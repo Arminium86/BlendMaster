@@ -1,0 +1,25 @@
+[pull]
+	rebase = false
+[fetch]
+	prune = false
+[rebase]
+	autoStash = false
+	autosquash = false
+	updateRefs = false
+[user]
+	name = arminium86
+	email = armin.sabetmobarhan@gmail.com
+[core]
+	editor = notepad
+[diff]
+	guitool = vscode
+[difftool "vscode"]
+	path = C:/Users/mahsa/AppData/Local/Programs/Microsoft VS Code/Code.exe
+	cmd = \"C:/Users/mahsa/AppData/Local/Programs/Microsoft VS Code/Code.exe\" --new-window --wait --diff \"$LOCAL\" \"$REMOTE\"
+[merge]
+	guitool = vscode
+[mergetool "vscode"]
+	path = C:/Users/mahsa/AppData/Local/Programs/Microsoft VS Code/Code.exe
+	cmd = \"C:/Users/mahsa/AppData/Local/Programs/Microsoft VS Code/Code.exe\" --new-window --wait --merge \"$REMOTE\" \"$LOCAL\" \"$BASE\" \"$MERGED\"
+[commit]
+	template = F:\\BlendMaster\\CommitTemplate.txt
