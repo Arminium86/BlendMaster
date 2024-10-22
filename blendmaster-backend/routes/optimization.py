@@ -53,43 +53,47 @@ def track_stockpile_depletion(stockpile_data, reclaim_rates, steady_state_durati
 def run_blending_optimization(stockpile_data, grade_blocks, reclaimer_data, digger_data, user_inputs, period):
     dmc = 1  # Default movement cost in $/tonne
 
-    # Reclaimer and digger rates by period
+    # Step 1: Get reclaim rates and digger rates based on the current period (preplan, period 1, or period 2)
     if period == "preplan":
         reclaim_rates = {rc["id"]: rc["rate_preplan"] for rc in reclaimer_data}
         digger_rates = {dg["id"]: dg["rate_preplan"] for dg in digger_data}
+        steady_state_duration = (user_inputs["periods"]["preplan_end"] - user_inputs["periods"]["preplan_start"]).total_seconds() / 3600
     elif period == "period_1":
         reclaim_rates = {rc["id"]: rc["rate_period_1"] for rc in reclaimer_data}
         digger_rates = {dg["id"]: dg["rate_period_1"] for dg in digger_data}
+        steady_state_duration = 12  # Period 1 duration
     elif period == "period_2":
         reclaim_rates = {rc["id"]: rc["rate_period_2"] for rc in reclaimer_data}
         digger_rates = {dg["id"]: dg["rate_period_2"] for dg in digger_data}
+        steady_state_duration = 12  # Period 2 duration
 
-    # Filter out stockpiles and grade blocks based on rules
+    # Filter stockpiles and grade blocks based on rules
     filtered_stockpiles = [
         sp for sp in stockpile_data if sp["priority"] >= 0 and sp["use"] and sp["tonnage"] >= sp["reclaim_threshold"]
     ]
     filtered_grade_blocks = [gb for gb in grade_blocks if gb["use"]]
 
-    # Objective function (minimize movement cost)
+    # Step 2: Define the objective function (minimize movement cost)
     c = [dmc + calculate_stockpile_movement_cost(sp["priority"]) for sp in filtered_stockpiles]
     c.extend([dmc for _ in filtered_grade_blocks])  # Grade blocks have no additional cost
 
-    # Bounds (tonnage from stockpiles and grade blocks)
+    # Step 3: Define bounds for decision variables (tonnage from stockpiles and grade blocks)
     stockpile_bounds = [(0, sp["tonnage"]) for sp in filtered_stockpiles]
     grade_block_bounds = [(0, gb["tonnage"]) for gb in filtered_grade_blocks]
     bounds = stockpile_bounds + grade_block_bounds
 
-    # Constraints for grades (example: Fe)
-    A_eq = [...]  # (Define your grade constraints here based on stockpile grades)
-    b_eq = [...]  # (Define your grade targets here)
+    # Step 4: Define constraints for grades (example: Fe)
+    A_eq = [...]  # Define your grade constraints here
+    b_eq = [...]  # Define your grade targets here
 
-    # Track depletion and adjust steady state
-    adjusted_steady_state_duration = track_stockpile_depletion(filtered_stockpiles, reclaim_rates, user_inputs["steady_state_duration"])
+    # Step 5: Track stockpile depletion and adjust steady state
+    adjusted_steady_state_duration = track_stockpile_depletion(filtered_stockpiles, reclaim_rates, steady_state_duration)
 
-    # Run the optimization
+    # Step 6: Run the optimization
     result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
 
     if result.success:
         return {"status": "success", "optimal_tonnages": result.x, "steady_state_duration": adjusted_steady_state_duration}
     else:
         return {"status": "error", "message": "Optimization failed"}
+

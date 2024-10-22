@@ -32,6 +32,7 @@ def test_run_blending_optimization():
     {"id": 1, "name": "EX1", "rate_preplan": 800, "rate_period_1": 1000, "rate_period_2": 900},
     {"id": 2, "name": "EX2", "rate_preplan": 600, "rate_period_1": 700, "rate_period_2": 750}
 ]
+  
     user_inputs = {
     "grade_targets": {
         "preplan": {"target_fe": 62.0},
@@ -45,8 +46,8 @@ def test_run_blending_optimization():
     }
 }
 
-    
-    result = run_blending_optimization(stockpile_data, grade_blocks, reclaimer_data, digger_data, user_inputs, "preplan")
+    periods = calculate_periods()
+    result = run_blending_optimization(stockpile_data, grade_blocks, reclaimer_data, digger_data, user_inputs, periods)
     assert result["status"] == "success"
     print("Optimization result:", result)
 
