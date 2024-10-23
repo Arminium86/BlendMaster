@@ -4,7 +4,7 @@ import os
 # Add the project root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), r'C:\BlendMaster\blendmaster-backend\routes')))
 
-from routes.optimization import calculate_periods, run_blending_optimization
+from routes.optimization import calculate_periods, run_blending_optimization, generate_event_pool, crusher_targets
 
 # Test case for periods
 def test_calculate_periods():
@@ -15,41 +15,39 @@ def test_calculate_periods():
 # Test case for blending optimization
 def test_run_blending_optimization():
     stockpile_data = [
-    {"id": 1, "name": "SP1", "tonnage": 2000, "priority": 1, "use": True, "reclaim_threshold": 500, "grade_fe": 62.5},
-    {"id": 2, "name": "SP2", "tonnage": 3000, "priority": 2, "use": True, "reclaim_threshold": 1000, "grade_fe": 61.0},
-    {"id": 3, "name": "SP3", "tonnage": 1500, "priority": 3, "use": True, "reclaim_threshold": 0, "grade_fe": 60.0}
+    {"id": 1, "name": "SP1", "balance": 100000, "priority_preplan": 1, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 500, "grade_fe": 58.0},
+    {"id": 2, "name": "SP2", "balance": 100000, "priority_preplan": 2, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 1000, "grade_fe": 60.0},
+    {"id": 3, "name": "SP3", "balance": 100000, "priority_preplan": 3, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 0, "grade_fe": 60.0}
 ]
-    grade_blocks = [
-    {"id": 1, "name": "GB1", "tonnage": 500, "use": True, "grade_fe": 65.0},
-    {"id": 2, "name": "GB2", "tonnage": 300, "use": True, "grade_fe": 64.5}
+    grade_block_data = [
+    {"id": 1, "name": "GB1", "balance": 100000, "use": True, "equipment": ["EX"], "grade_fe": 57.0},
+    {"id": 2, "name": "GB2", "balance": 100000, "use": True, "equipment": ["EX"],  "grade_fe": 57.5}
 ]
-    reclaimer_data = [
-    {"id": 1, "name": "RC1", "rate_preplan": 1000, "rate_period_1": 1200, "rate_period_2": 1100},
-    {"id": 2, "name": "RC2", "rate_preplan": 1500, "rate_period_1": 1400, "rate_period_2": 1300},
-    {"id": 3, "name": "RC3", "rate_preplan": 500,  "rate_period_1": 600,  "rate_period_2": 700}
+    equipment_data = [
+    {"id": 1, "name": "RC", "priority_preplan": 1, "priority_period_1": 1, "priority_period_2": 1, "rate_preplan": 3000, "rate_period_1": 1200, "rate_period_2": 1100},
+    {"id": 2, "name": "EX", "priority_preplan": 1, "priority_period_1": 1, "priority_period_2": 1, "rate_preplan": 3000, "rate_period_1": 700, "rate_period_2": 750}
 ]
-    digger_data = [
-    {"id": 1, "name": "EX1", "rate_preplan": 800, "rate_period_1": 1000, "rate_period_2": 900},
-    {"id": 2, "name": "EX2", "rate_preplan": 600, "rate_period_1": 700, "rate_period_2": 750}
-]
-  
-    user_inputs = {
-    "grade_targets": {
-        "preplan": {"target_fe": 62.0},
-        "period_1": {"target_fe": 61.5},
-        "period_2": {"target_fe": 60.5}
-    },
-    "crusher_rate": {
-        "preplan": 3000,  # Tonnes/hour
-        "period_1": 2500,
-        "period_2": 2000
-    }
+    
+    grade_targets = {
+    "preplan": {"target_fe_min": 60.0, "target_fe_max": 60.0},
+    "period_1": {"target_fe_min": 60.0, "target_fe_max": 62.0},
+    "period_2": {"target_fe_min": 60.0, "target_fe_max": 61.5}
+}
+
+    crusher_rates = {
+    
+        "crusher_rate": {"preplan": 6000, "period_1": 6000, "period_2": 6000}
 }
 
     periods = calculate_periods()
-    result = run_blending_optimization(stockpile_data, grade_blocks, reclaimer_data, digger_data, user_inputs, periods)
-    assert result["status"] == "success"
-    print("Optimization result:", result)
+    event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
+    crusher_target = crusher_targets(grade_targets, crusher_rates, "preplan")
+    result = run_blending_optimization(event_pool, crusher_target, "preplan", periods)
+    if result["status"] == "success":
+        print("Optimization result:", result)
+        print("Event Pool:", event_pool)
+    else: 
+        print("Optimization failed 2")
 
 # Make sure to call your test functions if you're not using a test framework
 if __name__ == "__main__":

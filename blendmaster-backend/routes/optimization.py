@@ -8,15 +8,17 @@ def calculate_periods():
     now = datetime.now()
     
     # Define next 6AM and 6PM, adjusting for current time
-    if now.hour >= 18:  # If it's after 6PM, the next 6AM is the following day
+    if now.hour >= 6 and now.hour < 18:  # Between 6AM and 6PM
         next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    else:
-        next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
-    
-    if now.hour >= 6 and now.hour < 18:  # If it's between 6AM and 6PM, the next 6PM is today
         next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
-    else:
+
+    elif now.hour >= 18:  # Between 6PM and midnight
+        next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
         next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    else:  # Between midnight and 6AM
+        next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
 
     # Preplan ends at the closest 6AM or 6PM
     preplan_end = min(next_6am, next_6pm)
@@ -36,64 +38,152 @@ def calculate_periods():
         "period_2_end": period_2_end
     }
 
-# Function to calculate additional movement cost based on stockpile priority
-def calculate_stockpile_movement_cost(priority):
-    return priority  # The additional cost increases with lower priority (e.g., priority 1 has the least cost)
+def generate_event_pool(stockpile_data, equipment_data, grade_block_data, period):
+    events = []
 
-# Simulate stockpile depletion and trigger new steady state
-def track_stockpile_depletion(stockpile_data, reclaim_rates, steady_state_duration):
+    # Loop through each stockpile and match it with all reclaimers it can be reclaimed by
     for stockpile in stockpile_data:
-        reclaim_rate = reclaim_rates[stockpile["id"]]
-        time_to_depletion = stockpile["tonnage"] / reclaim_rate
-        if time_to_depletion < steady_state_duration:
-            return time_to_depletion  # Trigger new steady state when a stockpile runs out
-    return steady_state_duration
+        stockpile_priority = stockpile[f"priority_{period}"]  # Get stockpile priority for the period
+        for equipment in equipment_data:
+            if equipment["name"] in stockpile["equipment"]:  # Based on movement rules
+                equipment_priority = equipment[f"priority_{period}"]  # Get equipment priority for the period
+                reclaim_rate = equipment[f"rate_{period}"]  # Get reclaim rate for the period
+                
+                events.append({
+                    "stockpile": stockpile["name"],
+                    "equipment": equipment["name"],
+                    "priority": stockpile_priority + equipment_priority,  # Combined priority for cost minimization
+                    "rate": reclaim_rate,  # Reclaim rate (time-dependent)
+                    "grade_fe": stockpile["grade_fe"],
+                    "balance": stockpile["balance"]
+                })
+    
+    # Add direct tip opportunities from grade blocks
+    for grade_block in grade_block_data:
+        for equipment in equipment_data:
+            if (equipment["name"] in grade_block["equipment"]) and ("EX" in equipment["name"]):  # Ensure only excavators (diggers) are used for grade blocks
+                equipment_priority = equipment[f"priority_{period}"]  # Get digger priority for the period
+                reclaim_rate = equipment[f"rate_{period}"]  # Get reclaim rate for the period
+
+                events.append({
+                    "grade_block": grade_block["name"],
+                    "equipment": equipment["name"],
+                    "priority": equipment_priority,  # Diggers have no stockpile priority
+                    "rate": reclaim_rate,  # Reclaim rate (time-dependent)
+                    "grade_fe": grade_block["grade_fe"],
+                    "balance": grade_block["balance"]
+                })
+
+    return events
+
+def crusher_targets(grade_targets, crusher_rates, period):
+    # Get the Fe grade target for the current period
+    fe_target_min = grade_targets[period]["target_fe_min"]
+    fe_target_max = grade_targets[period]["target_fe_max"]
+    # Get the crusher rate for the current period
+    crusher_rate = crusher_rates["crusher_rate"][period]
+    
+    # Return both the Fe grade target and crusher rate
+    return {
+        "fe_target_min": fe_target_min,
+        "fe_target_max": fe_target_max,
+        "crusher_rate": crusher_rate
+    }
 
 # Main blending optimization logic
-def run_blending_optimization(stockpile_data, grade_blocks, reclaimer_data, digger_data, user_inputs, period):
-    dmc = 1  # Default movement cost in $/tonne
+def run_blending_optimization(event_pool, crusher_target, period, periods):
+    dmc = -5  # Default movement cash in $/tonne
 
-    # Step 1: Get reclaim rates and digger rates based on the current period (preplan, period 1, or period 2)
+    # Step 1: Extract time-dependent equipment rates
     if period == "preplan":
-        reclaim_rates = {rc["id"]: rc["rate_preplan"] for rc in reclaimer_data}
-        digger_rates = {dg["id"]: dg["rate_preplan"] for dg in digger_data}
-        steady_state_duration = (user_inputs["periods"]["preplan_end"] - user_inputs["periods"]["preplan_start"]).total_seconds() / 3600
+        steady_state_duration = (periods["preplan_end"] - periods["preplan_start"]).total_seconds() / 3600
     elif period == "period_1":
-        reclaim_rates = {rc["id"]: rc["rate_period_1"] for rc in reclaimer_data}
-        digger_rates = {dg["id"]: dg["rate_period_1"] for dg in digger_data}
-        steady_state_duration = 12  # Period 1 duration
+        steady_state_duration = 12
     elif period == "period_2":
-        reclaim_rates = {rc["id"]: rc["rate_period_2"] for rc in reclaimer_data}
-        digger_rates = {dg["id"]: dg["rate_period_2"] for dg in digger_data}
-        steady_state_duration = 12  # Period 2 duration
+        steady_state_duration = 12
 
-    # Filter stockpiles and grade blocks based on rules
-    filtered_stockpiles = [
-        sp for sp in stockpile_data if sp["priority"] >= 0 and sp["use"] and sp["tonnage"] >= sp["reclaim_threshold"]
-    ]
-    filtered_grade_blocks = [gb for gb in grade_blocks if gb["use"]]
+    # Step 2: Build the cost and constraints based on event pool
+    c = []  # Movement cost for each event
+    A_eq = [[event["grade_fe"] - crusher_target["fe_target_max"] for event in event_pool]]
+    b_eq = [0]  # The difference between both sides should equal 0
 
-    # Step 2: Define the objective function (minimize movement cost)
-    c = [dmc + calculate_stockpile_movement_cost(sp["priority"]) for sp in filtered_stockpiles]
-    c.extend([dmc for _ in filtered_grade_blocks])  # Grade blocks have no additional cost
+    # Minimum crusher grade (turned into an upper-bound inequality)
+    A_ub_min_crusher_grade = [[-event["grade_fe"] for event in event_pool]]
+    b_ub_min_crusher_grade = [-crusher_target["fe_target_min"]]
 
-    # Step 3: Define bounds for decision variables (tonnage from stockpiles and grade blocks)
-    stockpile_bounds = [(0, sp["tonnage"]) for sp in filtered_stockpiles]
-    grade_block_bounds = [(0, gb["tonnage"]) for gb in filtered_grade_blocks]
-    bounds = stockpile_bounds + grade_block_bounds
+    # Minimum crusher grade (turned into an upper-bound inequality)
+    A_ub_max_crusher_grade = [[event["grade_fe"] for event in event_pool]]
+    b_ub_max_crusher_grade = [crusher_target["fe_target_max"]]
 
-    # Step 4: Define constraints for grades (example: Fe)
-    A_eq = [...]  # Define your grade constraints here
-    b_eq = [...]  # Define your grade targets here
 
-    # Step 5: Track stockpile depletion and adjust steady state
-    adjusted_steady_state_duration = track_stockpile_depletion(filtered_stockpiles, reclaim_rates, steady_state_duration)
+    for event in event_pool:
+        # Movement cost = dmc + combined priority of stockpile / grade block and reclaimer / digger
+        c.append(dmc + event["priority"])
 
-    # Step 6: Run the optimization
-    result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
+    # Step 3: Crusher capacity constraint
+    A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
+    b_ub = [crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * duration
+
+    # Step 4: Add stockpile selection constraint (minimum 2, maximum 3 stockpiles)
+    stockpile_indices = [i for i, event in enumerate(event_pool) if "stockpile" in event]
+    
+    # Minimum 2 stockpiles constraint (turned into an upper-bound inequality)
+    A_ub_min_stockpiles = [[-1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
+    b_ub_min_stockpiles = [-2]  # At least 2 stockpiles
+
+    # Maximum 3 stockpiles constraint
+    A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
+    b_ub_max_stockpiles = [3]  # At most 3 stockpiles
+
+    # Step 5: Define bounds (how much tonnage each event contributes)
+    bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
+
+    # Step 6: Run the optimization with the added stockpile constraints
+    result = linprog(c, 
+                     A_eq=A_eq, 
+                     b_eq=b_eq, 
+                     A_ub=A_ub,
+                     #+ A_ub_min_stockpiles + A_ub_max_stockpiles 
+                     #+ A_ub_min_crusher_grade + A_ub_max_crusher_grade, 
+                     b_ub=b_ub,
+                     #+ b_ub_min_stockpiles + b_ub_max_stockpiles 
+                     #+ b_ub_min_crusher_grade + b_ub_max_crusher_grade, 
+                     bounds=bounds, method='highs')
 
     if result.success:
-        return {"status": "success", "optimal_tonnages": result.x, "steady_state_duration": adjusted_steady_state_duration}
+        return {
+            "status": "success", 
+            "steady state duration:": steady_state_duration, 
+            "optimal_tonnages": result.x
+        }
     else:
-        return {"status": "error", "message": "Optimization failed"}
+        # Print useful debug information when optimization fails
+        print(f"Optimization failed with message: {result.message}")
+        print(f"Status: {result.status}")
+        print(f"Objective function value: {result.fun}")
+        print(f"Slack variables: {result.slack}")
+        print(f"Residuals of equality constraints: {result.con}")
+        
+        return {
+            "status": "error", 
+            "message": result.message, 
+            "objective_function_value": result.fun, 
+            "slack": result.slack, 
+            "residuals_equality_constraints": result.con
+        }
+
+# Simulate stockpile depletion and trigger new steady state
+def track_stockpile_depletion(blend, reclaimer_rates, steady_state_duration):
+    for stockpile in blend:
+        reclaim_rate = reclaimer_rates[stockpile["reclaimer"]]
+        time_to_depletion = stockpile["tonnage"] / reclaim_rate
+        
+        if time_to_depletion < steady_state_duration:
+            return time_to_depletion  # Trigger a new steady state at this point
+    
+    return steady_state_duration  # No stockpile runs out before the steady state ends
+
+
+
+
 
