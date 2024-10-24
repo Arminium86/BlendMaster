@@ -132,12 +132,12 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
     stockpile_indices = [i for i, event in enumerate(event_pool) if "stockpile" in event]
     
     # Minimum 2 stockpiles constraint (turned into an upper-bound inequality)
-    A_ub_min_stockpiles = [[-1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
-    b_ub_min_stockpiles = [-2]  # At least 2 stockpiles
+    A_ub_min_stockpiles = [[-1 if i in stockpile_indices else 0 + 2 for i in range(len(event_pool))]] # Min 2 stockpiles
+    b_ub_min_stockpiles = [0] 
 
     # Maximum 3 stockpiles constraint
-    A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
-    b_ub_max_stockpiles = [3]  # At most 3 stockpiles
+    A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 - 3 for i in range(len(event_pool))]] # Max 3 stockpiles
+    b_ub_max_stockpiles = [0]  
 
  
 
@@ -146,13 +146,13 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
                      #A_eq=A_eq, 
                      #b_eq=b_eq, 
                      A_ub=A_ub
-                     #+ A_ub_min_stockpiles 
-                     #+ A_ub_max_stockpiles 
+                     + A_ub_min_stockpiles 
+                     + A_ub_max_stockpiles 
                      + A_ub_min_crusher_grade 
                      + A_ub_max_crusher_grade, 
                      b_ub=b_ub
-                     #+ b_ub_min_stockpiles 
-                     #+ b_ub_max_stockpiles 
+                     + b_ub_min_stockpiles 
+                     + b_ub_max_stockpiles 
                      + b_ub_min_crusher_grade 
                      + b_ub_max_crusher_grade, 
                      bounds=bounds, method='highs')
