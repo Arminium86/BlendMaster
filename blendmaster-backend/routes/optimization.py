@@ -139,6 +139,14 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
     A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 - 3 for i in range(len(event_pool))]] # Max 3 stockpiles
     b_ub_max_stockpiles = [0]  
 
+
+    # Step 3.1: Grade block contribution constraint (grade_block <= 20% of total tonnes)
+    grade_block_indices = [i for i, event in enumerate(event_pool) if "grade_block" in event]  # Identify grade block events
+
+    # A new upper-bound inequality for the grade blocks
+    A_ub_grade_block = [[1 if i in grade_block_indices else -1 for i in range(len(event_pool))]]
+    b_ub_grade_block = [0]  # Grade blocks must be <= 100% of total tonnes
+
  
 
     # Step 6: Run the optimization with the added stockpile constraints
@@ -149,12 +157,14 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
                      + A_ub_min_stockpiles 
                      + A_ub_max_stockpiles 
                      + A_ub_min_crusher_grade 
-                     + A_ub_max_crusher_grade, 
+                     + A_ub_max_crusher_grade
+                     + A_ub_grade_block,  
                      b_ub=b_ub
                      + b_ub_min_stockpiles 
                      + b_ub_max_stockpiles 
                      + b_ub_min_crusher_grade 
-                     + b_ub_max_crusher_grade, 
+                     + b_ub_max_crusher_grade
+                     + b_ub_grade_block, 
                      bounds=bounds, method='highs')
 
     if result.success:
