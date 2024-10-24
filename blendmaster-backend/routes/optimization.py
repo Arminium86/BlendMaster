@@ -148,13 +148,13 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
                      A_ub=A_ub
                      #+ A_ub_min_stockpiles 
                      #+ A_ub_max_stockpiles 
-                     + A_ub_min_crusher_grade, 
-                     #+ A_ub_max_crusher_grade, 
+                     + A_ub_min_crusher_grade 
+                     + A_ub_max_crusher_grade, 
                      b_ub=b_ub
                      #+ b_ub_min_stockpiles 
                      #+ b_ub_max_stockpiles 
-                     + b_ub_min_crusher_grade, 
-                     #+ b_ub_max_crusher_grade, 
+                     + b_ub_min_crusher_grade 
+                     + b_ub_max_crusher_grade, 
                      bounds=bounds, method='highs')
 
     if result.success:

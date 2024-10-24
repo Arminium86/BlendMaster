@@ -29,7 +29,7 @@ def test_run_blending_optimization():
 ]
     
     grade_targets = {
-    "preplan": {"target_fe_min": 58.0, "target_fe_max": 61.0},
+    "preplan": {"target_fe_min": 58.0, "target_fe_max": 59.0},
     "period_1": {"target_fe_min": 60.0, "target_fe_max": 62.0},
     "period_2": {"target_fe_min": 60.0, "target_fe_max": 61.5}
 }
