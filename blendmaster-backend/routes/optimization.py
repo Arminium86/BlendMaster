@@ -102,18 +102,22 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
     elif period == "period_2":
         steady_state_duration = 12
 
+    
+    # Step 5: Define bounds (how much tonnage each event contributes)
+    bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
+    
     # Step 2: Build the cost and constraints based on event pool
     c = []  # Movement cost for each event
     A_eq = [[event["grade_fe"] - crusher_target["fe_target_max"] for event in event_pool]]
     b_eq = [0]  # The difference between both sides should equal 0
 
     # Minimum crusher grade (turned into an upper-bound inequality)
-    A_ub_min_crusher_grade = [[-event["grade_fe"] for event in event_pool]]
-    b_ub_min_crusher_grade = [-crusher_target["fe_target_min"]]
+    A_ub_min_crusher_grade = [[-event["grade_fe"] + crusher_target["fe_target_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+    b_ub_min_crusher_grade = [0]
 
-    # Minimum crusher grade (turned into an upper-bound inequality)
-    A_ub_max_crusher_grade = [[event["grade_fe"] for event in event_pool]]
-    b_ub_max_crusher_grade = [crusher_target["fe_target_max"]]
+    # Max crusher grade (upper-bound inequality)
+    A_ub_max_crusher_grade = [[event["grade_fe"] - crusher_target["fe_target_max"] for event in event_pool]]
+    b_ub_max_crusher_grade = [0]
 
 
     for event in event_pool:
@@ -135,26 +139,33 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
     A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
     b_ub_max_stockpiles = [3]  # At most 3 stockpiles
 
-    # Step 5: Define bounds (how much tonnage each event contributes)
-    bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
+ 
 
     # Step 6: Run the optimization with the added stockpile constraints
     result = linprog(c, 
-                     A_eq=A_eq, 
-                     b_eq=b_eq, 
-                     A_ub=A_ub,
-                     #+ A_ub_min_stockpiles + A_ub_max_stockpiles 
-                     #+ A_ub_min_crusher_grade + A_ub_max_crusher_grade, 
-                     b_ub=b_ub,
-                     #+ b_ub_min_stockpiles + b_ub_max_stockpiles 
-                     #+ b_ub_min_crusher_grade + b_ub_max_crusher_grade, 
+                     #A_eq=A_eq, 
+                     #b_eq=b_eq, 
+                     A_ub=A_ub
+                     #+ A_ub_min_stockpiles 
+                     #+ A_ub_max_stockpiles 
+                     + A_ub_min_crusher_grade, 
+                     #+ A_ub_max_crusher_grade, 
+                     b_ub=b_ub
+                     #+ b_ub_min_stockpiles 
+                     #+ b_ub_max_stockpiles 
+                     + b_ub_min_crusher_grade, 
+                     #+ b_ub_max_crusher_grade, 
                      bounds=bounds, method='highs')
 
     if result.success:
         return {
             "status": "success", 
             "steady state duration:": steady_state_duration, 
-            "optimal_tonnages": result.x
+            "optimal_tonnages": result.x,
+            "Actual Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x),
+            "Crusher Fe Grade Target (Min)": crusher_target["fe_target_min"],
+            "Crusher Fe Grade Target (max)": crusher_target["fe_target_max"],
+            "Actual Tonnes": sum(result.x)
         }
     else:
         # Print useful debug information when optimization fails

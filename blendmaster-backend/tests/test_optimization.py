@@ -29,7 +29,7 @@ def test_run_blending_optimization():
 ]
     
     grade_targets = {
-    "preplan": {"target_fe_min": 60.0, "target_fe_max": 60.0},
+    "preplan": {"target_fe_min": 58.0, "target_fe_max": 61.0},
     "period_1": {"target_fe_min": 60.0, "target_fe_max": 62.0},
     "period_2": {"target_fe_min": 60.0, "target_fe_max": 61.5}
 }
@@ -43,11 +43,9 @@ def test_run_blending_optimization():
     event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
     crusher_target = crusher_targets(grade_targets, crusher_rates, "preplan")
     result = run_blending_optimization(event_pool, crusher_target, "preplan", periods)
-    if result["status"] == "success":
-        print("Optimization result:", result)
-        print("Event Pool:", event_pool)
-    else: 
-        print("Optimization failed 2")
+    print("Optimization result:", result)
+    #print("Event Pool:", event_pool)
+
 
 # Make sure to call your test functions if you're not using a test framework
 if __name__ == "__main__":
