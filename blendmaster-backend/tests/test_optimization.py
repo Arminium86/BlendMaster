@@ -4,7 +4,7 @@ import os
 # Add the project root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), r'C:\BlendMaster\blendmaster-backend\routes')))
 
-from routes.optimization import calculate_periods, run_blending_optimization, generate_event_pool, crusher_targets
+from routes.optimization import calculate_periods, run_with_dynamic_steady_state, generate_event_pool, crusher_targets
 
 # Test case for periods
 def test_calculate_periods():
@@ -42,7 +42,7 @@ def test_run_blending_optimization():
     periods = calculate_periods()
     event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
     crusher_target = crusher_targets(grade_targets, crusher_rates, "preplan")
-    result = run_blending_optimization(event_pool, crusher_target, "preplan", periods)
+    result = run_with_dynamic_steady_state(event_pool, crusher_target, "preplan", periods)
     #print("Optimization result:", result)
     #print("Event Pool:", event_pool)
     print(f"status: {result['status']}\n")

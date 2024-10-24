@@ -90,19 +90,33 @@ def crusher_targets(grade_targets, crusher_rates, period):
         "crusher_rate": crusher_rate
     }
 
-# Main blending optimization logic
-def run_blending_optimization(event_pool, crusher_target, period, periods):
-    dmc = -5  # Default movement cash in $/tonne
-
-    # Step 1: Extract time-dependent equipment rates
+def run_with_dynamic_steady_state(event_pool, crusher_target, period, periods):
+    # Step 1: Set the initial steady state duration
     if period == "preplan":
         steady_state_duration = (periods["preplan_end"] - periods["preplan_start"]).total_seconds() / 3600
     elif period == "period_1":
         steady_state_duration = 12
     elif period == "period_2":
         steady_state_duration = 12
-
     
+    # Step 2: Run the initial optimization
+    result = run_blending_optimization(event_pool, crusher_target, steady_state_duration)
+    
+    if result["status"] == "success":
+        # Step 3: Check for early depletion using the actual selected tonnes from the result
+        new_duration = track_stockpile_depletion(result["outcome"], steady_state_duration, result["optimal_tonnes"])
+        
+        if new_duration < steady_state_duration:
+            # Steady state duration was shortened, rerun optimization
+            steady_state_duration = new_duration
+            result = run_blending_optimization(event_pool, crusher_target, steady_state_duration)
+
+    return result
+
+# Main blending optimization logic
+def run_blending_optimization(event_pool, crusher_target, steady_state_duration):
+    dmc = -5  # Default movement cash in $/tonne
+
     # Step 5: Define bounds (how much tonnage each event contributes)
     bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
     
@@ -182,7 +196,9 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
                     f"Equipment: {event['equipment']}\n"
                     f"Equipment Rate (Input): {event['rate']}\n"
                     f"Equipment Actual Rate: {result.x[i] / steady_state_duration}\n"
-                )
+                ),
+                "rate": event["rate"],  # Ensure the rate is passed along for depletion tracking
+                "balance": event["balance"]  # Keep balance for further reference
             })
 
         return {
@@ -212,16 +228,36 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
             "residuals_equality_constraints": result.con
         }
 
-# Simulate stockpile depletion and trigger new steady state
-def track_stockpile_depletion(blend, reclaimer_rates, steady_state_duration):
-    for stockpile in blend:
-        reclaim_rate = reclaimer_rates[stockpile["reclaimer"]]
-        time_to_depletion = stockpile["tonnage"] / reclaim_rate
-        
-        if time_to_depletion < steady_state_duration:
-            return time_to_depletion  # Trigger a new steady state at this point
+# Track stockpile depletion
+def track_stockpile_depletion(events, steady_state_duration, selected_tonnes):
+    """
+    Track if any stockpile or grade block will deplete sooner than the given steady state duration.
     
-    return steady_state_duration  # No stockpile runs out before the steady state ends
+    Args:
+    - events: List of events from the optimization result, containing information about actual reclaimed tonnes and rates.
+    - steady_state_duration: The initial steady state duration in hours.
+    - selected_tonnes: The actual tonnes selected by the solver for each event.
+    
+    Returns:
+    - The updated steady state duration (the minimum of the original steady state or any early depletion).
+    """
+    updated_duration = steady_state_duration
+    
+    for i, event in enumerate(events):
+        if selected_tonnes[i] == event["balance"]:
+            actual_tonnes = selected_tonnes[i]  # Actual tonnes selected by the solver
+            rate = event["rate"]  # Equipment rate for reclaim or digging
+
+            # Calculate time to depletion based on the actual selected tonnes
+            time_to_depletion = actual_tonnes / rate
+
+            # If the event will deplete sooner than the current steady state, update the steady state duration
+            if time_to_depletion < updated_duration:
+                updated_duration = time_to_depletion
+    
+    return updated_duration
+
+
 
 
 
