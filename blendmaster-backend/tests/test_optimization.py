@@ -43,10 +43,17 @@ def test_run_blending_optimization():
     event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
     crusher_target = crusher_targets(grade_targets, crusher_rates, "preplan")
     result = run_blending_optimization(event_pool, crusher_target, "preplan", periods)
-    print("Optimization result:", result)
+    #print("Optimization result:", result)
     #print("Event Pool:", event_pool)
-
-
+    print(f"status: {result['status']}\n")
+    print(f"steady state duration: {result['steady state duration']}\n")
+    print(f"Actual Crusher Tonnes: {result['Actual Crusher Tonnes']}\n")
+    print(f"Actual Crusher Fe Grade: {result['Actual Crusher Fe Grade']}\n")
+    print(f"Crusher Fe Grade Target (Min): {result['Crusher Fe Grade Target (Min)']}\n")
+    print(f"Crusher Fe Grade Target (max): {result['Crusher Fe Grade Target (max)']}\n")
+    for event in result["outcome"]:
+        print(f"Event {event['event_number']}:\n{event['details']}")
+    
 # Make sure to call your test functions if you're not using a test framework
 if __name__ == "__main__":
     test_calculate_periods()

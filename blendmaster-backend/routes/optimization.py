@@ -158,14 +158,33 @@ def run_blending_optimization(event_pool, crusher_target, period, periods):
                      bounds=bounds, method='highs')
 
     if result.success:
+
+        outcome = []
+        for i, event in enumerate(event_pool):
+            if result.x[i] > 0:  # Check if the event's tonnage is greater than zero
+                outcome.append({
+                "event_number": i+1,
+                "details": (
+                    f"Source: {event.get('stockpile', event.get('grade_block'))}\n"
+                    f"Opening Balance: {event['balance']}\n"
+                    f"Actual Tonnes (Reclaimed): {result.x[i]}\n"
+                    f"Grade Fe: {event['grade_fe']}\n"
+                    f"Equipment: {event['equipment']}\n"
+                    f"Equipment Rate (Input): {event['rate']}\n"
+                    f"Equipment Actual Rate: {result.x[i] / steady_state_duration}\n"
+                )
+            })
+
         return {
             "status": "success", 
-            "steady state duration:": steady_state_duration, 
-            "optimal_tonnages": result.x,
-            "Actual Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x),
+            "outcome": outcome,  # Return the selected events here
+            "steady state duration": steady_state_duration, 
+            "optimal_tonnes": result.x,
+            "Actual Crusher Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x),
             "Crusher Fe Grade Target (Min)": crusher_target["fe_target_min"],
             "Crusher Fe Grade Target (max)": crusher_target["fe_target_max"],
-            "Actual Tonnes": sum(result.x)
+            "Actual Crusher Tonnes": sum(result.x),
+
         }
     else:
         # Print useful debug information when optimization fails
