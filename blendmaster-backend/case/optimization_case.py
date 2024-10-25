@@ -29,7 +29,7 @@ def case_run_blending_optimization():
     for event in result["outcome"]:
         print(f"Event {event['event_number']}:\n{event['details']}")
     
-# Make sure to call your case functions
+# Call your case functions
 if __name__ == "__main__":
 
     case_run_blending_optimization()
