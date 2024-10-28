@@ -1,7 +1,7 @@
 import pandas as pd
 
 # Load the Excel file
-file_path = r"C:\BlendMaster\file mappings\data.xlsx"  # Replace with the actual path to the Excel file
+file_path = r"C:\BlendMaster\blendmaster-backend\input\data.xlsx"  # Replace with the actual path to the Excel file
 xls = pd.ExcelFile(file_path)
 
 # Load each sheet into a DataFrame
