@@ -1,25 +1,42 @@
-stockpile_data = [
-    {"name": "SP1", "balance": 100000, "priority_preplan": 1, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 500, "build_threshold": 0, "grade_fe": 58.0},
-    {"name": "SP2", "balance": 100000, "priority_preplan": 2, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 1000, "build_threshold": 0, "grade_fe": 60.0},
-    {"name": "SP3", "balance": 100000, "priority_preplan": 3, "priority_period_1": 0, "priority_period_2": 0, "use": True, "equipment": ["RC"], "reclaim_threshold": 0, "build_threshold": 0, "grade_fe": 60.0}
-]
-grade_block_data = [
-    {"name": "GB1", "balance": 100000,"actual_tonnes_mined": 0, "use": True, "equipment": ["EX"], "grade_fe": 58.0},
-    {"name": "GB2", "balance": 100000,"actual_tonnes_mined": 0, "use": True, "equipment": ["EX"],  "grade_fe": 57.5},
-    {"name": "GB3", "balance": 100000,"actual_tonnes_mined": 100, "use": True, "equipment": ["EX"],  "grade_fe": 57.5}
-]
-equipment_data = [
-    {"name": "RC", "priority_preplan": 1, "priority_period_1": 1, "priority_period_2": 1, "rate_preplan": 3000, "rate_period_1": 1200, "rate_period_2": 1100},
-    {"name": "EX", "priority_preplan": 1, "priority_period_1": 1, "priority_period_2": 1, "rate_preplan": 3000, "rate_period_1": 700, "rate_period_2": 750}
-]
-    
-grade_targets = {
-    "preplan": {"target_fe_min": 58.0, "target_fe_max": 59.0},
-    "period_1": {"target_fe_min": 60.0, "target_fe_max": 62.0},
-    "period_2": {"target_fe_min": 60.0, "target_fe_max": 61.5}
+import pandas as pd
+
+# Load the Excel file
+file_path = r"C:\BlendMaster\file mappings\data.xlsx"  # Replace with the actual path to the Excel file
+xls = pd.ExcelFile(file_path)
+
+# Load each sheet into a DataFrame
+equipment_data_df = pd.read_excel(xls, 'final_input_equipment_data')
+crusher_data_df = pd.read_excel(xls, 'final_input_crusher_data')
+grade_block_data_df = pd.read_excel(xls, 'final_input_grade_block_data')
+stockpile_data_df = pd.read_excel(xls, 'final_input_stockpile_data')
+
+# Convert the stockpile data to dictionary format
+stockpile_data = stockpile_data_df.to_dict(orient='records')
+
+# Convert the grade block data to dictionary format
+grade_block_data = grade_block_data_df.to_dict(orient='records')
+
+# Convert the equipment data to dictionary format
+equipment_data = equipment_data_df.to_dict(orient='records')
+
+# Convert the crusher target data into nested dictionary structure
+crusher_target_data = {
+    "preplan": {
+        "target_fe_min": crusher_data_df["target_fe_min_preplan"].iloc[0],
+        "target_fe_max": crusher_data_df["target_fe_max_preplan"].iloc[0],
+        "crusher_rate": crusher_data_df["crusher_rate_preplan"].iloc[0]
+    },
+    "period_1": {
+        "target_fe_min": crusher_data_df["target_fe_min_period_1"].iloc[0],
+        "target_fe_max": crusher_data_df["target_fe_max_period_1"].iloc[0],
+        "crusher_rate": crusher_data_df["crusher_rate_period_1"].iloc[0]
+    },
+    "period_2": {
+        "target_fe_min": crusher_data_df["target_fe_min_period_2"].iloc[0],
+        "target_fe_max": crusher_data_df["target_fe_max_period_2"].iloc[0],
+        "crusher_rate": crusher_data_df["crusher_rate_period_2"].iloc[0]
+    }
 }
 
-crusher_rates = {
-    
-        "crusher_rate": {"preplan": 6000, "period_1": 6000, "period_2": 6000}
-}
+# At this point, the data is available in the following structures:
+# stockpile_data, grade_block_data, equipment_data, crusher_target_data

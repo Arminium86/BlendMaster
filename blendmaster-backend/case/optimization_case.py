@@ -7,7 +7,7 @@ from routes.optimization_engine import run_with_dynamic_steady_state
 from routes.event_generator import generate_event_pool
 from routes.crusher_targets import crusher_targets
 from routes.time_handler import calculate_periods
-from case.input import stockpile_data, grade_block_data, crusher_rates, grade_targets, equipment_data
+from case.input import stockpile_data, grade_block_data, crusher_target_data, equipment_data
 
 
 # Case for blending optimization
@@ -15,8 +15,8 @@ def case_run_blending_optimization():
 
     periods = calculate_periods()
     event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
-    crusher_target = crusher_targets(grade_targets, crusher_rates, "preplan")
-    result = run_with_dynamic_steady_state(event_pool, crusher_target, "preplan", periods)
+    period_crusher_target = crusher_targets(crusher_target_data, "preplan")
+    result = run_with_dynamic_steady_state(event_pool, period_crusher_target, "preplan", periods)
     #print("Optimization result:", result)
     #print("Event Pool:", event_pool)
     print(f"Preplan and periods calculated successfully: {periods}\n")

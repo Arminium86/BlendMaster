@@ -1,7 +1,7 @@
 from scipy.optimize import linprog
 
 # Main blending optimization logic
-def run_blending_optimization(event_pool, crusher_target, steady_state_duration):
+def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration):
     dmc = -5  # Default movement cash in $/tonne
 
     # Step 5: Define bounds (how much tonnage each event contributes)
@@ -9,15 +9,15 @@ def run_blending_optimization(event_pool, crusher_target, steady_state_duration)
     
     # Step 2: Build the cost and constraints based on event pool
     c = []  # Movement cost for each event
-    A_eq = [[event["grade_fe"] - crusher_target["fe_target_max"] for event in event_pool]]
+    A_eq = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
     b_eq = [0]  # The difference between both sides should equal 0
 
     # Minimum crusher grade (turned into an upper-bound inequality)
-    A_ub_min_crusher_grade = [[-event["grade_fe"] + crusher_target["fe_target_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+    A_ub_min_crusher_grade = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
     b_ub_min_crusher_grade = [0]
 
     # Max crusher grade (upper-bound inequality)
-    A_ub_max_crusher_grade = [[event["grade_fe"] - crusher_target["fe_target_max"] for event in event_pool]]
+    A_ub_max_crusher_grade = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
     b_ub_max_crusher_grade = [0]
 
 
@@ -27,7 +27,7 @@ def run_blending_optimization(event_pool, crusher_target, steady_state_duration)
 
     # Step 3: Crusher capacity constraint
     A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
-    b_ub = [crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * duration
+    b_ub = [period_crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * duration
 
     # Step 4: Add stockpile selection constraint (minimum 2, maximum 3 stockpiles)
     stockpile_indices = [i for i, event in enumerate(event_pool) if "stockpile" in event]
@@ -94,8 +94,8 @@ def run_blending_optimization(event_pool, crusher_target, steady_state_duration)
             "steady state duration": steady_state_duration, 
             "optimal_tonnes": result.x,
             "Actual Crusher Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x),
-            "Crusher Fe Grade Target (Min)": crusher_target["fe_target_min"],
-            "Crusher Fe Grade Target (max)": crusher_target["fe_target_max"],
+            "Crusher Fe Grade Target (Min)": period_crusher_target["target_fe_min"],
+            "Crusher Fe Grade Target (max)": period_crusher_target["target_fe_max"],
             "Actual Crusher Tonnes": sum(result.x),
 
         }
