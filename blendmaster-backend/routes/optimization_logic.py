@@ -75,15 +75,13 @@ def run_blending_optimization(event_pool, period_crusher_target, steady_state_du
             if result.x[i] > 0:  # Check if the event's tonnage is greater than zero
                 outcome.append({
                 "event_number": i+1,
-                "details": (
-                    f"Source: {event.get('stockpile', event.get('grade_block'))}\n"
-                    f"Opening Balance: {event['balance']}\n"
-                    f"Actual Tonnes (Reclaimed): {result.x[i]}\n"
-                    f"Grade Fe: {event['grade_fe']}\n"
-                    f"Equipment: {event['equipment']}\n"
-                    f"Equipment Rate (Input): {event['rate']}\n"
-                    f"Equipment Actual Rate: {result.x[i] / steady_state_duration}\n"
-                ),
+                "Source": f"{event.get('stockpile', event.get('grade_block'))}\n",
+                "Opening Balance": f"{event['balance']}\n",
+                "Actual Tonnes (Reclaimed)": f"{result.x[i]}\n",
+                "Grade Fe": f"{event['grade_fe']}\n",
+                "Equipment": f"{event['equipment']}\n",
+                "Equipment Rate (Input)": f"{event['rate']}\n",
+                "Equipment Actual Rate": f"{result.x[i] / steady_state_duration}\n",
                 "rate": event["rate"],  # Ensure the rate is passed along for depletion tracking
                 "balance": event["balance"]  # Keep balance for further reference
             })

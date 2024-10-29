@@ -1,6 +1,7 @@
 import sys
 import os
 import pandas as pd
+
 # Add the project root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), r'C:\BlendMaster\blendmaster-backend\routes')))
 
@@ -9,6 +10,7 @@ from routes.event_generator import generate_event_pool
 from routes.crusher_targets import crusher_targets
 from routes.time_handler import calculate_periods
 from case.input import stockpile_data, grade_block_data, crusher_target_data, equipment_data
+from datetime import datetime, timedelta
 
 
 # Case for blending optimization
@@ -27,15 +29,31 @@ def case_run_blending_optimization():
     print(f"Crusher Fe Grade Target (Min): {result['Crusher Fe Grade Target (Min)']}\n")
     print(f"Crusher Fe Grade Target (max): {result['Crusher Fe Grade Target (max)']}\n")
     for event in result["outcome"]:
-        print(f"Event {event['event_number']}:\n{event['details']}")
+        print(f"Event {event['event_number']}:\n" 
+          f"Source: {event['Source']}\n" 
+          f"Opening Balance: {event['Opening Balance']}\n" 
+          f"Actual Tonnes: {event['Actual Tonnes (Reclaimed)']}\n" 
+          f"Grade Fe: {event['Grade Fe']}\n" 
+          f"Equipment: {event['Equipment']}\n" 
+          f"Equipment Rate (Input): {event['Equipment Rate (Input)']}\n" 
+          f"Equipment Actual Rate: {event['Equipment Actual Rate']}")
     
  # Prepare data to write into a CSV
     outcome_data = []
     for event in result["outcome"]:
         outcome_data.append({
-            "event_number": event["event_number"],
-            "details": event["details"]
+            "start_datetime": periods["preplan_start"],
+            "end_datetime": periods["preplan_start"] + timedelta(hours= float(result["steady state duration"])),
+            "steady_state_duration": float(result["steady state duration"]),
+            "source": event["Source"].strip() if isinstance(event["Source"], str) else event["Source"],
+            "opening_balance": float(event["Opening Balance"]),
+            "actual_tonnes": float(event["Actual Tonnes (Reclaimed)"]),
+            "grade_fe": float(event["Grade Fe"]),
+            "equipment": event["Equipment"].strip() if isinstance(event["Equipment"], str) else event["Equipment"],
+            "equipment_rate_input": float(event["Equipment Rate (Input)"]),
+            "equipment_actual_rate": float(event["Equipment Actual Rate"])
         })
+
     
     # Convert outcome data to DataFrame
     outcome_df = pd.DataFrame(outcome_data)
@@ -55,8 +73,8 @@ def case_run_blending_optimization():
     summary_df = pd.DataFrame([result_summary])
     
     # Write the outcome and result summary to a CSV file
-    outcome_df.to_csv(r"C:\BlendMaster\blendmaster-backend\output\outcome_data.csv", index=False)
-    summary_df.to_csv(r"C:\BlendMaster\blendmaster-backend\output\result_summary.csv", index=False)
+    outcome_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\outcome_data.xlsx", index=False)
+    summary_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\result_summary.xlsx", index=False)
 
 
     
