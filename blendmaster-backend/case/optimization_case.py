@@ -16,10 +16,12 @@ from datetime import datetime, timedelta
 # Case for blending optimization
 def case_run_blending_optimization():
 
+    
+    period_tracker = "preplan"
     periods = calculate_periods()
-    event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, "preplan")
-    period_crusher_target = crusher_targets(crusher_target_data, "preplan")
-    result = run_with_dynamic_steady_state(event_pool, period_crusher_target, "preplan", periods)
+    event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, period_tracker)
+    period_crusher_target = crusher_targets(crusher_target_data, period_tracker)
+    result = run_with_dynamic_steady_state(event_pool, period_crusher_target, period_tracker, periods)
    
     print(f"Preplan and periods calculated successfully: {periods}\n")
     print(f"status: {result['status']}\n")
@@ -59,22 +61,22 @@ def case_run_blending_optimization():
     outcome_df = pd.DataFrame(outcome_data)
     
     # Add other key result data to the DataFrame if needed
-    result_summary = {
-        "status": result["status"],
-        "steady_state_duration": result["steady state duration"],
-        "actual_crusher_tonnes": result["Actual Crusher Tonnes"],
-        "actual_crusher_fe_grade": result["Actual Crusher Fe Grade"],
-        "crusher_fe_grade_target_min": result["Crusher Fe Grade Target (Min)"],
-        "crusher_fe_grade_target_max": result["Crusher Fe Grade Target (max)"]
-    }
+    #result_summary = {
+        #"status": result["status"],
+        #"steady_state_duration": result["steady state duration"],
+        #"actual_crusher_tonnes": result["Actual Crusher Tonnes"],
+        #"actual_crusher_fe_grade": result["Actual Crusher Fe Grade"],
+        #"crusher_fe_grade_target_min": result["Crusher Fe Grade Target (Min)"],
+        #"crusher_fe_grade_target_max": result["Crusher Fe Grade Target (max)"]
+    #}
 
     # Convert result_summary to DataFrame and concatenate with outcome_df if necessary
     # You can also save them separately if you prefer
-    summary_df = pd.DataFrame([result_summary])
+    #summary_df = pd.DataFrame([result_summary])
     
     # Write the outcome and result summary to a CSV file
     outcome_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\outcome_data.xlsx", index=False)
-    summary_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\result_summary.xlsx", index=False)
+    #summary_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\result_summary.xlsx", index=False)
 
 
     
