@@ -36,7 +36,7 @@ def calculate_periods():
         "period_2_end": period_2_end
     }
 
-# Track stockpile depletion
+# Track stockpile depletion and update steady state duration
 def depletion_time_tracker(events, steady_state_duration, selected_tonnes):
     """
     Track if any stockpile or grade block will deplete sooner than the given steady state duration.

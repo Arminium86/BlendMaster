@@ -2,6 +2,7 @@ from scipy.optimize import linprog
 
 # Main blending optimization logic
 def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration):
+
     dmc = -5  # Default movement cash in $/tonne
 
     # Step 5: Define bounds (how much tonnage each event contributes)
@@ -68,8 +69,10 @@ def run_blending_optimization(event_pool, period_crusher_target, steady_state_du
                      + b_ub_grade_block, 
                      bounds=bounds, method='highs')
 
+   
+    
     if result.success:
-
+        
         outcome = []
         for i, event in enumerate(event_pool):
             if result.x[i] > 0:  # Check if the event's tonnage is greater than zero
@@ -91,12 +94,12 @@ def run_blending_optimization(event_pool, period_crusher_target, steady_state_du
             "outcome": outcome,  # Return the selected events here
             "steady state duration": steady_state_duration, 
             "optimal_tonnes": result.x,
-            "Actual Crusher Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x),
+            "Actual Crusher Fe Grade" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "No tonnes selected.",
             "Crusher Fe Grade Target (Min)": period_crusher_target["target_fe_min"],
             "Crusher Fe Grade Target (max)": period_crusher_target["target_fe_max"],
-            "Actual Crusher Tonnes": sum(result.x),
-
+            "Actual Crusher Tonnes": sum(result.x)
         }
+
     else:
         # Print useful debug information when optimization fails
         print(f"Optimization failed with message: {result.message}")

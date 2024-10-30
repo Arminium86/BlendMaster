@@ -76,7 +76,6 @@ def case_run_blending_optimization():
         event_pool = generate_event_pool(stockpile_data, equipment_data, grade_block_data, period_tracker)
         period_crusher_target = crusher_targets(crusher_target_data, period_tracker)
 
-
     # Write the cumulative outcomes to Excel once at the end
     all_outcomes_df.to_excel(r"C:\BlendMaster\blendmaster-backend\output\outcome_data.xlsx", index=False)
     print("All steady state results successfully written to outcome_data.xlsx.")
