@@ -39,6 +39,3 @@ class DataLoader:
         }
 
         return stockpile_data, grade_block_data, equipment_data, crusher_target_data
-
-data = DataLoader().load_data()
-print (data)

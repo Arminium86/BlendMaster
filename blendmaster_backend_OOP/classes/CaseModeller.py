@@ -23,11 +23,8 @@ class CaseModeller:
         """Runs the modeling process, coordinating optimization and time advancement."""
         while self.current_time < self.periods["period_2_end"]:
             # Run optimization and only advance time if successful
-            if self.run_optimization_step():
-                self.advance_time()
-            else:
-                print("Optimization failed; exiting loop.")
-                break
+            self.run_optimization_step()
+            self.advance_time()
 
         # Save results to an Excel file at the end
         self.save_results(r"C:\BlendMaster\blendmaster_backend_OOP\output\outcome_data.xlsx")
@@ -52,8 +49,11 @@ class CaseModeller:
 
     def advance_time(self):
         """Advance current time and update period if needed."""
-        steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
-        self.current_time += timedelta(hours=steady_state_duration)
+        if self.run_optimization_step():
+            steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
+            self.current_time += timedelta(hours=steady_state_duration)
+        else: 
+            self.current_time += timedelta(hours=self.calculate_initial_steady_state_duration())
 
         # Switch periods if needed
         if self.current_time >= self.periods["preplan_end"] and self.period_tracker == "preplan":
@@ -72,7 +72,7 @@ class CaseModeller:
                 "source": event["Source"],
                 "opening_balance": event["Opening Balance"],
                 "actual_tonnes": event["Actual Tonnes (Reclaimed)"],
-                "remaining_tonnes": event["remaining_tonnes"],
+                "remaining_tonnes": event["Remaining Tonnes"],
                 "grade_fe": event["Grade Fe"],
                 "equipment": event["Equipment"],
                 "equipment_rate_input": event["Equipment Rate (Input)"],

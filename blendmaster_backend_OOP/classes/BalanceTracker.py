@@ -6,7 +6,7 @@ class BalanceTracker:
         """Update balance after each optimization step."""
         for event in events:
             name = event["Source"]
-            self.balances[name] -= event["Actual Tonnes (Reclaimed)"]
+            self.balances[name] -= float(event["Actual Tonnes (Reclaimed)"])
 
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""

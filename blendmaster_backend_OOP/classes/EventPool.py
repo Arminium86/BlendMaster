@@ -18,7 +18,7 @@ class EventPool:
                     
                     # Create a stockpile-based event with combined priorities
                     events.append({
-                        "name": stockpile["name"],
+                        "stockpile": stockpile["name"],
                         "type": "stockpile",
                         "equipment": equipment["name"],
                         "priority": stockpile_priority + equipment_priority,
@@ -36,7 +36,7 @@ class EventPool:
 
                     # Create a grade block-based event
                     events.append({
-                        "name": grade_block["name"],
+                        "grade_block": grade_block["name"],
                         "type": "grade_block",
                         "equipment": equipment["name"],
                         "priority": equipment_priority,  # No grade block priority (their priority is inherently 0); only equipment priority
@@ -55,6 +55,6 @@ class EventPool:
         """Update each event's balance in the pool based on the balance tracker."""
         for event in event_pool:
             if event["type"] == "stockpile":
-                event["balance"] = balance_tracker.get_balance(event["name"])
+                event["balance"] = balance_tracker.get_balance(event["stockpile"])
             elif event["type"] == "grade_block":
-                event["balance"] = balance_tracker.get_balance(event["name"])
+                event["balance"] = balance_tracker.get_balance(event["grade_block"])

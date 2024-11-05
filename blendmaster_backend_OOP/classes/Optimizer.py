@@ -4,7 +4,7 @@ class Optimizer:
     def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration):
         """Runs blending optimization and adjusts steady state if needed."""
         result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
-
+        
         if result["status"] == "success":
             steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration, result["optimal_tonnes"])
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
@@ -88,13 +88,14 @@ class Optimizer:
                 if result.x[i] > 0:  # Check if the event's tonnage is greater than zero
                     outcome.append({
                     "event_number": i+1,
-                    "Source": f"{event.get('stockpile', event.get('grade_block'))}\n",
-                    "Opening Balance": f"{event['balance']}\n",
-                    "Actual Tonnes (Reclaimed)": f"{result.x[i]}\n",
-                    "Grade Fe": f"{event['grade_fe']}\n",
-                    "Equipment": f"{event['equipment']}\n",
-                    "Equipment Rate (Input)": f"{event['rate']}\n",
-                    "Equipment Actual Rate": f"{result.x[i] / steady_state_duration}\n",
+                    "Source": event.get('stockpile', event.get('grade_block')),
+                    "Opening Balance": event['balance'],
+                    "Actual Tonnes (Reclaimed)": result.x[i],
+                    "Remaining Tonnes": float(event['balance']) - float(result.x[i]),
+                    "Grade Fe": event['grade_fe'],
+                    "Equipment": event['equipment'],
+                    "Equipment Rate (Input)": event['rate'],
+                    "Equipment Actual Rate": result.x[i] / steady_state_duration,
                     "rate": event["rate"],  # Ensure the rate is passed along for depletion tracking
                     "balance": event["balance"]  # Keep balance for further reference
                 })

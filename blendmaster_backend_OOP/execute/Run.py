@@ -3,6 +3,10 @@ from classes.CaseModeller import CaseModeller
 from execute.DataLoader import DataLoader
 from execute.PeriodManager import PeriodManager
 
+from classes.EventPool import EventPool
+from classes.CrusherTarget import CrusherTarget
+from classes.Optimizer import Optimizer
+
 
 # Load data
 data_loader = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx")
@@ -19,4 +23,5 @@ case_modeller = CaseModeller(
     crusher_targets=crusher_target_data,
     periods=periods
 )
+
 case_modeller.run()
