@@ -11,6 +11,26 @@ class Optimizer:
 
         return result
 
+    @staticmethod
+    def update_steady_state_duration(events, steady_state_duration, selected_tonnes):
+        """Update steady state duration if depletion is detected early."""
+
+        updated_duration = steady_state_duration
+        
+        for i, event in enumerate(events):
+            if selected_tonnes[i] == event["balance"]:
+                actual_tonnes = selected_tonnes[i]  # Actual tonnes selected by the solver
+                rate = event["rate"]  # Equipment rate for reclaim or digging
+
+                # Calculate time to depletion based on the actual selected tonnes
+                time_to_depletion = actual_tonnes / rate
+
+                # If the event will deplete sooner than the current steady state, update the steady state duration
+                if time_to_depletion < updated_duration:
+                    updated_duration = time_to_depletion
+        
+        return updated_duration
+
     def run_blending_optimization(self, event_pool, period_crusher_target, steady_state_duration):
         """Core linear optimization logic."""
         dmc = -5  # Default movement cash in $/tonne
@@ -95,7 +115,7 @@ class Optimizer:
                     "Grade Fe": event['grade_fe'],
                     "Equipment": event['equipment'],
                     "Equipment Rate (Input)": event['rate'],
-                    "Equipment Actual Rate": result.x[i] / steady_state_duration,
+                    "Equipment Actual Rate": result.x[i] / steady_state_duration if steady_state_duration != 0 else 0,
                     "rate": event["rate"],  # Ensure the rate is passed along for depletion tracking
                     "balance": event["balance"]  # Keep balance for further reference
                 })
@@ -112,13 +132,6 @@ class Optimizer:
             }
 
         else:
-            # Print useful debug information when optimization fails
-            print(f"Optimization failed with message: {result.message}")
-            print(f"Status: {result.status}")
-            print(f"Objective function value: {result.fun}")
-            print(f"Slack variables: {result.slack}")
-            print(f"Residuals of equality constraints: {result.con}")
-            
             return {
                 "status": "error", 
                 "message": result.message, 
@@ -126,23 +139,3 @@ class Optimizer:
                 "slack": result.slack, 
                 "residuals_equality_constraints": result.con
             }
-    
-    @staticmethod
-    def update_steady_state_duration(events, steady_state_duration, selected_tonnes):
-        """Update steady state duration if depletion is detected early."""
-
-        updated_duration = steady_state_duration
-        
-        for i, event in enumerate(events):
-            if selected_tonnes[i] == event["balance"]:
-                actual_tonnes = selected_tonnes[i]  # Actual tonnes selected by the solver
-                rate = event["rate"]  # Equipment rate for reclaim or digging
-
-                # Calculate time to depletion based on the actual selected tonnes
-                time_to_depletion = actual_tonnes / rate
-
-                # If the event will deplete sooner than the current steady state, update the steady state duration
-                if time_to_depletion < updated_duration:
-                    updated_duration = time_to_depletion
-        
-        return updated_duration
