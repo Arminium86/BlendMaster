@@ -3,45 +3,54 @@ from scipy.optimize import linprog
 class Optimizer:
     def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration):
         """Runs blending optimization and adjusts steady state if needed."""
-        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
         
-        if result["status"] == "success":
-            steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration, result["optimal_tonnes"])
+        while steady_state_duration > 0:
+            
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
+        
+            if result['result'].success and sum(result['result'].x) > 0: 
+                steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration, result["optimal_tonnes"])
+                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
+                break
 
+            elif result['result'].success and sum(result['result'].x)  == 0:
+                steady_state_duration -= 1
+                continue 
+
+            else: break
+             
         return result
 
     @staticmethod
-    def update_steady_state_duration(events, steady_state_duration, selected_tonnes):
+    def update_steady_state_duration(selected_events, steady_state_duration, selected_tonnes):
         """Update steady state duration if depletion is detected early."""
 
         updated_duration = steady_state_duration
         
-        for i, event in enumerate(events):
-            if selected_tonnes[i] == event["balance"]:
+        for i, event in enumerate(selected_events):
+            if (selected_tonnes[i] == event["Opening Balance"] and selected_tonnes[i] > 0):
                 actual_tonnes = selected_tonnes[i]  # Actual tonnes selected by the solver
-                rate = event["rate"]  # Equipment rate for reclaim or digging
+                rate = event["Equipment Rate (Input)"]  # Equipment rate for reclaim or digging
 
                 # Calculate time to depletion based on the actual selected tonnes
                 time_to_depletion = actual_tonnes / rate
 
                 # If the event will deplete sooner than the current steady state, update the steady state duration
-                if time_to_depletion < updated_duration:
+                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667:
                     updated_duration = time_to_depletion
+                else: return 0.016666667
         
         return updated_duration
 
     def run_blending_optimization(self, event_pool, period_crusher_target, steady_state_duration):
         """Core linear optimization logic."""
-        dmc = -5  # Default movement cash in $/tonne
+        dmc = -10  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
 
-        # Step 5: Define bounds (how much tonnage each event contributes)
+        # Step 1: Define bounds (how many tonnes each event contributes)
         bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
         
         # Step 2: Build the cost and constraints based on event pool
-        c = []  # Movement cost for each event
-        A_eq = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
-        b_eq = [0]  # The difference between both sides should equal 0
+        c = []  # Movement cash flow for each event
 
         # Minimum crusher grade (turned into an upper-bound inequality)
         A_ub_min_crusher_grade = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
@@ -51,9 +60,8 @@ class Optimizer:
         A_ub_max_crusher_grade = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
         b_ub_max_crusher_grade = [0]
 
-
         for event in event_pool:
-            # Movement cost = dmc + combined priority of stockpile / grade block and reclaimer / digger
+            # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
             c.append(dmc + event["priority"])
 
         # Step 3: Crusher capacity constraint
@@ -63,44 +71,28 @@ class Optimizer:
         # Step 4: Add stockpile selection constraint (minimum 2, maximum 3 stockpiles)
         stockpile_indices = [i for i, event in enumerate(event_pool) if "stockpile" in event]
         
-        # Minimum 2 stockpiles constraint (turned into an upper-bound inequality)
-        A_ub_min_stockpiles = [[-1 if i in stockpile_indices else 0 + 2 for i in range(len(event_pool))]] # Min 2 stockpiles
-        b_ub_min_stockpiles = [0] 
+        # Maximum ratio of grade block to stockpile feed (use second value. 0 means no constraint. 10 means max 0.1 grade block / stockpile feed)
+        A_ub_max_feed_ratio = [[-1 if i in stockpile_indices else 5 for i in range(len(event_pool))]] 
+        b_ub_max_feed_ratio = [0] 
 
-        # Maximum 3 stockpiles constraint
-        A_ub_max_stockpiles = [[1 if i in stockpile_indices else 0 - 3 for i in range(len(event_pool))]] # Max 3 stockpiles
-        b_ub_max_stockpiles = [0]  
-
-
-        # Step 3.1: Grade block contribution constraint (grade_block <= 20% of total tonnes)
-        grade_block_indices = [i for i, event in enumerate(event_pool) if "grade_block" in event]  # Identify grade block events
-
-        # A new upper-bound inequality for the grade blocks
-        A_ub_grade_block = [[1 if i in grade_block_indices else -1 for i in range(len(event_pool))]]
-        b_ub_grade_block = [0]  # Grade blocks must be <= 100% of total tonnes
-
-    
+        # Minimum ratio of grade block to stockpile feed (use first value. 0 means no constraint. 0.1 means min 0.1 grade block / stockpile feed)  )
+        A_ub_min_feed_ratio = [[0 if i in stockpile_indices else -1 for i in range(len(event_pool))]]
+        b_ub_min_feed_ratio = [0]  
 
         # Step 6: Run the optimization with the added stockpile constraints
         result = linprog(c, 
-                        #A_eq=A_eq, 
-                        #b_eq=b_eq, 
                         A_ub=A_ub
-                        + A_ub_min_stockpiles 
-                        + A_ub_max_stockpiles 
+                        + A_ub_min_feed_ratio
+                        + A_ub_max_feed_ratio
                         + A_ub_min_crusher_grade 
-                        + A_ub_max_crusher_grade
-                        + A_ub_grade_block,  
+                        + A_ub_max_crusher_grade,  
                         b_ub=b_ub
-                        + b_ub_min_stockpiles 
-                        + b_ub_max_stockpiles 
+                        + b_ub_min_feed_ratio
+                        + b_ub_max_feed_ratio
                         + b_ub_min_crusher_grade 
-                        + b_ub_max_crusher_grade
-                        + b_ub_grade_block, 
+                        + b_ub_max_crusher_grade, 
                         bounds=bounds, method='highs')
 
-    
-        
         if result.success:
             
             outcome = []
@@ -116,12 +108,10 @@ class Optimizer:
                     "Equipment": event['equipment'],
                     "Equipment Rate (Input)": event['rate'],
                     "Equipment Actual Rate": result.x[i] / steady_state_duration if steady_state_duration != 0 else 0,
-                    "rate": event["rate"],  # Ensure the rate is passed along for depletion tracking
-                    "balance": event["balance"]  # Keep balance for further reference
                 })
 
             return {
-                "status": "success", 
+                "result": result,
                 "outcome": outcome,  # Return the selected events here
                 "steady state duration": steady_state_duration, 
                 "optimal_tonnes": result.x,
@@ -133,6 +123,7 @@ class Optimizer:
 
         else:
             return {
+                "result": result,
                 "status": "error", 
                 "message": result.message, 
                 "objective_function_value": result.fun, 

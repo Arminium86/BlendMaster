@@ -24,7 +24,6 @@ class CaseModeller:
         while self.current_time < self.periods["period_2_end"]:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
-            self.advance_time()
 
         # Save results to an Excel file at the end
         self.save_results(r"C:\BlendMaster\blendmaster_backend_OOP\output\outcome_data.xlsx")
@@ -40,20 +39,19 @@ class CaseModeller:
             events, period_crusher_target, self.calculate_initial_steady_state_duration()
         )
 
-        if result["status"] != "success":
+        if result['result'].success:
+            self.record_results(result)
+            self.balance_tracker.update_balances(result["outcome"])
+            self.advance_time()
+
+        else: 
             print("Optimization failed; exiting loop.")
             return
-
-        self.record_results(result)
-        self.balance_tracker.update_balances(result["outcome"])
-
+        
     def advance_time(self):
-        """Advance current time and update period if needed."""
-        if self.run_optimization_step():
-            steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
-            self.current_time += timedelta(hours=steady_state_duration)
-        else: 
-            self.current_time += timedelta(hours=self.calculate_initial_steady_state_duration())
+        """Advance current time and update period if needed."""    
+        steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
+        self.current_time += timedelta(hours=steady_state_duration)
 
         # Switch periods if needed
         if self.current_time >= self.periods["preplan_end"] and self.period_tracker == "preplan":
@@ -86,7 +84,7 @@ class CaseModeller:
         """Save results to an Excel file."""
         self.results.to_excel(filename, index=False)
         print(f"All results written to {filename}")
-
+       
     def calculate_initial_steady_state_duration(self):
             
             if self.current_time >= self.periods["preplan_start"] and self.current_time < self.periods["preplan_end"]: 
