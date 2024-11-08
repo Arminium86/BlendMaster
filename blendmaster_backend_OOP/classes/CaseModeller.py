@@ -40,8 +40,9 @@ class CaseModeller:
         )
 
         if result['result'].success:
+            self.balance_tracker.adjust_results(result)
             self.record_results(result)
-            self.balance_tracker.update_balances(result["outcome"])
+            self.balance_tracker.update_balances(result)
             self.advance_time()
 
         else: 
@@ -70,7 +71,7 @@ class CaseModeller:
                 "source": event["Source"],
                 "opening_balance": event["Opening Balance"],
                 "actual_tonnes": event["Actual Tonnes (Reclaimed)"],
-                "remaining_tonnes": event["Remaining Tonnes"],
+                "closing_balance": event["Opening Balance"] - event["Actual Tonnes (Reclaimed)"],
                 "grade_fe": event["Grade Fe"],
                 "equipment": event["Equipment"],
                 "equipment_rate_input": event["Equipment Rate (Input)"],

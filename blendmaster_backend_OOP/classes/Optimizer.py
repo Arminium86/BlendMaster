@@ -1,26 +1,42 @@
 from scipy.optimize import linprog
+import numpy as np
 
 class Optimizer:
-    
+
     def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration):
         """Runs blending optimization and adjusts steady state if needed."""
         
-        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
+        steady_state_controller_source = None
+        steady_state_controller_tonnes = None
+
+        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
         
         if result['result'].success: 
-            steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration)
-            result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
-        
+            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["outcome"], steady_state_duration)
+            result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
+
+            if result['result'].success: 
+                return result
+            
+            elif not result['result'].success: 
+                steady_state_controller_source, steady_state_controller_tonnes = None, None
+                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
+
+                if result['result'].success: 
+                    return result
+                
+                else: return
+
         else: return
-             
-        return result
 
     @staticmethod
     def update_steady_state_duration(selected_events, steady_state_duration):
         """Update steady state duration if depletion is detected early."""
 
         updated_duration = steady_state_duration
-        
+        source_name = "Null"
+        source_tonnes = "Null"
+
         for event in selected_events:
             if (event["Actual Tonnes (Reclaimed)"] == event["Opening Balance"] and event["Actual Tonnes (Reclaimed)"] > 0):
                 actual_tonnes = event["Actual Tonnes (Reclaimed)"]  # Actual tonnes selected by the solver
@@ -30,14 +46,18 @@ class Optimizer:
                 time_to_depletion = float(actual_tonnes / rate)
 
                 # If the event will deplete sooner than the current steady state, update the steady state duration
-                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667 :
+                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667:
                     updated_duration = time_to_depletion
+                    source_name = event["Source"]
+                    source_tonnes = event["Opening Balance"]
                 else: updated_duration =  0.016666667
-        
-        return updated_duration
+                source_name = str(event["Source"])
+                source_tonnes = float(event["Opening Balance"])
+
+        return updated_duration, source_name, source_tonnes
     
     @staticmethod
-    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration):
+    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes: float):
         """Core linear optimization logic."""
         dmc = -10  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
 
@@ -46,6 +66,15 @@ class Optimizer:
         
         # Step 2: Build the cost and constraints based on event pool
         c = []  # Movement cash flow for each event
+
+        if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
+            indices = [i for i, event in enumerate(event_pool) if ((event["type"] == "stockpile" and event["stockpile"] == steady_state_controller_source and "grade_block" not in event) or (event["type"] == "grade_block" and event["grade_block"] == steady_state_controller_source and "stockpile" not in event))]
+            A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
+            b_eq = [steady_state_controller_tonnes] * len(A_eq)
+
+        else:
+            A_eq = None
+            b_eq = None
 
         # Minimum crusher grade (turned into an upper-bound inequality)
         A_ub_min_crusher_grade = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
@@ -75,7 +104,25 @@ class Optimizer:
         b_ub_min_feed_ratio = [0]  
 
         # Step 6: Run the optimization with the added stockpile constraints
-        result = linprog(c, 
+        
+        if A_eq == None and b_eq == None:
+            result = linprog(c,
+                            A_ub=A_ub
+                            + A_ub_min_feed_ratio
+                            + A_ub_max_feed_ratio
+                            + A_ub_min_crusher_grade 
+                            + A_ub_max_crusher_grade,  
+                            b_ub=b_ub
+                            + b_ub_min_feed_ratio
+                            + b_ub_max_feed_ratio
+                            + b_ub_min_crusher_grade 
+                            + b_ub_max_crusher_grade, 
+                            bounds=bounds, method='highs')
+        
+        else:
+            result = linprog(c,
+                        A_eq=A_eq, 
+                        b_eq=b_eq,  
                         A_ub=A_ub
                         + A_ub_min_feed_ratio
                         + A_ub_max_feed_ratio
@@ -98,7 +145,6 @@ class Optimizer:
                     "Source": event.get('stockpile', event.get('grade_block')),
                     "Opening Balance": event['balance'],
                     "Actual Tonnes (Reclaimed)": result.x[i],
-                    "Remaining Tonnes": float(event['balance']) - float(result.x[i]),
                     "Grade Fe": event['grade_fe'],
                     "Equipment": event['equipment'],
                     "Equipment Rate (Input)": event['rate'],
