@@ -90,7 +90,7 @@ class CaseModeller:
             if self.current_time >= self.periods["preplan_start"] and self.current_time < self.periods["preplan_end"]: 
                 return (self.periods["preplan_end"] - self.current_time).total_seconds() / 3600
             elif self.current_time >= self.periods["period_1_start"] and self.current_time < self.periods["period_1_end"]:
-                return (self.periods["period_1_end"] - self.current_time).total_seconds() / 3600 
+                return (self.periods["period_1_end"] - self.current_time).total_seconds() / 3600
             elif self.current_time >= self.periods["period_2_start"] and self.current_time < self.periods["period_2_end"]:
-                return  (self.periods["period_2_end"] - self.current_time).total_seconds() / 3600
+                return (self.periods["period_2_end"] - self.current_time).total_seconds() / 3600
             else: return 0

@@ -1,48 +1,43 @@
 from scipy.optimize import linprog
 
 class Optimizer:
+    
     def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration):
         """Runs blending optimization and adjusts steady state if needed."""
         
-        while steady_state_duration > 0:
-            
+        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
+        
+        if result['result'].success: 
+            steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration)
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
         
-            if result['result'].success and sum(result['result'].x) > 0: 
-                steady_state_duration = self.update_steady_state_duration(result["outcome"], steady_state_duration, result["optimal_tonnes"])
-                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration)
-                break
-
-            elif result['result'].success and sum(result['result'].x)  == 0:
-                steady_state_duration -= 1
-                continue 
-
-            else: break
+        else: return
              
         return result
 
     @staticmethod
-    def update_steady_state_duration(selected_events, steady_state_duration, selected_tonnes):
+    def update_steady_state_duration(selected_events, steady_state_duration):
         """Update steady state duration if depletion is detected early."""
 
         updated_duration = steady_state_duration
         
-        for i, event in enumerate(selected_events):
-            if (selected_tonnes[i] == event["Opening Balance"] and selected_tonnes[i] > 0):
-                actual_tonnes = selected_tonnes[i]  # Actual tonnes selected by the solver
+        for event in selected_events:
+            if (event["Actual Tonnes (Reclaimed)"] == event["Opening Balance"] and event["Actual Tonnes (Reclaimed)"] > 0):
+                actual_tonnes = event["Actual Tonnes (Reclaimed)"]  # Actual tonnes selected by the solver
                 rate = event["Equipment Rate (Input)"]  # Equipment rate for reclaim or digging
 
                 # Calculate time to depletion based on the actual selected tonnes
-                time_to_depletion = actual_tonnes / rate
+                time_to_depletion = float(actual_tonnes / rate)
 
                 # If the event will deplete sooner than the current steady state, update the steady state duration
-                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667:
+                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667 :
                     updated_duration = time_to_depletion
-                else: return 0.016666667
+                else: updated_duration =  0.016666667
         
         return updated_duration
-
-    def run_blending_optimization(self, event_pool, period_crusher_target, steady_state_duration):
+    
+    @staticmethod
+    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration):
         """Core linear optimization logic."""
         dmc = -10  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
 
