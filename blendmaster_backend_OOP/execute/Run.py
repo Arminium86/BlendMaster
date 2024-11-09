@@ -1,9 +1,10 @@
-# Import necessary classes from your module (assuming all classes are in a module named blend_master)
+# This is the control centre in which user and inventory data are imported and the program is executed
+# Import necessary classes from your modules
 from classes.CaseModeller import CaseModeller
 from execute.DataLoader import DataLoader
 from execute.PeriodManager import PeriodManager
 
-# Load data
+# Load input data (this is combined user input and opening inventories)
 data_loader = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx")
 stockpile_data, grade_block_data, equipment_data, crusher_target_data = data_loader.load_data()
 

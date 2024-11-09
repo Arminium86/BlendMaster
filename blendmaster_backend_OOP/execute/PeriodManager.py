@@ -1,3 +1,5 @@
+# This generate 3 periods whenever the progrsm runs: preplan, period_1, and period_2. Preplan is from current time to 6AM or 6PM whichever first
+# which is followed by two 12 hour periods
 from datetime import datetime, timedelta
 
 class PeriodManager:
@@ -5,16 +7,16 @@ class PeriodManager:
     def calculate_periods():
         now = datetime.now()
         
-        # Define next 6AM and 6PM, adjusting for current time
-        if now.hour >= 6 and now.hour < 18:  # Between 6AM and 6PM
+        # Define next 6AM and 6PM
+        if now.hour >= 6 and now.hour < 18: 
             next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
             next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
 
-        elif now.hour >= 18:  # Between 6PM and midnight
+        elif now.hour >= 18:
             next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
             next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
-        else:  # Between midnight and 6AM
+        else:  
             next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
             next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
 

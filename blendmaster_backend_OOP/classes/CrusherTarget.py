@@ -1,3 +1,4 @@
+# This simply returns crusher targets by period
 class CrusherTarget:
     def __init__(self, crusher_targets):
         self.crusher_targets = crusher_targets

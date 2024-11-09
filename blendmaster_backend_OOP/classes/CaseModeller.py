@@ -1,3 +1,4 @@
+# This is where the main workflow is defined (everything happens here)
 from classes.BalanceTracker import BalanceTracker
 from classes.EventPool import EventPool
 from classes.Optimizer import Optimizer
@@ -18,15 +19,18 @@ class CaseModeller:
         self.event_pool = EventPool(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
         self.results = pd.DataFrame()
+        self.steady_state_tracker = 0
 
     def run(self):
-        """Runs the modeling process, coordinating optimization and time advancement."""
+        """Runs the modeling process, coordinating optimization and time tracking."""
+        
         while self.current_time < self.periods["period_2_end"]:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
+            self.steady_state_tracker += 1
 
         # Save results to an Excel file at the end
-        self.save_results(r"C:\BlendMaster\blendmaster_backend_OOP\output\outcome_data.xlsx")
+        self.save_results(r"C:\BlendMaster\blendmaster_backend_OOP\output\report_data.xlsx")
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
@@ -62,24 +66,29 @@ class CaseModeller:
 
     def record_results(self, result):
         """Record results from an optimization run into the main DataFrame."""
-        outcome_data = [
+        report_data = [
             {
                 "start_datetime": self.current_time,
-                "end_datetime": self.current_time + timedelta(hours=result["steady state duration"]),
-                "steady_state_duration": result["steady state duration"],
+                "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
+                "steady_state_number": self.steady_state_tracker,
+                "steady_state_duration": result["steady_state_duration"],
                 "period": self.period_tracker,
-                "source": event["Source"],
-                "opening_balance": event["Opening Balance"],
-                "actual_tonnes": event["Actual Tonnes (Reclaimed)"],
-                "closing_balance": event["Opening Balance"] - event["Actual Tonnes (Reclaimed)"],
-                "grade_fe": event["Grade Fe"],
-                "equipment": event["Equipment"],
-                "equipment_rate_input": event["Equipment Rate (Input)"],
-                "equipment_rate_output": event["Equipment Actual Rate"]
+                "source": outcome["source"],
+                "source_opening_balance": outcome["opening_balance"],
+                "source_actual_tonnes": outcome["actual_tonnes"],
+                "source_closing_balance": outcome["opening_balance"] - outcome["actual_tonnes"],
+                "source_grade_fe": outcome["grade_fe"],
+                "equipment": outcome["equipment"],
+                "equipment_rate_input": outcome["equipment_rate_input"],
+                "equipment_rate_output": outcome["equipment_rate_output"],
+                "crusher_actual_tonnes": result["crusher_actual_tonnes"],
+                "crusher_actual_grade_fe": result["crusher_actual_grade_fe"],
+                "crusher_grade_target_min_fe": result["crusher_grade_target_min_fe"],
+                "crusher_grade_target_max_fe": result["crusher_grade_target_max_fe"]
             }
-            for event in result["outcome"]
+            for outcome in result["outcome"]
         ]
-        self.results = pd.concat([self.results, pd.DataFrame(outcome_data)], ignore_index=True)
+        self.results = pd.concat([self.results, pd.DataFrame(report_data)], ignore_index=True)
 
     def save_results(self, filename):
         """Save results to an Excel file."""

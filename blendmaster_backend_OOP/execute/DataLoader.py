@@ -1,3 +1,4 @@
+# This loads the data from external sources (currently an Excel file with multiple tabs which represented the combined user input and opening inventories)
 import pandas as pd
 
 class DataLoader:
