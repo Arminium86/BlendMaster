@@ -47,13 +47,18 @@ class Optimizer:
                 time_to_depletion = float(actual_tonnes / rate)
 
                 # If a source will deplete sooner than the current steady state duration, then update the steady state duration
-                if time_to_depletion < updated_duration and time_to_depletion >= 0.016666667:
+                if time_to_depletion < updated_duration and time_to_depletion > 0.016666667:
                     updated_duration = time_to_depletion
                     source_name = selected_event["source"]
                     source_tonnes = selected_event["opening_balance"]
-                else: updated_duration =  0.016666667
-                source_name = selected_event["source"]
-                source_tonnes = selected_event["opening_balance"]
+
+                elif time_to_depletion > updated_duration: 
+                    continue
+
+                else: 
+                    updated_duration =  0.016666667 # Min steady state duration is 1 minute (this else block should be reached in rare cases)
+                    source_name = selected_event["source"]
+                    source_tonnes = selected_event["opening_balance"]
 
         return updated_duration, source_name, source_tonnes
     
@@ -67,10 +72,13 @@ class Optimizer:
         
         # Step 2: Build the cost and constraints based on event pool
         c = []  # Movement cash flow for each event
+        for event in event_pool:
+            # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
+            c.append(dmc + event["priority"])
 
         # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
-        # constraint fail
+        # constraint fail the optimization
         if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
             indices = [i for i, event in enumerate(event_pool) if ((event["type"] == "stockpile" and event["stockpile"] == steady_state_controller_source and "grade_block" not in event) or (event["type"] == "grade_block" and event["grade_block"] == steady_state_controller_source and "stockpile" not in event))]
             A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
@@ -88,17 +96,21 @@ class Optimizer:
         A_ub_max_crusher_grade = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
         b_ub_max_crusher_grade = [0]
 
-        for event in event_pool:
-            # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            c.append(dmc + event["priority"])
-
         # Step 3: Crusher capacity constraint
         A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
         b_ub = [period_crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * steady state duration
 
+        # Generate a list of indicies for each unique stockpile
+        unique_stockpiles = {}
+        stockpile_indices = []
+
+        for i, event in enumerate(event_pool):
+            stockpile_name = event.get("stockpile")
+            if "stockpile" in event and stockpile_name not in unique_stockpiles:
+                unique_stockpiles[stockpile_name] = i
+                stockpile_indices.append(i)
+
         # Step 4: Add a constraint for grade block to stockpile feed ratio
-        stockpile_indices = [i for i, event in enumerate(event_pool) if "stockpile" in event]
-        
         # Maximum ratio of grade block to stockpile feed (use second value below. 0 means no constraint. 10 means max 0.1 grade block / stockpile feed)
         A_ub_max_feed_ratio = [[-1 if i in stockpile_indices else 5 for i in range(len(event_pool))]] 
         b_ub_max_feed_ratio = [0] 
@@ -106,6 +118,14 @@ class Optimizer:
         # Minimum ratio of grade block to stockpile feed (use first value below. 0 means no constraint. 0.1 means min 0.1 grade block / stockpile feed)
         A_ub_min_feed_ratio = [[0 if i in stockpile_indices else -1 for i in range(len(event_pool))]]
         b_ub_min_feed_ratio = [0]  
+
+        
+        # Step 5: Minimum and maximum number of stockpiles in a blend (this may need transition to milp library to handle mixed integer)
+       
+        # Minimum number of stockpiles future code here
+
+        # Maximum number of stockpiles future code here
+        
 
         # Step 6: Run the optimization
         
