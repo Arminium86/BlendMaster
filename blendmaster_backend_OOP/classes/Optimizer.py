@@ -12,18 +12,18 @@ class Optimizer:
 
         result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
         
-        if result['result'].success: 
-            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["outcome"], steady_state_duration)
+        if result['Linprog_result_object'].success: 
+            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration)
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
 
-            if result['result'].success: 
+            if result['Linprog_result_object'].success: 
                 return result
             
-            elif not result['result'].success: 
+            elif not result['Linprog_result_object'].success: 
                 steady_state_controller_source, steady_state_controller_tonnes = None, None
                 result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
 
-                if result['result'].success: 
+                if result['Linprog_result_object'].success: 
                     return result
                 
                 else: return
@@ -141,10 +141,10 @@ class Optimizer:
 
         if result.success:
             
-            outcome = []
+            transactions = []
             for i, event in enumerate(event_pool):
-                if result.x[i] > 0:  # Check if the event's tonnage is greater than zero
-                    outcome.append({
+                if result.x[i] >= 0:  # Check if the event has happened
+                    transactions.append({
                     "source": event.get('stockpile', event.get('grade_block')),
                     "opening_balance": event['balance'],
                     "actual_tonnes": result.x[i],
@@ -155,14 +155,16 @@ class Optimizer:
                 })
 
             return {
-                "result": result,
-                "outcome": outcome,  # Return the selected events
+                "Linprog_result_object": result,
+                "transactions": transactions,
                 "steady_state_duration": steady_state_duration, 
-                "crusher_actual_grade_fe" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "No tonnes selected.",
+                "crusher_actual_grade_fe" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
                 "crusher_grade_target_min_fe": period_crusher_target["target_fe_min"],
                 "crusher_grade_target_max_fe": period_crusher_target["target_fe_max"],
+                "crusher_rate_input": period_crusher_target["crusher_rate"],
+                "crusher_rate_output": sum(result.x) / steady_state_duration if steady_state_duration != 0 else 0,
                 "crusher_actual_tonnes": sum(result.x)
             }
 
         else:
-            return {"result": result}
+            return {"Linprog_result_object": result}

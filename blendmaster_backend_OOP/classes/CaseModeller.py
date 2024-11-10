@@ -14,6 +14,7 @@ class CaseModeller:
         self.crusher_targets = crusher_targets
         self.periods = periods
         self.current_time = periods["preplan_start"]
+        self.current_time_for_export = periods["preplan_start"]
         self.period_tracker = "preplan"
         self.balance_tracker = BalanceTracker(stockpiles, grade_blocks)
         self.event_pool = EventPool(stockpiles, grade_blocks, equipment)
@@ -30,7 +31,7 @@ class CaseModeller:
             self.steady_state_tracker += 1
 
         # Save results to an Excel file at the end
-        self.save_results(r"C:\BlendMaster\blendmaster_backend_OOP\output\report_data.xlsx")
+        self.save_results(fr"C:\BlendMaster\blendmaster_backend_OOP\output\report_data_{self.current_time_for_export.date()}_{self.current_time_for_export.strftime('%H-%M')}.xlsx")
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
@@ -43,8 +44,7 @@ class CaseModeller:
             events, period_crusher_target, self.calculate_initial_steady_state_duration()
         )
 
-        if result['result'].success:
-            self.balance_tracker.adjust_results(result)
+        if result['Linprog_result_object'].success:
             self.record_results(result)
             self.balance_tracker.update_balances(result)
             self.advance_time()
@@ -73,20 +73,26 @@ class CaseModeller:
                 "steady_state_number": self.steady_state_tracker,
                 "steady_state_duration": result["steady_state_duration"],
                 "period": self.period_tracker,
-                "source": outcome["source"],
-                "source_opening_balance": outcome["opening_balance"],
-                "source_actual_tonnes": outcome["actual_tonnes"],
-                "source_closing_balance": outcome["opening_balance"] - outcome["actual_tonnes"],
-                "source_grade_fe": outcome["grade_fe"],
-                "equipment": outcome["equipment"],
-                "equipment_rate_input": outcome["equipment_rate_input"],
-                "equipment_rate_output": outcome["equipment_rate_output"],
-                "crusher_actual_tonnes": result["crusher_actual_tonnes"],
+                "source": transaction["source"],
+                "source_opening_balance": transaction["opening_balance"],
+                "source_actual_tonnes": transaction["actual_tonnes"] if transaction["actual_tonnes"] != 0 else "No tonnes selected",
+                "source_closing_balance": transaction["opening_balance"] - transaction["actual_tonnes"],
+                "source_grade_fe": transaction["grade_fe"],
+                "equipment": transaction["equipment"],
+                "equipment_rate_input": transaction["equipment_rate_input"],
+                "equipment_rate_output": transaction["equipment_rate_output"],
+                "crusher_actual_tonnes": result["crusher_actual_tonnes"] if result["crusher_actual_tonnes"] != 0 else "No crusher feed in steady state",
+                "crusher_rate_input": result["crusher_rate_input"],
+                "crusher_rate_output": result["crusher_rate_output"],
                 "crusher_actual_grade_fe": result["crusher_actual_grade_fe"],
                 "crusher_grade_target_min_fe": result["crusher_grade_target_min_fe"],
                 "crusher_grade_target_max_fe": result["crusher_grade_target_max_fe"]
             }
-            for outcome in result["outcome"]
+            for transaction in result["transactions"]
+            if (
+            (transaction["actual_tonnes"] != 0 and result["crusher_actual_tonnes"] != 0)
+            or (transaction["actual_tonnes"] == 0 and result["crusher_actual_tonnes"] == 0)
+            )
         ]
         self.results = pd.concat([self.results, pd.DataFrame(report_data)], ignore_index=True)
 
