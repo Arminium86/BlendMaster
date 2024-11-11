@@ -112,14 +112,42 @@ class Optimizer:
 
         # Step 4: Add a constraint for grade block to stockpile feed ratio
         # Maximum ratio of grade block to stockpile feed (use second value below. 0 means no constraint. 10 means max 0.1 grade block / stockpile feed)
-        A_ub_max_feed_ratio = [[-1 if i in stockpile_indices else 5 for i in range(len(event_pool))]] 
-        b_ub_max_feed_ratio = [0] 
+
+        direct_feed_ratio_max = period_crusher_target["direct_feed_ratio_max"]
+        if direct_feed_ratio_max >= 1 or direct_feed_ratio_max < 0:
+
+            A_ub_max_feed_ratio = [[-1 if i in stockpile_indices else 0 for i in range(len(event_pool))]] 
+            b_ub_max_feed_ratio = [0] 
+        
+        elif direct_feed_ratio_max == 0:
+           
+            A_ub_max_feed_ratio = [[0 if i in stockpile_indices else 1 for i in range(len(event_pool))]] 
+            b_ub_max_feed_ratio = [0] 
+       
+        else:
+            stockpile_coef = -direct_feed_ratio_max * 10
+            grade_block_coef = 10 + stockpile_coef
+            A_ub_max_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]] 
+            b_ub_max_feed_ratio = [0]          
 
         # Minimum ratio of grade block to stockpile feed (use first value below. 0 means no constraint. 0.1 means min 0.1 grade block / stockpile feed)
-        A_ub_min_feed_ratio = [[0 if i in stockpile_indices else -1 for i in range(len(event_pool))]]
-        b_ub_min_feed_ratio = [0]  
+        direct_feed_ratio_min = period_crusher_target["direct_feed_ratio_min"]
+        if direct_feed_ratio_min <= 0 or direct_feed_ratio_min > 1:
+            
+            A_ub_min_feed_ratio = [[0 if i in stockpile_indices else -1 for i in range(len(event_pool))]] 
+            b_ub_min_feed_ratio = [0] 
+       
+        elif direct_feed_ratio_min == 1:
+           
+            A_ub_min_feed_ratio = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]] 
+            b_ub_min_feed_ratio = [0] 
 
-        
+        else:
+            stockpile_coef = direct_feed_ratio_max * 10
+            grade_block_coef = -10 + stockpile_coef
+            A_ub_min_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]] 
+            b_ub_min_feed_ratio = [0]   
+
         # Step 5: Maximum quantities for each source
         # Generate a list of indicies for each unique source
         unique_sources = {}

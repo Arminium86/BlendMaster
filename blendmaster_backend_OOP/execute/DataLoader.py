@@ -25,16 +25,22 @@ class DataLoader:
             "preplan": {
                 "target_fe_min": crusher_data_df["target_fe_min_preplan"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_preplan"].iloc[0],
+                "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_preplan"].iloc[0],
+                "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_preplan"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_preplan"].iloc[0]
             },
             "period_1": {
                 "target_fe_min": crusher_data_df["target_fe_min_period_1"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_period_1"].iloc[0],
+                "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_period_1"].iloc[0],
+                "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_period_1"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_period_1"].iloc[0]
             },
             "period_2": {
                 "target_fe_min": crusher_data_df["target_fe_min_period_2"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_period_2"].iloc[0],
+                "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_period_2"].iloc[0],
+                "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_period_2"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_period_2"].iloc[0]
             }
         }
