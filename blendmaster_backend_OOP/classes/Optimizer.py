@@ -4,31 +4,31 @@ import numpy as np
 
 class Optimizer:
 
-    def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration):
+    def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration, periods, period_tracker):
         """Runs blending optimization and adjusts steady state if needed."""
         
         steady_state_controller_source = None
         steady_state_controller_tonnes = None
 
-        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
+        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
         
         if result['Linprog_result_object'].success: 
             steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration)
-            result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
+            result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
 
             if result['Linprog_result_object'].success: 
                 return result
             
             elif not result['Linprog_result_object'].success: 
                 steady_state_controller_source, steady_state_controller_tonnes = None, None
-                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes)
+                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
 
                 if result['Linprog_result_object'].success: 
                     return result
                 
-                else: return
+                else: return result
 
-        else: return
+        else: return result
 
     @staticmethod
     def update_steady_state_duration(selected_events, steady_state_duration):
@@ -63,9 +63,9 @@ class Optimizer:
         return updated_duration, source_name, source_tonnes
     
     @staticmethod
-    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes: float):
+    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker):
         """Core linear optimization logic."""
-        dmc = -10  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
+        dmc = -100  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
 
         # Step 1: Define bounds (how many tonnes each event contributes)
         bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
@@ -74,7 +74,7 @@ class Optimizer:
         c = []  # Movement cash flow for each event
         for event in event_pool:
             # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            c.append(dmc + event["priority"])
+            c.append(dmc + event["cost"] + event["cash"])
 
         # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
@@ -120,12 +120,34 @@ class Optimizer:
         b_ub_min_feed_ratio = [0]  
 
         
-        # Step 5: Minimum and maximum number of stockpiles in a blend (this may need transition to milp library to handle mixed integer)
-       
-        # Minimum number of stockpiles future code here
+        # Step 5: Maximum quantities for each source
+        # Generate a list of indicies for each unique source
+        unique_sources = {}
+        source_indices = []
 
-        # Maximum number of stockpiles future code here
+        for i, event in enumerate(event_pool):
+            source_name = event.get("stockpile") if event['type'] == "stockpile" else event.get("grade_block")
+            if source_name not in unique_sources:
+                unique_sources[source_name] = i
+                source_indices.append(i)
+
+        # Inequality constraint to handle max quantity
+        A_ub_max_quantity = []
+        b_ub_max_quantity = []
+
+        for event_index in range(len(event_pool)):
+            # Create a row filled with zeros
+            A_ub_row = [0] * len(event_pool)
+            
+            # Set the diagonal element (where row index matches column index)
+            if event_index in source_indices:
+                A_ub_row[event_index] = 1 / steady_state_duration
+                
+            A_ub_max_quantity.append(A_ub_row)
         
+        for event in event_pool:
+            # Create the corresponding entry for b_ub for this event
+            b_ub_max_quantity.append(event["max_quantity"] / periods[f"{period_tracker}_duration"])
 
         # Step 6: Run the optimization
         
@@ -135,12 +157,14 @@ class Optimizer:
                             + A_ub_min_feed_ratio
                             + A_ub_max_feed_ratio
                             + A_ub_min_crusher_grade 
-                            + A_ub_max_crusher_grade,  
+                            + A_ub_max_crusher_grade
+                            + A_ub_max_quantity,
                             b_ub=b_ub
                             + b_ub_min_feed_ratio
                             + b_ub_max_feed_ratio
                             + b_ub_min_crusher_grade 
-                            + b_ub_max_crusher_grade, 
+                            + b_ub_max_crusher_grade
+                            + b_ub_max_quantity, 
                             bounds=bounds, method='highs')
         
         else:
@@ -151,12 +175,14 @@ class Optimizer:
                         + A_ub_min_feed_ratio
                         + A_ub_max_feed_ratio
                         + A_ub_min_crusher_grade 
-                        + A_ub_max_crusher_grade,  
+                        + A_ub_max_crusher_grade
+                        + A_ub_max_quantity,  
                         b_ub=b_ub
                         + b_ub_min_feed_ratio
                         + b_ub_max_feed_ratio
                         + b_ub_min_crusher_grade 
-                        + b_ub_max_crusher_grade, 
+                        + b_ub_max_crusher_grade
+                        + b_ub_max_quantity, 
                         bounds=bounds, method='highs')
 
         if result.success:
@@ -187,4 +213,6 @@ class Optimizer:
             }
 
         else:
-            return {"Linprog_result_object": result}
+            return {"Linprog_result_object": result,
+                    "steady_state_duration": steady_state_duration
+            }

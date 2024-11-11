@@ -10,9 +10,11 @@ class EventPool:
         events = []
 
         for stockpile in self.stockpiles:
-            stockpile_priority = stockpile.get(f"priority_{period}", 0)
+            stockpile_cost = stockpile.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
+            stockpile_cash = -stockpile.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+            stockpile_max_quantity = stockpile.get(f"max_quantity_{period}", 0)
             for equipment in self.equipment:
-                if equipment["name"] in stockpile.get("equipment", []): 
+                if equipment["name"] in stockpile.get("equipment", []) and "RC" in equipment["name"]: 
                     equipment_priority = equipment.get(f"priority_{period}", 0)
                     reclaim_rate = equipment.get(f"rate_{period}", 0)
 
@@ -20,13 +22,18 @@ class EventPool:
                         "stockpile": stockpile["name"],
                         "type": "stockpile",
                         "equipment": equipment["name"],
-                        "priority": stockpile_priority + equipment_priority,
+                        "cost": stockpile_cost + equipment_priority,
+                        "cash": stockpile_cash,
                         "rate": reclaim_rate,
                         "grade_fe": stockpile["grade_fe"],
-                        "balance": stockpile["balance"]
+                        "balance": stockpile["balance"],
+                        "max_quantity": stockpile_max_quantity
                     })
         
         for grade_block in self.grade_blocks:
+            grade_block_cost = grade_block.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
+            grade_block_cash = -grade_block.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+            grade_block_max_quantity = grade_block.get(f"max_quantity_{period}", 0)
             for equipment in self.equipment:
                 if equipment["name"] in grade_block.get("equipment", []) and "EX" in equipment["name"]:
                     equipment_priority = equipment.get(f"priority_{period}", 0)
@@ -36,10 +43,12 @@ class EventPool:
                         "grade_block": grade_block["name"],
                         "type": "grade_block",
                         "equipment": equipment["name"],
-                        "priority": equipment_priority,  # No grade block priority (their priority is inherently higher which is 0)
+                        "cost": grade_block_cost + equipment_priority, 
+                        "cash": grade_block_cash,
                         "rate": reclaim_rate,
                         "grade_fe": grade_block["grade_fe"],
-                        "balance": grade_block["balance"]
+                        "balance": grade_block["balance"],
+                        "max_quantity": grade_block_max_quantity
                     })
 
         return events

@@ -5,11 +5,14 @@ class BalanceTracker:
         
     def update_balances(self, result):
         """Update balance after each optimization step."""
-        for transaction in result["transactions"]:
-            name = transaction["source"]
-           
-            if self.balances[name] != 0:
-                self.balances[name] -= transaction["actual_tonnes"]
+        if result['Linprog_result_object'].success:
+        
+            for transaction in result["transactions"]:
+                name = transaction["source"]
+            
+                if self.balances[name] != 0:
+                    self.balances[name] -= transaction["actual_tonnes"]
+        else: return
 
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""

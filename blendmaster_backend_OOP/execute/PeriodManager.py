@@ -32,8 +32,11 @@ class PeriodManager:
         return {
             "preplan_start": now,
             "preplan_end": preplan_end,
+            "preplan_duration" : (preplan_end - now).total_seconds() / 3600,
             "period_1_start": period_1_start,
             "period_1_end": period_1_end,
+            "period_1_duration": (period_1_end - period_1_start).total_seconds() / 3600,
             "period_2_start": period_2_start,
-            "period_2_end": period_2_end
+            "period_2_end": period_2_end,
+            "period_2_duration": (period_2_end - period_2_start).total_seconds() / 3600
         }
