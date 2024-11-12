@@ -24,6 +24,7 @@ class CaseModeller:
         self.blend_option = 1
         self.user_blend_choice = None
         self.decision_point_results = None
+        self.user_interaction_mode = None
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -104,22 +105,21 @@ class CaseModeller:
             )
         ]
         
-        max_blend_option = self.decision_point_results_to_display["blend_option"].max()
-        if max_blend_option > 1:
-            print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_actual_tonnes"]])
-            self.user_blend_choice = input("Choose blend: ")
+        if self.user_interaction_mode == None:
+            self.user_interaction_mode = input("Enter 1 to automatically select the top blend option in every steady state or 2 to select manually: ")
 
-            # Cast user choice to appropriate type
-            try:
-                self.user_blend_choice = int(self.user_blend_choice)
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-                return
+        # Cast user choice to appropriate type
+        try:
+            self.user_interaction_mode = int(self.user_interaction_mode)
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+            return
         
-        else: self.user_blend_choice = max_blend_option
-
-        # Filter results based on user choice
-        filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
+        if self.user_interaction_mode == 1:
+            
+            self.user_blend_choice = 1
+            # Filter results based on user choice
+            filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
             (
                 (self.decision_point_results["source_actual_tonnes"] != 0) & 
                 (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
@@ -128,7 +128,37 @@ class CaseModeller:
                 (self.decision_point_results["blend_option"] == "No blend found")
                 |
                 (self.decision_point_results["blend_option"] == "Rare case")
-        ]
+            ]
+
+        elif self.user_interaction_mode == 2:
+            
+            max_blend_option = self.decision_point_results_to_display["blend_option"].max()
+ 
+            if max_blend_option > 1:
+               
+                print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_actual_tonnes"]])
+                self.user_blend_choice = input("Choose blend: ")
+
+                # Cast user choice to appropriate type
+                try:
+                    self.user_blend_choice = int(self.user_blend_choice)
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+                    return
+        
+            else: self.user_blend_choice = max_blend_option
+
+            # Filter results based on user choice
+            filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
+                (
+                    (self.decision_point_results["source_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["blend_option"] == self.user_blend_choice)
+                ) | 
+                    (self.decision_point_results["blend_option"] == "No blend found")
+                    |
+                    (self.decision_point_results["blend_option"] == "Rare case")
+                ]
 
         self.append_results(filtered_decision_point_results_to_user_choice)
         self.decision_point_results = None
@@ -157,8 +187,8 @@ class CaseModeller:
                 {
                     "start_datetime": self.current_time,
                     "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
-                    "blend_option": "No blend selected",
                     "steady_state_number": self.steady_state_tracker,
+                    "blend_option": "No blend selected",
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": "",
@@ -182,8 +212,8 @@ class CaseModeller:
                 {
                     "start_datetime": self.current_time,
                     "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
-                    "blend_option": self.blend_option,
                     "steady_state_number": self.steady_state_tracker,
+                    "blend_option": self.blend_option,
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": transaction["source"],
