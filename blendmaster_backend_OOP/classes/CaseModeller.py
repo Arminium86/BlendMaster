@@ -24,7 +24,10 @@ class CaseModeller:
         self.blend_option = 1
         self.user_blend_choice = None
         self.decision_point_results = None
+        self.decision_point_results_to_display = None
+        self.decision_point_results_to_display_filtered_to_current_blend_choice = None
         self.user_interaction_mode = None
+
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -89,6 +92,8 @@ class CaseModeller:
                 else: self.blend_option += 1
                 continue
 
+        
+        # Manage user interaction
         # Ensure numeric columns for comparison
         self.decision_point_results["source_actual_tonnes"] = pd.to_numeric(
             self.decision_point_results["source_actual_tonnes"], errors='coerce'
@@ -104,9 +109,21 @@ class CaseModeller:
                 (self.decision_point_results["crusher_actual_tonnes"] != 0)
             )
         ]
-        
+
+        # Filter results to previous blend choice to compare results between iterations
+        self.decision_point_results_to_display_filtered_to_current_blend_choice = self.decision_point_results.loc[
+            (
+                (self.decision_point_results["source_actual_tonnes"] != 0) & 
+                (self.decision_point_results["crusher_actual_tonnes"] != 0) &
+                (self.decision_point_results["blend_option"] == self.user_blend_choice)
+
+            )
+        ]
+
+        # Prompt user for interaction mode
         if self.user_interaction_mode == None:
-            self.user_interaction_mode = input("Enter 1 to automatically select the top blend option in every steady state or 2 to select manually: ")
+            self.user_interaction_mode = input("\033[92mEnter 1 to automatically select the top blend option in every steady state or 2 to select manually: \033[0m")
+
 
         # Cast user choice to appropriate type
         try:
@@ -118,8 +135,48 @@ class CaseModeller:
         if self.user_interaction_mode == 1:
             
             self.user_blend_choice = 1
-            # Filter results based on user choice
-            filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
+
+        elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
+            
+            # max_blend_option = self.decision_point_results_to_display["blend_option"].max()
+ 
+           # if max_blend_option > 1:
+
+            # Compare the sources for a blend option between two iteration and avoid user interaction if no change
+            current_filtered_sources =  self.decision_point_results_to_display_filtered_to_current_blend_choice["source"]
+            previous_filtered_sources = self.results[
+                (self.results["blend_option"] == self.user_blend_choice) &
+                (self.results["steady_state_number"] == self.steady_state_tracker - 1)
+            ]["source"]
+                
+            if not list(current_filtered_sources) == list(previous_filtered_sources):
+                print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
+                print("\033[92mBlend fully depleted.\033[0m")
+                self.user_blend_choice = input("\033[95mChoose new blend: \033[0m")
+                # Cast user choice to appropriate type
+                try:
+                    self.user_blend_choice = int(self.user_blend_choice)
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+                    return
+            else:
+                pass
+        
+           # else: self.user_blend_choice = max_blend_option
+
+
+        elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
+            print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
+            self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
+            # Cast user choice to appropriate type
+            try:
+                self.user_blend_choice = int(self.user_blend_choice)
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+                return
+        
+        # Filter results based on user choice
+        filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
             (
                 (self.decision_point_results["source_actual_tonnes"] != 0) & 
                 (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
@@ -129,37 +186,7 @@ class CaseModeller:
                 |
                 (self.decision_point_results["blend_option"] == "Rare case")
             ]
-
-        elif self.user_interaction_mode == 2:
-            
-            max_blend_option = self.decision_point_results_to_display["blend_option"].max()
- 
-            if max_blend_option > 1:
-               
-                print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_actual_tonnes"]])
-                self.user_blend_choice = input("Choose blend: ")
-
-                # Cast user choice to appropriate type
-                try:
-                    self.user_blend_choice = int(self.user_blend_choice)
-                except ValueError:
-                    print("Invalid input. Please enter a number.")
-                    return
         
-            else: self.user_blend_choice = max_blend_option
-
-            # Filter results based on user choice
-            filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
-                (
-                    (self.decision_point_results["source_actual_tonnes"] != 0) & 
-                    (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
-                    (self.decision_point_results["blend_option"] == self.user_blend_choice)
-                ) | 
-                    (self.decision_point_results["blend_option"] == "No blend found")
-                    |
-                    (self.decision_point_results["blend_option"] == "Rare case")
-                ]
-
         self.append_results(filtered_decision_point_results_to_user_choice)
         self.decision_point_results = None
 
@@ -192,6 +219,7 @@ class CaseModeller:
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": "",
+                    "source_blend_ratio": "No tonnes selected",
                     "source_opening_balance": "",
                     "source_actual_tonnes": "No tonnes selected",
                     "source_closing_balance": "",
@@ -217,6 +245,7 @@ class CaseModeller:
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": transaction["source"],
+                    "source_blend_ratio": round(transaction["equipment_rate_output"] / result["crusher_rate_output"], 2) if result["crusher_rate_output"] != 0 else 0,
                     "source_opening_balance": transaction["opening_balance"],
                     "source_actual_tonnes": transaction["actual_tonnes"],
                     "source_closing_balance": transaction["opening_balance"] - transaction["actual_tonnes"],
