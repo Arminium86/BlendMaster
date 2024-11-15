@@ -23,11 +23,11 @@ class CaseModeller:
         self.steady_state_tracker = 0
         self.blend_option = 1
         self.user_blend_choice = None
+        self.blend_ID = 2
         self.decision_point_results = None
         self.decision_point_results_to_display = None
         self.decision_point_results_to_display_filtered_to_current_blend_choice = None
         self.user_interaction_mode = None
-
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -132,15 +132,7 @@ class CaseModeller:
             print("Invalid input. Please enter a number.")
             return
         
-        if self.user_interaction_mode == 1:
-            
-            self.user_blend_choice = 1
-
-        elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
-            
-            # max_blend_option = self.decision_point_results_to_display["blend_option"].max()
- 
-           # if max_blend_option > 1:
+        if self.steady_state_tracker != 0:
 
             # Compare the sources for a blend option between two iteration and avoid user interaction if no change
             current_filtered_sources =  self.decision_point_results_to_display_filtered_to_current_blend_choice["source"]
@@ -148,11 +140,29 @@ class CaseModeller:
                 (self.results["blend_option"] == self.user_blend_choice) &
                 (self.results["steady_state_number"] == self.steady_state_tracker - 1)
             ]["source"]
-                
+
+        else: pass
+        
+        if self.user_interaction_mode == 1:
+            
+            self.user_blend_choice = 1
+
+            if self.steady_state_tracker != 0:
+                if not list(current_filtered_sources) == list(previous_filtered_sources):
+                    self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
+                    self.blend_ID += 1
+                else: pass
+            elif self.steady_state_tracker == 0:
+                self.blend_ID == 1
+
+        elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
+            
             if not list(current_filtered_sources) == list(previous_filtered_sources):
                 print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
                 print("\033[92mBlend fully depleted.\033[0m")
                 self.user_blend_choice = input("\033[95mChoose new blend: \033[0m")
+                self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
+                self.blend_ID += 1
                 # Cast user choice to appropriate type
                 try:
                     self.user_blend_choice = int(self.user_blend_choice)
@@ -162,12 +172,10 @@ class CaseModeller:
             else:
                 pass
         
-           # else: self.user_blend_choice = max_blend_option
-
-
         elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
             print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
             self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
+            self.blend_ID = 1
             # Cast user choice to appropriate type
             try:
                 self.user_blend_choice = int(self.user_blend_choice)
@@ -216,6 +224,7 @@ class CaseModeller:
                     "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
                     "steady_state_number": self.steady_state_tracker,
                     "blend_option": "No blend selected",
+                    "blend_ID": "No blend selected",
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": "",
@@ -242,6 +251,7 @@ class CaseModeller:
                     "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
                     "steady_state_number": self.steady_state_tracker,
                     "blend_option": self.blend_option,
+                    "blend_ID": self.blend_ID,
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": transaction["source"],
