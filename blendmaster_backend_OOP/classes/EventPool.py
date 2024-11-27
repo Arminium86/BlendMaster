@@ -29,6 +29,10 @@ class EventPool:
                             "cash": stockpile_cash,
                             "rate": reclaim_rate,
                             "grade_fe": stockpile["grade_fe"],
+                            "grade_si": stockpile["grade_si"],
+                            "grade_al": stockpile["grade_al"],
+                            "grade_p": stockpile["grade_p"],
+                            "grade_mn": stockpile["grade_mn"],
                             "balance": stockpile["balance"],
                             "max_quantity": stockpile_max_quantity,
                             "reclaim_threshold": stockpile["reclaim_threshold"],
@@ -52,6 +56,10 @@ class EventPool:
                         "cash": grade_block_cash,
                         "rate": reclaim_rate,
                         "grade_fe": grade_block["grade_fe"],
+                        "grade_si": grade_block["grade_si"],
+                        "grade_al": grade_block["grade_al"],
+                        "grade_p": grade_block["grade_p"],
+                        "grade_mn": grade_block["grade_mn"],
                         "balance": grade_block["balance"],
                         "max_quantity": grade_block_max_quantity
                     })

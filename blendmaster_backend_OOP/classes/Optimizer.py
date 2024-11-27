@@ -89,12 +89,36 @@ class Optimizer:
             b_eq = None
 
         # Minimum crusher grade (turned into an upper-bound inequality)
-        A_ub_min_crusher_grade = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade = [0]
+        A_ub_min_crusher_grade_fe = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        b_ub_min_crusher_grade_fe = [0]
+        
+        A_ub_min_crusher_grade_si = [[-event["grade_si"] + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        b_ub_min_crusher_grade_si = [0]
+
+        A_ub_min_crusher_grade_al = [[-event["grade_al"] + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        b_ub_min_crusher_grade_al = [0]
+
+        A_ub_min_crusher_grade_p = [[-event["grade_p"] + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        b_ub_min_crusher_grade_p = [0]
+
+        A_ub_min_crusher_grade_mn = [[-event["grade_mn"] + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        b_ub_min_crusher_grade_mn = [0]
 
         # Max crusher grade (upper-bound inequality)
-        A_ub_max_crusher_grade = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
-        b_ub_max_crusher_grade = [0]
+        A_ub_max_crusher_grade_fe = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
+        b_ub_max_crusher_grade_fe = [0]
+
+        A_ub_max_crusher_grade_si = [[event["grade_si"] - period_crusher_target["target_si_max"] for event in event_pool]]
+        b_ub_max_crusher_grade_si = [0]
+
+        A_ub_max_crusher_grade_al = [[event["grade_al"] - period_crusher_target["target_al_max"] for event in event_pool]]
+        b_ub_max_crusher_grade_al = [0]
+
+        A_ub_max_crusher_grade_p = [[event["grade_p"] - period_crusher_target["target_p_max"] for event in event_pool]]
+        b_ub_max_crusher_grade_p = [0]
+
+        A_ub_max_crusher_grade_mn = [[event["grade_mn"] - period_crusher_target["target_mn_max"] for event in event_pool]]
+        b_ub_max_crusher_grade_mn = [0]
 
         # Step 3: Crusher capacity constraint
         A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
@@ -184,14 +208,30 @@ class Optimizer:
                             A_ub=A_ub
                             + A_ub_min_feed_ratio
                             + A_ub_max_feed_ratio
-                            + A_ub_min_crusher_grade 
-                            + A_ub_max_crusher_grade
+                            + A_ub_min_crusher_grade_fe 
+                            + A_ub_max_crusher_grade_fe
+                            + A_ub_min_crusher_grade_si 
+                            + A_ub_max_crusher_grade_si
+                            + A_ub_min_crusher_grade_al 
+                            + A_ub_max_crusher_grade_al
+                            + A_ub_min_crusher_grade_p 
+                            + A_ub_max_crusher_grade_p
+                            + A_ub_min_crusher_grade_mn 
+                            + A_ub_max_crusher_grade_mn
                             + A_ub_max_quantity,
                             b_ub=b_ub
                             + b_ub_min_feed_ratio
                             + b_ub_max_feed_ratio
-                            + b_ub_min_crusher_grade 
-                            + b_ub_max_crusher_grade
+                            + b_ub_min_crusher_grade_fe 
+                            + b_ub_max_crusher_grade_fe
+                            + b_ub_min_crusher_grade_si
+                            + b_ub_max_crusher_grade_si
+                            + b_ub_min_crusher_grade_al 
+                            + b_ub_max_crusher_grade_al
+                            + b_ub_min_crusher_grade_p 
+                            + b_ub_max_crusher_grade_p
+                            + b_ub_min_crusher_grade_mn 
+                            + b_ub_max_crusher_grade_mn
                             + b_ub_max_quantity, 
                             bounds=bounds, method='highs')
         
@@ -202,14 +242,30 @@ class Optimizer:
                         A_ub=A_ub
                         + A_ub_min_feed_ratio
                         + A_ub_max_feed_ratio
-                        + A_ub_min_crusher_grade 
-                        + A_ub_max_crusher_grade
+                        + A_ub_min_crusher_grade_fe 
+                        + A_ub_max_crusher_grade_fe
+                        + A_ub_min_crusher_grade_si 
+                        + A_ub_max_crusher_grade_si
+                        + A_ub_min_crusher_grade_al 
+                        + A_ub_max_crusher_grade_al
+                        + A_ub_min_crusher_grade_p 
+                        + A_ub_max_crusher_grade_p
+                        + A_ub_min_crusher_grade_mn 
+                        + A_ub_max_crusher_grade_mn
                         + A_ub_max_quantity,  
                         b_ub=b_ub
                         + b_ub_min_feed_ratio
                         + b_ub_max_feed_ratio
-                        + b_ub_min_crusher_grade 
-                        + b_ub_max_crusher_grade
+                        + b_ub_min_crusher_grade_fe 
+                        + b_ub_max_crusher_grade_fe
+                        + b_ub_min_crusher_grade_si
+                        + b_ub_max_crusher_grade_si
+                        + b_ub_min_crusher_grade_al 
+                        + b_ub_max_crusher_grade_al
+                        + b_ub_min_crusher_grade_p 
+                        + b_ub_max_crusher_grade_p
+                        + b_ub_min_crusher_grade_mn 
+                        + b_ub_max_crusher_grade_mn
                         + b_ub_max_quantity, 
                         bounds=bounds, method='highs')
 
@@ -223,6 +279,10 @@ class Optimizer:
                     "opening_balance": event['balance'],
                     "actual_tonnes": result.x[i],
                     "grade_fe": event['grade_fe'],
+                    "grade_si": event['grade_si'],
+                    "grade_al": event['grade_al'],
+                    "grade_p": event['grade_p'],
+                    "grade_mn": event['grade_mn'],
                     "equipment": event['equipment'],
                     "equipment_rate_input": event['rate'],
                     "equipment_rate_output": result.x[i] / steady_state_duration if steady_state_duration != 0 else 0,
@@ -233,8 +293,20 @@ class Optimizer:
                 "transactions": transactions,
                 "steady_state_duration": steady_state_duration, 
                 "crusher_actual_grade_fe" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_si" : sum(event["grade_si"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_al" : sum(event["grade_al"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_p" : sum(event["grade_p"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_mn" : sum(event["grade_mn"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
                 "crusher_grade_target_min_fe": period_crusher_target["target_fe_min"],
                 "crusher_grade_target_max_fe": period_crusher_target["target_fe_max"],
+                "crusher_grade_target_min_si": period_crusher_target["target_si_min"],
+                "crusher_grade_target_max_si": period_crusher_target["target_si_max"],
+                "crusher_grade_target_min_al": period_crusher_target["target_al_min"],
+                "crusher_grade_target_max_al": period_crusher_target["target_al_max"],
+                "crusher_grade_target_min_p": period_crusher_target["target_p_min"],
+                "crusher_grade_target_max_p": period_crusher_target["target_p_max"],
+                "crusher_grade_target_min_mn": period_crusher_target["target_mn_min"],
+                "crusher_grade_target_max_mn": period_crusher_target["target_mn_max"],
                 "crusher_rate_input": period_crusher_target["crusher_rate"],
                 "crusher_rate_output": sum(result.x) / steady_state_duration if steady_state_duration != 0 else 0,
                 "crusher_actual_tonnes": sum(result.x)

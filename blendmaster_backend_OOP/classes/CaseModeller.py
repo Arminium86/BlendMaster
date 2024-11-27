@@ -233,6 +233,10 @@ class CaseModeller:
                     "source_actual_tonnes": "No tonnes selected",
                     "source_closing_balance": "",
                     "source_grade_fe": "",
+                    "source_grade_si": "",
+                    "source_grade_al": "",
+                    "source_grade_p": "",
+                    "source_grade_mn": "",
                     "equipment": "",
                     "equipment_rate_input": "",
                     "equipment_rate_output": "",
@@ -240,8 +244,20 @@ class CaseModeller:
                     "crusher_rate_input": "",
                     "crusher_rate_output": "",
                     "crusher_actual_grade_fe": "",
+                    "crusher_actual_grade_si": "",
+                    "crusher_actual_grade_al": "",
+                    "crusher_actual_grade_p": "",
+                    "crusher_actual_grade_mn": "",
                     "crusher_grade_target_min_fe": "",
-                    "crusher_grade_target_max_fe": ""
+                    "crusher_grade_target_max_fe": "",
+                    "crusher_grade_target_min_si": "",
+                    "crusher_grade_target_max_si": "",
+                    "crusher_grade_target_min_al": "",
+                    "crusher_grade_target_max_al": "",
+                    "crusher_grade_target_min_p": "",
+                    "crusher_grade_target_max_p": "",
+                    "crusher_grade_target_min_mn": "",
+                    "crusher_grade_target_max_mn": ""
                 }
             ]
         else:
@@ -260,6 +276,10 @@ class CaseModeller:
                     "source_actual_tonnes": transaction["actual_tonnes"],
                     "source_closing_balance": transaction["opening_balance"] - transaction["actual_tonnes"],
                     "source_grade_fe": transaction["grade_fe"],
+                    "source_grade_si": transaction["grade_si"],
+                    "source_grade_al": transaction["grade_al"],
+                    "source_grade_p": transaction["grade_p"],
+                    "source_grade_mn": transaction["grade_mn"],
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],
                     "equipment_rate_output": transaction["equipment_rate_output"],
@@ -267,8 +287,20 @@ class CaseModeller:
                     "crusher_rate_input": result["crusher_rate_input"],
                     "crusher_rate_output": result["crusher_rate_output"],
                     "crusher_actual_grade_fe": result["crusher_actual_grade_fe"],
+                    "crusher_actual_grade_si": result["crusher_actual_grade_si"],
+                    "crusher_actual_grade_al": result["crusher_actual_grade_al"],
+                    "crusher_actual_grade_p": result["crusher_actual_grade_p"],
+                    "crusher_actual_grade_mn": result["crusher_actual_grade_mn"],
                     "crusher_grade_target_min_fe": result["crusher_grade_target_min_fe"],
-                    "crusher_grade_target_max_fe": result["crusher_grade_target_max_fe"]
+                    "crusher_grade_target_max_fe": result["crusher_grade_target_max_fe"],
+                    "crusher_grade_target_min_si": result["crusher_grade_target_min_si"],
+                    "crusher_grade_target_max_si": result["crusher_grade_target_max_si"],
+                    "crusher_grade_target_min_al": result["crusher_grade_target_min_al"],
+                    "crusher_grade_target_max_al": result["crusher_grade_target_max_al"],
+                    "crusher_grade_target_min_p": result["crusher_grade_target_min_p"],
+                    "crusher_grade_target_max_p": result["crusher_grade_target_max_p"],
+                    "crusher_grade_target_min_mn": result["crusher_grade_target_min_mn"],
+                    "crusher_grade_target_max_mn": result["crusher_grade_target_max_mn"]
                 }
                 for transaction in result["transactions"]
             ]

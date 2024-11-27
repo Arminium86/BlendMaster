@@ -1,4 +1,4 @@
-# This loads the data from external sources (currently an Excel file with multiple tabs which represented the combined user input and opening inventories)
+# This loads the data from external sources (currently an Excel file with multiple tabs which represents the combined user input and opening inventories)
 import pandas as pd
 
 class DataLoader:
@@ -25,6 +25,14 @@ class DataLoader:
             "preplan": {
                 "target_fe_min": crusher_data_df["target_fe_min_preplan"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_preplan"].iloc[0],
+                "target_si_min": crusher_data_df["target_si_min_preplan"].iloc[0],
+                "target_si_max": crusher_data_df["target_si_max_preplan"].iloc[0],
+                "target_al_min": crusher_data_df["target_al_min_preplan"].iloc[0],
+                "target_al_max": crusher_data_df["target_al_max_preplan"].iloc[0],
+                "target_p_min": crusher_data_df["target_p_min_preplan"].iloc[0],
+                "target_p_max": crusher_data_df["target_p_max_preplan"].iloc[0],
+                "target_mn_min": crusher_data_df["target_mn_min_preplan"].iloc[0],
+                "target_mn_max": crusher_data_df["target_mn_max_preplan"].iloc[0],
                 "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_preplan"].iloc[0],
                 "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_preplan"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_preplan"].iloc[0]
@@ -32,6 +40,14 @@ class DataLoader:
             "period_1": {
                 "target_fe_min": crusher_data_df["target_fe_min_period_1"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_period_1"].iloc[0],
+                "target_si_min": crusher_data_df["target_si_min_period_1"].iloc[0],
+                "target_si_max": crusher_data_df["target_si_max_period_1"].iloc[0],
+                "target_al_min": crusher_data_df["target_al_min_period_1"].iloc[0],
+                "target_al_max": crusher_data_df["target_al_max_period_1"].iloc[0],
+                "target_p_min": crusher_data_df["target_p_min_period_1"].iloc[0],
+                "target_p_max": crusher_data_df["target_p_max_period_1"].iloc[0],
+                "target_mn_min": crusher_data_df["target_mn_min_period_1"].iloc[0],
+                "target_mn_max": crusher_data_df["target_mn_max_period_1"].iloc[0],
                 "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_period_1"].iloc[0],
                 "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_period_1"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_period_1"].iloc[0]
@@ -39,6 +55,14 @@ class DataLoader:
             "period_2": {
                 "target_fe_min": crusher_data_df["target_fe_min_period_2"].iloc[0],
                 "target_fe_max": crusher_data_df["target_fe_max_period_2"].iloc[0],
+                "target_si_min": crusher_data_df["target_si_min_period_2"].iloc[0],
+                "target_si_max": crusher_data_df["target_si_max_period_2"].iloc[0],
+                "target_al_min": crusher_data_df["target_al_min_period_2"].iloc[0],
+                "target_al_max": crusher_data_df["target_al_max_period_2"].iloc[0],
+                "target_p_min": crusher_data_df["target_p_min_period_2"].iloc[0],
+                "target_p_max": crusher_data_df["target_p_max_period_2"].iloc[0],
+                "target_mn_min": crusher_data_df["target_mn_min_period_2"].iloc[0],
+                "target_mn_max": crusher_data_df["target_mn_max_period_2"].iloc[0],
                 "direct_feed_ratio_min": crusher_data_df["direct_feed_ratio_min_period_2"].iloc[0],
                 "direct_feed_ratio_max": crusher_data_df["direct_feed_ratio_max_period_2"].iloc[0],
                 "crusher_rate": crusher_data_df["crusher_rate_period_2"].iloc[0]
