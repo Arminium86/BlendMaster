@@ -152,8 +152,7 @@ class CaseModeller:
                     self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
                     self.blend_ID += 1
                 else: pass
-            elif self.steady_state_tracker == 0:
-                self.blend_ID == 1
+            else: pass
 
         elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
             
@@ -175,7 +174,6 @@ class CaseModeller:
         elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
             print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
             self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
-            self.blend_ID = 1
             # Cast user choice to appropriate type
             try:
                 self.user_blend_choice = int(self.user_blend_choice)
@@ -196,7 +194,6 @@ class CaseModeller:
             ]
         
         self.append_results(filtered_decision_point_results_to_user_choice)
-        self.decision_point_results = None
 
         # Reset for next cycle
         self.decision_point_results = None
