@@ -7,7 +7,7 @@ class DataLoader:
 
     def load_data(self):
         """Loads data from Excel and returns it in structured format."""
-        xls = pd.ExcelFile(self.file_path)
+        xls = pd.ExcelFile(self.data)
 
         # Load sheets into DataFrames
         stockpile_data_df = pd.read_excel(xls, 'final_input_stockpile_data')

@@ -14,13 +14,14 @@ class BalanceTracker:
                 self.balances[name] -= transaction["source_actual_tonnes"]
         
         # Loop through expit payload transactions
-        for transaction in expit_payload_transactions:
-            name = transaction["destination"]
+        for _, transaction in expit_payload_transactions.iterrows():
+            name = transaction["destination"].replace("Stockpiles/", "")
             delivered_datetime = transaction["delivered_datetime"]
             
-            # Check if the transaction is within the time range
+            # Check if the transaction is within the time range (this needs to update the grades as well)
             if start_time <= delivered_datetime <= end_time:
-                self.balances[name] += transaction["payload"]
+                if name in self.balances:
+                    self.balances[name] += transaction["payload"]
 
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""

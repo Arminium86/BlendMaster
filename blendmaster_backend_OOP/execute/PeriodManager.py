@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 class PeriodManager:
     @staticmethod
     def calculate_periods():
-        now = datetime.now()
+        #now = datetime.now()
+        now = datetime(2024, 11, 28, 6, 0, 0)  # Year, Month, Day, Hour, Minute, Second
         
         # Define next 6AM and 6PM
         if now.hour >= 6 and now.hour < 18: 
