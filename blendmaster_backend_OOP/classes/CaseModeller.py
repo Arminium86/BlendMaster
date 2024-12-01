@@ -3,11 +3,12 @@ from classes.BalanceTracker import BalanceTracker
 from classes.EventPool import EventPool
 from classes.Optimizer import Optimizer
 from classes.CrusherTarget import CrusherTarget
+from execute.ExpitDataHandler import ExpitDataHandler
 import pandas as pd
 from datetime import timedelta
 
 class CaseModeller:
-    def __init__(self, stockpiles, grade_blocks, equipment, crusher_targets, periods):
+    def __init__(self, stockpiles, grade_blocks, equipment, crusher_targets, expit_payload_transactions, periods):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -17,6 +18,7 @@ class CaseModeller:
         self.current_time_for_export = periods["preplan_start"]
         self.period_tracker = "preplan"
         self.balance_tracker = BalanceTracker(stockpiles, grade_blocks)
+        self.expit_payload_transactions = expit_payload_transactions
         self.event_pool = EventPool(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
         self.results = pd.DataFrame()
@@ -197,7 +199,12 @@ class CaseModeller:
 
         # Reset for next cycle
         self.decision_point_results = None
-        self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice)
+        
+        self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
+                                            self.expit_payload_transactions, 
+                                            self.current_time,
+                                            self.current_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+                                            )
         self.advance_time()
         self.blend_option = 1
     

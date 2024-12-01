@@ -2,8 +2,8 @@ import pandas as pd
 from datetime import timedelta
 
 class ExpitDataHandler:
-    def __init__(self, filepath, sheet_name):
-        self.data = pd.read_excel(filepath, sheet_name=sheet_name)
+    def __init__(self, input_data, aps_transactions):
+        self.data = pd.read_excel(input_data, sheet_name=aps_transactions)
         self._preprocess_data()
         self._group_data()
 
@@ -129,17 +129,17 @@ class ExpitDataHandler:
                                     load_time)
                         )
                     results.append({
-                        "Agent": agent,
-                        "Source": source_name,
-                        "Time.StartTime": start_time,
-                        "Tonnes": payload,
-                        "Grade_fe": row["Mining.grades_fe"],
-                        "Grade_si": row["Mining.grades_si"],
-                        "Grade_al": row["Mining.grades_al"],
-                        "Grade_mn": row["Mining.grades_mn"],
-                        "Grade_p": row["Mining.grades_p"],
-                        "Destination": destination,
-                        "DeliveredTime": delivery_time
+                        "agent": agent,
+                        "source": source_name,
+                        "start_datetime": start_time,
+                        "payload": payload,
+                        "source_grade_fe": row["Mining.grades_fe"],
+                        "source_grade__si": row["Mining.grades_si"],
+                        "source_grade__al": row["Mining.grades_al"],
+                        "source_grade__mn": row["Mining.grades_mn"],
+                        "source_grade__p": row["Mining.grades_p"],
+                        "destination": destination,
+                        "delivered_datetime": delivery_time
                     })
 
                 # Handle fractional tonnes (top-up case)
@@ -190,26 +190,20 @@ class ExpitDataHandler:
 
                     # Append the topped-up trip
                     results.append({
-                        "Agent": agent,
-                        "Source": source_name,
-                        "Time.StartTime": start_time,
-                        "Tonnes": fractional_tonnes,
-                        "Grade_fe": weighted_grades["Grade_fe"],
-                        "Grade_si": weighted_grades["Grade_si"],
-                        "Grade_al": weighted_grades["Grade_al"],
-                        "Grade_mn": weighted_grades["Grade_mn"],
-                        "Grade_p": weighted_grades["Grade_p"],
-                        "Destination": destination,
-                        "DeliveredTime": delivery_time
+                        "agent": agent,
+                        "source": source_name,
+                        "start_datetime": start_time,
+                        "payload": fractional_tonnes,
+                        "source_grade_fe": weighted_grades["Grade_fe"],
+                        "source_grade_si": weighted_grades["Grade_si"],
+                        "source_grade_al": weighted_grades["Grade_al"],
+                        "source_grade_mn": weighted_grades["Grade_mn"],
+                        "source_grade_p": weighted_grades["Grade_p"],
+                        "destination": destination,
+                        "delivered_datetime": delivery_time
                     })
 
         return pd.DataFrame(results)
 
-
-
-# Usage example
-processor = ExpitDataHandler(filepath=r"F:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", sheet_name="aps_transactions")
-result = processor.process_transactions()
-
 # Save or display results
-result.to_excel(fr"F:\BlendMaster\blendmaster_backend_OOP\output\processed_aps_transactions.xlsx")
+#result.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\processed_aps_transactions.xlsx")

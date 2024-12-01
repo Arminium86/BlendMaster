@@ -3,10 +3,13 @@
 from classes.CaseModeller import CaseModeller
 from execute.DataLoader import DataLoader
 from execute.PeriodManager import PeriodManager
+from execute.ExpitDataHandler import ExpitDataHandler
 
 # Load input data (this is combined user input and opening inventories)
-data_loader = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx")
-stockpile_data, grade_block_data, equipment_data, crusher_target_data = data_loader.load_data()
+input_data = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx")
+expit_data_handler = ExpitDataHandler(filepath=r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", sheet_name="aps_transactions")
+expit_payload_transactions = expit_data_handler.process_transactions()
+stockpile_data, grade_block_data, equipment_data, crusher_target_data = input_data.load_data()
 
 # Initialize periods
 periods = PeriodManager().calculate_periods()
@@ -17,6 +20,7 @@ case_modeller = CaseModeller(
     grade_blocks=grade_block_data,
     equipment=equipment_data,
     crusher_targets=crusher_target_data,
+    expit_payload_transactions=expit_payload_transactions,
     periods=periods
 )
 
