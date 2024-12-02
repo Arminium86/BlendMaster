@@ -12,7 +12,8 @@ class EventPool:
         events = []
 
         for stockpile in self.stockpiles:
-            if stockpile["balance"] >= stockpile["reclaim_threshold"]:
+            stockpile_state = stockpile.get(f"state_{period}", 0)
+            if ((stockpile_state == "Auto" and stockpile["balance"] >= stockpile["reclaim_threshold"]) or stockpile_state == "Build" or stockpile_state == "Reclaim"):
                 stockpile_cost = stockpile.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
                 stockpile_cash = -stockpile.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
                 stockpile_max_quantity = stockpile.get(f"max_quantity_{period}", 0)
@@ -36,7 +37,7 @@ class EventPool:
                             "balance": stockpile["balance"],
                             "max_quantity": stockpile_max_quantity,
                             "reclaim_threshold": stockpile["reclaim_threshold"],
-                            "build_threshold": stockpile["build_threshold"]
+                            "state": stockpile_state
                         })
         
         for grade_block in self.grade_blocks:
