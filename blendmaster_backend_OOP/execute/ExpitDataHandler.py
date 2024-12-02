@@ -134,10 +134,10 @@ class ExpitDataHandler:
                         "start_datetime": start_time,
                         "payload": payload,
                         "source_grade_fe": row["Mining.grades_fe"],
-                        "source_grade__si": row["Mining.grades_si"],
-                        "source_grade__al": row["Mining.grades_al"],
-                        "source_grade__mn": row["Mining.grades_mn"],
-                        "source_grade__p": row["Mining.grades_p"],
+                        "source_grade_si": row["Mining.grades_si"],
+                        "source_grade_al": row["Mining.grades_al"],
+                        "source_grade_mn": row["Mining.grades_mn"],
+                        "source_grade_p": row["Mining.grades_p"],
                         "destination": destination,
                         "delivered_datetime": delivery_time
                     })
