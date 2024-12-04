@@ -1,4 +1,5 @@
 # This tracks source balances and the program runs and provides input to the EventPool for the update functionality
+import pandas as pd
 class BalanceTracker:
     def __init__(self, stockpiles, grade_blocks):
         self.balances = {item["name"]: item["balance"] for item in stockpiles + grade_blocks}
@@ -7,8 +8,9 @@ class BalanceTracker:
         self.grade_al = {item["name"]: item["grade_al"] for item in stockpiles + grade_blocks}
         self.grade_p = {item["name"]: item["grade_p"] for item in stockpiles + grade_blocks}
         self.grade_mn = {item["name"]: item["grade_mn"] for item in stockpiles + grade_blocks}
+        self.build_report = [] # Store transactions that meet the condition
         
-    def update_balances(self, filtered_decision_point_results_to_user_choice, expit_payload_transactions, start_time, end_time):
+    def update_balances(self, filtered_decision_point_results_to_user_choice, expit_payload_transactions, start_time, end_time, steady_state_tracker):
         """Update balance and grades after each optimization step."""
         
         # Loop through decision point results
@@ -17,7 +19,7 @@ class BalanceTracker:
             
             if self.balances[name] != 0:
                 self.balances[name] -= transaction["source_actual_tonnes"]
-        
+
         # Loop through expit payload transactions
         for _, transaction in expit_payload_transactions.iterrows():
             name = transaction["destination"].replace("Stockpiles/", "")
@@ -54,9 +56,31 @@ class BalanceTracker:
                     
                     # Update the balance
                     self.balances[name] = updated_balance
+                    
+                    # Add the transaction to the tracked list
+                    self.build_report.append({
+                        "steady_state_number": steady_state_tracker,
+                        "start_datetime": start_time,
+                        "end_datetime": end_time,
+                        "stockpile": name,
+                        "payload": payload,
+                        "delivered_datetime": delivered_datetime,
+                        "closing_balance": updated_balance,
+                        "grade_fe": self.grade_fe[name],
+                        "grade_si": self.grade_si[name],
+                        "grade_al": self.grade_al[name],
+                        "grade_p": self.grade_p[name],
+                        "grade_mn": self.grade_mn[name]
+                        
+                    })
                 else: 
                     raise ValueError(f"Name '{name}' is not found in opening inventory. Either review the Snowflake query or remove the transactions to this destination from APS output.")
 
+
+    def get_build_transactions(self):
+        """Retrieve the list of build transactions."""
+        return pd.DataFrame(self.build_report)
+    
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""
         return self.balances.get(name, 0)

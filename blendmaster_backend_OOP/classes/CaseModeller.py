@@ -22,6 +22,7 @@ class CaseModeller:
         self.event_pool = EventPool(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
         self.results = pd.DataFrame()
+        self.build_report = pd.DataFrame()
         self.steady_state_tracker = 0
         self.blend_option = 1
         self.user_blend_choice = None
@@ -39,12 +40,14 @@ class CaseModeller:
             self.run_optimization_step()
             self.steady_state_tracker += 1
 
-        # Save results to an Excel file at the end
-        self.save_results(fr"C:\BlendMaster\blendmaster_backend_OOP\output\report_data_{self.current_time_for_export.date()}_{self.current_time_for_export.strftime('%H-%M')}.xlsx")
+        # Save blend results to an Excel file at the end
+        self.save_optimised_blend_report(fr"C:\BlendMaster\blendmaster_backend_OOP\output\optimised_blend_report_{self.current_time_for_export.date()}_{self.current_time_for_export.strftime('%H-%M')}.xlsx")
+        # Save stockpile build report to an Excel file at the end
+        self.save_build_report(fr"C:\BlendMaster\blendmaster_backend_OOP\output\build_report_{self.current_time_for_export.date()}_{self.current_time_for_export.strftime('%H-%M')}.xlsx")
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
-        events = self.event_pool.get_events(self.period_tracker, self.decision_point_results)
+        events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.expit_payload_transactions)
         self.event_pool.update_event_balances(events, self.balance_tracker)
         period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)
 
@@ -58,7 +61,7 @@ class CaseModeller:
                 self.blend_option = "No blend found"
                 self.record_results(result)
                 self.blend_option = store_blend_option
-                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results)
+                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.expit_payload_transactions)
                 updated_events_len = len(events)
                 if updated_events_len == events_len: break
                 else: self.blend_option += 1
@@ -67,7 +70,7 @@ class CaseModeller:
             elif result['Linprog_result_object'].success:
                 if result['crusher_actual_tonnes'] > 0:
                     self.record_results(result)
-                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results)
+                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.expit_payload_transactions)
                     self.event_pool.update_event_balances(events, self.balance_tracker)
                     updated_events_len = len(events)
                     if updated_events_len == events_len: break
@@ -78,7 +81,7 @@ class CaseModeller:
                     self.blend_option = "Exclude"
                     self.record_results(result)
                     self.blend_option = store_blend_option
-                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results)
+                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.expit_payload_transactions)
                     updated_events_len = len(events)
                     if updated_events_len == events_len: break
                     else: self.blend_option += 1
@@ -88,7 +91,7 @@ class CaseModeller:
                 self.blend_option = "Rare case"
                 self.record_results(result)
                 self.blend_option = store_blend_option
-                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results)
+                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.expit_payload_transactions)
                 updated_events_len = len(events)
                 if updated_events_len == events_len: break
                 else: self.blend_option += 1
@@ -203,7 +206,8 @@ class CaseModeller:
         self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
                                             self.expit_payload_transactions, 
                                             self.current_time,
-                                            self.current_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+                                            self.current_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"])),
+                                            self.steady_state_tracker
                                             )
         self.advance_time()
         self.blend_option = 1
@@ -315,7 +319,7 @@ class CaseModeller:
         """Append filtered results to the main DataFrame."""
         self.results = pd.concat([self.results, pd.DataFrame(filtered_decision_point_results_to_user_choice)], ignore_index=True)
     
-    def save_results(self, filename):
+    def save_optimised_blend_report(self, filename):
         """Save results to an Excel file."""
         # Ensure numeric columns for comparison
         self.results["source_actual_tonnes"] = pd.to_numeric(
@@ -336,6 +340,12 @@ class CaseModeller:
             )
         ]
         self.results.to_excel(filename, index=False)
+        print(f"All results written to {filename}")
+
+    def save_build_report(self, filename):
+        """Save stockpile build report to an Excel file."""
+        self.build_report = self.balance_tracker.get_build_transactions()
+        self.build_report.to_excel(filename, index=False)
         print(f"All results written to {filename}")
        
     def calculate_initial_steady_state_duration(self):

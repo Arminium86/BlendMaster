@@ -7,13 +7,17 @@ class EventPool:
         self.equipment = equipment
 
 
-    def generate_initial_event_pool(self, period):
+    def generate_initial_event_pool(self, period, current_time, expit_payload_transactions):
         """Generate potential events based on available stockpiles, grade blocks, and equipment."""
         events = []
 
         for stockpile in self.stockpiles:
             stockpile_state = stockpile.get(f"state_{period}", 0)
-            if ((stockpile_state == "Auto" and stockpile["balance"] >= stockpile["reclaim_threshold"]) or stockpile_state == "Build" or stockpile_state == "Reclaim"):
+            if ((stockpile_state == "Auto" and 
+                 stockpile["balance"] >= stockpile["reclaim_threshold"] and 
+                 self.expit_transactions_complete(stockpile, current_time, expit_payload_transactions)
+                 ) 
+                 or stockpile_state == "Reclaim"):
                 stockpile_cost = stockpile.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
                 stockpile_cash = -stockpile.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
                 stockpile_max_quantity = stockpile.get(f"max_quantity_{period}", 0)
@@ -39,7 +43,7 @@ class EventPool:
                             "reclaim_threshold": stockpile["reclaim_threshold"],
                             "state": stockpile_state
                         })
-        
+
         for grade_block in self.grade_blocks:
             grade_block_cost = grade_block.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
             grade_block_cash = -grade_block.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
@@ -66,6 +70,19 @@ class EventPool:
                     })
 
         return events
+    
+    def expit_transactions_complete(self, stockpile, current_time, expit_payload_transactions):
+
+            for _, transaction in expit_payload_transactions.iterrows():
+                # Check if the transaction's destination matches the stockpile
+                name = transaction["destination"].replace("Stockpiles/", "")
+
+                if name == stockpile["name"]:
+                    # Check if the transaction's time is after the current time
+                    if transaction['delivered_datetime'] > current_time:
+                        
+                        return False
+            return True
     
     def update_pool_participants(self, decision_point_results, initial_event_pool):
     
@@ -107,12 +124,12 @@ class EventPool:
 
         return events 
 
-    def get_events(self, period, decision_point_results):
-        """Retrieve generated event pool for the current period."""
-        initial_event_pool = self.generate_initial_event_pool(period)
+    def get_events(self, period, decision_point_results, current_time, expit_payload_transactions):
+        """Retrieve generated blend event pool for the current period."""
+        initial_event_pool = self.generate_initial_event_pool(period, current_time, expit_payload_transactions)
         final_event_pool = self.update_pool_participants(decision_point_results, initial_event_pool)
+       
         return final_event_pool
-
 
     def update_event_balances(self, event_pool, balance_tracker):
         """Update each event's balance in the pool based on the balance tracker."""
