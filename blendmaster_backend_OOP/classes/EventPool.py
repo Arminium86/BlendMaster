@@ -83,13 +83,12 @@ class EventPool:
     def stockpile_is_ready(self, stockpile, period, current_time, expit_payload_transactions):
         stockpile_state = stockpile.get(f"state_{period}", 0)
         if ((stockpile_state == "Auto" and 
-                 stockpile["balance"] >= stockpile["reclaim_threshold"] and 
-                 self.expit_transactions_complete(stockpile, current_time, expit_payload_transactions)
-                 ) 
-                 or stockpile_state == "Reclaim"): True
-        else: False
-
-    def stockpile_auto_turnover_datetime (self, start_time)
+            stockpile["balance"] >= stockpile["reclaim_threshold"] and 
+            self.expit_transactions_complete(stockpile, current_time, expit_payload_transactions)
+            ) 
+            or stockpile_state == "Reclaim"): return True
+        
+        else: return False
 
     def update_pool_participants(self, decision_point_results, initial_event_pool):
     
