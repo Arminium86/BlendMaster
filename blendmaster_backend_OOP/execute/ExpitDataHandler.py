@@ -106,7 +106,6 @@ class ExpitDataHandler:
                 
                 payload = row["HaulageResult.TruckPayload"]
                 start_time = row["Time.StartTime"]
-                end_time = row["Time.EndTime"]
                 destination = row["Destination.FullName"]
                 source_name = row["Source.FullName"]
                 load_time = payload / row["HaulageResult.LoaderProductionRate.Wtph"]
@@ -204,6 +203,3 @@ class ExpitDataHandler:
                     })
 
         return pd.DataFrame(results)
-
-# Save or display results
-#result.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\processed_aps_transactions.xlsx")

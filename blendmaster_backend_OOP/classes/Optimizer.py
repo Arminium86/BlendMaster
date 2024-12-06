@@ -1,10 +1,11 @@
 # This is the main optimization engine and logic
 from scipy.optimize import linprog
 import numpy as np
+from datetime import timedelta
 
 class Optimizer:
 
-    def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration, periods, period_tracker):
+    def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration, periods, period_tracker, current_time, stockpile_data):
         """Runs blending optimization and adjusts steady state if needed."""
         
         steady_state_controller_source = None
@@ -13,7 +14,7 @@ class Optimizer:
         result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
         
         if result['Linprog_result_object'].success: 
-            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration)
+            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data)
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
 
             if result['Linprog_result_object'].success: 
@@ -31,10 +32,11 @@ class Optimizer:
         else: return result
 
     @staticmethod
-    def update_steady_state_duration(selected_events, steady_state_duration):
+    def update_steady_state_duration(selected_events, steady_state_duration, start_of_steady_state_datetime, stockpile_data):
         """Update steady state duration if any source is depleted early."""
-
+        end_of_steady_state_datetime = start_of_steady_state_datetime + timedelta(hours=steady_state_duration)
         updated_duration = steady_state_duration
+        updated_duration_auto_turnover = steady_state_duration
         source_name = "Null"
         source_tonnes = "Null"
 
@@ -60,7 +62,24 @@ class Optimizer:
                     source_name = selected_event["source"]
                     source_tonnes = selected_event["opening_balance"]
 
-        return updated_duration, source_name, source_tonnes
+ 
+
+        for stockpile in stockpile_data:
+            if (stockpile['auto_turnover_datetime']) != None:
+               if start_of_steady_state_datetime < (stockpile['auto_turnover_datetime']) < end_of_steady_state_datetime:
+                   time_to_turnover = (stockpile['auto_turnover_datetime'] - start_of_steady_state_datetime).total_seconds() / 3600
+                   if time_to_turnover < updated_duration_auto_turnover:
+                       updated_duration_auto_turnover = time_to_turnover
+
+                   else: continue
+
+               else: continue
+
+            else: continue
+
+        if updated_duration <= updated_duration_auto_turnover:
+            return updated_duration, source_name, source_tonnes
+        else: return updated_duration_auto_turnover, "Null", "Null"
     
     @staticmethod
     def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker):

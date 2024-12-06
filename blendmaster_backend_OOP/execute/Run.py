@@ -5,14 +5,18 @@ from execute.DataLoader import DataLoader
 from execute.PeriodManager import PeriodManager
 from execute.ExpitDataHandler import ExpitDataHandler
 
-# Load input data (this is combined user input and opening inventories)
-input_data = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx")
-expit_data_handler = ExpitDataHandler(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", "aps_transactions")
-expit_payload_transactions = expit_data_handler.process_transactions()
-stockpile_data, grade_block_data, equipment_data, crusher_target_data = input_data.load_data()
-
 # Initialize periods
 periods = PeriodManager().calculate_periods()
+
+# Process APS expit data (mining.csv)
+expit_data_handler = ExpitDataHandler(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", "aps_transactions")
+expit_payload_transactions = expit_data_handler.process_transactions()
+expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\processed_aps_transactions.xlsx")
+
+# Load input data (this is combined user input and opening inventories)
+input_data = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", expit_payload_transactions)
+
+stockpile_data, grade_block_data, equipment_data, crusher_target_data = input_data.load_data()
 
 # Initialize and run CaseModeller
 case_modeller = CaseModeller(
