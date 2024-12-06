@@ -13,11 +13,7 @@ class EventPool:
 
         for stockpile in self.stockpiles:
             stockpile_state = stockpile.get(f"state_{period}", 0)
-            if ((stockpile_state == "Auto" and 
-                 stockpile["balance"] >= stockpile["reclaim_threshold"] and 
-                 self.expit_transactions_complete(stockpile, current_time, expit_payload_transactions)
-                 ) 
-                 or stockpile_state == "Reclaim"):
+            if (self.stockpile_is_ready(stockpile, period, current_time, expit_payload_transactions)):
                 stockpile_cost = stockpile.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
                 stockpile_cash = -stockpile.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
                 stockpile_max_quantity = stockpile.get(f"max_quantity_{period}", 0)
@@ -84,6 +80,17 @@ class EventPool:
                         return False
             return True
     
+    def stockpile_is_ready(self, stockpile, period, current_time, expit_payload_transactions):
+        stockpile_state = stockpile.get(f"state_{period}", 0)
+        if ((stockpile_state == "Auto" and 
+                 stockpile["balance"] >= stockpile["reclaim_threshold"] and 
+                 self.expit_transactions_complete(stockpile, current_time, expit_payload_transactions)
+                 ) 
+                 or stockpile_state == "Reclaim"): True
+        else: False
+
+    def stockpile_auto_turnover_datetime (self, start_time)
+
     def update_pool_participants(self, decision_point_results, initial_event_pool):
     
         events = []
