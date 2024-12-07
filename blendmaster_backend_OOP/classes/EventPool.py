@@ -1,7 +1,11 @@
 # This is where events are generated based on input data and regenerated / updated based on optimization results
 import pandas as pd
+from classes.EquipmentData import EquipmentData
+from classes.StockpileData import StockpileData
+from classes.GradeBlockData import GradeBlockData
+from typing import List
 class EventPool:
-    def __init__(self, stockpiles, grade_blocks, equipment):
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData]):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -12,75 +16,75 @@ class EventPool:
         events = []
 
         for stockpile in self.stockpiles:
-            stockpile_state = stockpile.get(f"state_{period}", 0)
+            stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
             if (self.is_stockpile_ready(stockpile, period, current_time, balance_tracker)):
-                stockpile_cost = stockpile.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
-                stockpile_cash = -stockpile.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
-                stockpile_max_quantity = stockpile.get(f"max_quantity_{period}", 0)
+                stockpile_cost = stockpile.to_dict().get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
+                stockpile_cash = -stockpile.to_dict().get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+                stockpile_max_quantity = stockpile.to_dict().get(f"max_quantity_{period}", 0)
                 for equipment in self.equipment:
-                    if equipment["name"] in stockpile.get("equipment", []) and "RC" in equipment["name"]: 
-                        equipment_priority = equipment.get(f"priority_{period}", 0)
-                        reclaim_rate = equipment.get(f"rate_{period}", 0)
+                    
+                    if equipment.name in stockpile.to_dict().get("equipment", []) and "RC" in equipment.name: 
+                        equipment_priority = equipment.to_dict().get(f"priority_{period}", 0)
+                        reclaim_rate = equipment.to_dict().get(f"rate_{period}", 0)
 
                         events.append({
-                            "stockpile": stockpile["name"],
+                            "stockpile": stockpile.name,
                             "type": "stockpile",
-                            "equipment": equipment["name"],
+                            "equipment": equipment.name,
                             "cost": stockpile_cost + equipment_priority,
                             "cash": stockpile_cash,
                             "rate": reclaim_rate,
-                            "grade_fe": stockpile["grade_fe"],
-                            "grade_si": stockpile["grade_si"],
-                            "grade_al": stockpile["grade_al"],
-                            "grade_p": stockpile["grade_p"],
-                            "grade_mn": stockpile["grade_mn"],
-                            "balance": stockpile["balance"],
+                            "grade_fe": stockpile.grade_fe,
+                            "grade_si": stockpile.grade_si,
+                            "grade_al": stockpile.grade_al,
+                            "grade_p": stockpile.grade_p,
+                            "grade_mn": stockpile.grade_mn,
+                            "balance": stockpile.balance,
                             "max_quantity": stockpile_max_quantity,
-                            "reclaim_threshold": stockpile["reclaim_threshold"],
+                            "reclaim_threshold": stockpile.reclaim_threshold,
                             "state": stockpile_state,
-                            "auto_turnover_datetime": stockpile["auto_turnover_datetime"] 
+                            "auto_turnover_datetime": stockpile.auto_turnover_datetime
                         })
 
         for grade_block in self.grade_blocks:
-            grade_block_cost = grade_block.get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
-            grade_block_cash = -grade_block.get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
-            grade_block_max_quantity = grade_block.get(f"max_quantity_{period}", 0)
+            grade_block_cost = grade_block.to_dict().get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
+            grade_block_cash = -grade_block.to_dict().get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+            grade_block_max_quantity = grade_block.to_dict().get(f"max_quantity_{period}", 0)
             for equipment in self.equipment:
-                if equipment["name"] in grade_block.get("equipment", []) and "EX" in equipment["name"]:
-                    equipment_priority = equipment.get(f"priority_{period}", 0)
-                    reclaim_rate = equipment.get(f"rate_{period}", 0)
+                if equipment.name in grade_block.to_dict().get("equipment", []) and "EX" in equipment.name:
+                    equipment_priority = equipment.to_dict().get(f"priority_{period}", 0)
+                    reclaim_rate = equipment.to_dict().get(f"rate_{period}", 0)
 
                     events.append({
-                        "grade_block": grade_block["name"],
+                        "grade_block": grade_block.name,
                         "type": "grade_block",
-                        "equipment": equipment["name"],
+                        "equipment": equipment.name,
                         "cost": grade_block_cost + equipment_priority, 
                         "cash": grade_block_cash,
                         "rate": reclaim_rate,
-                        "grade_fe": grade_block["grade_fe"],
-                        "grade_si": grade_block["grade_si"],
-                        "grade_al": grade_block["grade_al"],
-                        "grade_p": grade_block["grade_p"],
-                        "grade_mn": grade_block["grade_mn"],
-                        "balance": grade_block["balance"],
+                        "grade_fe": grade_block.grade_fe,
+                        "grade_si": grade_block.grade_si,
+                        "grade_al": grade_block.grade_al,
+                        "grade_p": grade_block.grade_p,
+                        "grade_mn": grade_block.grade_mn,
+                        "balance": grade_block.balance,
                         "max_quantity": grade_block_max_quantity
                     })
 
         return events
     
-    def expit_transactions_complete(self, stockpile, current_time):
+    def expit_transactions_complete(self, stockpile: StockpileData, current_time):
 
-        if stockpile['auto_turnover_datetime']:
-            if stockpile['auto_turnover_datetime'] > current_time:
+        if stockpile.auto_turnover_datetime:
+            if stockpile.auto_turnover_datetime > current_time:
                 return False
             else: return True
         else: return True
     
-    def is_stockpile_ready(self, stockpile, period, current_time, balance_tracker):
-        stockpile_state = stockpile.get(f"state_{period}", 0)
-        stockpile["balance"] = balance_tracker.get_balance(stockpile["name"])
+    def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker):
+        stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
+        stockpile.balance = balance_tracker.get_balance(stockpile.name)
         if ((stockpile_state == "Auto" and 
-            #stockpile["balance"] >= stockpile["reclaim_threshold"] and 
             self.expit_transactions_complete(stockpile, current_time)
             ) 
             or stockpile_state == "Reclaim"): return True

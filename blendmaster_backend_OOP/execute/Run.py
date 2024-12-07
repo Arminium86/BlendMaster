@@ -16,13 +16,14 @@ expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\ou
 # Load input data (this is combined user input and opening inventories)
 input_data = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", expit_payload_transactions)
 
-stockpile_data, grade_block_data, equipment_data, crusher_target_data = input_data.load_data()
+stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+
 
 # Initialize and run CaseModeller
 case_modeller = CaseModeller(
-    stockpiles=stockpile_data,
-    grade_blocks=grade_block_data,
-    equipment=equipment_data,
+    stockpiles=stockpile_data_objects,
+    grade_blocks=grade_block_data_objects,
+    equipment=equipment_data_objects,
     crusher_targets=crusher_target_data,
     expit_payload_transactions=expit_payload_transactions,
     periods=periods

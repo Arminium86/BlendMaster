@@ -1,13 +1,16 @@
 # This tracks source balances and the program runs and provides input to the EventPool for the update functionality
 import pandas as pd
+from classes.StockpileData import StockpileData
+from classes.GradeBlockData import GradeBlockData
+from typing import List
 class BalanceTracker:
-    def __init__(self, stockpiles, grade_blocks):
-        self.balances = {item["name"]: item["balance"] for item in stockpiles + grade_blocks}
-        self.grade_fe = {item["name"]: item["grade_fe"] for item in stockpiles + grade_blocks}
-        self.grade_si = {item["name"]: item["grade_si"] for item in stockpiles + grade_blocks}
-        self.grade_al = {item["name"]: item["grade_al"] for item in stockpiles + grade_blocks}
-        self.grade_p = {item["name"]: item["grade_p"] for item in stockpiles + grade_blocks}
-        self.grade_mn = {item["name"]: item["grade_mn"] for item in stockpiles + grade_blocks}
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData]):
+        self.balances = {item.name: item.balance for item in stockpiles + grade_blocks}
+        self.grade_fe = {item.name: item.grade_fe for item in stockpiles + grade_blocks}
+        self.grade_si = {item.name: item.grade_si for item in stockpiles + grade_blocks}
+        self.grade_al = {item.name: item.grade_al for item in stockpiles + grade_blocks}
+        self.grade_p = {item.name: item.grade_p for item in stockpiles + grade_blocks}
+        self.grade_mn = {item.name: item.grade_mn for item in stockpiles + grade_blocks}
         self.build_report = [] # Store transactions that meet the condition
         
     def update_balances(self, filtered_decision_point_results_to_user_choice, expit_payload_transactions, start_time, end_time, steady_state_tracker):
@@ -27,7 +30,7 @@ class BalanceTracker:
             payload = transaction["payload"]
             
             # Check if the transaction is within the time range
-            if start_time <= delivered_datetime <= end_time:
+            if start_time <= delivered_datetime < end_time:
                 if name in self.balances:
                     # Perform weighted averaging for each grade
                     current_balance = self.balances[name]

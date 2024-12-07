@@ -1,13 +1,17 @@
 # This is where the main workflow is defined (everything happens here)
 from classes.BalanceTracker import BalanceTracker
 from classes.EventPool import EventPool
+from classes.EquipmentData import EquipmentData
+from classes.StockpileData import StockpileData
+from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.CrusherTarget import CrusherTarget
 import pandas as pd
 from datetime import timedelta
+from typing import List
 
 class CaseModeller:
-    def __init__(self, stockpiles, grade_blocks, equipment, crusher_targets, expit_payload_transactions, periods):
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -33,12 +37,10 @@ class CaseModeller:
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
-        
         while self.current_time < self.periods["period_2_end"]:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
             self.steady_state_tracker += 1
-
         # Save blend results to an Excel file at the end
         self.save_optimised_blend_report(fr"C:\BlendMaster\blendmaster_backend_OOP\output\optimised_blend_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
         # Save stockpile build report to an Excel file at the end
