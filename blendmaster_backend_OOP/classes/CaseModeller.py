@@ -1,6 +1,6 @@
 # This is where the main workflow is defined (everything happens here)
 from classes.BalanceTracker import BalanceTracker
-from classes.EventPool import EventPool
+from classes.EventPoolGenerator import EventPoolGenerator
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
@@ -22,7 +22,7 @@ class CaseModeller:
         self.period_tracker = "preplan"
         self.balance_tracker = BalanceTracker(stockpiles, grade_blocks)
         self.expit_payload_transactions = expit_payload_transactions
-        self.event_pool = EventPool(stockpiles, grade_blocks, equipment)
+        self.event_pool = EventPoolGenerator(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
         self.results = pd.DataFrame()
         self.build_report = pd.DataFrame()
@@ -50,7 +50,7 @@ class CaseModeller:
         """Run a single optimization step for the initial steady state duration."""
         events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
         
-        # This method will be ultimately redundant as stockpile balances are updated in the is_stockpile_ready method of EventPool and the same can be done for grade blocks (at which point this method is no longer required)
+        # This method will be ultimately redundant as stockpile balances are updated in the is_stockpile_ready method of EventPoolGenerator and the same can be done for grade blocks (at which point this method is no longer required)
         self.event_pool.update_event_balances(events, self.balance_tracker)
         
         period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)

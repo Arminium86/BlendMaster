@@ -3,8 +3,10 @@ import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
+from classes.BalanceTracker import BalanceTracker
+from classes.EventData import EventData
 from typing import List
-class EventPool:
+class EventPoolGenerator:
     def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData]):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
@@ -72,26 +74,8 @@ class EventPool:
                     })
 
         return events
-    
-    def expit_transactions_complete(self, stockpile: StockpileData, current_time):
 
-        if stockpile.auto_turnover_datetime:
-            if stockpile.auto_turnover_datetime > current_time:
-                return False
-            else: return True
-        else: return True
-    
-    def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker):
-        stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
-        stockpile.balance = balance_tracker.get_balance(stockpile.name)
-        if ((stockpile_state == "Auto" and 
-            self.expit_transactions_complete(stockpile, current_time)
-            ) 
-            or stockpile_state == "Reclaim"): return True
-        
-        else: return False
-
-    def update_pool_participants(self, decision_point_results, initial_event_pool):
+    def update_pool_participants(self, decision_point_results, initial_event_pool: List[EventData]):
     
         events = []
 
@@ -99,7 +83,7 @@ class EventPool:
 
             for event in initial_event_pool:
             
-                if event["type"] == "stockpile" and event["balance"] < event["reclaim_threshold"]:
+                if event.is_stockpile and event.balance < event.reclaim_threshold:
                     continue
                 else: events.append(event)
             
@@ -110,20 +94,20 @@ class EventPool:
 
             for event in initial_event_pool:
                 
-                if event["type"] == "stockpile" and event["balance"] < event["reclaim_threshold"]:
+                if event.is_stockpile and event.balance < event.reclaim_threshold:
                     continue
                             
-                elif (event["type"] == "stockpile" and 
-                    event["stockpile"] in decision_point_results["source"].values and 
+                elif (event.is_stockpile and 
+                    event.stockpile in decision_point_results["source"].values and 
                     decision_point_results.loc[
-                        decision_point_results["source"] == event["stockpile"], "source_actual_tonnes"
+                        decision_point_results["source"] == event.stockpile, "source_actual_tonnes"
                     ].gt(0).any()):
                     continue
         
-                elif (event["type"] == "grade_block" and 
-                    event["grade_block"] in decision_point_results["source"].values and 
+                elif (event.is_grade_block and 
+                    event.grade_block in decision_point_results["source"].values and 
                     decision_point_results.loc[
-                        decision_point_results["source"] == event["grade_block"], "source_actual_tonnes"
+                        decision_point_results["source"] == event.grade_block, "source_actual_tonnes"
                     ].gt(0).any()):
                     continue
 
@@ -134,14 +118,59 @@ class EventPool:
     def get_events(self, period, decision_point_results, current_time, balance_tracker):
         """Retrieve generated blend event pool for the current period."""
         initial_event_pool = self.generate_initial_event_pool(period, current_time, balance_tracker)
-        final_event_pool = self.update_pool_participants(decision_point_results, initial_event_pool)
+        initial_event_pool_objects = self.create_event_data_objects(initial_event_pool)
+        final_event_pool = self.update_pool_participants(decision_point_results, initial_event_pool_objects)
        
         return final_event_pool
 
-    def update_event_balances(self, event_pool, balance_tracker):
+    def update_event_balances(self, event_pool: List[EventData], balance_tracker: BalanceTracker):
         """Update each event's balance in the pool based on the balance tracker."""
         for event in event_pool:
-            if event["type"] == "stockpile":
-                event["balance"] = balance_tracker.get_balance(event["stockpile"])
-            elif event["type"] == "grade_block":
-                event["balance"] = balance_tracker.get_balance(event["grade_block"])
+            if event.is_stockpile:
+                event.balance = balance_tracker.get_balance(event.stockpile)
+            elif event.is_grade_block:
+                event.balance = balance_tracker.get_balance(event.grade_block)
+    
+    def expit_transactions_complete(self, stockpile: StockpileData, current_time):
+
+        if stockpile.auto_turnover_datetime:
+            if stockpile.auto_turnover_datetime > current_time:
+                return False
+            else: return True
+        else: return True
+    
+    def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
+        stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
+        stockpile.balance = balance_tracker.get_balance(stockpile.name)
+        if ((stockpile_state == "Auto" and 
+            self.expit_transactions_complete(stockpile, current_time)
+            ) 
+            or stockpile_state == "Reclaim"): return True
+        
+        else: return False
+    
+    def create_event_data_objects(self, event_data_dicts):
+        """Create a list of EventData objects from a list of dictionaries."""
+        return [
+            EventData(
+                stockpile=record.get("stockpile"),
+                grade_block=record.get("grade_block"),
+                event_type=record.get("type"),
+                equipment=record.get("equipment"),
+                cost=record.get("cost"),
+                cash=record.get("cash"),
+                rate=record.get("rate"),
+                grade_fe=record.get("grade_fe"),
+                grade_si=record.get("grade_si"),
+                grade_al=record.get("grade_al"),
+                grade_p=record.get("grade_p"),
+                grade_mn=record.get("grade_mn"),
+                balance=record.get("balance"),
+                max_quantity=record.get("max_quantity"),
+                reclaim_threshold=record.get("reclaim_threshold"),
+                state=record.get("state"),
+                auto_turnover_datetime=record.get("auto_turnover_datetime")
+
+            )
+            for record in event_data_dicts
+        ]

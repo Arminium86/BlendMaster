@@ -4,10 +4,11 @@ import numpy as np
 from datetime import timedelta
 from typing import List
 from classes.StockpileData import StockpileData
+from classes.EventData import EventData
 
 class Optimizer:
 
-    def run_with_dynamic_steady_state(self, event_pool, period_crusher_target, steady_state_duration, periods, period_tracker, current_time, stockpile_data: List[StockpileData]):
+    def run_with_dynamic_steady_state(self, event_pool: List[EventData], period_crusher_target, steady_state_duration, periods, period_tracker, current_time, stockpile_data: List[StockpileData]):
         """Runs blending optimization and adjusts steady state if needed."""
         
         steady_state_controller_source = None
@@ -84,24 +85,24 @@ class Optimizer:
         else: return updated_duration_auto_turnover, "Null", "Null"
     
     @staticmethod
-    def run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker):
+    def run_blending_optimization(event_pool: List[EventData], period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker):
         """Core linear optimization logic."""
         dmc = -100  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
 
         # Step 1: Define bounds (how many tonnes each event contributes)
-        bounds = [(0, min(event["rate"] * steady_state_duration, event["balance"])) for event in event_pool]
+        bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
         
         # Step 2: Build the cost and constraints based on event pool
         c = []  # Movement cash flow for each event
         for event in event_pool:
             # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            c.append(dmc + event["cost"] + event["cash"])
+            c.append(dmc + event.cost + event.cash)
 
         # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
         # constraint fail the optimization
         if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
-            indices = [i for i, event in enumerate(event_pool) if ((event["type"] == "stockpile" and event["stockpile"] == steady_state_controller_source and "grade_block" not in event) or (event["type"] == "grade_block" and event["grade_block"] == steady_state_controller_source and "stockpile" not in event))]
+            indices = [i for i, event in enumerate(event_pool) if ((event.is_stockpile and event.stockpile == steady_state_controller_source) or (event.is_grade_block and event.grade_block == steady_state_controller_source))]
             A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
             b_eq = [steady_state_controller_tonnes] * len(A_eq)
 
@@ -110,35 +111,35 @@ class Optimizer:
             b_eq = None
 
         # Minimum crusher grade (turned into an upper-bound inequality)
-        A_ub_min_crusher_grade_fe = [[-event["grade_fe"] + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        A_ub_min_crusher_grade_fe = [[-event.grade_fe + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
         b_ub_min_crusher_grade_fe = [0]
         
-        A_ub_min_crusher_grade_si = [[-event["grade_si"] + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        A_ub_min_crusher_grade_si = [[-event.grade_si + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
         b_ub_min_crusher_grade_si = [0]
 
-        A_ub_min_crusher_grade_al = [[-event["grade_al"] + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        A_ub_min_crusher_grade_al = [[-event.grade_al + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
         b_ub_min_crusher_grade_al = [0]
 
-        A_ub_min_crusher_grade_p = [[-event["grade_p"] + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        A_ub_min_crusher_grade_p = [[-event.grade_p + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
         b_ub_min_crusher_grade_p = [0]
 
-        A_ub_min_crusher_grade_mn = [[-event["grade_mn"] + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+        A_ub_min_crusher_grade_mn = [[-event.grade_mn + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
         b_ub_min_crusher_grade_mn = [0]
 
         # Max crusher grade (upper-bound inequality)
-        A_ub_max_crusher_grade_fe = [[event["grade_fe"] - period_crusher_target["target_fe_max"] for event in event_pool]]
+        A_ub_max_crusher_grade_fe = [[event.grade_fe - period_crusher_target["target_fe_max"] for event in event_pool]]
         b_ub_max_crusher_grade_fe = [0]
 
-        A_ub_max_crusher_grade_si = [[event["grade_si"] - period_crusher_target["target_si_max"] for event in event_pool]]
+        A_ub_max_crusher_grade_si = [[event.grade_si - period_crusher_target["target_si_max"] for event in event_pool]]
         b_ub_max_crusher_grade_si = [0]
 
-        A_ub_max_crusher_grade_al = [[event["grade_al"] - period_crusher_target["target_al_max"] for event in event_pool]]
+        A_ub_max_crusher_grade_al = [[event.grade_al - period_crusher_target["target_al_max"] for event in event_pool]]
         b_ub_max_crusher_grade_al = [0]
 
-        A_ub_max_crusher_grade_p = [[event["grade_p"] - period_crusher_target["target_p_max"] for event in event_pool]]
+        A_ub_max_crusher_grade_p = [[event.grade_p - period_crusher_target["target_p_max"] for event in event_pool]]
         b_ub_max_crusher_grade_p = [0]
 
-        A_ub_max_crusher_grade_mn = [[event["grade_mn"] - period_crusher_target["target_mn_max"] for event in event_pool]]
+        A_ub_max_crusher_grade_mn = [[event.grade_mn - period_crusher_target["target_mn_max"] for event in event_pool]]
         b_ub_max_crusher_grade_mn = [0]
 
         # Step 3: Crusher capacity constraint
@@ -150,8 +151,8 @@ class Optimizer:
         stockpile_indices = []
 
         for i, event in enumerate(event_pool):
-            stockpile_name = event.get("stockpile")
-            if "stockpile" in event and stockpile_name not in unique_stockpiles:
+            stockpile_name = event.stockpile
+            if event.is_stockpile and stockpile_name not in unique_stockpiles:
                 unique_stockpiles[stockpile_name] = i
                 stockpile_indices.append(i)
 
@@ -199,7 +200,7 @@ class Optimizer:
         source_indices = []
 
         for i, event in enumerate(event_pool):
-            source_name = event.get("stockpile") if event['type'] == "stockpile" else event.get("grade_block")
+            source_name = event.stockpile if event.is_stockpile else event.grade_block
             if source_name not in unique_sources:
                 unique_sources[source_name] = i
                 source_indices.append(i)
@@ -220,7 +221,7 @@ class Optimizer:
         
         for event in event_pool:
             # Create the corresponding entry for b_ub for this event
-            b_ub_max_quantity.append(event["max_quantity"] / periods[f"{period_tracker}_duration"])
+            b_ub_max_quantity.append(event.max_quantity / periods[f"{period_tracker}_duration"])
 
         # Step 6: Run the optimization
         
@@ -296,16 +297,16 @@ class Optimizer:
             for i, event in enumerate(event_pool):
                 if result.x[i] >= 0:  # Check if the event has happened
                     transactions.append({
-                    "source": event.get('stockpile', event.get('grade_block')),
-                    "opening_balance": event['balance'],
+                    "source": event.to_dict().get('stockpile', event.to_dict().get('grade_block')),
+                    "opening_balance": event.balance,
                     "actual_tonnes": result.x[i],
-                    "grade_fe": event['grade_fe'],
-                    "grade_si": event['grade_si'],
-                    "grade_al": event['grade_al'],
-                    "grade_p": event['grade_p'],
-                    "grade_mn": event['grade_mn'],
-                    "equipment": event['equipment'],
-                    "equipment_rate_input": event['rate'],
+                    "grade_fe": event.grade_fe,
+                    "grade_si": event.grade_si,
+                    "grade_al": event.grade_al,
+                    "grade_p": event.grade_p,
+                    "grade_mn": event.grade_mn,
+                    "equipment": event.equipment,
+                    "equipment_rate_input": event.rate,
                     "equipment_rate_output": result.x[i] / steady_state_duration if steady_state_duration != 0 else 0,
                 })
 
@@ -313,11 +314,11 @@ class Optimizer:
                 "Linprog_result_object": result,
                 "transactions": transactions,
                 "steady_state_duration": steady_state_duration, 
-                "crusher_actual_grade_fe" : sum(event["grade_fe"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_si" : sum(event["grade_si"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_al" : sum(event["grade_al"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_p" : sum(event["grade_p"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_mn" : sum(event["grade_mn"] * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_fe" : sum(event.grade_fe * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_si" : sum(event.grade_si * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_al" : sum(event.grade_al * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_p" : sum(event.grade_p * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "crusher_actual_grade_mn" : sum(event.grade_mn * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
                 "crusher_grade_target_min_fe": period_crusher_target["target_fe_min"],
                 "crusher_grade_target_max_fe": period_crusher_target["target_fe_max"],
                 "crusher_grade_target_min_si": period_crusher_target["target_si_min"],
