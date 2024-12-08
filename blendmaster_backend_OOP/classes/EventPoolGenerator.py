@@ -76,28 +76,37 @@ class EventPoolGenerator:
         return events
 
     def update_pool_participants(self, decision_point_results, initial_event_pool: List[EventData]):
-    
+        """Updates initial event pool based on stockpile state, reclaim threshold and whether an event occurred in a previous iteration of a steady state (until there is no events left). See method definition."""
         events = []
 
         if decision_point_results is None:
 
             for event in initial_event_pool:
             
-                if event.is_stockpile and event.balance < event.reclaim_threshold:
-                    continue
+                if event.is_stockpile:
+
+                    if event.state == "Build":
+                        continue
+                    elif event.state == "Off":
+                        continue
+                    elif event.state == "Auto" and event.balance < event.reclaim_threshold:
+                        continue
+                    elif event.state == "Auto" and event.balance >= event.reclaim_threshold:
+                        events.append(event)
+                    elif event.state == "Reclaim":
+                        events.append(event)
+
                 else: events.append(event)
             
+        # Exclude events if they are present in decision point results 
         elif decision_point_results is not None:
             decision_point_results["source_actual_tonnes"] = pd.to_numeric(
             decision_point_results["source_actual_tonnes"], errors='coerce'
             )
 
             for event in initial_event_pool:
-                
-                if event.is_stockpile and event.balance < event.reclaim_threshold:
-                    continue
                             
-                elif (event.is_stockpile and 
+                if (event.is_stockpile and 
                     event.stockpile in decision_point_results["source"].values and 
                     decision_point_results.loc[
                         decision_point_results["source"] == event.stockpile, "source_actual_tonnes"
@@ -110,6 +119,19 @@ class EventPoolGenerator:
                         decision_point_results["source"] == event.grade_block, "source_actual_tonnes"
                     ].gt(0).any()):
                     continue
+
+                elif event.is_stockpile:
+
+                    if event.state == "Build":
+                        continue
+                    elif event.state == "Off":
+                        continue
+                    elif event.state == "Auto" and event.balance < event.reclaim_threshold:
+                        continue
+                    elif event.state == "Auto" and event.balance >= event.reclaim_threshold:
+                        events.append(event)
+                    elif event.state == "Reclaim":
+                        events.append(event)
 
                 else: events.append(event)
 
@@ -131,14 +153,6 @@ class EventPoolGenerator:
             elif event.is_grade_block:
                 event.balance = balance_tracker.get_balance(event.grade_block)
     
-    def expit_transactions_complete(self, stockpile: StockpileData, current_time):
-
-        if stockpile.auto_turnover_datetime:
-            if stockpile.auto_turnover_datetime > current_time:
-                return False
-            else: return True
-        else: return True
-    
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
         stockpile.balance = balance_tracker.get_balance(stockpile.name)
@@ -149,6 +163,14 @@ class EventPoolGenerator:
         
         else: return False
     
+    def expit_transactions_complete(self, stockpile: StockpileData, current_time):
+
+        if stockpile.auto_turnover_datetime:
+            if stockpile.auto_turnover_datetime > current_time:
+                return False
+            else: return True
+        else: return True
+
     def create_event_data_objects(self, event_data_dicts):
         """Create a list of EventData objects from a list of dictionaries."""
         return [

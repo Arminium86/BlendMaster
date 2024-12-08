@@ -20,7 +20,7 @@ class CaseModeller:
         self.current_time = periods["preplan_start"]
         self.start_time = periods["preplan_start"]
         self.period_tracker = "preplan"
-        self.balance_tracker = BalanceTracker(stockpiles, grade_blocks)
+        self.balance_tracker = BalanceTracker(stockpiles, grade_blocks, self.period_tracker)
         self.expit_payload_transactions = expit_payload_transactions
         self.event_pool = EventPoolGenerator(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()

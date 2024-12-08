@@ -17,7 +17,7 @@ class Optimizer:
         result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
         
         if result['Linprog_result_object'].success: 
-            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data)
+            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data, period_tracker)
             result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
 
             if result['Linprog_result_object'].success: 
@@ -35,7 +35,7 @@ class Optimizer:
         else: return result
 
     @staticmethod
-    def update_steady_state_duration(selected_events, steady_state_duration, start_of_steady_state_datetime, stockpile_data: List[StockpileData]):
+    def update_steady_state_duration(selected_events, steady_state_duration, start_of_steady_state_datetime, stockpile_data: List[StockpileData], period_tracker):
         """Update steady state duration if any source is depleted early."""
         end_of_steady_state_datetime = start_of_steady_state_datetime + timedelta(hours=steady_state_duration)
         updated_duration = steady_state_duration
@@ -65,11 +65,10 @@ class Optimizer:
                     source_name = selected_event["source"]
                     source_tonnes = selected_event["opening_balance"]
 
- 
-
         for stockpile in stockpile_data:
-            if (stockpile.auto_turnover_datetime) != None:
-               if start_of_steady_state_datetime < (stockpile.auto_turnover_datetime) < end_of_steady_state_datetime:
+            if (stockpile.auto_turnover_datetime != None and 
+                (stockpile.to_dict().get(f"state_{period_tracker}", 0) == "Auto")):
+               if start_of_steady_state_datetime < stockpile.auto_turnover_datetime <= end_of_steady_state_datetime:
                    time_to_turnover = (stockpile.auto_turnover_datetime - start_of_steady_state_datetime).total_seconds() / 3600
                    if time_to_turnover < updated_duration_auto_turnover:
                        updated_duration_auto_turnover = time_to_turnover

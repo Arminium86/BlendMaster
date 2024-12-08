@@ -11,7 +11,7 @@ periods = PeriodManager().calculate_periods()
 # Process APS expit data (mining.csv)
 expit_data_handler = ExpitDataHandler(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", "aps_transactions")
 expit_payload_transactions = expit_data_handler.process_transactions()
-expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\processed_aps_transactions.xlsx")
+expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\expit_payload_transactions.xlsx")
 
 # Load input data (this is combined user input and opening inventories)
 input_data = DataLoader(r"C:\BlendMaster\blendmaster_backend_OOP\input\data.xlsx", expit_payload_transactions)

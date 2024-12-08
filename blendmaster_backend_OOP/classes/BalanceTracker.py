@@ -3,9 +3,11 @@ import pandas as pd
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from typing import List
+from pandas import DataFrame
 class BalanceTracker:
-    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData]):
-        self.balances = {item.name: item.balance for item in stockpiles + grade_blocks}
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], period_tracker):
+        self.state = {item.name: item.to_dict().get(f"state_{period_tracker}", 0) for item in stockpiles}
+        self.balance = {item.name: item.balance for item in stockpiles + grade_blocks}
         self.grade_fe = {item.name: item.grade_fe for item in stockpiles + grade_blocks}
         self.grade_si = {item.name: item.grade_si for item in stockpiles + grade_blocks}
         self.grade_al = {item.name: item.grade_al for item in stockpiles + grade_blocks}
@@ -13,15 +15,15 @@ class BalanceTracker:
         self.grade_mn = {item.name: item.grade_mn for item in stockpiles + grade_blocks}
         self.build_report = [] # Store transactions that meet the condition
         
-    def update_balances(self, filtered_decision_point_results_to_user_choice, expit_payload_transactions, start_time, end_time, steady_state_tracker):
+    def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
         """Update balance and grades after each optimization step."""
         
         # Loop through decision point results
         for _, transaction in filtered_decision_point_results_to_user_choice.iterrows():
             name = transaction["source"]
             
-            if self.balances[name] != 0:
-                self.balances[name] -= transaction["source_actual_tonnes"]
+            if self.balance[name] != 0:
+                self.balance[name] -= transaction["source_actual_tonnes"]
 
         # Loop through expit payload transactions
         for _, transaction in expit_payload_transactions.iterrows():
@@ -30,10 +32,10 @@ class BalanceTracker:
             payload = transaction["payload"]
             
             # Check if the transaction is within the time range
-            if start_time <= delivered_datetime < end_time:
-                if name in self.balances:
+            if steady_state_start_time <= delivered_datetime < steady_state_end_time:
+                if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
                     # Perform weighted averaging for each grade
-                    current_balance = self.balances[name]
+                    current_balance = self.balance[name]
                     updated_balance = current_balance + payload
                     
                     self.grade_fe[name] = (
@@ -58,13 +60,13 @@ class BalanceTracker:
                     )
                     
                     # Update the balance
-                    self.balances[name] = updated_balance
+                    self.balance[name] = updated_balance
                     
                     # Add the transaction to the tracked list
                     self.build_report.append({
                         "steady_state_number": steady_state_tracker,
-                        "start_datetime": start_time,
-                        "end_datetime": end_time,
+                        "start_datetime": steady_state_start_time,
+                        "end_datetime": steady_state_end_time,
                         "stockpile": name,
                         "payload": payload,
                         "delivered_datetime": delivered_datetime,
@@ -76,6 +78,10 @@ class BalanceTracker:
                         "grade_mn": self.grade_mn[name]
                         
                     })
+                
+                elif (name in self.state) and ((self.state[name] == "Reclaim") or (self.state[name] == "Off")):
+                    continue
+
                 else: 
                     raise ValueError(f"Name '{name}' is not found in opening inventory. Either review the Snowflake query or remove the transactions to this destination from APS output.")
 
@@ -86,5 +92,5 @@ class BalanceTracker:
     
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""
-        return self.balances.get(name, 0)
+        return self.balance.get(name, 0)
 
