@@ -121,16 +121,21 @@ class ExpitDataHandler:
                                     row["HaulageResult.Times.SpotAtDump"] / 60 +
                                     row["HaulageResult.Times.Dumping"] / 60)
                         )
+                        mining_start_time = start_time
                     else:
                         delivery_time = (
                             delivery_time +
                             timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
                                     load_time)
                         )
+                        mining_start_time = (mining_start_time +
+                        timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                    load_time)
+                        )
                     results.append({
                         "agent": agent,
                         "source": source_name,
-                        "start_datetime": start_time,
+                        "start_datetime": mining_start_time,
                         "payload": payload,
                         "source_grade_fe": row["Mining.grades_fe"],
                         "source_grade_si": row["Mining.grades_si"],
@@ -186,12 +191,17 @@ class ExpitDataHandler:
                             timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
                                    load_time)
                         )
+                        
+                        mining_start_time = (mining_start_time +
+                        timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                    load_time)
+                        )
 
                     # Append the topped-up trip
                     results.append({
                         "agent": agent,
                         "source": source_name,
-                        "start_datetime": start_time,
+                        "start_datetime": mining_start_time,
                         "payload": fractional_tonnes,
                         "source_grade_fe": weighted_grades["Grade_fe"],
                         "source_grade_si": weighted_grades["Grade_si"],
@@ -203,3 +213,76 @@ class ExpitDataHandler:
                     })
 
         return pd.DataFrame(results)
+    
+    def get_current_block(self, agent):
+        """Retrieve the current or last block a load agent has interacted with in FMS."""
+        return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
+
+    def update_transactions(self, expit_payload_transactions, now):
+            
+            updated_transactions = expit_payload_transactions
+            
+            # Process transactions grouped by `agent`
+            grouped = updated_transactions.groupby("agent")
+            
+            updated_groups = []  # Store updated groups here
+            
+            for agent, group in grouped:
+                # Get current block info for the agent
+                current_block_name, current_block_mined_tonnes = self.get_current_block(agent)
+
+                # Sort transactions for the agent
+                group = group.sort_values(by=["start_datetime"]).reset_index()
+
+                # Find the first row where `current_block_name` matches
+                filtered_rows = group[group["source"].str.contains(current_block_name, na=False)]
+                    
+                if not filtered_rows.empty:
+                    block_row = filtered_rows.iloc[0]
+                    block_index = block_row.name  # Get index of the matching row
+
+                    # Skip rows until payload sum meets or exceeds `current_block_mined_tonnes`
+                    cumulative_payload = 0
+                    skip_until_index = None
+                    
+                    for idx in range(block_index, len(group)):
+                        cumulative_payload += group.at[idx, "payload"]
+                        if cumulative_payload >= current_block_mined_tonnes:
+                            skip_until_index = idx
+                            break
+                    
+                    # Keep only the rows after `skip_until_index`
+                    if skip_until_index is not None:
+                        group = group.iloc[skip_until_index:]
+                        
+                        # Calculate time difference and update `delivered_datetime`
+                        for idx, row in group.iterrows():
+                            if idx == skip_until_index:
+                                # Compute time difference
+                                time_diff = now - row["start_datetime"]
+
+                            # Update `delivered_datetime`
+                            if time_diff.total_seconds() > 0:
+                                updated_delivery_time = row["delivered_datetime"] + time_diff
+                                updated_mining_start_time = row["start_datetime"] + time_diff
+                            else:
+                                updated_delivery_time = row["delivered_datetime"] - abs(time_diff)
+                                updated_mining_start_time = row["start_datetime"] - abs(time_diff)
+
+                            group.at[idx, "delivered_datetime"] = updated_delivery_time
+                            group.at[idx, "start_datetime"] = updated_mining_start_time
+        
+                    print(fr"Expit payload transactions updated for {agent}.")
+                
+                else:
+                    print(fr"Current block not found for {agent}. Original expit payload transactions will be executed for this agent.")
+                    block_row = None
+                    block_index = None
+
+                # Append the updated group
+                updated_groups.append(group)
+
+            # Concatenate all updated groups into one DataFrame
+            updated_transactions = pd.concat(updated_groups, ignore_index=True)
+            
+            return updated_transactions

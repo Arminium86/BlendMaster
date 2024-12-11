@@ -195,5 +195,5 @@ class GradeBlockData:
             "grade_si": self._grade_si,
             "grade_al": self._grade_al,
             "grade_p": self._grade_p,
-            "grade_mn": self._grade_mn,
+            "grade_mn": self._grade_mn
         }

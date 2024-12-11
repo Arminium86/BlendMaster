@@ -18,19 +18,22 @@ class BalanceTracker:
     def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
         """Update balance and grades after each optimization step."""
         
-        # Loop through decision point results
+        # Loop through user choice of decision point results and deplete balances
         for _, transaction in filtered_decision_point_results_to_user_choice.iterrows():
             name = transaction["source"]
             
             if self.balance[name] != 0:
                 self.balance[name] -= transaction["source_actual_tonnes"]
 
-        # Loop through expit payload transactions
+        # Loop through expit payload transactions and build stockpiles
         for _, transaction in expit_payload_transactions.iterrows():
             name = transaction["destination"].replace("Stockpiles/", "")
             delivered_datetime = transaction["delivered_datetime"]
             payload = transaction["payload"]
-            
+            agent = transaction["agent"]
+            source = transaction["source"]
+            mining_start_datetime = transaction["start_datetime"]
+
             # Check if the transaction is within the time range
             if steady_state_start_time <= delivered_datetime < steady_state_end_time:
                 if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
@@ -65,8 +68,11 @@ class BalanceTracker:
                     # Add the transaction to the tracked list
                     self.build_report.append({
                         "steady_state_number": steady_state_tracker,
-                        "start_datetime": steady_state_start_time,
-                        "end_datetime": steady_state_end_time,
+                        "steady_state_start_datetime": steady_state_start_time,
+                        "steady_state_end_datetime": steady_state_end_time,
+                        "agent": agent,
+                        "mining_start_datetime": mining_start_datetime,
+                        "source": source,
                         "stockpile": name,
                         "payload": payload,
                         "delivered_datetime": delivered_datetime,
@@ -93,4 +99,4 @@ class BalanceTracker:
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""
         return self.balance.get(name, 0)
-
+    
