@@ -75,11 +75,11 @@ class EventPoolGenerator:
 
         return events
 
-    def update_pool_participants(self, decision_point_results, initial_event_pool: List[EventData]):
+    def update_pool_participants(self, decision_point_results: pd.DataFrame, initial_event_pool: List[EventData]):
         """Updates initial event pool based on stockpile state, reclaim threshold and whether an event occurred in a previous iteration of a steady state (until there is no events left). See method definition."""
         events = []
 
-        if decision_point_results is None:
+        if decision_point_results.empty:
 
             for event in initial_event_pool:
             
@@ -99,7 +99,8 @@ class EventPoolGenerator:
                 else: events.append(event)
             
         # Exclude events if they are present in decision point results 
-        elif decision_point_results is not None:
+        elif (decision_point_results["source_actual_tonnes"] > 0).any():
+            
             decision_point_results["source_actual_tonnes"] = pd.to_numeric(
             decision_point_results["source_actual_tonnes"], errors='coerce'
             )

@@ -30,9 +30,9 @@ class CaseModeller:
         self.blend_option = 1
         self.user_blend_choice = None
         self.blend_ID = 2
-        self.decision_point_results = None
-        self.decision_point_results_to_display = None
-        self.decision_point_results_to_display_filtered_to_current_blend_choice = None
+        self.decision_point_results = pd.DataFrame()
+        self.decision_point_results_to_display = pd.DataFrame()
+        self.decision_point_results_to_display_filtered_to_current_blend_choice = pd.DataFrame()
         self.user_interaction_mode = None
 
     def run(self):
@@ -82,7 +82,7 @@ class CaseModeller:
                     continue
                 else:
                     store_blend_option = self.blend_option
-                    self.blend_option = "Exclude"
+                    self.blend_option = "No blend"
                     self.record_results(result)
                     self.blend_option = store_blend_option
                     events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
@@ -101,120 +101,145 @@ class CaseModeller:
                 else: self.blend_option += 1
                 continue
 
-        
-        # Manage user interaction
-        # Ensure numeric columns for comparison
-        self.decision_point_results["source_actual_tonnes"] = pd.to_numeric(
-            self.decision_point_results["source_actual_tonnes"], errors='coerce'
-        )
-        self.decision_point_results["crusher_actual_tonnes"] = pd.to_numeric(
-            self.decision_point_results["crusher_actual_tonnes"], errors='coerce'
-        )
-        
-        # Filter results to display
-        self.decision_point_results_to_display = self.decision_point_results.loc[
-            (
-                (self.decision_point_results["source_actual_tonnes"] != 0) & 
-                (self.decision_point_results["crusher_actual_tonnes"] != 0)
+        # Check if there is any decision point results
+        if (self.decision_point_results["source_actual_tonnes"] > 0).any():
+
+            # Manage user interaction
+            # Ensure numeric columns for comparison
+            self.decision_point_results["source_actual_tonnes"] = pd.to_numeric(
+                self.decision_point_results["source_actual_tonnes"], errors='coerce'
             )
-        ]
-
-        # Filter results to previous blend choice to compare results between iterations
-        self.decision_point_results_to_display_filtered_to_current_blend_choice = self.decision_point_results.loc[
-            (
-                (self.decision_point_results["source_actual_tonnes"] != 0) & 
-                (self.decision_point_results["crusher_actual_tonnes"] != 0) &
-                (self.decision_point_results["blend_option"] == self.user_blend_choice)
-
+            self.decision_point_results["crusher_actual_tonnes"] = pd.to_numeric(
+                self.decision_point_results["crusher_actual_tonnes"], errors='coerce'
             )
-        ]
-
-        # Prompt user for interaction mode
-        if self.user_interaction_mode == None:
-            self.user_interaction_mode = input("\033[92mEnter 1 to automatically select the top blend option in every steady state or 2 to select manually: \033[0m")
-
-
-        # Cast user choice to appropriate type
-        try:
-            self.user_interaction_mode = int(self.user_interaction_mode)
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-            return
-        
-        if self.steady_state_tracker != 0:
-
-            # Compare the sources for a blend option between two iteration and avoid user interaction if no change
-            current_filtered_sources =  self.decision_point_results_to_display_filtered_to_current_blend_choice["source"]
-            previous_filtered_sources = self.results[
-                (self.results["blend_option"] == self.user_blend_choice) &
-                (self.results["steady_state_number"] == self.steady_state_tracker - 1)
-            ]["source"]
-
-        else: pass
-        
-        if self.user_interaction_mode == 1:
             
-            self.user_blend_choice = 1
+            # Filter results to display
+            self.decision_point_results_to_display = self.decision_point_results.loc[
+                (
+                    (self.decision_point_results["source_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["crusher_actual_tonnes"] != 0)
+                )
+            ]
 
+            # Filter results to previous blend choice to compare results between iterations
+            self.decision_point_results_to_display_filtered_to_current_blend_choice = self.decision_point_results.loc[
+                (
+                    (self.decision_point_results["source_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["crusher_actual_tonnes"] != 0) &
+                    (self.decision_point_results["blend_option"] == self.user_blend_choice)
+
+                )
+            ]
+
+            # Prompt user for interaction mode
+            if self.user_interaction_mode == None:
+                self.user_interaction_mode = input("\033[92mEnter 1 to automatically select the top blend option in every steady state or 2 to select manually: \033[0m")
+
+
+            # Cast user choice to appropriate type
+            try:
+                self.user_interaction_mode = int(self.user_interaction_mode)
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+                return
+            
             if self.steady_state_tracker != 0:
+
+                # Compare the sources for a blend option between two iteration and avoid user interaction if no change
+                current_filtered_sources =  self.decision_point_results_to_display_filtered_to_current_blend_choice["source"]
+                previous_filtered_sources = self.results[
+                    (self.results["blend_option"] == self.user_blend_choice) &
+                    (self.results["steady_state_number"] == self.steady_state_tracker - 1)
+                ]["source"]
+
+            else: pass
+            
+            if self.user_interaction_mode == 1:
+                
+                self.user_blend_choice = 1
+
+                if self.steady_state_tracker != 0:
+                    if not list(current_filtered_sources) == list(previous_filtered_sources):
+                        self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
+                        self.blend_ID += 1
+                    else: pass
+                else: pass
+
+            elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
+                
                 if not list(current_filtered_sources) == list(previous_filtered_sources):
+                    print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
+                    print("\033[92mBlend fully depleted.\033[0m")
+                    self.user_blend_choice = input("\033[95mChoose new blend: \033[0m")
                     self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
                     self.blend_ID += 1
-                else: pass
-            else: pass
-
-        elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
+                    # Cast user choice to appropriate type
+                    try:
+                        self.user_blend_choice = int(self.user_blend_choice)
+                    except ValueError:
+                        print("Invalid input. Please enter a number.")
+                        return
+                else:
+                    pass
             
-            if not list(current_filtered_sources) == list(previous_filtered_sources):
+            elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
                 print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
-                print("\033[92mBlend fully depleted.\033[0m")
-                self.user_blend_choice = input("\033[95mChoose new blend: \033[0m")
-                self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
-                self.blend_ID += 1
+                self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
                 # Cast user choice to appropriate type
                 try:
                     self.user_blend_choice = int(self.user_blend_choice)
                 except ValueError:
                     print("Invalid input. Please enter a number.")
                     return
-            else:
-                pass
-        
-        elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
-            print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
-            self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
-            # Cast user choice to appropriate type
-            try:
-                self.user_blend_choice = int(self.user_blend_choice)
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-                return
-        
-        # Filter results based on user choice
-        filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
-            (
-                (self.decision_point_results["source_actual_tonnes"] != 0) & 
-                (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
-                (self.decision_point_results["blend_option"] == self.user_blend_choice)
-            ) | 
-                (self.decision_point_results["blend_option"] == "No blend found")
-                |
-                (self.decision_point_results["blend_option"] == "Rare case")
-            ]
-        
-        self.append_results(filtered_decision_point_results_to_user_choice)
+            
+            # Filter results based on user choice
+            filtered_decision_point_results_to_user_choice = self.decision_point_results.loc[
+                (
+                    (self.decision_point_results["source_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["crusher_actual_tonnes"] != 0) & 
+                    (self.decision_point_results["blend_option"] == self.user_blend_choice)
+                ) | 
+                    (self.decision_point_results["blend_option"] == "No blend found")
+                    |
+                    (self.decision_point_results["blend_option"] == "Rare case")
+                ]
+            
+            self.append_results(filtered_decision_point_results_to_user_choice)
 
-        # Reset for next cycle
-        self.decision_point_results = None
+            # Prepare for next cycle
+            
+            steady_state_start_time = self.current_time
+            steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+            
+            self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
+                                                self.expit_payload_transactions,
+                                                steady_state_start_time,
+                                                steady_state_end_time,
+                                                self.steady_state_tracker
+                                                )
+            self.advance_time()
+            
+            self.decision_point_results = pd.DataFrame()
+            self.blend_option = 1
         
-        self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
-                                            self.expit_payload_transactions, 
-                                            self.current_time,
-                                            self.current_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"])),
-                                            self.steady_state_tracker
-                                            )
-        self.advance_time()
-        self.blend_option = 1
+        else:
+            self.append_results(self.decision_point_results)
+
+            # Prepare for next cycle (no results)
+            
+            steady_state_start_time = self.current_time
+            steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+
+            self.balance_tracker.update_balances(self.decision_point_results, 
+                                                self.expit_payload_transactions,
+                                                steady_state_start_time,
+                                                steady_state_end_time,
+                                                self.steady_state_tracker
+                                                )
+            self.advance_time()
+            
+            self.decision_point_results = pd.DataFrame()
+            self.blend_option = 1
     
     def advance_time(self):
         """Advance current time and update period if needed."""
