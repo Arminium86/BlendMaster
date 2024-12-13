@@ -1,9 +1,9 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
 # Import necessary classes from your modules
 from classes.CaseModeller import CaseModeller
-from execute.DataLoader import DataLoader
-from execute.PeriodManager import PeriodManager
-from execute.ExpitDataHandler import ExpitDataHandler
+from classes.DataLoader import DataLoader
+from classes.PeriodManager import PeriodManager
+from classes.ExpitDataHandler import ExpitDataHandler
 from datetime import datetime
 
 # Initialize periods
