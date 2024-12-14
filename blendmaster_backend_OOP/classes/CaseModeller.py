@@ -6,6 +6,7 @@ from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.CrusherTarget import CrusherTarget
+from database.SQLiteDatabase import DatabaseManager
 import pandas as pd
 from datetime import timedelta
 from typing import List
@@ -34,6 +35,7 @@ class CaseModeller:
         self.decision_point_results_to_display = pd.DataFrame()
         self.decision_point_results_to_display_filtered_to_current_blend_choice = pd.DataFrame()
         self.user_interaction_mode = None
+        self.database_manager = DatabaseManager()
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -368,14 +370,20 @@ class CaseModeller:
                 (self.results["crusher_actual_tonnes"] == 0)
             )
         ]
+
         self.results.to_excel(filename, index=False)
         print(f"All results written to {filename}")
+
+        self.database_manager.write_optimised_blend_report_to_database(self.results)
 
     def save_build_report(self, filename):
         """Save stockpile build report to an Excel file."""
         self.build_report = self.balance_tracker.get_build_transactions()
+
         self.build_report.to_excel(filename, index=False)
         print(f"All results written to {filename}")
+
+        self.database_manager.write_build_report_to_database(self.build_report)
        
     def calculate_initial_steady_state_duration(self):
         """Calculate initial steady state duration based on the current time and periods."""

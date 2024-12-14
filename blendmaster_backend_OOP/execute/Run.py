@@ -4,6 +4,7 @@ from classes.CaseModeller import CaseModeller
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
+from database.SQLiteDatabase import DatabaseManager
 from datetime import datetime
 
 # Initialize periods
@@ -22,14 +23,20 @@ try:
 except ValueError:
     print("Invalid input. Please enter a number.")
 
+database_manager = DatabaseManager()
+
 if user_interaction_mode == 2:
     #now = datetime.now()
     now = datetime(2024, 11, 28, 6, 0, 0)
     expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, now)
     expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\expit_payload_transactions.xlsx")
+    expit_payload_transactions_copy = expit_payload_transactions.copy()
+    database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
 elif user_interaction_mode == 1:
     expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_backend_OOP\output\expit_payload_transactions.xlsx")
+    expit_payload_transactions_copy = expit_payload_transactions.copy()
+    database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
 else: print("Invalid input. Please enter a number.")
 
