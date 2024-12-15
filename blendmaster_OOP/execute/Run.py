@@ -5,7 +5,13 @@ from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
 from database.SQLiteDatabase import DatabaseManager
+from execute.Requirements import Requirements
 from datetime import datetime
+
+
+# Install required libraries
+requirements = Requirements()
+requirements.install_requirements()
 
 # Initialize periods
 periods = PeriodManager().calculate_periods()
