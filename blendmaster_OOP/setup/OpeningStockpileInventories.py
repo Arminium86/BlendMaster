@@ -1,0 +1,56 @@
+import snowflake.connector
+
+class OpeningStockpileInventories:
+
+    # Function to fetch query result and return dictionary
+    def call_opening_stockpile_inventories(self, hub, area_name):
+        # Snowflake connection
+        conn = snowflake.connector.connect(
+            user = 'armin.sabet@fortescue.com',
+            account = 'wn74261.ap-southeast-2',
+            warehouse = 'WH_EDW_SELFSERVICE',
+            database = 'AA_OPERATIONS_MANAGEMENT',
+            authenticator='externalbrowser',
+            role = 'EDW_ARMIN.SABET',
+            login_timeout= 60, # Increase login timeout
+            network_timeout= 300  # Increase network timeout
+        )
+
+        # SQL Query
+        query = f"""
+        SELECT HUB, AREANAME, STOCKPILENAME, BALANCEWMT, FE_INSITU_WTAVG, SIO2_INSITU_WTAVG, AL2O3_INSITU_WTAVG, P_INSITU_WTAVG, MN_INSITU_WTAVG
+        FROM (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY STOCKPILENAME ORDER BY TRANSACTIONDATETIME DESC) AS rn
+            FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS
+        ) ranked
+        WHERE rn = 1 
+        AND TRANSACTIONDIRECTION IN ('Stack', 'Reclaim') 
+        AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT')) 
+        AND HUB = '{hub}'
+        AND AREANAME = '{area_name}'
+        ORDER BY 
+            HUB,
+            STOCKPILENAME,
+            TRANSACTIONDATETIME
+        """
+
+        try:
+            # Execute query
+            cursor = conn.cursor()
+            cursor.execute(query)
+            result = cursor.fetchall()
+
+            # Fetch column names
+            columns = [col[0] for col in cursor.description]
+
+            # Convert to dictionary with STOCKPILENAME as the key
+            data_dict = {
+                row[2]: dict(zip(columns, row))
+                for row in result
+            }
+
+            return data_dict
+        finally:
+            # Close the connection
+            conn.close()

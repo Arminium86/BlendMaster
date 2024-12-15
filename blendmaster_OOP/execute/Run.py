@@ -6,8 +6,16 @@ from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
+from GUI.GUI import UserInputs
+import sys
+from PyQt5.QtWidgets import QApplication
 from datetime import datetime
 
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = UserInputs()  # Create an instance of the imported class
+    window.show()              # Show the GUI
+    sys.exit(app.exec_())      # Run the event loop
 
 # Install required libraries
 requirements = Requirements()
