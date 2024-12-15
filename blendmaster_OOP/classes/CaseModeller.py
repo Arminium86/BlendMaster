@@ -44,9 +44,9 @@ class CaseModeller:
             self.run_optimization_step()
             self.steady_state_tracker += 1
         # Save blend results to an Excel file at the end
-        self.save_optimised_blend_report(fr"C:\BlendMaster\blendmaster_backend_OOP\output\optimised_blend_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
+        self.save_optimised_blend_report(fr"C:\BlendMaster\blendmaster_OOP\output\optimised_blend_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
         # Save stockpile build report to an Excel file at the end
-        self.save_build_report(fr"C:\BlendMaster\blendmaster_backend_OOP\output\build_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
+        self.save_build_report(fr"C:\BlendMaster\blendmaster_OOP\output\build_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""

@@ -5,7 +5,7 @@ class DatabaseManager:
 
     def write_optimised_blend_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster_backend.db'
+        database_name = 'blendmaster.db'
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -84,7 +84,7 @@ class DatabaseManager:
 
     def write_build_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster_backend.db'
+        database_name = 'blendmaster.db'
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -146,7 +146,7 @@ class DatabaseManager:
 
     def write_expit_payload_transactions_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster_backend.db'
+        database_name = 'blendmaster.db'
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
