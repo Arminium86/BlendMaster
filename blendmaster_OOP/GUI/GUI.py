@@ -1,7 +1,7 @@
 import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel
 )
 from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtCore import Qt
@@ -57,25 +57,67 @@ class UserInputs(QMainWindow):
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
-        self.tabs.addTab(self.site_config_tab, "Site Configuration")
+        self.tabs.addTab(self.site_config_tab, "Site Selection")
         layout = QFormLayout(self.site_config_tab)
 
-        # Input fields for Hub and Mine
-        self.hub_input = QLineEdit()
-        self.mine_input = QLineEdit()
+        # Dropdown lists for Hub and Mine
+        self.hub_input = QComboBox()
+        self.hub_input.addItems(["Chichester Hub", "Western Hub", "Solomon Hub", "Iron Bridge Hub"])
+        self.mine_input = QComboBox()
 
-        layout.addRow("Hub:", self.hub_input)
-        layout.addRow("Mine:", self.mine_input)
+        # Adjust size of dropdowns
+        self.hub_input.setFixedWidth(150)
+        self.mine_input.setFixedWidth(150)
 
-        # Submit Button
+        # Create bold labels for Hub and Mine
+        hub_label = QLabel("Hub:")
+        hub_label.setStyleSheet("font-weight: bold;")
+        mine_label = QLabel("Mine:")
+        mine_label.setStyleSheet("font-weight: bold;")
+
+        layout.addRow(hub_label, self.hub_input)
+        layout.addRow(mine_label, self.mine_input)
+
+        # Connect hub dropdown change to update mine dropdown
+        self.hub_input.currentIndexChanged.connect(self.update_mine_dropdown)
+
+        # Submit Button with smaller size and alignment
         submit_button = QPushButton("Submit")
+        submit_button.setFixedWidth(100)
         submit_button.clicked.connect(self.handle_site_config_submit)
-        layout.addWidget(submit_button)
+
+        # Create a horizontal layout for the button
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(submit_button)
+        button_layout.addStretch()  # Push button to the left
+
+        # Add button layout to the main layout
+        layout.addRow(button_layout)
+
+    def update_mine_dropdown(self):
+        """Update the Mine dropdown based on the selected Hub."""
+        hub_selection = self.hub_input.currentText()
+
+        # Clear current items in the Mine dropdown
+        self.mine_input.clear()
+
+        # Populate Mine dropdown based on Hub selection
+        if hub_selection == "Chichester Hub":
+            self.mine_input.addItems(["CC", "CB"])
+        elif hub_selection == "Iron Bridge Hub":
+            self.mine_input.addItems(["IB"])
+        elif hub_selection == "Western Hub":
+            self.mine_input.addItems(["EW"])
+        elif hub_selection == "Solomon Hub":
+            self.mine_input.addItems(["KV", "FT"])
+        else:
+            # Default: No selection or unknown hub
+            self.mine_input.addItems([])
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
-        self.hub_input = self.hub_input.text().strip()
-        self.mine_input = self.mine_input.text().strip()
+        self.hub_input = self.hub_input.currentText().strip()
+        self.mine_input = self.mine_input.currentText().strip()
 
         if self.hub_input and self.mine_input:
             print(f"Site Configuration - Hub: {self.hub_input}, Mine: {self.mine_input}")
@@ -88,8 +130,140 @@ class UserInputs(QMainWindow):
         else:
             print("Error: Please fill in both Hub and Mine.")
 
+    def fetch_stockpile_data(self):
+        """Fetch stockpile data from OpeningStockpileInventories."""
+        hub_input = self.hub_input
+        mine_input = self.mine_input
+        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input)
+
+        self.stockpile_data_keys = self.stockpile_data.keys()
+    
+    def setup_stockpile_table(self):
+        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+        # Define Headers
+        headers = [
+            "Stockpile Name",
+            "Balance (WMT)",
+            "Grade Fe (%)",
+            "Grade Si (%)",
+            "Grade Al (%)",
+            "Grade P (%)",
+            "Grade Mn (%)",
+            "Reclaim Threshold (WMT)"
+        ]
+        self.stockpile_table.setColumnCount(len(headers))
+        self.stockpile_table.setHorizontalHeaderLabels(headers)
+        self.stockpile_table.verticalHeader().setVisible(False)
+
+        # Bold headers
+        header_font = self.stockpile_table.horizontalHeader().font()
+        header_font.setBold(True)
+        self.stockpile_table.horizontalHeader().setFont(header_font)
+
+        # Set Table Dimensions
+        self.stockpile_table.setRowCount(len(self.stockpile_data))
+
+        # Populate Stockpile Data
+        for row_idx, (stockpile_name, attributes) in enumerate(self.stockpile_data.items()):
+            # Stockpile Name
+            stockpile_item = QTableWidgetItem(str(stockpile_name))
+            stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+            self.stockpile_table.setItem(row_idx, 0, stockpile_item)
+
+            # Attributes (Balance and Grades)
+            keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
+            for col_idx, key in enumerate(keys, start=1):
+                value = attributes.get(key, 0)  # Default to 0 if key is missing
+
+                if key == "BALANCE":
+                    # Round balance and apply conditional formatting
+                    value = round(float(value))
+                    balance_item = QTableWidgetItem(str(value))
+                    balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                    if value < 0:
+                        balance_item.setForeground(QColor("red"))
+                        font = balance_item.font()
+                        font.setBold(True)
+                        balance_item.setFont(font)
+                    self.stockpile_table.setItem(row_idx, col_idx, balance_item)
+                else:
+                    # Round grade values to 2 decimal points
+                    value = round(float(value), 2) if value else 0
+                    grade_item = QTableWidgetItem(f"{value:.2f}")
+                    grade_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                    self.stockpile_table.setItem(row_idx, col_idx, grade_item)
+
+            # Reclaim Threshold (Editable)
+            reclaim_value = attributes.get("reclaim_threshold", 0)
+            reclaim_value = round(float(reclaim_value))  # Ensure reclaim threshold is rounded
+            reclaim_item = QTableWidgetItem(str(reclaim_value))
+            self.stockpile_table.setItem(row_idx, len(headers) - 1, reclaim_item)
+
+        # Resize Columns
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.stockpile_table.setEditTriggers(self.stockpile_table.AllEditTriggers)
+
+        # Connect cellChanged signal to a slot for live formatting
+        self.stockpile_table.cellChanged.connect(self.handle_cell_change)
+
+        # Add Submit Button at the Bottom Left
+        submit_button = QPushButton("Submit Reclaim Thresholds")
+        submit_button.clicked.connect(self.store_reclaim_thresholds)
+
+        # Align button to the bottom-left using layout
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(submit_button)
+        button_layout.addStretch()  # Push the button to the left
+
+        self.stockpile_tab_layout.addLayout(button_layout)
+
+    def handle_cell_change(self, row, column):
+        """Handle live formatting for the Reclaim Threshold column."""
+        headers = [
+            "Stockpile Name",
+            "Balance (WMT)",
+            "Grade Fe",
+            "Grade Si",
+            "Grade Al",
+            "Grade P",
+            "Grade Mn",
+            "Reclaim Threshold"
+        ]
+
+        if column == headers.index("Reclaim Threshold"):  # Check if the changed cell is in the Reclaim Threshold column
+            reclaim_item = self.stockpile_table.item(row, column)
+            balance_item = self.stockpile_table.item(row, headers.index("Balance (WMT)"))
+
+            if reclaim_item and balance_item:
+                try:
+                    reclaim_value = float(reclaim_item.text())
+                    balance_value = float(balance_item.text())
+
+                    # Apply conditional formatting
+                    if reclaim_value <= balance_value:
+                        reclaim_item.setForeground(QColor("green"))
+                    else:
+                        reclaim_item.setForeground(QColor("red"))
+                except ValueError:
+                    # Ignore invalid inputs
+                    reclaim_item.setForeground(QColor("black"))
+
+
+    def store_reclaim_thresholds(self):
+        """Store reclaim thresholds entered by the user."""
+        for row in range(self.stockpile_table.rowCount()):
+            stockpile_name = self.stockpile_table.item(row, 0).text()
+            reclaim_threshold = self.stockpile_table.item(row, 7).text()  # Assuming last column index is 7
+            self.stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+
+
+        # Enable the next tab (Calendar Tab)
+        self.setup_calendar()
+        self.tabs.setTabEnabled(2, True)
+        self.tabs.setCurrentIndex(2)  # Switch to Calendar tab
+    
     def setup_calendar(self):
-        """Setup for the main table (existing functionality)."""
+        """Setup for the main table with a Submit button."""
         headers = ["", "Preplan", "Period_1", "Period_2"]  # Column headers
         rows = []
 
@@ -140,7 +314,7 @@ class UserInputs(QMainWindow):
             "red": QColor(255, 200, 200),
         }
 
-        # Set Table Dimensions
+        # Configure the main table
         self.main_table.setColumnCount(len(headers))
         self.main_table.setRowCount(len(rows))
         self.main_table.setHorizontalHeaderLabels(headers)
@@ -174,70 +348,64 @@ class UserInputs(QMainWindow):
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.main_table.setEditTriggers(self.main_table.AllEditTriggers)
 
-    def fetch_stockpile_data(self):
-        """Fetch stockpile data from OpeningStockpileInventories."""
-        hub_input = self.hub_input
-        mine_input = self.mine_input
-        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input)
-        self.stockpile_data_keys = self.stockpile_data.keys()
+        # Add Submit Button at Bottom-Right
+        submit_button = QPushButton("Submit")
+        submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
+
+        # Align button to bottom-right
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(submit_button) # Add the button first to keep it aligned to the left
+        button_layout.addStretch()  # Push any other content (if any) to the right
+
+        # Add table and button layout to the main tab layout
+        self.main_tab_layout.addLayout(button_layout)
+
     
-    def setup_stockpile_table(self):
-        """Setup for the stockpile table in the new Stockpiles tab."""
-        # Define Headers
-        headers = ["Stockpile Name"] + list(next(iter(self.stockpile_data.values())).keys()) + ["Reclaim Threshold"]
-        self.stockpile_table.setColumnCount(len(headers))
-        self.stockpile_table.setHorizontalHeaderLabels(headers)
-        self.stockpile_table.verticalHeader().setVisible(False)
+    def store_calendar_inputs(self):
+        """Extract and store user entries from the table into a structured format."""
+        self.calendar_inputs = {}
 
-        # Set Table Dimensions
-        self.stockpile_table.setRowCount(len(self.stockpile_data))
+        # Capture column headers for periods
+        headers = [self.main_table.horizontalHeaderItem(col).text().strip() for col in range(1, self.main_table.columnCount())]
 
-        # Populate Stockpile Data
-        for row_idx, (stockpile_name, attributes) in enumerate(self.stockpile_data.items()):
-            # Stockpile Name
-            stockpile_item = QTableWidgetItem(stockpile_name)
-            stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
-            self.stockpile_table.setItem(row_idx, 0, stockpile_item)
+        for row_idx in range(self.main_table.rowCount()):
+            # Get the caption for the row (e.g., "Crusher", "  Rate")
+            caption_item = self.main_table.item(row_idx, 0)
+            if not caption_item:
+                continue  # Skip if no caption exists (shouldn't happen)
 
-            # Attributes
-            for col_idx, (key, value) in enumerate(attributes.items(), start=1):
-                attr_item = QTableWidgetItem(str(value))
-                attr_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
-                self.stockpile_table.setItem(row_idx, col_idx, attr_item)
+            caption = caption_item.text().strip()
 
-            # Reclaim Threshold (Editable)
-            reclaim_item = QTableWidgetItem("")
-            self.stockpile_table.setItem(row_idx, len(headers) - 1, reclaim_item)
+            # Identify the parent and child relationships
+            if not (caption.startswith("  ") or caption.startswith("    ") or caption.startswith("      ")):  # Top-level item
+                current_parent = caption
+                if current_parent not in self.calendar_inputs:
+                    self.calendar_inputs[current_parent] = {}
+            else:  # Child-level item
+                sub_caption = caption.strip()
+                if current_parent not in self.calendar_inputs:
+                    self.calendar_inputs[current_parent] = {}
 
-        # Resize Columns
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.stockpile_table.setEditTriggers(self.stockpile_table.AllEditTriggers)
+                # Retrieve the values for Preplan, Period_1, Period_2, etc.
+                sub_data = {}
+                for col_idx, header in enumerate(headers, start=1):
+                    item = self.main_table.item(row_idx, col_idx)
+                    value = item.text().strip() if item and item.text().strip() else None  # Get the value
+                    sub_data[header] = value
 
-        # Add Submit Button
-        submit_button = QPushButton("Submit Reclaim Thresholds")
-        submit_button.clicked.connect(self.store_reclaim_thresholds)
-        self.stockpile_tab_layout.addWidget(submit_button)
+                self.calendar_inputs[current_parent][sub_caption] = sub_data
 
-    def store_reclaim_thresholds(self):
-        """Retrieve and store reclaim threshold values."""
-        thresholds = {}
-        for row_idx in range(self.stockpile_table.rowCount()):
-            stockpile_name = self.stockpile_table.item(row_idx, 0).text()
-            reclaim_threshold_item = self.stockpile_table.item(row_idx, self.stockpile_table.columnCount() - 1)
-            reclaim_threshold = reclaim_threshold_item.text() if reclaim_threshold_item else ""
-            
-            # Validate and store reclaim threshold
-            if reclaim_threshold.strip():  # Ensure it's not empty
-                try:
-                    thresholds[stockpile_name] = float(reclaim_threshold)  # Convert to float for numerical use
-                except ValueError:
-                    print(f"Invalid reclaim threshold for {stockpile_name}: '{reclaim_threshold}' (not a number)")
-            else:
-                print(f"No reclaim threshold entered for {stockpile_name}")
+        # Example output of the extracted data
+        # {
+        #     "Crusher": {
+        #         "Rate": {
+        #             "Preplan": "value",
+        #             "Period_1": "value",
+        #             "Period_2": "value"
+        #         },
+        #         ...
+        #     },
+        #     ...
+        # }
+        return self.calendar_inputs
 
-        print("Reclaim Thresholds Stored:", thresholds)
-
-        # Enable the next tab (Calendar Tab)
-        self.setup_calendar()
-        self.tabs.setTabEnabled(2, True)
-        self.tabs.setCurrentIndex(2)  # Switch to Calendar tab

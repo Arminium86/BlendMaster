@@ -6,19 +6,26 @@ class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name):
         # Snowflake connection
         conn = snowflake.connector.connect(
-            user = 'armin.sabet@fortescue.com',
-            account = 'wn74261.ap-southeast-2',
-            warehouse = 'WH_EDW_SELFSERVICE',
-            database = 'AA_OPERATIONS_MANAGEMENT',
+            user='armin.sabet@fortescue.com',
+            account='wn74261.ap-southeast-2',
+            warehouse='WH_EDW_SELFSERVICE',
+            database='AA_OPERATIONS_MANAGEMENT',
             authenticator='externalbrowser',
-            role = 'EDW_ARMIN.SABET',
-            login_timeout= 60, # Increase login timeout
-            network_timeout= 300  # Increase network timeout
+            role='EDW_ARMIN.SABET',
+            login_timeout=60,  # Increase login timeout
+            network_timeout=300  # Increase network timeout
         )
 
         # SQL Query
         query = f"""
-        SELECT HUB, AREANAME, STOCKPILENAME, BALANCEWMT, FE_INSITU_WTAVG, SIO2_INSITU_WTAVG, AL2O3_INSITU_WTAVG, P_INSITU_WTAVG, MN_INSITU_WTAVG
+        SELECT 
+        STOCKPILENAME AS name,
+        BALANCEWMT AS balance, 
+        FE_INSITU_WTAVG AS grade_fe, 
+        SIO2_INSITU_WTAVG AS grade_si, 
+        AL2O3_INSITU_WTAVG AS grade_al, 
+        P_INSITU_WTAVG AS grade_p, 
+        MN_INSITU_WTAVG AS grade_mn
         FROM (
             SELECT *,
                 ROW_NUMBER() OVER (PARTITION BY STOCKPILENAME ORDER BY TRANSACTIONDATETIME DESC) AS rn
@@ -46,7 +53,7 @@ class OpeningStockpileInventories:
 
             # Convert to dictionary with STOCKPILENAME as the key
             data_dict = {
-                row[2]: dict(zip(columns, row))
+                row[0]: dict(zip(columns, row))  # Use STOCKPILENAME as key (row[0])
                 for row in result
             }
 
@@ -54,3 +61,4 @@ class OpeningStockpileInventories:
         finally:
             # Close the connection
             conn.close()
+
