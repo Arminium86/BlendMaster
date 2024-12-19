@@ -46,13 +46,10 @@ class UserInputs(QMainWindow):
         # Main Table
         self.main_table = QTableWidget()
         self.main_tab_layout.addWidget(self.main_table)
-
-    
         
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
-
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -160,17 +157,23 @@ class UserInputs(QMainWindow):
         header_font.setBold(True)
         self.stockpile_table.horizontalHeader().setFont(header_font)
 
+        # Left-align the first header
+        header_item = self.stockpile_table.horizontalHeaderItem(0)
+        if header_item:
+            header_item.setTextAlignment(Qt.AlignLeft)
+
         # Set Table Dimensions
         self.stockpile_table.setRowCount(len(self.stockpile_data))
 
         # Populate Stockpile Data
         for row_idx, (stockpile_name, attributes) in enumerate(self.stockpile_data.items()):
-            # Stockpile Name
+            # Stockpile Name (Left-aligned)
             stockpile_item = QTableWidgetItem(str(stockpile_name))
             stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+            stockpile_item.setTextAlignment(Qt.AlignLeft)
             self.stockpile_table.setItem(row_idx, 0, stockpile_item)
 
-            # Attributes (Balance and Grades)
+            # Attributes (Balance and Grades, Center-aligned)
             keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
             for col_idx, key in enumerate(keys, start=1):
                 value = attributes.get(key, 0)  # Default to 0 if key is missing
@@ -180,6 +183,7 @@ class UserInputs(QMainWindow):
                     value = round(float(value))
                     balance_item = QTableWidgetItem(str(value))
                     balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                    balance_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     if value < 0:
                         balance_item.setForeground(QColor("red"))
                         font = balance_item.font()
@@ -191,12 +195,14 @@ class UserInputs(QMainWindow):
                     value = round(float(value), 2) if value else 0
                     grade_item = QTableWidgetItem(f"{value:.2f}")
                     grade_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                    grade_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, grade_item)
 
-            # Reclaim Threshold (Editable)
+            # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
             reclaim_value = round(float(reclaim_value))  # Ensure reclaim threshold is rounded
             reclaim_item = QTableWidgetItem(str(reclaim_value))
+            reclaim_item.setTextAlignment(Qt.AlignCenter)
             self.stockpile_table.setItem(row_idx, len(headers) - 1, reclaim_item)
 
         # Resize Columns
@@ -248,7 +254,6 @@ class UserInputs(QMainWindow):
                     # Ignore invalid inputs
                     reclaim_item.setForeground(QColor("black"))
 
-
     def store_reclaim_thresholds(self):
         """Store reclaim thresholds entered by the user."""
         for row in range(self.stockpile_table.rowCount()):
@@ -267,46 +272,47 @@ class UserInputs(QMainWindow):
         headers = ["", "Preplan", "Period_1", "Period_2"]  # Column headers
         rows = []
 
-        # Static Rows
+        # Static Rows with default values of 0
+
         rows.extend([
-            ("Reclaim Equipment", [False, False, False], "green"),
-            ("  Max Reclaim Rate", [True, True, True], "green"),
-            
-            ("Crusher", [False, False, False], "blue"),
-            ("  Rate", [True, True, True], "blue"),
-            
-            ("  Target", [False, False, False], "blue"),
-            ("    Fe", [False, False, False], "blue"),
-            ("      Min", [True, True, True], "blue"),
-            ("      Max", [True, True, True], "blue"),
+            ("Reclaim Equipment", [False, False, False], "green", ["", "", ""]),
+            ("  Max Reclaim Rate", [True, True, True], "green", ["1000", "1000", "1000"]),
 
-            ("    Si", [False, False, False], "blue"),
-            ("      Min", [True, True, True], "blue"),
-            ("      Max", [True, True, True], "blue"),
+            ("Crusher", [False, False, False], "blue", ["", "", ""]),
+            ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"]),
 
-            ("    Al", [False, False, False], "blue"),
-            ("      Min", [True, True, True], "blue"),
-            ("      Max", [True, True, True], "blue"),
+            ("  Target", [False, False, False], "blue", ["", "", ""]),
+            ("    Fe", [False, False, False], "blue", ["", "", ""]),
+            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
+            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
 
-            ("    P", [False, False, False], "blue"),
-            ("      Min", [True, True, True], "blue"),
-            ("      Max", [True, True, True], "blue"),
+            ("    Si", [False, False, False], "blue", ["", "", ""]),
+            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
+            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
 
-            ("    Mn", [False, False, False], "blue"),
-            ("      Min", [True, True, True], "blue"),
-            ("      Max", [True, True, True], "blue"),
+            ("    Al", [False, False, False], "blue", ["0", "0", "0"]),
+            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
+            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+
+            ("    P", [False, False, False], "blue", ["0", "0", "0"]),
+            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
+            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+
+            ("    Mn", [False, False, False], "blue", ["0", "0", "0"]),
+            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
+            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
         ])
-        
-        # Dynamically Add Stockpile Rows
-        rows.append(("Stockpiles", [False, False, False], "red"))
+
+        # Dynamically Add Stockpile Rows with default values
+        rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
 
         for stockpile in self.stockpile_data_keys:
-            rows.append((f"  {stockpile}", [False, False, False], "red"))
-            rows.append((f"    State", [True, True, True], "red"))
-            rows.append((f"    Maximum Quantity", [True, True, True], "red"))
-            rows.append((f"    Cost", [True, True, True], "red"))
-            rows.append((f"    Cash", [True, True, True], "red"))
-        
+            rows.append((f"  {stockpile}", [False, False, False], "red", ["", "", ""]))
+            rows.append((f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"]))
+            rows.append((f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"]))
+            rows.append((f"    Cost", [True, True, True], "red", ["0", "0", "0"]))
+            rows.append((f"    Cash", [True, True, True], "red", ["10", "10", "10"]))
+
         # Define Parent Colors
         parent_colors = {
             "green": QColor(200, 255, 200),
@@ -325,7 +331,7 @@ class UserInputs(QMainWindow):
         bold_font.setBold(True)
 
         # Populate Table
-        for row_idx, (caption, editables, color_group) in enumerate(rows):
+        for row_idx, (caption, editables, color_group, default_values) in enumerate(rows):
             # Caption Column
             item_caption = QTableWidgetItem(caption)
             item_caption.setFlags(Qt.ItemIsEnabled)  # Non-editable
@@ -333,16 +339,14 @@ class UserInputs(QMainWindow):
             item_caption.setBackground(QBrush(parent_colors[color_group]))  # Parent group color
             self.main_table.setItem(row_idx, 0, item_caption)
 
-            # Editable and Non-Editable Cells
-            for col_idx, is_editable in enumerate(editables, start=1):
-                if is_editable:
-                    item = QTableWidgetItem()
-                    self.main_table.setItem(row_idx, col_idx, item)
-                else:
-                    item = QTableWidgetItem("")
+            # Editable and Non-Editable Cells with Default Values
+            for col_idx, (is_editable, default_value) in enumerate(zip(editables, default_values), start=1):
+                item = QTableWidgetItem(str(default_value))
+                item.setTextAlignment(Qt.AlignCenter)  # Center align all values
+                if not is_editable:
                     item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     item.setBackground(QBrush(QColor(200, 200, 200)))  # Grey background
-                    self.main_table.setItem(row_idx, col_idx, item)
+                self.main_table.setItem(row_idx, col_idx, item)
 
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -354,19 +358,21 @@ class UserInputs(QMainWindow):
 
         # Align button to bottom-right
         button_layout = QHBoxLayout()
-        button_layout.addWidget(submit_button) # Add the button first to keep it aligned to the left
+        button_layout.addWidget(submit_button)  # Add the button first to keep it aligned to the left
         button_layout.addStretch()  # Push any other content (if any) to the right
 
         # Add table and button layout to the main tab layout
         self.main_tab_layout.addLayout(button_layout)
 
-    
     def store_calendar_inputs(self):
-        """Extract and store user entries from the table into a structured format."""
+        """Extract and store user entries from the table into a structured format with concatenated keys."""
         self.calendar_inputs = {}
 
         # Capture column headers for periods
         headers = [self.main_table.horizontalHeaderItem(col).text().strip() for col in range(1, self.main_table.columnCount())]
+
+        # A stack to track the current hierarchy
+        hierarchy = []
 
         for row_idx in range(self.main_table.rowCount()):
             # Get the caption for the row (e.g., "Crusher", "  Rate")
@@ -374,38 +380,30 @@ class UserInputs(QMainWindow):
             if not caption_item:
                 continue  # Skip if no caption exists (shouldn't happen)
 
-            caption = caption_item.text().strip()
+            caption = caption_item.text()
 
-            # Identify the parent and child relationships
-            if not (caption.startswith("  ") or caption.startswith("    ") or caption.startswith("      ")):  # Top-level item
-                current_parent = caption
-                if current_parent not in self.calendar_inputs:
-                    self.calendar_inputs[current_parent] = {}
-            else:  # Child-level item
-                sub_caption = caption.strip()
-                if current_parent not in self.calendar_inputs:
-                    self.calendar_inputs[current_parent] = {}
+            # Adjust hierarchy based on indentation
+            indent_level = (len(caption) - len(caption.lstrip()))/2
+            while len(hierarchy) > indent_level:
+                hierarchy.pop()
 
-                # Retrieve the values for Preplan, Period_1, Period_2, etc.
-                sub_data = {}
-                for col_idx, header in enumerate(headers, start=1):
-                    item = self.main_table.item(row_idx, col_idx)
-                    value = item.text().strip() if item and item.text().strip() else None  # Get the value
-                    sub_data[header] = value
+            # Add the current name to the hierarchy
+            current_name = caption.strip().replace(" ", "_").lower()
+            hierarchy.append(current_name)
 
-                self.calendar_inputs[current_parent][sub_caption] = sub_data
+            # Generate the full key by joining the hierarchy
+            full_key = "_".join(hierarchy)
 
-        # Example output of the extracted data
-        # {
-        #     "Crusher": {
-        #         "Rate": {
-        #             "Preplan": "value",
-        #             "Period_1": "value",
-        #             "Period_2": "value"
-        #         },
-        #         ...
-        #     },
-        #     ...
-        # }
-        return self.calendar_inputs
+            # Retrieve the values for Preplan, Period_1, Period_2, etc.
+            row_data = {}
+            for col_idx, header in enumerate(headers, start=1):
+                item = self.main_table.item(row_idx, col_idx)
+                value = item.text().strip() if item and item.text().strip() else None  # Get the value
+                row_data[header] = value
+
+            # Store the data in the dictionary
+            self.calendar_inputs[full_key] = row_data
+        
+
+
 
