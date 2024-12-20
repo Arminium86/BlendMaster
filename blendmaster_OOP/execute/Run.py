@@ -1,75 +1,68 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
-# Import necessary classes from your modules
-from classes.CaseModeller import CaseModeller
-from classes.DataLoader import DataLoader
-from classes.PeriodManager import PeriodManager
-from classes.ExpitDataHandler import ExpitDataHandler
-from database.SQLiteDatabase import DatabaseManager
-from execute.Requirements import Requirements
-from GUI.InitialiseGUI import UserInputs
-import sys
-from PyQt5.QtWidgets import QApplication
-from datetime import datetime
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = UserInputs()  # Create an instance of the imported class
-    window.show()              # Show the GUI
-    sys.exit(app.exec_())      # Run the event loop
 
 class Run:
-    # Install required libraries
-    requirements = Requirements()
-    requirements.install_requirements()
+    def execute(self):
+        # Install required libraries
+        from classes.CaseModeller import CaseModeller
+        from classes.DataLoader import DataLoader
+        from classes.PeriodManager import PeriodManager
+        from classes.ExpitDataHandler import ExpitDataHandler
+        from database.SQLiteDatabase import DatabaseManager
+        from execute.Requirements import Requirements
+        from datetime import datetime
 
-    # Initialize periods
-    periods = PeriodManager()
-    periods.calculate_periods()
+        requirements = Requirements()
+        requirements.install_requirements()
 
-    # Process APS expit data (mining.csv)
-    expit_data_handler = ExpitDataHandler(r"C:\BlendMaster\blendmaster_OOP\input\data.xlsx", "aps_transactions")
-    expit_payload_transactions = expit_data_handler.process_transactions()
+        # Initialize periods
+        periods = PeriodManager()
+        periods.calculate_periods()
 
-    # User interaction required to choose between original time and updated time methods
-    user_interaction_mode = input("\033[92mEnter 1 to execute original expit payload transactions or 2 to update transactions based on current time and dig block (this will account for load agent delays or breakdowns): \033[0m")
+        # Process APS expit data (mining.csv)
+        expit_data_handler = ExpitDataHandler(r"C:\BlendMaster\blendmaster_OOP\input\data.xlsx", "aps_transactions")
+        expit_payload_transactions = expit_data_handler.process_transactions()
 
-    # Cast user choice to appropriate type
-    try:
-        user_interaction_mode = int(user_interaction_mode)
-    except ValueError:
-        print("Invalid input. Please enter a number.")
+        # User interaction required to choose between original time and updated time methods
+        user_interaction_mode = input("\033[92mEnter 1 to execute original expit payload transactions or 2 to update transactions based on current time and dig block (this will account for load agent delays or breakdowns): \033[0m")
 
-    database_manager = DatabaseManager()
+        # Cast user choice to appropriate type
+        try:
+            user_interaction_mode = int(user_interaction_mode)
+        except ValueError:
+            print("Invalid input. Please enter a number.")
 
-    if user_interaction_mode == 2:
-        #now = datetime.now()
-        now = datetime(2024, 11, 28, 6, 0, 0)
-        expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, now)
-        expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
-        expit_payload_transactions_copy = expit_payload_transactions.copy()
-        database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
+        database_manager = DatabaseManager()
 
-    elif user_interaction_mode == 1:
-        expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
-        expit_payload_transactions_copy = expit_payload_transactions.copy()
-        database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
+        if user_interaction_mode == 2:
+            #now = datetime.now()
+            now = datetime(2024, 11, 28, 6, 0, 0)
+            expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, now)
+            expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
+            expit_payload_transactions_copy = expit_payload_transactions.copy()
+            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
-    else: print("Invalid input. Please enter a number.")
+        elif user_interaction_mode == 1:
+            expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
+            expit_payload_transactions_copy = expit_payload_transactions.copy()
+            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
-    # Load input data (this is combined user input and opening inventories)
-    input_data = DataLoader(r"C:\BlendMaster\blendmaster_OOP\input\data.xlsx", expit_payload_transactions)
+        else: 
+            print("Invalid input. Please enter a number.")
+            return  # Exit execution for invalid input
 
-    stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        # Load input data (this is combined user input and opening inventories)
+        input_data = DataLoader(r"C:\BlendMaster\blendmaster_OOP\input\data.xlsx", expit_payload_transactions)
 
+        stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
-    # Initialize and run CaseModeller
-    case_modeller = CaseModeller(
-        stockpiles=stockpile_data_objects,
-        grade_blocks=grade_block_data_objects,
-        equipment=equipment_data_objects,
-        crusher_targets=crusher_target_data,
-        expit_payload_transactions=expit_payload_transactions,
-        periods=periods
-    )
+        # Initialize and run CaseModeller
+        case_modeller = CaseModeller(
+            stockpiles=stockpile_data_objects,
+            grade_blocks=grade_block_data_objects,
+            equipment=equipment_data_objects,
+            crusher_targets=crusher_target_data,
+            expit_payload_transactions=expit_payload_transactions,
+            periods=periods
+        )
 
-    case_modeller.run()
+        case_modeller.run()
