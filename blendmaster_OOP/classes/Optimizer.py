@@ -220,7 +220,7 @@ class Optimizer:
         
         for event in event_pool:
             # Create the corresponding entry for b_ub for this event
-            b_ub_max_quantity.append(event.max_quantity / periods[f"{period_tracker}_duration"])
+            b_ub_max_quantity.append(event.max_quantity / periods.get_periods()[f"{period_tracker}_duration"])
 
         # Step 6: Run the optimization
         

@@ -7,19 +7,20 @@ from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.CrusherTarget import CrusherTarget
 from database.SQLiteDatabase import DatabaseManager
+from classes.PeriodManager import PeriodManager
 import pandas as pd
 from datetime import timedelta
 from typing import List
 
 class CaseModeller:
-    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods):
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods: PeriodManager , user_interaction_mode):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
         self.crusher_targets = crusher_targets
         self.periods = periods
-        self.current_time = periods["preplan_start"]
-        self.start_time = periods["preplan_start"]
+        self.current_time = periods.get_periods()["preplan_start"]
+        self.start_time = periods.get_periods()["preplan_start"]
         self.period_tracker = "preplan"
         self.balance_tracker = BalanceTracker(stockpiles, grade_blocks, self.period_tracker)
         self.expit_payload_transactions = expit_payload_transactions
@@ -34,12 +35,12 @@ class CaseModeller:
         self.decision_point_results = pd.DataFrame()
         self.decision_point_results_to_display = pd.DataFrame()
         self.decision_point_results_to_display_filtered_to_current_blend_choice = pd.DataFrame()
-        self.user_interaction_mode = None
+        self.user_interaction_mode = user_interaction_mode
         self.database_manager = DatabaseManager()
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
-        while self.current_time < self.periods["period_2_end"]:
+        while self.current_time < self.periods.get_periods()["period_2_end"]:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
             self.steady_state_tracker += 1
@@ -249,9 +250,9 @@ class CaseModeller:
         self.current_time += timedelta(hours=steady_state_duration)
 
         # Switch periods if needed
-        if self.current_time >= self.periods["preplan_end"] and self.period_tracker == "preplan":
+        if self.current_time >= self.periods.get_periods()["preplan_end"] and self.period_tracker == "preplan":
             self.period_tracker = "period_1"
-        elif self.current_time >= self.periods["period_1_end"] and self.period_tracker == "period_1":
+        elif self.current_time >= self.periods.get_periods()["period_1_end"] and self.period_tracker == "period_1":
             self.period_tracker = "period_2"
 
     def record_results(self, result):
@@ -387,11 +388,11 @@ class CaseModeller:
        
     def calculate_initial_steady_state_duration(self):
         """Calculate initial steady state duration based on the current time and periods."""
-        if self.current_time >= self.periods["preplan_start"] and self.current_time < self.periods["preplan_end"]: 
-            return (self.periods["preplan_end"] - self.current_time).total_seconds() / 3600
-        elif self.current_time >= self.periods["period_1_start"] and self.current_time < self.periods["period_1_end"]:
-            return (self.periods["period_1_end"] - self.current_time).total_seconds() / 3600
-        elif self.current_time >= self.periods["period_2_start"] and self.current_time < self.periods["period_2_end"]:
-            return (self.periods["period_2_end"] - self.current_time).total_seconds() / 3600
+        if self.current_time >= self.periods.get_periods()["preplan_start"] and self.current_time < self.periods.get_periods()["preplan_end"]: 
+            return (self.periods.get_periods()["preplan_end"] - self.current_time).total_seconds() / 3600
+        elif self.current_time >= self.periods.get_periods()["period_1_start"] and self.current_time < self.periods.get_periods()["period_1_end"]:
+            return (self.periods.get_periods()["period_1_end"] - self.current_time).total_seconds() / 3600
+        elif self.current_time >= self.periods.get_periods()["period_2_start"] and self.current_time < self.periods.get_periods()["period_2_end"]:
+            return (self.periods.get_periods()["period_2_end"] - self.current_time).total_seconds() / 3600
         else:
             return 0

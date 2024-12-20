@@ -1,12 +1,13 @@
 import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog
 )
 from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtCore import Qt
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
-
+from execute.Run import Run
+from datetime import datetime
 
 class UserInputs(QMainWindow):
     def __init__(self):
@@ -51,6 +52,9 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
 
+        # Initialise main program
+        self.run_program = Run()
+
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
@@ -78,7 +82,70 @@ class UserInputs(QMainWindow):
         # Connect hub dropdown change to update mine dropdown
         self.hub_input.currentIndexChanged.connect(self.update_mine_dropdown)
 
-        # Submit Button with smaller size and alignment
+        # --- Input 1: Time Starts At ---
+        time_label = QLabel("Time Starts At:")
+        time_label.setStyleSheet("font-weight: bold;")
+        self.time_mode = QComboBox()
+        self.time_mode.addItems(["Now", "Set Time"])
+        self.time_mode.setFixedWidth(150)
+
+        # DateTime selector (initially disabled)
+        self.start_time = QDateTimeEdit()
+        self.start_time.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.start_time.setFixedWidth(200)
+        self.start_time.setEnabled(False)
+
+        # Enable datetime input only if "Set Time" is selected
+        self.time_mode.currentIndexChanged.connect(
+            lambda: self.start_time.setEnabled(self.time_mode.currentIndex() == 1)
+        )
+
+        layout.addRow(time_label, self.time_mode)
+        layout.addRow(QLabel("Set Date & Time:"), self.start_time)
+
+        # --- Input 2: Expit Transactions ---
+        expit_label = QLabel("Expit Transactions:")
+        expit_label.setStyleSheet("font-weight: bold;")
+        self.expit_mode = QComboBox()
+        self.expit_mode.addItems(["Execute Original Expit Transactions", "Update Transactions Based on Current Time"])
+        self.expit_mode.setFixedWidth(300)
+
+        # Expit options are active only when time starts at "Now"
+        self.expit_mode.setEnabled(False)
+        self.time_mode.currentIndexChanged.connect(
+            lambda: self.expit_mode.setEnabled(self.time_mode.currentIndex() == 0)
+        )
+
+        layout.addRow(expit_label, self.expit_mode)
+
+        # --- Input 3: Select File ---
+        file_label = QLabel("Select File:")
+        file_label.setStyleSheet("font-weight: bold;")
+        self.file_path = QLineEdit()
+        self.file_path.setReadOnly(True)
+        self.file_path.setFixedWidth(400)
+
+        # Browse button
+        self.file_button = QPushButton("Browse")
+        self.file_button.setFixedWidth(100)
+        self.file_button.clicked.connect(self.browse_file)
+
+        file_layout = QHBoxLayout()
+        file_layout.addWidget(self.file_path)
+        file_layout.addWidget(self.file_button)
+
+        layout.addRow(file_label, file_layout)
+
+        # --- Input 4: Optimized Blend Choices ---
+        blend_label = QLabel("Optimized Blend Choices:")
+        blend_label.setStyleSheet("font-weight: bold;")
+        self.blend_input = QComboBox()
+        self.blend_input.addItems(["Select the Best Result Automatically", "Prompt User at Every Decision Point"])
+        self.blend_input.setFixedWidth(300)
+
+        layout.addRow(blend_label, self.blend_input)
+
+        # Submit Button
         submit_button = QPushButton("Submit")
         submit_button.setFixedWidth(100)
         submit_button.clicked.connect(self.handle_site_config_submit)
@@ -90,6 +157,12 @@ class UserInputs(QMainWindow):
 
         # Add button layout to the main layout
         layout.addRow(button_layout)
+
+    def browse_file(self):
+        """Browse to select a file."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "CSV Files (*.csv);;All Files (*)")
+        if file_path:
+            self.file_path.setText(file_path)
 
     def update_mine_dropdown(self):
         """Update the Mine dropdown based on the selected Hub."""
@@ -113,6 +186,24 @@ class UserInputs(QMainWindow):
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
+        self.time_mode = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
+        self.start_time = None
+        if self.time_mode == 2:  # If "Set Time" is selected
+           self.start_time = self.start_time.dateTime().toPyDateTime()
+
+        else: self.start_time = datetime.now()
+
+        self.expit_mode = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else None
+        self.file_path = self.file_path.text()
+        self.blend_input = self.blend_input.currentIndex() + 1  # Translate to 1 or 2
+
+        print("Time Mode:", self.time_mode )
+        print("Date/Time Value:", self.start_time)
+        print("Expit Mode:", self.expit_mode)
+        print("Selected File:", self.file_path)
+        print("Blend Choice:", self.blend_input)
+        QMessageBox.information(self, "Configuration Submitted", "Your configuration has been saved!")
+        
         self.hub_input = self.hub_input.currentText().strip()
         self.mine_input = self.mine_input.currentText().strip()
 
@@ -403,7 +494,11 @@ class UserInputs(QMainWindow):
 
             # Store the data in the dictionary
             self.calendar_inputs[full_key] = row_data
-        
+            self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_input)
 
-
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = UserInputs()  # Create an instance of the imported class
+    window.show()              # Show the GUI
+    sys.exit(app.exec_())      # Run the event loop
 

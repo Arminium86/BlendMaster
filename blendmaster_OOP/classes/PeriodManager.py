@@ -3,11 +3,12 @@
 from datetime import datetime, timedelta
 
 class PeriodManager:
-    @staticmethod
-    def calculate_periods():
-        #now = datetime.now()
-        now = datetime(2024, 11, 28, 6, 0, 0)  # Year, Month, Day, Hour, Minute, Second
-        
+    def __init__(self):
+        self.periods = {}
+
+    def calculate_periods(self, start_time):
+        now = start_time
+
         # Define next 6AM and 6PM
         if now.hour >= 6 and now.hour < 18: 
             next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
@@ -30,14 +31,17 @@ class PeriodManager:
         period_2_start = period_1_end
         period_2_end = period_2_start + timedelta(hours=12)
 
-        return {
+        self.periods = {
             "preplan_start": now,
             "preplan_end": preplan_end,
-            "preplan_duration" : (preplan_end - now).total_seconds() / 3600,
+            "preplan_duration": (preplan_end - now).total_seconds() / 3600,
             "period_1_start": period_1_start,
             "period_1_end": period_1_end,
             "period_1_duration": (period_1_end - period_1_start).total_seconds() / 3600,
             "period_2_start": period_2_start,
             "period_2_end": period_2_end,
-            "period_2_duration": (period_2_end - period_2_start).total_seconds() / 3600
+            "period_2_duration": (period_2_end - period_2_start).total_seconds() / 3600,
         }
+
+    def get_periods(self):
+        return self.periods
