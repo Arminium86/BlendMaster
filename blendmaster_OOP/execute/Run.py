@@ -1,7 +1,7 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
 
 class Run:
-    def execute(self, start_time, expit_mode, file_path, blend_mode):
+    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs):
         # Install required libraries
         from classes.CaseModeller import CaseModeller
         from classes.DataLoader import DataLoader
@@ -9,7 +9,6 @@ class Run:
         from classes.ExpitDataHandler import ExpitDataHandler
         from database.SQLiteDatabase import DatabaseManager
         from execute.Requirements import Requirements
-        from datetime import datetime
 
         requirements = Requirements()
         requirements.install_requirements()
@@ -19,7 +18,7 @@ class Run:
         periods.calculate_periods(start_time)
 
         # Process APS expit data (mining.csv)
-        expit_data_handler = ExpitDataHandler(file_path, "aps_transactions")
+        expit_data_handler = ExpitDataHandler(file_path)
         expit_payload_transactions = expit_data_handler.process_transactions()
 
         # User interaction required to choose between original time and updated time methods
@@ -50,14 +49,14 @@ class Run:
             return  # Exit execution for invalid input
 
         # Load input data (this is combined user input and opening inventories)
-        input_data = DataLoader(file_path, expit_payload_transactions)
+        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions)
 
-        stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        stockpile_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
         # Initialize and run CaseModeller
         case_modeller = CaseModeller(
             stockpiles=stockpile_data_objects,
-            grade_blocks=grade_block_data_objects,
+            grade_blocks=[], # Placeholder
             equipment=equipment_data_objects,
             crusher_targets=crusher_target_data,
             expit_payload_transactions=expit_payload_transactions,

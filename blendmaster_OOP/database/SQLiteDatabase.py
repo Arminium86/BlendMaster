@@ -81,7 +81,6 @@ class DatabaseManager:
 
         print(f"Optimised blend report saved to database {database_name}")
 
-
     def write_build_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
         database_name = 'blendmaster.db'

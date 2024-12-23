@@ -89,7 +89,7 @@ class BalanceTracker:
                     continue
 
                 else: 
-                    raise ValueError(f"Name '{name}' is not found in opening inventory. Either review the Snowflake query or remove the transactions to this destination from APS output.")
+                    raise ValueError(f"Stockpile '{name}' is not found in opening inventory. Either review the Snowflake query or remove the transactions to this destination from APS output.")
 
 
     def get_build_transactions(self):

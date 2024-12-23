@@ -2,24 +2,19 @@ import pandas as pd
 from datetime import timedelta
 
 class ExpitDataHandler:
-    def __init__(self, input_data, aps_transactions):
-        self.data = pd.read_excel(input_data, sheet_name=aps_transactions)
+    def __init__(self, input_data):
+        self.data = pd.read_csv(input_data)
         self._preprocess_data()
         self._group_data()
 
     def _preprocess_data(self):
         # Explicit datetime parsing with the correct format
         self.data["Time.StartTime"] = pd.to_datetime(
-            self.data["Time.StartTime"], 
-            format="%d/%m/%Y %I:%M:%S %p", 
-            errors="coerce"
-        )
+            self.data["Time.StartTime"])
+        
         
         self.data["Time.EndTime"] = pd.to_datetime(
-            self.data["Time.EndTime"], 
-            format="%d/%m/%Y %I:%M:%S %p", 
-            errors="coerce"
-        )
+            self.data["Time.EndTime"])
         
         # Continue with other preprocessing
         self.data = self.data.astype({

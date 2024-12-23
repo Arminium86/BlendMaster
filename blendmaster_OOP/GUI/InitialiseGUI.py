@@ -9,6 +9,8 @@ from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime
 
+
+
 class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -139,11 +141,11 @@ class UserInputs(QMainWindow):
         # --- Input 4: Optimized Blend Choices ---
         blend_label = QLabel("Optimized Blend Choices:")
         blend_label.setStyleSheet("font-weight: bold;")
-        self.blend_input = QComboBox()
-        self.blend_input.addItems(["Select the Best Result Automatically", "Prompt User at Every Decision Point"])
-        self.blend_input.setFixedWidth(300)
+        self.blend_mode = QComboBox()
+        self.blend_mode.addItems(["Select the Best Result Automatically", "Prompt User at Every Decision Point"])
+        self.blend_mode.setFixedWidth(300)
 
-        layout.addRow(blend_label, self.blend_input)
+        layout.addRow(blend_label, self.blend_mode)
 
         # Submit Button
         submit_button = QPushButton("Submit")
@@ -187,21 +189,21 @@ class UserInputs(QMainWindow):
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
         self.time_mode = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
-        self.start_time = None
+
         if self.time_mode == 2:  # If "Set Time" is selected
            self.start_time = self.start_time.dateTime().toPyDateTime()
 
         else: self.start_time = datetime.now()
 
-        self.expit_mode = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else None
+        self.expit_mode = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         self.file_path = self.file_path.text()
-        self.blend_input = self.blend_input.currentIndex() + 1  # Translate to 1 or 2
+        self.blend_mode = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
 
         print("Time Mode:", self.time_mode )
         print("Date/Time Value:", self.start_time)
         print("Expit Mode:", self.expit_mode)
         print("Selected File:", self.file_path)
-        print("Blend Choice:", self.blend_input)
+        print("Blend Mode:", self.blend_mode)
         QMessageBox.information(self, "Configuration Submitted", "Your configuration has been saved!")
         
         self.hub_input = self.hub_input.currentText().strip()
@@ -222,7 +224,7 @@ class UserInputs(QMainWindow):
         """Fetch stockpile data from OpeningStockpileInventories."""
         hub_input = self.hub_input
         mine_input = self.mine_input
-        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input)
+        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time)
 
         self.stockpile_data_keys = self.stockpile_data.keys()
     
@@ -346,13 +348,26 @@ class UserInputs(QMainWindow):
                     reclaim_item.setForeground(QColor("black"))
 
     def store_reclaim_thresholds(self):
-        """Store reclaim thresholds entered by the user."""
+        """Store reclaim thresholds entered by the user and modifies types."""
         for row in range(self.stockpile_table.rowCount()):
             stockpile_name = self.stockpile_table.item(row, 0).text()
-            reclaim_threshold = self.stockpile_table.item(row, 7).text()  # Assuming last column index is 7
-            self.stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+            reclaim_threshold = self.stockpile_table.item(row, 7) # Assuming last column index is 7
+            
+            if reclaim_threshold:
+                self.stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold.type()
+            else:
+                self.stockpile_data[stockpile_name]["reclaim_threshold"] = 0
+            
+        
+        self.stockpile_data = {
+    key.upper(): {
+        nested_key.lower(): (nested_value.lower() if nested_key.lower() == "name" and isinstance(nested_value, str) else nested_value)
+        for nested_key, nested_value in value.items()
+    }
+    for key, value in self.stockpile_data.items()
+}
 
-
+       
         # Enable the next tab (Calendar Tab)
         self.setup_calendar()
         self.tabs.setTabEnabled(2, True)
@@ -456,7 +471,7 @@ class UserInputs(QMainWindow):
         self.main_tab_layout.addLayout(button_layout)
 
     def store_calendar_inputs(self):
-        """Extract and store user entries from the table into a structured format with concatenated keys."""
+        """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
         self.calendar_inputs = {}
 
         # Capture column headers for periods
@@ -494,11 +509,26 @@ class UserInputs(QMainWindow):
 
             # Store the data in the dictionary
             self.calendar_inputs[full_key] = row_data
-            self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_input)
+
+        # Modify types
+        self.calendar_inputs = {
+    outer_key: {
+        inner_key: (
+            int(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+        )
+        for inner_key, inner_value in outer_value.items()
+    }
+    for outer_key, outer_value in self.calendar_inputs.items()
+}
+
+       
+        # Call main optimised run
+        self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.stockpile_data, self.calendar_inputs)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = UserInputs()  # Create an instance of the imported class
     window.show()              # Show the GUI
     sys.exit(app.exec_())      # Run the event loop
+
 
