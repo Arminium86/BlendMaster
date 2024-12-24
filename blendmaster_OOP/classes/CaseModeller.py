@@ -375,7 +375,7 @@ class CaseModeller:
         self.results.to_excel(filename, index=False)
         print(f"All results written to {filename}")
 
-        self.database_manager.write_optimised_blend_report_to_database(self.results)
+        self.database_manager.write_optimised_blend_report_to_database(self.results, self.periods)
 
     def save_build_report(self, filename):
         """Save stockpile build report to an Excel file."""

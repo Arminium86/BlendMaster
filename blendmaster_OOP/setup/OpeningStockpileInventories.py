@@ -1,8 +1,8 @@
 import snowflake.connector
+import sqlite3
+from datetime import datetime
 
 class OpeningStockpileInventories:
-
-    # Function to fetch query result and return dictionary
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
         # Snowflake connection
         conn = snowflake.connector.connect(
@@ -16,7 +16,7 @@ class OpeningStockpileInventories:
             network_timeout=300  # Increase network timeout
         )
         
-        start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")        
+        start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
         
         # SQL Query
         query = f"""
@@ -66,8 +66,61 @@ class OpeningStockpileInventories:
                 for row in result
             }
 
+            # Store results in SQLite database
+            self.save_to_database(data_dict)
+
             return data_dict
         finally:
             # Close the connection
             conn.close()
+
+    def save_to_database(self, data_dict):
+        # SQLite connection
+        database_name = 'blendmaster.db'
+        conn = sqlite3.connect(database_name)
+        cursor = conn.cursor()
+
+        # Create table for stockpile inventories
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS opening_stockpile_inventories (
+            name TEXT PRIMARY KEY,
+            balance REAL,
+            grade_fe REAL,
+            grade_si REAL,
+            grade_al REAL,
+            grade_p REAL,
+            grade_mn REAL
+        )
+        ''')
+
+        # Clear the table
+        cursor.execute('DELETE FROM opening_stockpile_inventories')
+
+        # Insert data into the database
+        for key, row in data_dict.items():
+            # Map uppercase keys to expected database column names
+            mapped_row = {
+                "name": row.get("NAME", None),  # Adjusted for uppercase column names
+                "balance": row.get("BALANCE", 0.0),
+                "grade_fe": row.get("GRADE_FE", None),
+                "grade_si": row.get("GRADE_SI", None),
+                "grade_al": row.get("GRADE_AL", None),
+                "grade_p": row.get("GRADE_P", None),
+                "grade_mn": row.get("GRADE_MN", None)
+            }
+
+            # Skip insertion if mandatory fields (e.g., name) are missing
+            if not mapped_row["name"]:
+                print(f"Skipping row with missing name: {mapped_row}")
+                continue
+
+            cursor.execute('''
+            INSERT INTO opening_stockpile_inventories (name, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn)
+            VALUES (:name, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn)
+            ''', mapped_row)
+
+        # Commit and close the connection
+        conn.commit()
+        conn.close()
+        print(f"Stockpile inventories saved to database {database_name}")
 
