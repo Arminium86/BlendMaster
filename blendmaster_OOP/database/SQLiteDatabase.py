@@ -236,7 +236,7 @@ class DatabaseManager:
             period = steady_state['period']
             source = steady_state['source']
             equipment_rate_output = steady_state['equipment_rate_output']
-            duration_minutes = steady_state['steady_state_duration'] * 60
+            duration_minutes = steady_state['steady_state_duration'] * 3600
             grades = {
                 "fe": steady_state['source_grade_fe'],
                 "si": steady_state['source_grade_si'],
@@ -248,14 +248,14 @@ class DatabaseManager:
             source_closing_balance = steady_state['source_closing_balance']
 
             # Calculate per-minute depletion
-            source_actual_tonnes_per_minute = equipment_rate_output / 60
+            source_actual_tonnes_per_minute = equipment_rate_output / 3600
 
             # Initialize start_datetime for this steady state
             start_datetime = datetime.strptime(steady_state['start_datetime'], '%Y-%m-%d %H:%M:%S')
 
             current_balance = source_opening_balance
             for minute in range(int(duration_minutes)):
-                end_datetime = start_datetime + timedelta(minutes=1)
+                end_datetime = start_datetime + timedelta(seconds=1)
                 
                 # Ensure balance integrity
                 source_actual_tonnes = (

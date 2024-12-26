@@ -3,6 +3,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog
 )
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtCore import Qt
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
@@ -520,8 +521,7 @@ class UserInputs(QMainWindow):
     }
     for outer_key, outer_value in self.calendar_inputs.items()
 }
-
-       
+        
         # Call main optimised run
         self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.stockpile_data, self.calendar_inputs)
 
