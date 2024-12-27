@@ -1,8 +1,10 @@
 import pandas as pd
+import numpy as np
 import sqlite3
 import dash
 from dash import dcc, html, dash_table
 import plotly.express as px
+import random
 
 class DrawStockProfiles:
     def __init__(self, db_path):
@@ -24,32 +26,60 @@ class DrawStockProfiles:
 
     def create_charts(self, data):
         """
-        Create individual charts for each unique stockpile.
+        Create individual charts for each unique stockpile with random colors.
         """
         if data.empty:
             print("No data available to create charts.")
             return []
 
-        unique_stockpiles = data['stockpile'].unique()
-        charts = []
+        # Preprocess data: round and add aliases
+        data['Balance'] = data['balance'].round(1).fillna('None')
+        data['Steady State Number'] = data['steady_state_number'].fillna('None')
+        data['Agent'] = data['agent'].fillna('None')
+        data['Source or Destination'] = data['source_or_destination'].fillna('None')
+
+        # Format grades: round to 2 decimals and add % suffix
+        for col in data.columns:
+            if col.startswith('grade_'):
+                alias = col.replace('grade_', 'Grade ').capitalize()
+                data[alias] = data[col].round(2).astype(str) + '%'
         
+        # Generate a random color for each unique stockpile
+        unique_stockpiles = data['stockpile'].unique()
+        random_colors = {stockpile: self.generate_random_color() for stockpile in unique_stockpiles}
+
+        charts = []
+
         for stockpile in unique_stockpiles:
             stockpile_data = data[data['stockpile'] == stockpile]
+            stockpile_color = random_colors[stockpile]  # Get the color for this stockpile
+
             fig = px.area(
-                stockpile_data,
-                x='time',
-                y='balance',
-                color='stockpile',  # Distinguish by stockpile
-                hover_data=['steady_state_number', 'agent', 'source_or_destination'] +
-                           [col for col in data.columns if col.startswith('grade_')],
-                title=f"Stockpile: {stockpile}"
-            )
+                        stockpile_data,
+                        x='time',
+                        y='Balance',  # Use the alias column
+                        color_discrete_sequence=[stockpile_color],  # Apply the stockpile's random color
+                        hover_data={
+                            'Balance': True,  # Include rounded balance
+                            'Steady State Number': True,  # Include alias
+                            'Agent': True,  # Include alias
+                            'Source or Destination': True,  # Include alias
+                            **{alias: True for alias in stockpile_data.columns if alias.startswith('Grade ')}  # Include grades
+                        },
+                        title=f"Stockpile: {stockpile}"
+                    )
+            # Set the title color to match the chart's color
             fig.update_layout(
-                xaxis_title='Time',
-                yaxis_title='Balance',
-                legend_title='Stockpile'
+            title=dict(
+                text=f"Stockpile: {stockpile}",
+                font=dict(color=stockpile_color)  # Set title font color
+            ),
+            xaxis_title='Time',
+            yaxis_title='Balance',
+            legend_title='Stockpile'
             )
             charts.append(dcc.Graph(figure=fig))  # Append to the Dash layout
+
         return charts
 
     def run_app(self):
@@ -75,9 +105,20 @@ class DrawStockProfiles:
                 )
             ]
         )
-
         # Run the Dash app
         app.run_server(debug=True)
+
+    def generate_random_color(self):
+        """
+        Generate a random hex color, excluding intense magenta-like colors.
+        """
+        while True:
+            # Generate random RGB components
+            r, g, b = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+            
+            # Exclude intense magenta-like colors (high red and blue, low green)
+            if not (r > 200 and b > 200 and g < 100):
+                return f"#{r:02x}{g:02x}{b:02x}"
 
 
 class DrawGanttChart:
@@ -300,4 +341,8 @@ class DrawGanttChart:
         """
         self.app.run_server(debug=True, port=self.port)
 
- 
+ # Example Usage
+if __name__ == "__main__":
+    db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
+    chart_drawer = DrawStockProfiles(db_path)
+    chart_drawer.run_app()

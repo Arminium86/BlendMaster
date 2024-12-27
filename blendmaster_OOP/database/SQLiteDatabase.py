@@ -1,5 +1,6 @@
 import sqlite3
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from classes.PeriodManager import PeriodManager
 
@@ -409,6 +410,28 @@ class StockpileProfileReport:
             optimised_blend_report['start_datetime'] = pd.to_datetime(optimised_blend_report['start_datetime'])
             optimised_blend_report['end_datetime'] = pd.to_datetime(optimised_blend_report['end_datetime'])
 
+            # Truncate to minutes for comparison with extended_combined_report
+            optimised_blend_report['start_datetime'] = optimised_blend_report['start_datetime'].dt.floor('min')
+            optimised_blend_report['end_datetime'] = optimised_blend_report['end_datetime'].dt.floor('min')
+
+            # Convert columns to NumPy arrays for faster operations
+            start_times = optimised_blend_report['start_datetime'].to_numpy()
+            end_times = optimised_blend_report['end_datetime'].to_numpy()
+            steady_states = optimised_blend_report['steady_state_number'].to_numpy()
+            times = extended_combined_report['time'].to_numpy()
+
+            # Create an empty array to store results
+            steady_state_numbers = np.full(len(times), np.nan)
+
+            # Vectorized interval checks
+            for i, time in enumerate(times):
+                mask = (start_times <= time) & (end_times > time)
+                if np.any(mask):
+                    steady_state_numbers[i] = steady_states[np.argmax(mask)]  # Get the first match
+
+            # Assign results back to the DataFrame
+            extended_combined_report['steady_state_number'] = steady_state_numbers
+            
             def map_steady_state_number(time):
                 match = optimised_blend_report[
                     (optimised_blend_report['start_datetime'] <= time) &

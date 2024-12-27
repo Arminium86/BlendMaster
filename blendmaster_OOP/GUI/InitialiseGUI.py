@@ -531,4 +531,3 @@ if __name__ == "__main__":
     window.show()              # Show the GUI
     sys.exit(app.exec_())      # Run the event loop
 
-
