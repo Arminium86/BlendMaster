@@ -300,8 +300,4 @@ class DrawGanttChart:
         """
         self.app.run_server(debug=True, port=self.port)
 
-# Example Usage
-if __name__ == "__main__":
-    db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
-    chart_drawer = DrawStockProfiles(db_path)
-    chart_drawer.run_app()
+ 

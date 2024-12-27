@@ -228,15 +228,15 @@ class DatabaseManager:
         # Clear the table
         cursor.execute('DELETE FROM optimised_stockpile_depletion_report')
 
-        # Placeholder for minute-level transactions
-        minute_transactions = []
+        # Placeholder for second-level transactions
+        second_transactions = []
 
         for _, steady_state in blend_report.iterrows():
             steady_state_number = steady_state['steady_state_number']
             period = steady_state['period']
             source = steady_state['source']
             equipment_rate_output = steady_state['equipment_rate_output']
-            duration_minutes = steady_state['steady_state_duration'] * 3600
+            duration_seconds = steady_state['steady_state_duration'] * 3600
             grades = {
                 "fe": steady_state['source_grade_fe'],
                 "si": steady_state['source_grade_si'],
@@ -247,25 +247,25 @@ class DatabaseManager:
             source_opening_balance = steady_state['source_opening_balance']
             source_closing_balance = steady_state['source_closing_balance']
 
-            # Calculate per-minute depletion
-            source_actual_tonnes_per_minute = equipment_rate_output / 3600
+            # Calculate per-second depletion
+            source_actual_tonnes_per_second = equipment_rate_output / 3600
 
             # Initialize start_datetime for this steady state
             start_datetime = datetime.strptime(steady_state['start_datetime'], '%Y-%m-%d %H:%M:%S')
 
             current_balance = source_opening_balance
-            for minute in range(int(duration_minutes)):
+            for second in range(int(duration_seconds)):
                 end_datetime = start_datetime + timedelta(seconds=1)
                 
                 # Ensure balance integrity
                 source_actual_tonnes = (
-                    source_actual_tonnes_per_minute if current_balance >= source_actual_tonnes_per_minute 
+                    source_actual_tonnes_per_second if current_balance >= source_actual_tonnes_per_second 
                     else current_balance
                 )
                 source_closing_balance = current_balance - source_actual_tonnes
 
                 # Append to transactions
-                minute_transactions.append({
+                second_transactions.append({
                     "start_datetime": start_datetime.strftime('%Y-%m-%d %H:%M:%S'),
                     "end_datetime": end_datetime.strftime('%Y-%m-%d %H:%M:%S'),
                     "steady_state_number": steady_state_number,
@@ -277,7 +277,7 @@ class DatabaseManager:
                     **{f"source_grade_{k}": v for k, v in grades.items()}
                 })
 
-                # Update for next minute
+                # Update for next second
                 start_datetime = end_datetime
                 current_balance = source_closing_balance
 
@@ -286,9 +286,9 @@ class DatabaseManager:
                 f"Balance mismatch for steady state {steady_state_number} and source {source}"
 
         # Convert transactions to DataFrame
-        transactions_df = pd.DataFrame(minute_transactions)
+        transactions_df = pd.DataFrame(second_transactions)
 
-        # Insert minute transactions into the database
+        # Insert second transactions into the database
         for _, row in transactions_df.iterrows():
             cursor.execute('''
             INSERT INTO optimised_stockpile_depletion_report VALUES (
@@ -386,7 +386,11 @@ class StockpileProfileReport:
                 all_times = pd.date_range(start=start_datetime, end=end_datetime, freq='min')
                 extended_group = pd.DataFrame({'time': all_times})
 
-                # Merge with existing group to find minute-level transactions
+                # Truncate seconds in both DataFrames to only honor hours and minutes
+                extended_group['time'] = pd.to_datetime(extended_group['time']).dt.floor('min')
+                group['time'] = pd.to_datetime(group['time']).dt.floor('min')
+
+                # Perform the merge on the truncated time
                 extended_group = extended_group.merge(group, how='left', on='time')
 
                 # Fill forward and backward with the first and last transaction values
@@ -412,7 +416,7 @@ class StockpileProfileReport:
                 ]
                 return match['steady_state_number'].iloc[0] if not match.empty else None
 
-            extended_combined_report['steady_state_number'] = extended_combined_report['time'].apply(map_steady_state_number)
+            #extended_combined_report['steady_state_number'] = extended_combined_report['time'].apply(map_steady_state_number)
 
             # Save the extended report to the database
             extended_combined_report.to_sql('optimised_stockpile_profile_report', conn, if_exists='replace', index=False)
@@ -422,5 +426,4 @@ class StockpileProfileReport:
         finally:
             # Close the database connection
             conn.close()
-
 

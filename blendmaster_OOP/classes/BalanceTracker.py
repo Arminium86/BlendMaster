@@ -24,6 +24,9 @@ class BalanceTracker:
             
             if self.balance[name] != 0:
                 self.balance[name] -= transaction["source_actual_tonnes"]
+       
+        # Sort the DataFrame by delivered_datetime (old to new)
+        expit_payload_transactions = expit_payload_transactions.sort_values(by=["destination", "delivered_datetime"])
 
         # Loop through expit payload transactions and build stockpiles
         for _, transaction in expit_payload_transactions.iterrows():
@@ -65,7 +68,7 @@ class BalanceTracker:
                     # Update the balance
                     self.balance[name] = updated_balance
                     
-                    # Add the transaction to the tracked list
+                    # Add the used transaction to the tracked list
                     self.build_report.append({
                         "steady_state_number": steady_state_tracker,
                         "steady_state_start_datetime": steady_state_start_time,
