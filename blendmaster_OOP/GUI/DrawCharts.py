@@ -120,7 +120,6 @@ class DrawStockProfiles:
             if not (r > 200 and b > 200 and g < 100):
                 return f"#{r:02x}{g:02x}{b:02x}"
 
-
 class DrawGanttChart:
     def __init__(self, db_path, port=8050):
         """
@@ -194,7 +193,21 @@ class DrawGanttChart:
                         f"Crusher Actual Grade Mn: {float(row['crusher_actual_grade_mn']):.2f}%<br>",
             axis=1
         )
-
+        
+        # Create a legend column
+        data['Legend'] = data.apply(
+            lambda row: f"Blend ID: {row['blend_ID']}<br>"
+                        f"Period: {row['period']}<br>"
+                        f"Sources and Ratios:<br>" +
+                        "".join(
+                            f" - {source} @ {float(ratio) * 100:.2f}%<br>"  # Format ratio as percent
+                            for source, ratio in zip(
+                                (row['source_agg'].split(", ") if isinstance(row['source_agg'], str) else []),
+                                (row['source_blend_ratio_agg'].split(", ") if isinstance(row['source_blend_ratio_agg'], str) else [])
+                            )
+                        ),
+            axis=1
+        )
 
         return data
 
@@ -202,29 +215,54 @@ class DrawGanttChart:
         """
         Set up the Dash layout.
         """
+        # Define column aliases
+        column_aliases = {
+            "start_datetime": "Start Time",
+            "end_datetime": "End Time",
+            "blend_ID": "Blend ID",
+            "lane": "Lane",
+            "steady_state_number": "Steady State #",
+            "source_agg": "Sources",
+            "source_blend_ratio_agg": "Blend Ratios",
+            "crusher_actual_tonnes": "Crusher Tonnes",
+            "crusher_rate_output": "Crusher Rate",
+            "crusher_actual_grade_fe": "Grade Fe (%)",
+            "crusher_actual_grade_si": "Grade Si (%)",
+            "crusher_actual_grade_al": "Grade Al (%)",
+            "crusher_actual_grade_p": "Grade P (%)",
+            "crusher_actual_grade_mn": "Grade Mn (%)"
+        }
         self.app.layout = html.Div(
-            style={'display': 'flex', 'flex-direction': 'row', 'padding': '20px'},
+            style={'display': 'flex', 'flex-direction': 'column', 'padding': '20px'},
             children=[
                 # Gantt Chart
                 html.Div(
-                    style={'flex': '2', 'padding-right': '10px'},
+                    style={'padding-bottom': '20px'},
                     children=[
-                        html.H1("Gantt Chart for Optimised Blend Report"),
+                        html.H1("Gantt Chart & Blend Details"),
                         dcc.Graph(
                             id="gantt-chart",
-                            style={'width': '100%', 'height': '100vh'}  # Adjust chart width and height
+                            style={
+                                'width': '100%',
+                                'height': '100vh',  # Adjust height as needed
+                                'border': '2px solid black',  # Add a black border
+                                'padding': '10px',  # Optional: Add padding inside the border
+                                'borderRadius': '5px',  # Optional: Rounded corners
+                                'overflow': 'hidden',  # Ensure content stays inside the border
+                                'boxSizing': 'border-box'  # Include padding in total size calculations
+                            }
                         )
                     ]
                 ),
                 # Property Table
                 html.Div(
-                    style={'flex': '1'},
                     children=[
-                        html.H2("Details"),
+                        html.H2(""),
                         dash_table.DataTable(
                             id="property-table",
                             columns=[
-                                {"name": col, "id": col} for col in [
+                                {"name": column_aliases.get(col, col), "id": col}  
+                                for col in [
                                     "start_datetime", "end_datetime", "blend_ID", "lane", "steady_state_number",
                                     "source_agg", "source_blend_ratio_agg", "crusher_actual_tonnes",
                                     "crusher_rate_output"
@@ -232,8 +270,30 @@ class DrawGanttChart:
                             ],
                             data=[],  # Initially empty
                             style_table={'overflowX': 'auto'},
-                            style_cell={'textAlign': 'left', 'padding': '5px'},
-                            style_header={'fontWeight': 'bold'},
+                            style_cell={
+                                    'textAlign': 'center',  # Align text to the left
+                                    'padding': '5px',  # Add padding
+                                    'whiteSpace': 'normal',  # Enable wrapping
+                                    'overflow': 'hidden',  # Prevent overflow
+                                    'textOverflow': 'ellipsis',  # Add ellipsis for clipped text
+                                    'maxWidth': '150px',  # Set max width for columns
+                                },
+                            style_cell_conditional=[
+
+                                {'if': {'column_id': 'start_datetime'}, 'textAlign': 'left'},  # Left align for 'start_datetime'
+                                {'if': {'column_id': 'end_datetime'}, 'textAlign': 'left'},  # Left align for 'end_datetime'
+                                {'if': {'column_id': 'source_agg'}, 'textAlign': 'left'},
+                                {'if': {'column_id': 'source_blend_ratio_agg'}, 'textAlign': 'left'}
+                            ],
+                            style_header={
+                                    'fontWeight': 'bold',
+                                    'textAlign': 'center',  # Center-align header text
+                                    'whiteSpace': 'normal',  # Enable wrapping for header text
+                                    'height': 'auto',  # Allow dynamic height for wrapped text
+                                    'lineHeight': '1.2',  # Adjust line spacing for better readability
+                                    'padding': '5px',  # Add padding to avoid text clipping
+                                    'overflow': 'hidden',  # Prevent header text overflow
+                                },
                             hidden_columns=["lane"],  # Hide the lane column
                         )
                     ]
@@ -257,11 +317,11 @@ class DrawGanttChart:
             data = self.prepare_gantt_data(data)
             data['hover_name'] = "Blend ID: " + data['blend_ID'].astype(str)
 
-             # Calculate the number of unique lanes
-            num_lanes = data['lane'].nunique()
+            # Calculate the number of unique lanes
+            num_lanes = max(data['lane'].nunique(),3)
 
             # Set the height in pixels based on the number of lanes
-            chart_height = num_lanes * 120
+            chart_height = num_lanes * 100
 
             # Create Gantt chart
             fig = px.timeline(
@@ -269,29 +329,40 @@ class DrawGanttChart:
                 x_start="start_datetime",
                 x_end="end_datetime",
                 y="lane",  # Cascading lanes (top to bottom)
-                color="blend_ID",  # Different color for each blend_ID
+                color="Legend",  # Different color for each blend_ID
                 hover_name="hover_name",
                 hover_data={
                 'blend_ID': False,
                 'start_datetime': True,  # Hide start_datetime
                 'end_datetime': True,    # Hide end_datetime
                 'lane': False,            # Hide lane
-                'Details': True           # Only display the tooltip explicitly
+                'Details': True,          # Only display the tooltip explicitly
+                'Legend' : False
                 },
                 title=""
             )
 
             # Adjust layout
             fig.update_layout(
-                xaxis_title="Time",
+                xaxis_title="",
                 yaxis_title="Blend",
                 yaxis=dict(
                     tickmode='array',
                     tickvals=data['lane'],
-                    ticktext=data['blend_ID'] # Label lanes with blend_ID
+                    ticktext=data['blend_ID']  # Label lanes with blend_ID
                 ),
-                showlegend=False,
-                width=1000, # Increase chart width
+                showlegend=True,
+                
+                legend=dict(
+                title="Blend Details",  # Title for the legend
+                orientation="v",  # Vertical orientation
+                x=1.02,  # Position to the right of the chart
+                y=1,  # Top of the chart
+                bgcolor="rgba(255,255,255,0.5)",  # Semi-transparent background
+                bordercolor="black",  # Border around the legend
+                borderwidth=1  # Thickness of the legend border
+            ),
+                width=1000,  # Increase chart width
                 height=chart_height  # Set dynamic height in pixels
             )
 
@@ -335,14 +406,15 @@ class DrawGanttChart:
             
             return data.to_dict("records")
 
+
     def run_app(self):
         """
         Run the Dash app.
         """
-        self.app.run_server(debug=True, port=self.port)
+        self.app.run_server(debug=True, port=self.port, use_reloader=False)
 
  # Example Usage
 if __name__ == "__main__":
     db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
-    chart_drawer = DrawStockProfiles(db_path)
+    chart_drawer = DrawGanttChart(db_path)
     chart_drawer.run_app()

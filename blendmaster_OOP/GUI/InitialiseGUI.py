@@ -1,16 +1,16 @@
-import sys
+import sys, threading
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit
 )
+
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtGui import QColor, QBrush, QFont
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime
-
-
+from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
 
 class UserInputs(QMainWindow):
     def __init__(self):
@@ -42,18 +42,22 @@ class UserInputs(QMainWindow):
         self.stockpile_table = QTableWidget()
         self.stockpile_tab_layout.addWidget(self.stockpile_table)
 
-        # Add Main Tab
+        # Add calendar Tab
         self.main_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
 
-        # Main Table
+        # Calendar table
         self.main_table = QTableWidget()
         self.main_tab_layout.addWidget(self.main_table)
+
+        # Add Results Tab
+        self.setup_results_tab()
         
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
+        self.tabs.setTabEnabled(3, False)  # Disable Results (optimised) tab
 
         # Initialise main program
         self.run_program = Run()
@@ -61,7 +65,7 @@ class UserInputs(QMainWindow):
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
-        self.tabs.addTab(self.site_config_tab, "Site Selection")
+        self.tabs.addTab(self.site_config_tab, "Site Configuration")
         layout = QFormLayout(self.site_config_tab)
 
         # Dropdown lists for Hub and Mine
@@ -148,18 +152,37 @@ class UserInputs(QMainWindow):
 
         layout.addRow(blend_label, self.blend_mode)
 
-        # Submit Button
-        submit_button = QPushButton("Submit")
-        submit_button.setFixedWidth(100)
-        submit_button.clicked.connect(self.handle_site_config_submit)
+         # Submit Button
+        self.submit_button = QPushButton("Submit")
+        self.submit_button.setFixedWidth(100)
+        self.submit_button.setEnabled(False)  # Initially disabled
 
-        # Create a horizontal layout for the button
+        self.submit_button.clicked.connect(self.handle_site_config_submit)
+
         button_layout = QHBoxLayout()
-        button_layout.addWidget(submit_button)
-        button_layout.addStretch()  # Push button to the left
+        button_layout.addWidget(self.submit_button)
+        button_layout.addStretch()
 
-        # Add button layout to the main layout
         layout.addRow(button_layout)
+
+        # Connect input field changes to form validation
+        self.hub_input.currentIndexChanged.connect(self.validate_form)
+        self.mine_input.currentIndexChanged.connect(self.validate_form)
+        self.time_mode.currentIndexChanged.connect(self.validate_form)
+        self.start_time.dateTimeChanged.connect(self.validate_form)
+        self.file_path.textChanged.connect(self.validate_form)
+        self.blend_mode.currentIndexChanged.connect(self.validate_form)
+
+    def validate_form(self):
+        """Enable or disable the submit button based on form completion."""
+        all_fields_populated = (
+            self.hub_input.currentIndex() != -1
+            and self.mine_input.currentIndex() != -1
+            and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
+            and bool(self.file_path.text())
+            and self.blend_mode.currentIndex() != -1
+        )
+        self.submit_button.setEnabled(all_fields_populated)
 
     def browse_file(self):
         """Browse to select a file."""
@@ -199,27 +222,21 @@ class UserInputs(QMainWindow):
         self.expit_mode = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         self.file_path = self.file_path.text()
         self.blend_mode = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
-
-        print("Time Mode:", self.time_mode )
-        print("Date/Time Value:", self.start_time)
-        print("Expit Mode:", self.expit_mode)
-        print("Selected File:", self.file_path)
-        print("Blend Mode:", self.blend_mode)
-        QMessageBox.information(self, "Configuration Submitted", "Your configuration has been saved!")
         
         self.hub_input = self.hub_input.currentText().strip()
         self.mine_input = self.mine_input.currentText().strip()
 
-        if self.hub_input and self.mine_input:
-            print(f"Site Configuration - Hub: {self.hub_input}, Mine: {self.mine_input}")
+        if self.hub_input and self.mine_input and self.time_mode and self.start_time and self.expit_mode and self.file_path and self.blend_mode: 
+            QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input}, Mine: {self.mine_input}.")
             
             # Fetch stockpile data and create setup task
             self.fetch_stockpile_data()
             self.setup_stockpile_table()
             self.tabs.setTabEnabled(1, True)
             self.tabs.setCurrentIndex(1)  # Switch to the next tab
+
         else:
-            print("Error: Please fill in both Hub and Mine.")
+            QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
@@ -522,8 +539,69 @@ class UserInputs(QMainWindow):
     for outer_key, outer_value in self.calendar_inputs.items()
 }
         
+        self.tabs.setTabEnabled(3, True)  # Enable Results (optimised) tab
+        self.tabs.setCurrentIndex(3)  # Switch to Results (optimised) tab
+        
         # Call main optimised run
         self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.stockpile_data, self.calendar_inputs)
+
+        # Start the Dash app thread
+        self.start_dash_thread()
+
+    def setup_results_tab(self):
+            self.results_tab = QWidget()
+            self.tabs.addTab(self.results_tab, "Results (Optimised)")
+            self.results_layout = QVBoxLayout(self.results_tab)
+
+            # Top Section (Gantt Chart and Decision Point)
+            self.top_layout = QHBoxLayout()
+            self.results_layout.addLayout(self.top_layout)
+
+            # Top Left (Gantt Chart with QWebEngineView)
+            self.gantt_chart_view = QWebEngineView()  # Embed the Dash app
+            self.gantt_chart_view.setStyleSheet("border: 1px solid black;")
+            self.top_layout.addWidget(self.gantt_chart_view, 3)  # 3/4 width
+
+            # Load the Dash app into the QWebEngineView
+            self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+
+            # Top Right (Decision Point)
+            self.decision_point_widget = QTextEdit()
+            self.decision_point_widget.setReadOnly(True)
+            self.top_layout.addWidget(self.decision_point_widget, 1)  # 1/4 width
+
+            # Middle Section (Blend Details Table Placeholder)
+            self.blend_details_placeholder = QLabel("Blend Details Table Placeholder")
+            self.blend_details_placeholder.setAlignment(Qt.AlignCenter)
+            self.blend_details_placeholder.setStyleSheet("border: 1px solid black;")
+            self.results_layout.addWidget(self.blend_details_placeholder)
+
+            # Bottom Section (Stockpile Profiles Chart Placeholder)
+            self.stockpile_profiles_placeholder = QLabel("Stockpile Profiles Chart Placeholder")
+            self.stockpile_profiles_placeholder.setAlignment(Qt.AlignCenter)
+            self.stockpile_profiles_placeholder.setStyleSheet("border: 1px solid black;")
+            self.results_layout.addWidget(self.stockpile_profiles_placeholder)
+            
+            self.update_decision_point()
+
+    def update_decision_point(self):
+        if self.blend_mode == 1:
+            # Static Blend Mode
+            self.decision_point_widget.setReadOnly(True)
+            self.decision_point_widget.setText("Auto")
+        elif self.blend_mode == 2:
+            # Dynamic Blend Mode (Interact with CaseModellerBridge)
+            self.decision_point_widget.setReadOnly(False)
+            self.decision_point_widget.setText("Select blends interactively")
+   
+    def start_dash_thread(self):
+        """Start the Dash app in a separate thread."""
+        db_path = "blendmaster.db"
+        self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
+
+        # Use a thread to run the Dash app server
+        self.dash_thread = threading.Thread(target=self.draw_gantt_chart.run_app, daemon=True)
+        self.dash_thread.start()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
