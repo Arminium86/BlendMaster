@@ -1,12 +1,12 @@
-import sys, threading
+import sys, threading, requests, time
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame
 )
 
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont
-from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtCore import Qt, QUrl, QTimer
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime
@@ -51,16 +51,47 @@ class UserInputs(QMainWindow):
         self.main_table = QTableWidget()
         self.main_tab_layout.addWidget(self.main_table)
 
-        # Add Results Tab
+        # Add Decision Point Tab
+        self.decision_point_tab = QWidget()
+        self.tabs.addTab(self.decision_point_tab, "Decision Point")
+        self.decision_point_tab_layout = QVBoxLayout(self.decision_point_tab)
+
+        # Create the table widget for the DataFrame
+        self.decision_table = QTableWidget()
+        self.decision_point_tab_layout.addWidget(self.decision_table)  # Add table at the top
+
+        # Text output area
+        self.decision_output = QTextEdit()
+        self.decision_output.setReadOnly(True)
+        self.decision_point_tab_layout.addWidget(self.decision_output)  # Add text in the middle
+
+        # Input layout (field + button)
+        input_layout = QHBoxLayout()
+        self.decision_input = QLineEdit()
+        self.decision_input.setPlaceholderText("Enter your input here...")
+        self.decision_input.returnPressed.connect(self.handle_decision_input)
+        input_layout.addWidget(self.decision_input)
+
+        self.enter_button = QPushButton("Enter")
+        self.enter_button.clicked.connect(self.handle_decision_input)
+        input_layout.addWidget(self.enter_button)
+
+        self.decision_point_tab_layout.addLayout(input_layout)  # Add input field and button at the bottom
+
+        # Add Results and Profiles Tab
         self.setup_results_tab()
-        
+
+        self.setup_profiles_tab()
+
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
-        self.tabs.setTabEnabled(3, False)  # Disable Results (optimised) tab
+        self.tabs.setTabEnabled(3, False)  # Disable Decision tab
+        self.tabs.setTabEnabled(4, False)  # Disable Results tab
+        self.tabs.setTabEnabled(5, False)  # Disable Profiles tab
 
         # Initialise main program
-        self.run_program = Run()
+        self.run_program = Run(self)
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -147,7 +178,7 @@ class UserInputs(QMainWindow):
         blend_label = QLabel("Optimized Blend Choices:")
         blend_label.setStyleSheet("font-weight: bold;")
         self.blend_mode = QComboBox()
-        self.blend_mode.addItems(["Select the Best Result Automatically", "Prompt User at Every Decision Point"])
+        self.blend_mode.addItems(["Select Best Result Automatically", "Prompt User at Decision Point"])
         self.blend_mode.setFixedWidth(300)
 
         layout.addRow(blend_label, self.blend_mode)
@@ -414,15 +445,15 @@ class UserInputs(QMainWindow):
             ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
             ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
 
-            ("    Al", [False, False, False], "blue", ["0", "0", "0"]),
+            ("    Al", [False, False, False], "blue", ["", "", ""]),
             ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
             ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
 
-            ("    P", [False, False, False], "blue", ["0", "0", "0"]),
+            ("    P", [False, False, False], "blue", ["", "", ""]),
             ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
             ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
 
-            ("    Mn", [False, False, False], "blue", ["0", "0", "0"]),
+            ("    Mn", [False, False, False], "blue", ["", "", ""]),
             ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
             ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
         ])
@@ -538,9 +569,7 @@ class UserInputs(QMainWindow):
     }
     for outer_key, outer_value in self.calendar_inputs.items()
 }
-        
-        self.tabs.setTabEnabled(3, True)  # Enable Results (optimised) tab
-        self.tabs.setCurrentIndex(3)  # Switch to Results (optimised) tab
+        self.update_decision_point_tab_state()
         
         # Call main optimised run
         self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.stockpile_data, self.calendar_inputs)
@@ -549,62 +578,180 @@ class UserInputs(QMainWindow):
         self.start_dash_thread()
 
     def setup_results_tab(self):
+            
             self.results_tab = QWidget()
             self.tabs.addTab(self.results_tab, "Results (Optimised)")
             self.results_layout = QVBoxLayout(self.results_tab)
+           
+            # Create a QFrame
+            self.top_frame = QFrame()
+            self.top_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
+            self.top_frame.setLineWidth(2)  # Set the frame's border width
+            self.top_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
 
-            # Top Section (Gantt Chart and Decision Point)
+            # Add layout to the frame
             self.top_layout = QHBoxLayout()
-            self.results_layout.addLayout(self.top_layout)
+            self.top_frame.setLayout(self.top_layout) 
 
-            # Top Left (Gantt Chart with QWebEngineView)
-            self.gantt_chart_view = QWebEngineView()  # Embed the Dash app
+            # Add the frame to the parent layout
+            self.results_layout.addWidget(self.top_frame) 
+
+            # Top (Gantt Chart with CustomWebEngineView)
+            self.gantt_chart_view = CustomWebEngineView()
+            
+            # Embed the Dash app
             self.gantt_chart_view.setStyleSheet("border: 1px solid black;")
-            self.top_layout.addWidget(self.gantt_chart_view, 3)  # 3/4 width
+            self.top_layout.addWidget(self.gantt_chart_view) 
 
             # Load the Dash app into the QWebEngineView
             self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+        
+    def setup_profiles_tab(self):
+        
+            self.profiles_tab = QWidget()
+            self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
+            self.profiles_layout = QVBoxLayout(self.profiles_tab)
+            
+            self.bottom_frame= QFrame()
+            self.bottom_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
+            self.bottom_frame.setLineWidth(2)  # Set the frame's border width
+            self.bottom_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
 
-            # Top Right (Decision Point)
-            self.decision_point_widget = QTextEdit()
-            self.decision_point_widget.setReadOnly(True)
-            self.top_layout.addWidget(self.decision_point_widget, 1)  # 1/4 width
+            self.bottom_layout = QHBoxLayout()
+            self.bottom_frame.setLayout(self.bottom_layout)
 
-            # Middle Section (Blend Details Table Placeholder)
-            self.blend_details_placeholder = QLabel("Blend Details Table Placeholder")
-            self.blend_details_placeholder.setAlignment(Qt.AlignCenter)
-            self.blend_details_placeholder.setStyleSheet("border: 1px solid black;")
-            self.results_layout.addWidget(self.blend_details_placeholder)
+            # Add the frame to the parent layout
+            self.profiles_layout.addWidget(self.bottom_frame)
 
             # Bottom Section (Stockpile Profiles Chart Placeholder)
-            self.stockpile_profiles_placeholder = QLabel("Stockpile Profiles Chart Placeholder")
-            self.stockpile_profiles_placeholder.setAlignment(Qt.AlignCenter)
-            self.stockpile_profiles_placeholder.setStyleSheet("border: 1px solid black;")
-            self.results_layout.addWidget(self.stockpile_profiles_placeholder)
-            
-            self.update_decision_point()
+            self.stockpile_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
+            self.stockpile_profile_chart_view.setStyleSheet("border: 1px solid black;")
+            self.bottom_layout.addWidget(self.stockpile_profile_chart_view)  
 
-    def update_decision_point(self):
-        if self.blend_mode == 1:
-            # Static Blend Mode
-            self.decision_point_widget.setReadOnly(True)
-            self.decision_point_widget.setText("Auto")
-        elif self.blend_mode == 2:
-            # Dynamic Blend Mode (Interact with CaseModellerBridge)
-            self.decision_point_widget.setReadOnly(False)
-            self.decision_point_widget.setText("Select blends interactively")
+            # Load the Dash app into the QWebEngineView
+            self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
    
     def start_dash_thread(self):
         """Start the Dash app in a separate thread."""
         db_path = "blendmaster.db"
         self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
-
+        self.draw_stockpile_profile_chart = DrawStockProfiles(db_path, port=8051)
+        
         # Use a thread to run the Dash app server
-        self.dash_thread = threading.Thread(target=self.draw_gantt_chart.run_app, daemon=True)
-        self.dash_thread.start()
+        self.dash_thread_gantt = threading.Thread(target=self.draw_gantt_chart.run_app, daemon=True)
+        self.dash_thread_gantt.start()
+
+        self.dash_thread_stockpile_profile = threading.Thread(target=self.draw_stockpile_profile_chart.run_app, daemon=True)
+        self.dash_thread_stockpile_profile.start()
+    
+    def update_decision_point_tab_state(self):
+        """Enable or disable the Decision Point tab based on blend_mode."""
+        if self.blend_mode == 2:
+            self.tabs.setTabEnabled(3, True)
+            self.tabs.setCurrentIndex(3)
+            self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
+            self.tabs.setTabEnabled(5, True)  # Enable profiles tab
+
+        else:
+            self.tabs.setTabEnabled(3, False)
+            self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
+            self.tabs.setTabEnabled(5, True)  # Enable profiles tab
+            self.tabs.setCurrentIndex(4)  # Switch to Results (optimised) tab
+
+    def handle_decision_input(self):
+        """Send input from the Decision Point tab to the CaseModellerBridge."""
+        user_input = self.decision_input.text()
+
+        # Validate the input
+        try:
+            user_input_int = int(user_input)  # Check if input is an integer
+            max_blend_id = self.max_blend_id  # Max blend_ID from the DataFrame
+            if 1 <= user_input_int <= max_blend_id:
+                # Input is valid, send it to CaseModellerBridge
+                self.run_program.case_bridge.send_input(user_input)
+                self.decision_input.clear()
+            else:
+                raise ValueError(f"Input must be between 1 and {max_blend_id}")
+        except ValueError as e:
+            # Display an error message in the decision_output text area
+            self.display_decision_output(f"Invalid input: {e}")
+
+    def display_decision_output(self, message):
+        """Display messages from CaseModeller in the Decision Point tab."""
+        self.decision_output.append(message)
+
+    def display_decision_dataframe(self, df):
+        """Display a DataFrame in a QTableWidget with custom styles."""
+        # Clear the table instead of removing/recreating it
+        self.decision_table.clearContents()
+        self.decision_table.setRowCount(0)
+        self.decision_table.setColumnCount(0)
+
+        # Populate the table with new data
+        self.decision_table.setRowCount(len(df))
+        self.decision_table.setColumnCount(len(df.columns))
+        self.decision_table.setHorizontalHeaderLabels(df.columns)
+        
+        # Store number of rows for data validation in handle_decision_input
+        self.max_blend_id  = len(df)
+
+        # Set font for the table
+        font = QFont("Segoe UI", 10)  # Set font name and size
+        self.decision_table.setFont(font)
+
+        # Customize the headers
+        header_font = QFont("Segoe UI", 10, QFont.Bold)  # Bold font for headers
+        self.decision_table.horizontalHeader().setFont(header_font)
+
+        # Increase column width
+        self.decision_table.horizontalHeader().setDefaultSectionSize(150)  # Set default column width
+        self.decision_table.horizontalHeader().setStretchLastSection(False)  # Optional: Stretch the last column
+
+        # Populate the table with DataFrame content
+        for row_idx, row in enumerate(df.itertuples(index=False)):
+            for col_idx, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter)  # Center-align cell content
+                self.decision_table.setItem(row_idx, col_idx, item)
+
+        # Resize columns to fit content 
+        self.decision_table.resizeColumnsToContents()
+
+
+class CustomWebEngineView(QWebEngineView):
+    def __init__(self):
+        super().__init__()
+        # Connect download handling to the QWebEngineView
+        self.page().profile().downloadRequested.connect(self.handle_download)
+
+    def handle_download(self, download_item: QWebEngineDownloadItem):
+        # Default the file name to JPG
+        save_path = QFileDialog.getSaveFileName(
+            self,
+            "Save File",
+            download_item.path().rsplit(".", 1)[0] + ".jpg",  # Replace the file extension with .jpg
+            "JPEG (*.jpg)"  # Only allow JPG files
+        )[0]
+
+        if save_path:  # Ensure a file path is selected
+            # Force .jpg extension in case the user deletes it
+            if not save_path.endswith(".jpg"):
+                save_path += ".jpg"
+
+            # Set the file path and accept the download
+            download_item.setPath(save_path)
+            download_item.accept()
+        else:
+            # Cancel the download if no path is chosen
+            download_item.cancel()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # Set the global font to Segoe UI, size 12
+    font = QFont("Segoe UI", 10)
+    app.setFont(font)
+    
     window = UserInputs()  # Create an instance of the imported class
     window.show()              # Show the GUI
     sys.exit(app.exec_())      # Run the event loop

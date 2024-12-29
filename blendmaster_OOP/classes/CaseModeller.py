@@ -44,10 +44,10 @@ class CaseModeller:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
             self.steady_state_tracker += 1
-        # Save blend results to an Excel file at the end
-        self.save_optimised_blend_report(fr"C:\BlendMaster\blendmaster_OOP\output\optimised_blend_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
-        # Save stockpile build report to an Excel file at the end
-        self.save_build_report(fr"C:\BlendMaster\blendmaster_OOP\output\build_report_{self.start_time.date()}_{self.start_time.strftime('%H-%M')}.xlsx")
+        # Save blend results to database
+        self.save_optimised_blend_report()
+        # Save stockpile build report to database
+        self.save_build_report()
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
@@ -172,8 +172,8 @@ class CaseModeller:
                 
                 if not list(current_filtered_sources) == list(previous_filtered_sources):
                     print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
-                    print("\033[92mBlend fully depleted.\033[0m")
-                    self.user_blend_choice = input("\033[95mChoose new blend: \033[0m")
+                    print("Blend fully depleted.")
+                    self.user_blend_choice = input("Choose new blend: ")
                     self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
                     self.blend_ID += 1
                     # Cast user choice to appropriate type
@@ -187,7 +187,7 @@ class CaseModeller:
             
             elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
                 print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
-                self.user_blend_choice = input("\033[95mChoose blend: \033[0m")
+                self.user_blend_choice = input("Choose blend: ")
                 # Cast user choice to appropriate type
                 try:
                     self.user_blend_choice = int(self.user_blend_choice)
@@ -351,7 +351,7 @@ class CaseModeller:
         """Append filtered results to the main DataFrame."""
         self.results = pd.concat([self.results, pd.DataFrame(filtered_decision_point_results_to_user_choice)], ignore_index=True)
     
-    def save_optimised_blend_report(self, filename):
+    def save_optimised_blend_report(self):
         """Save results to an Excel file."""
         # Ensure numeric columns for comparison
         self.results["source_actual_tonnes"] = pd.to_numeric(
@@ -372,17 +372,17 @@ class CaseModeller:
             )
         ]
 
-        self.results.to_excel(filename, index=False)
-        print(f"All results written to {filename}")
+        #self.results.to_excel(filename, index=False)
+        #print(f"All results written to {filename}")
 
         self.database_manager.write_optimised_blend_report_to_database(self.results, self.periods)
 
-    def save_build_report(self, filename):
+    def save_build_report(self):
         """Save stockpile build report to an Excel file."""
         self.build_report = self.balance_tracker.get_build_transactions()
 
-        self.build_report.to_excel(filename, index=False)
-        print(f"All results written to {filename}")
+        #self.build_report.to_excel(filename, index=False)
+        #print(f"All results written to {filename}")
 
         self.database_manager.write_build_report_to_database(self.build_report)
        

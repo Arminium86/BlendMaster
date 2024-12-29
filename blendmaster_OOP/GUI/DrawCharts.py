@@ -7,8 +7,9 @@ import plotly.express as px
 import random
 
 class DrawStockProfiles:
-    def __init__(self, db_path):
+    def __init__(self, db_path, port):
         self.db_path = db_path
+        self.port = port
 
     def fetch_data(self):
         """
@@ -106,7 +107,7 @@ class DrawStockProfiles:
             ]
         )
         # Run the Dash app
-        app.run_server(debug=True)
+        app.run_server(debug=True, port=self.port, use_reloader=False)
 
     def generate_random_color(self):
         """
@@ -197,7 +198,6 @@ class DrawGanttChart:
         # Create a legend column
         data['Legend'] = data.apply(
             lambda row: f"Blend ID: {row['blend_ID']}<br>"
-                        f"Period: {row['period']}<br>"
                         f"Sources and Ratios:<br>" +
                         "".join(
                             f" - {source} @ {float(ratio) * 100:.2f}%<br>"  # Format ratio as percent
@@ -237,16 +237,19 @@ class DrawGanttChart:
             children=[
                 # Gantt Chart
                 html.Div(
-                    style={'padding-bottom': '20px'},
+                    style={
+                        'width': '100%',  # Ensure the Gantt chart container spans full width
+                        'padding-bottom': '20px',  # Optional padding below the chart
+                    },
                     children=[
-                        html.H1("Gantt Chart & Blend Details"),
+                        html.H2("Gantt Chart & Blend Details"),
                         dcc.Graph(
                             id="gantt-chart",
                             style={
-                                'width': '100%',
-                                'height': '100vh',  # Adjust height as needed
+                                'width': '100%',  # Ensure the chart spans full width
+                                'height': '80vh',  # Adjust height as needed
                                 'border': '2px solid black',  # Add a black border
-                                'padding': '10px',  # Optional: Add padding inside the border
+                                'padding': '0',  # Remove padding
                                 'borderRadius': '5px',  # Optional: Rounded corners
                                 'overflow': 'hidden',  # Ensure content stays inside the border
                                 'boxSizing': 'border-box'  # Include padding in total size calculations
@@ -271,29 +274,32 @@ class DrawGanttChart:
                             data=[],  # Initially empty
                             style_table={'overflowX': 'auto'},
                             style_cell={
-                                    'textAlign': 'center',  # Align text to the left
-                                    'padding': '5px',  # Add padding
-                                    'whiteSpace': 'normal',  # Enable wrapping
-                                    'overflow': 'hidden',  # Prevent overflow
-                                    'textOverflow': 'ellipsis',  # Add ellipsis for clipped text
-                                    'maxWidth': '150px',  # Set max width for columns
-                                },
+                                'textAlign': 'center',
+                                'padding': '5px',
+                                'whiteSpace': 'normal',
+                                'overflow': 'hidden',
+                                'textOverflow': 'ellipsis',
+                                'maxWidth': '150px',
+                                'fontFamily': 'Segoe UI',  # Set font for table cells
+                                'fontSize': '14px'         # Set font size for table cells
+                            },
                             style_cell_conditional=[
-
-                                {'if': {'column_id': 'start_datetime'}, 'textAlign': 'left'},  # Left align for 'start_datetime'
-                                {'if': {'column_id': 'end_datetime'}, 'textAlign': 'left'},  # Left align for 'end_datetime'
+                                {'if': {'column_id': 'start_datetime'}, 'textAlign': 'left'},
+                                {'if': {'column_id': 'end_datetime'}, 'textAlign': 'left'},
                                 {'if': {'column_id': 'source_agg'}, 'textAlign': 'left'},
                                 {'if': {'column_id': 'source_blend_ratio_agg'}, 'textAlign': 'left'}
                             ],
                             style_header={
-                                    'fontWeight': 'bold',
-                                    'textAlign': 'center',  # Center-align header text
-                                    'whiteSpace': 'normal',  # Enable wrapping for header text
-                                    'height': 'auto',  # Allow dynamic height for wrapped text
-                                    'lineHeight': '1.2',  # Adjust line spacing for better readability
-                                    'padding': '5px',  # Add padding to avoid text clipping
-                                    'overflow': 'hidden',  # Prevent header text overflow
-                                },
+                                'fontWeight': 'bold',
+                                'textAlign': 'center',
+                                'fontFamily': 'Segoe UI',  # Set font for header
+                                'fontSize': '14px',        # Set font size for header
+                                'whiteSpace': 'normal',
+                                'height': 'auto',
+                                'lineHeight': '1.2',
+                                'padding': '5px',
+                                'overflow': 'hidden',
+                            },
                             hidden_columns=["lane"],  # Hide the lane column
                         )
                     ]
@@ -346,24 +352,28 @@ class DrawGanttChart:
             fig.update_layout(
                 xaxis_title="",
                 yaxis_title="Blend",
+                font=dict(
+                    family="Segoe UI",  # Set the font
+                    size=14,            # Font size
+                    color="black"       # Font color (optional)
+                ),
                 yaxis=dict(
                     tickmode='array',
                     tickvals=data['lane'],
                     ticktext=data['blend_ID']  # Label lanes with blend_ID
                 ),
                 showlegend=True,
-                
                 legend=dict(
-                title="Blend Details",  # Title for the legend
-                orientation="v",  # Vertical orientation
-                x=1.02,  # Position to the right of the chart
-                y=1,  # Top of the chart
-                bgcolor="rgba(255,255,255,0.5)",  # Semi-transparent background
-                bordercolor="black",  # Border around the legend
-                borderwidth=1  # Thickness of the legend border
-            ),
-                width=1000,  # Increase chart width
-                height=chart_height  # Set dynamic height in pixels
+                    title="Blend Details",
+                    orientation="v",
+                    x=1.02,
+                    y=1,
+                    bgcolor="rgba(255,255,255,0.5)",
+                    bordercolor="black",
+                    borderwidth=1
+                ),
+                width=1750,
+                height=chart_height
             )
 
             return fig
@@ -405,7 +415,6 @@ class DrawGanttChart:
                 return filtered_data.to_dict("records")
             
             return data.to_dict("records")
-
 
     def run_app(self):
         """

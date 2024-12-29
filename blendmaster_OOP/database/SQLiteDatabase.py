@@ -148,6 +148,7 @@ class DatabaseManager:
         conn.close()
 
         print(f"Build report saved to database {database_name}")
+        print(f"Expit payload transactions saved to database {database_name}")
 
     def write_expit_payload_transactions_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
@@ -444,7 +445,7 @@ class StockpileProfileReport:
             # Save the extended report to the database
             extended_combined_report.to_sql('optimised_stockpile_profile_report', conn, if_exists='replace', index=False)
 
-            print("Optimised stockpile profile report saved to database successfully.")
+            print(f"Optimised stockpile profile report saved to database {database_name}")
 
         finally:
             # Close the database connection
