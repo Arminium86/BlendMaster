@@ -578,58 +578,76 @@ class UserInputs(QMainWindow):
         self.start_dash_thread()
 
     def setup_results_tab(self):
-            
-            self.results_tab = QWidget()
-            self.tabs.addTab(self.results_tab, "Results (Optimised)")
-            self.results_layout = QVBoxLayout(self.results_tab)
-           
-            # Create a QFrame
-            self.top_frame = QFrame()
-            self.top_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
-            self.top_frame.setLineWidth(2)  # Set the frame's border width
-            self.top_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
+        self.results_tab = QWidget()
+        self.tabs.addTab(self.results_tab, "Results (Optimised)")
+        self.results_layout = QVBoxLayout(self.results_tab)
 
-            # Add layout to the frame
-            self.top_layout = QHBoxLayout()
-            self.top_frame.setLayout(self.top_layout) 
+        # Create a QFrame
+        self.top_frame = QFrame()
+        self.top_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
+        self.top_frame.setLineWidth(2)  # Set the frame's border width
+        self.top_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
 
-            # Add the frame to the parent layout
-            self.results_layout.addWidget(self.top_frame) 
+        # Add layout to the frame
+        self.top_layout = QHBoxLayout()
+        self.top_frame.setLayout(self.top_layout)
 
-            # Top (Gantt Chart with CustomWebEngineView)
-            self.gantt_chart_view = CustomWebEngineView()
-            
-            # Embed the Dash app
-            self.gantt_chart_view.setStyleSheet("border: 1px solid black;")
-            self.top_layout.addWidget(self.gantt_chart_view) 
+        # Add the frame to the parent layout
+        self.results_layout.addWidget(self.top_frame)
 
-            # Load the Dash app into the QWebEngineView
-            self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+        # Top (Gantt Chart with CustomWebEngineView)
+        self.gantt_chart_view = CustomWebEngineView()
+        self.gantt_chart_view.setStyleSheet("border: 1px solid black;")
+        self.top_layout.addWidget(self.gantt_chart_view)
+
+        # Add a button to load the chart
+        self.load_chart_button = QPushButton("Load or Update Chart")
+        self.load_chart_button.setFixedWidth(200)
+        self.load_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional: Style the button
+        self.load_chart_button.clicked.connect(self.load_gantt_chart)  # Connect button to function
+
+        # Add the button to the layout (you can position it as needed)
+        self.results_layout.addWidget(self.load_chart_button)
+
+    def load_gantt_chart(self):
+        # Load the Dash app into the QWebEngineView
+        self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
         
     def setup_profiles_tab(self):
-        
-            self.profiles_tab = QWidget()
-            self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
-            self.profiles_layout = QVBoxLayout(self.profiles_tab)
-            
-            self.bottom_frame= QFrame()
-            self.bottom_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
-            self.bottom_frame.setLineWidth(2)  # Set the frame's border width
-            self.bottom_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
+        self.profiles_tab = QWidget()
+        self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
+        self.profiles_layout = QVBoxLayout(self.profiles_tab)
 
-            self.bottom_layout = QHBoxLayout()
-            self.bottom_frame.setLayout(self.bottom_layout)
+        # Create the bottom frame
+        self.bottom_frame = QFrame()
+        self.bottom_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
+        self.bottom_frame.setLineWidth(2)  # Set the frame's border width
+        self.bottom_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
 
-            # Add the frame to the parent layout
-            self.profiles_layout.addWidget(self.bottom_frame)
+        # Add layout to the frame
+        self.bottom_layout = QHBoxLayout()
+        self.bottom_frame.setLayout(self.bottom_layout)
 
-            # Bottom Section (Stockpile Profiles Chart Placeholder)
-            self.stockpile_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
-            self.stockpile_profile_chart_view.setStyleSheet("border: 1px solid black;")
-            self.bottom_layout.addWidget(self.stockpile_profile_chart_view)  
+        # Add the frame to the parent layout
+        self.profiles_layout.addWidget(self.bottom_frame)
 
-            # Load the Dash app into the QWebEngineView
-            self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
+        # Bottom Section (Stockpile Profiles Chart Placeholder)
+        self.stockpile_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
+        self.stockpile_profile_chart_view.setStyleSheet("border: 1px solid black;")
+        self.bottom_layout.addWidget(self.stockpile_profile_chart_view)
+
+        # Add a button to load the chart
+        self.load_profile_chart_button = QPushButton("Load or Update Chart")
+        self.load_profile_chart_button.setFixedWidth(200)
+        self.load_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
+        self.load_profile_chart_button.clicked.connect(self.load_profiles)  # Connect button to function
+
+        # Add the button to the layout at the bottom-left
+        self.profiles_layout.addWidget(self.load_profile_chart_button)
+
+    def load_profiles(self):
+        # Load the Dash app into the QWebEngineView
+        self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
    
     def start_dash_thread(self):
         """Start the Dash app in a separate thread."""
@@ -665,13 +683,13 @@ class UserInputs(QMainWindow):
         # Validate the input
         try:
             user_input_int = int(user_input)  # Check if input is an integer
-            max_blend_id = self.max_blend_id  # Max blend_ID from the DataFrame
-            if 1 <= user_input_int <= max_blend_id:
+            max_blend_option = self.max_blend_option  # Max blend_ID from the DataFrame
+            if 1 <= user_input_int <= max_blend_option:
                 # Input is valid, send it to CaseModellerBridge
                 self.run_program.case_bridge.send_input(user_input)
                 self.decision_input.clear()
             else:
-                raise ValueError(f"Input must be between 1 and {max_blend_id}")
+                raise ValueError(f"Input must be between 1 and {max_blend_option}")
         except ValueError as e:
             # Display an error message in the decision_output text area
             self.display_decision_output(f"Invalid input: {e}")
@@ -693,7 +711,7 @@ class UserInputs(QMainWindow):
         self.decision_table.setHorizontalHeaderLabels(df.columns)
         
         # Store number of rows for data validation in handle_decision_input
-        self.max_blend_id  = len(df)
+        self.max_blend_option = df['blend_option'].max()
 
         # Set font for the table
         font = QFont("Segoe UI", 10)  # Set font name and size

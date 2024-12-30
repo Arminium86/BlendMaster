@@ -221,7 +221,7 @@ class DrawGanttChart:
             "end_datetime": "End Time",
             "blend_ID": "Blend ID",
             "lane": "Lane",
-            "steady_state_number": "Steady State #",
+            "steady_state_number": "Steady State",
             "source_agg": "Sources",
             "source_blend_ratio_agg": "Blend Ratios",
             "crusher_actual_tonnes": "Crusher Tonnes",
@@ -247,11 +247,11 @@ class DrawGanttChart:
                             id="gantt-chart",
                             style={
                                 'width': '100%',  # Ensure the chart spans full width
-                                'height': '80vh',  # Adjust height as needed
+                                'height': '100vh',  # Adjust height as needed
                                 'border': '2px solid black',  # Add a black border
                                 'padding': '0',  # Remove padding
                                 'borderRadius': '5px',  # Optional: Rounded corners
-                                'overflow': 'hidden',  # Ensure content stays inside the border
+                                'overflow': 'auto',  # Ensure content stays inside the border
                                 'boxSizing': 'border-box'  # Include padding in total size calculations
                             }
                         )
@@ -284,10 +284,10 @@ class DrawGanttChart:
                                 'fontSize': '14px'         # Set font size for table cells
                             },
                             style_cell_conditional=[
-                                {'if': {'column_id': 'start_datetime'}, 'textAlign': 'left'},
-                                {'if': {'column_id': 'end_datetime'}, 'textAlign': 'left'},
-                                {'if': {'column_id': 'source_agg'}, 'textAlign': 'left'},
-                                {'if': {'column_id': 'source_blend_ratio_agg'}, 'textAlign': 'left'}
+                                {'if': {'column_id': 'start_datetime'}, 'textAlign': 'center'},
+                                {'if': {'column_id': 'end_datetime'}, 'textAlign': 'center'},
+                                {'if': {'column_id': 'source_agg'}, 'textAlign': 'center'},
+                                {'if': {'column_id': 'source_blend_ratio_agg'}, 'textAlign': 'center'}
                             ],
                             style_header={
                                 'fontWeight': 'bold',
@@ -348,6 +348,16 @@ class DrawGanttChart:
                 title=""
             )
 
+            # Add borders to bars
+            fig.update_traces(
+                marker=dict(
+                    line=dict(
+                        width=1,  # Border thickness
+                        color="black"  # Border color
+                    )
+                )
+            )
+
             # Adjust layout
             fig.update_layout(
                 xaxis_title="",
@@ -364,16 +374,18 @@ class DrawGanttChart:
                 ),
                 showlegend=True,
                 legend=dict(
-                    title="Blend Details",
-                    orientation="v",
-                    x=1.02,
-                    y=1,
-                    bgcolor="rgba(255,255,255,0.5)",
-                    bordercolor="black",
-                    borderwidth=1
+                title="Blend Details",
+                orientation="v",
+                yanchor="top",  # Anchor the legend box at the top
+                y=1.0,          # Position the legend vertically (can go beyond plot height)
+                xanchor="left", # Anchor the legend box horizontally
+                x=1.02,         # Position the legend horizontally
+                bgcolor="rgba(255,255,255,0.5)",
+                bordercolor="black",
+                borderwidth=1
                 ),
                 width=1750,
-                height=chart_height
+                height=chart_height + 200
             )
 
             return fig
