@@ -1,7 +1,7 @@
 import sys, threading, requests, time
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QAbstractItemView, QCheckBox
 )
 
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
@@ -35,20 +35,21 @@ class UserInputs(QMainWindow):
 
         # Add Stockpile Tab
         self.stockpile_tab = QWidget()
-        self.tabs.addTab(self.stockpile_tab, "Stockpile Inventories and Reclaim Thresholds")
+        self.tabs.addTab(self.stockpile_tab, "Stockpile Inventories")
         self.stockpile_tab_layout = QVBoxLayout(self.stockpile_tab)
 
         # Stockpile Table
-        self.stockpile_table = QTableWidget()
+        self.stockpile_table = CustomTableWidget()
         self.stockpile_tab_layout.addWidget(self.stockpile_table)
 
         # Add calendar Tab
         self.main_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
+        self.calendar_inputs = {}
 
         # Calendar table
-        self.main_table = QTableWidget()
+        self.main_table = CustomTableWidget()
         self.main_tab_layout.addWidget(self.main_table)
 
         # Add Decision Point Tab
@@ -57,7 +58,7 @@ class UserInputs(QMainWindow):
         self.decision_point_tab_layout = QVBoxLayout(self.decision_point_tab)
 
         # Create the table widget for the DataFrame
-        self.decision_table = QTableWidget()
+        self.decision_table = CustomTableWidget()
         self.decision_point_tab_layout.addWidget(self.decision_table)  # Add table at the top
 
         # Text output area
@@ -274,13 +275,12 @@ class UserInputs(QMainWindow):
         hub_input = self.hub_input
         mine_input = self.mine_input
         self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time)
-
-        self.stockpile_data_keys = self.stockpile_data.keys()
     
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
-        # Define Headers
+        # Define Headers (Add "Use" Column)
         headers = [
+            "Use",
             "Stockpile Name",
             "Balance (WMT)",
             "Grade Fe (%)",
@@ -299,25 +299,35 @@ class UserInputs(QMainWindow):
         header_font.setBold(True)
         self.stockpile_table.horizontalHeader().setFont(header_font)
 
-        # Left-align the first header
-        header_item = self.stockpile_table.horizontalHeaderItem(0)
-        if header_item:
-            header_item.setTextAlignment(Qt.AlignLeft)
+        # Choose data source based on calendar_inputs
+        data_source = self.updated_stockpile_data if self.calendar_inputs else self.stockpile_data
 
         # Set Table Dimensions
         self.stockpile_table.setRowCount(len(self.stockpile_data))
 
         # Populate Stockpile Data
-        for row_idx, (stockpile_name, attributes) in enumerate(self.stockpile_data.items()):
-            # Stockpile Name (Left-aligned)
+        for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
+            # "Use" Column (Checkbox)
+            use_checkbox = QCheckBox()
+            use_checkbox.setChecked(False)  # Default to unchecked
+
+            # Center the checkbox using a QWidget and layout
+            checkbox_widget = QWidget()
+            layout = QHBoxLayout(checkbox_widget)
+            layout.addWidget(use_checkbox)
+            layout.setAlignment(Qt.AlignCenter)  # Center the checkbox
+            layout.setContentsMargins(0, 0, 0, 0)  # Remove any extra padding
+            self.stockpile_table.setCellWidget(row_idx, 0, checkbox_widget)
+
+            # Stockpile Name (Center-align)
             stockpile_item = QTableWidgetItem(str(stockpile_name))
             stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
-            stockpile_item.setTextAlignment(Qt.AlignLeft)
-            self.stockpile_table.setItem(row_idx, 0, stockpile_item)
+            stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
+            self.stockpile_table.setItem(row_idx, 1, stockpile_item)
 
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
-            for col_idx, key in enumerate(keys, start=1):
+            for col_idx, key in enumerate(keys, start=2):  # Start after "Use" and "Stockpile Name"
                 value = attributes.get(key, 0)  # Default to 0 if key is missing
 
                 if key == "BALANCE":
@@ -349,19 +359,21 @@ class UserInputs(QMainWindow):
 
         # Resize Columns
         self.stockpile_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.stockpile_table.setEditTriggers(self.stockpile_table.AllEditTriggers)
 
         # Connect cellChanged signal to a slot for live formatting
         self.stockpile_table.cellChanged.connect(self.handle_cell_change)
 
-        # Add Submit Button at the Bottom Left
-        submit_button = QPushButton("Submit Reclaim Thresholds")
-        submit_button.clicked.connect(self.store_reclaim_thresholds)
+        # Add Submit Button at the Bottom
+        submit_button = QPushButton("Submit")
+        submit_button.clicked.connect(self.store_stockpile_table)
 
         # Align button to the bottom-left using layout
         button_layout = QHBoxLayout()
-        button_layout.addWidget(submit_button)
-        button_layout.addStretch()  # Push the button to the left
+        
+        # Don't add the button if returning from the calendar
+        if not self.calendar_inputs:
+            button_layout.addWidget(submit_button)  
+            button_layout.addStretch()  # Push the button to the left
 
         self.stockpile_tab_layout.addLayout(button_layout)
 
@@ -396,27 +408,39 @@ class UserInputs(QMainWindow):
                     # Ignore invalid inputs
                     reclaim_item.setForeground(QColor("black"))
 
-    def store_reclaim_thresholds(self):
-        """Store reclaim thresholds entered by the user and modifies types."""
-        for row in range(self.stockpile_table.rowCount()):
-            stockpile_name = self.stockpile_table.item(row, 0).text()
-            reclaim_threshold = self.stockpile_table.item(row, 7) # Assuming last column index is 7
-            
-            if reclaim_threshold:
-                self.stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold.type()
-            else:
-                self.stockpile_data[stockpile_name]["reclaim_threshold"] = 0
-            
-        
-        self.stockpile_data = {
-    key.upper(): {
-        nested_key.lower(): (nested_value.lower() if nested_key.lower() == "name" and isinstance(nested_value, str) else nested_value)
-        for nested_key, nested_value in value.items()
-    }
-    for key, value in self.stockpile_data.items()
-}
+    def store_stockpile_table(self):
+        """Store stockpile details entered by the user, filtering by the 'Use' column."""
+        updated_stockpile_data = {}
 
-       
+        for row in range(self.stockpile_table.rowCount()):
+            # Check if "Use" column checkbox is checked
+            checkbox_widget = self.stockpile_table.cellWidget(row, 0)  # Get the widget in the "Use" column
+            if checkbox_widget:
+                checkbox = checkbox_widget.layout().itemAt(0).widget()  # Extract the QCheckBox
+                if checkbox.isChecked():  # Check if the checkbox is checked
+                    stockpile_name = self.stockpile_table.item(row, 1).text()
+
+                    # Retrieve Reclaim Threshold
+                    reclaim_item = self.stockpile_table.item(row, self.stockpile_table.columnCount() - 1)
+                    reclaim_threshold = float(reclaim_item.text()) if reclaim_item else 0
+
+                    # Update stockpile data
+                    updated_stockpile_data[stockpile_name] = self.stockpile_data.get(stockpile_name, {})
+                    updated_stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+
+                
+        # Update stockpile_data with filtered data
+        self.updated_stockpile_data = updated_stockpile_data
+        self.updated_stockpile_data_keys = updated_stockpile_data.keys()
+
+        self.updated_stockpile_data = {
+            key.upper(): {
+                nested_key.lower(): (nested_value.lower() if nested_key.lower() == "name" and isinstance(nested_value, str) else nested_value)
+                for nested_key, nested_value in value.items()
+            }
+            for key, value in self.updated_stockpile_data.items()
+        }
+
         # Enable the next tab (Calendar Tab)
         self.setup_calendar()
         self.tabs.setTabEnabled(2, True)
@@ -461,7 +485,7 @@ class UserInputs(QMainWindow):
         # Dynamically Add Stockpile Rows with default values
         rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
 
-        for stockpile in self.stockpile_data_keys:
+        for stockpile in self.updated_stockpile_data_keys:
             rows.append((f"  {stockpile}", [False, False, False], "red", ["", "", ""]))
             rows.append((f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"]))
             rows.append((f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"]))
@@ -505,16 +529,18 @@ class UserInputs(QMainWindow):
 
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.main_table.setEditTriggers(self.main_table.AllEditTriggers)
 
-        # Add Submit Button at Bottom-Right
+        # Add Submit Button at bottom-Right
         submit_button = QPushButton("Submit")
         submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
 
         # Align button to bottom-right
         button_layout = QHBoxLayout()
-        button_layout.addWidget(submit_button)  # Add the button first to keep it aligned to the left
-        button_layout.addStretch()  # Push any other content (if any) to the right
+        
+        # Check if the button already exists in the layout
+        if not self.calendar_inputs:
+          button_layout.addWidget(submit_button) 
+          button_layout.addStretch()  # Push any other content (if any) to the right
 
         # Add table and button layout to the main tab layout
         self.main_tab_layout.addLayout(button_layout)
@@ -523,6 +549,9 @@ class UserInputs(QMainWindow):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
         self.calendar_inputs = {}
 
+        # Connect the error signal to a popup display method
+        self.run_program.case_bridge.error_signal.connect(self.show_error_popup)
+        
         # Capture column headers for periods
         headers = [self.main_table.horizontalHeaderItem(col).text().strip() for col in range(1, self.main_table.columnCount())]
 
@@ -569,13 +598,26 @@ class UserInputs(QMainWindow):
     }
     for outer_key, outer_value in self.calendar_inputs.items()
 }
-        self.update_decision_point_tab_state()
         
-        # Call main optimised run
-        self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.stockpile_data, self.calendar_inputs)
+        success = False  # Flag to track whether execution was successful
 
-        # Start the Dash app thread
-        self.start_dash_thread()
+        try:
+            # Call main optimised run
+            self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.updated_stockpile_data, self.calendar_inputs)
+            success = True  # Set flag to True if no exception occurs
+
+        except Exception as e:
+            # Handle or log the error
+            self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
+
+        # Conditional logic based oÜn whether the execution was successful
+        if success:
+            self.update_decision_point_tab_state()
+            self.start_dash_thread()
+        else:
+            # Handle alternative flow if an exception occurred
+            self.tabs.setCurrentIndex(1)  
+            self.setup_stockpile_table()
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
@@ -734,7 +776,24 @@ class UserInputs(QMainWindow):
 
         # Resize columns to fit content 
         self.decision_table.resizeColumnsToContents()
+    
+    def show_error_popup(self, error_message):
+        """Display an error message in a popup."""
+        QMessageBox.critical(self, "Error", error_message)
 
+class CustomTableWidget(QTableWidget):
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):  # Check for Enter key
+            current_row = self.currentRow()
+            current_column = self.currentColumn()
+
+            # Move one row down, wrap around if at the last row
+            next_row = (current_row + 1) % self.rowCount()
+            self.setCurrentCell(next_row, current_column)
+
+        else:
+            # Default behavior for other keys
+            super().keyPressEvent(event)
 
 class CustomWebEngineView(QWebEngineView):
     def __init__(self):
@@ -762,6 +821,7 @@ class CustomWebEngineView(QWebEngineView):
         else:
             # Cancel the download if no path is chosen
             download_item.cancel()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

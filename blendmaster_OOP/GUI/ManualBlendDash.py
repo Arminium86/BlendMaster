@@ -1,27 +1,31 @@
 import dash
-from dash import html, dcc, callback, Input, Output, State, dash_table
+from dash import html, dcc, dash_table, Input, Output, State
 import plotly.express as px
 import pandas as pd
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+#from classes.PeriodManager import PeriodManager
 
-class BlendSchedulerApp:
-    def __init__(self):
+class ManualBlendDash:
+    
+    def __init__(self, periods, db_path, port):
         self.app = dash.Dash(__name__)
-        self.database = "blendmaster.db"
-        self.default_start_datetime = "2023-12-01 08:00:00"
-        self.default_end_datetime = "2023-12-07 18:00:00"
+        self.database = db_path
+        self.default_start_datetime = periods.get_periods()["preplan_start"].strftime("%Y-%m-%dT%H:%M")
+        self.default_end_datetime = periods.get_periods()["period_2_end"].strftime("%Y-%m-%dT%H:%M")
+        self.db_path = db_path
+        self.port = port
         self.setup_database()
 
         # Layout
         self.app.layout = html.Div(
-            style={'display': 'flex', 'flex-direction': 'column', 'padding': '20px'},
+            style={'display': 'flex', 'flex-direction': 'column', 'padding': '20px', 'font-family': 'Segoe UI', 'font-size': '10px'},
             children=[
                 # Gantt Chart
                 html.Div(
                     style={'width': '100%', 'padding-bottom': '20px'},
                     children=[
-                        html.H2("Gantt Chart & Blend Details"),
+                        html.H2("Gantt Chart & Blend Details", style={'font-weight': 'bold'}),
                         dcc.Graph(
                             id="gantt-chart",
                             style={
@@ -37,17 +41,20 @@ class BlendSchedulerApp:
                     ]
                 ),
                 # Input Table
+                # Define the calendar and table layout
                 html.Div(
                     id="input-container",
                     style={'margin-top': '20px'},
                     children=[
-                        html.H3("Blend Details Input"),
+                        html.H3("Blend Details Input", style={'font-weight': 'bold'}),
                         dash_table.DataTable(
                             id="input-table",
                             columns=[
                                 {"name": "Blend ID", "id": "blend_ID", "editable": False},
-                                {"name": "Start Time", "id": "start_datetime", "type": "text"},
-                                {"name": "End Time", "id": "end_datetime", "type": "text"},
+                                {"name": "Start Date", "id": "start_date", "presentation": "input"},
+                                {"name": "Start Time", "id": "start_time", "presentation": "dropdown"},
+                                {"name": "End Date", "id": "end_date", "presentation": "input"},
+                                {"name": "End Time", "id": "end_time", "presentation": "dropdown"},
                                 {"name": "Source 1", "id": "source_1", "presentation": "dropdown"},
                                 {"name": "Source 2", "id": "source_2", "presentation": "dropdown"},
                                 {"name": "Source 3", "id": "source_3", "presentation": "dropdown"},
@@ -62,11 +69,56 @@ class BlendSchedulerApp:
                             ],
                             editable=True,
                             style_table={'overflowX': 'auto'},
-                            dropdown={
-                                f"source_{i}": {
-                                    "options": [{"label": f"Stockpile {j}", "value": f"Stockpile {j}"} for j in range(1, 6)]
-                                } for i in range(1, 6)
+                            style_header={
+                                'backgroundColor': '#f4f4f4',
+                                'fontWeight': 'bold',
+                                'textAlign': 'center',
                             },
+                            style_data={
+                                'textAlign': 'center',
+                            },
+
+                             style_data_conditional=[
+                                {
+                                    "if": {"column_id": col},
+                                    "color": "black",  # Set dropdown font color to black
+                                }
+                                for col in ["start_time", "end_time", "source_1", "source_2", "source_3", "source_4", "source_5"]
+                            ],
+                            dropdown={
+                                "start_time": {
+                                    "options": [
+                                        {"label": f"{hour:02d}:{minute:02d}", "value": f"{hour:02d}:{minute:02d}"}
+                                        for hour in range(24) for minute in range(60)
+                                    ]
+                                },
+                                "end_time": {
+                                    "options": [
+                                        {"label": f"{hour:02d}:{minute:02d}", "value": f"{hour:02d}:{minute:02d}"}
+                                        for hour in range(24) for minute in range(60)
+                                    ]
+                                },
+                                **{
+                                    f"source_{i}": {
+                                        "options": [{"label": f"Stockpile {j}", "value": f"Stockpile {j}"} for j in range(1, 6)]
+                                    } for i in range(1, 6)
+                                },
+                            },
+                        ),
+                        html.Div(
+                            id="calendar-picker",
+                            children=[
+                                html.Div(
+                                    style={"display": "flex", "justifyContent": "space-between", "margin-top": "20px"},
+                                    children=[
+                                        dcc.DatePickerSingle(
+                                            id="date-picker",
+                                            date=datetime.today().strftime("%Y-%m-%d"),
+                                            placeholder="Date",
+                                        ),
+                                    ],
+                                ),
+                            ],
                         ),
                         html.Button("Submit", id="submit-button", style={'margin-top': '10px'}),
                     ]
@@ -82,7 +134,7 @@ class BlendSchedulerApp:
         conn = sqlite3.connect(self.database)
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS schedule (
+            CREATE TABLE IF NOT EXISTS manual_blend_dash_input (
                 blend_ID INTEGER,
                 start_datetime TEXT,
                 end_datetime TEXT,
@@ -99,51 +151,67 @@ class BlendSchedulerApp:
                 crusher_rate REAL
             )
         """)
+        # Clear the table if it exists
+        cursor.execute("DELETE FROM manual_blend_dash_input")
+       
         conn.commit()
         conn.close()
 
     def fetch_data(self):
         """Fetch data for the Gantt chart."""
         conn = sqlite3.connect(self.database)
-        df = pd.read_sql("SELECT * FROM schedule", conn)
+        df = pd.read_sql("SELECT * FROM manual_blend_dash_input", conn)
         conn.close()
 
         if df.empty:
-            # Return default data if the table is empty
+            # Default data if table is empty
             df = pd.DataFrame({
                 "blend_ID": list(range(1, 8)),
                 "start_datetime": [self.default_start_datetime] * 7,
                 "end_datetime": [self.default_end_datetime] * 7,
-                "source_1": [None] * 7,
-                "source_2": [None] * 7,
-                "source_3": [None] * 7,
-                "source_4": [None] * 7,
-                "source_5": [None] * 7,
-                "ratio_1": [None] * 7,
-                "ratio_2": [None] * 7,
-                "ratio_3": [None] * 7,
-                "ratio_4": [None] * 7,
-                "ratio_5": [None] * 7,
-                "crusher_rate": [None] * 7,
+                "lane": list(range(1, 8)),
+                "Legend": ["Blend"] * 7,
             })
         return df
 
     def create_gantt_figure(self, data):
-        """Generate the Gantt chart figure."""
-        data["lane"] = data["blend_ID"]  # Use blend_ID as lane
-        data["Legend"] = "Blend"  # Static legend
+        """Generate the Gantt chart figure with custom colors and borders."""
+        # Define 50%-sharper pale RGB colors for each blend_ID
+        colors = [
+            'rgb(77, 148, 204)',  # Sharper Pale Blue
+            'rgb(50, 200, 50)',   # Sharper Pale Green
+            'rgb(255, 255, 51)',  # Sharper Pale Yellow
+            'rgb(255, 60, 90)',   # Sharper Pale Red
+            'rgb(160, 80, 160)',  # Sharper Pale Purple
+            'rgb(255, 160, 100)', # Sharper Pale Orange
+            'rgb(77, 200, 200)'   # Sharper Pale Cyan
+        ]
+        blend_ids = sorted(data["blend_ID"].unique())  # Ensure blend_ID is unique and sorted
+        color_map = {str(blend_id): colors[i % len(colors)] for i, blend_id in enumerate(blend_ids)}
+
+        # Convert blend_ID to string for discrete mapping
+        data["blend_ID"] = data["blend_ID"].astype(str)
+
+        # Create the Gantt chart
         fig = px.timeline(
             data,
             x_start="start_datetime",
             x_end="end_datetime",
-            y="lane",
-            color="Legend",
-            hover_name="blend_ID",
+            y="blend_ID",
             title="Gantt Chart",
+            color="blend_ID",  # Use blend_ID for discrete color mapping
+            color_discrete_map=color_map,  # Apply the custom 50%-sharper pale colors
         )
-        fig.update_traces(marker=dict(line=dict(width=1, color="black")))
+
+        # Add a border to each bar
+        for trace in fig.data:
+            trace.update(marker=dict(line=dict(width=1, color='black')))  # 1px black border
+
+        # Update layout for correct display
         fig.update_layout(
-            yaxis=dict(tickvals=data["lane"], ticktext=data["blend_ID"]),
+            legend_title="Blend ID",
+            yaxis=dict(tickvals=data["blend_ID"].unique(), ticktext=data["blend_ID"].unique()),
+            font=dict(family="Segoe UI", size=10),
             height=700,
         )
         return fig
@@ -159,6 +227,7 @@ class BlendSchedulerApp:
         )
         def handle_gantt_and_table(click_data, n_clicks, table_data):
             """Handle updates to the Gantt chart and input table."""
+                        
             ctx = dash.callback_context
             triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
@@ -166,33 +235,90 @@ class BlendSchedulerApp:
             if triggered_id == "gantt-chart" and click_data:
                 clicked_blend_id = click_data["points"][0]["y"]
                 updated_table_data = data.to_dict("records")
-                for row in updated_table_data:
-                    if row["blend_ID"] == clicked_blend_id:
-                        row["selected"] = True  # Optionally highlight row
-                figure = self.create_gantt_figure(data)
-                return figure, updated_table_data
+                return self.create_gantt_figure(data), updated_table_data
 
             elif triggered_id == "submit-button" and n_clicks:
-                # Save updated data
-                conn = sqlite3.connect(self.database)
-                pd.DataFrame(table_data).to_sql("schedule", conn, if_exists="replace", index=False)
-                conn.close()
+                 for row in table_data:
 
-                # Update Gantt chart
-                data = self.fetch_data()
-                figure = self.create_gantt_figure(data)
-                return figure, table_data
+                    # Check if values are not None
+                    if row['start_date'] and row['start_time'] and row['end_date'] and row['end_time']:
 
-            # Initial load or no updates
-            figure = self.create_gantt_figure(data)
-            return figure, data.to_dict("records")
+                        # Merge date and time into ISO format
+                        start_datetime = f"{row['start_date']} {row['start_time']}"
+                        end_datetime = f"{row['end_date']} {row['end_time']}"
+                        
+                        # Convert to ISO 8601 format
+                        row['start_datetime'] = datetime.strptime(start_datetime, "%m/%d/%Y %H:%M").strftime("%Y-%m-%dT%H:%M")
+                        row['end_datetime'] = datetime.strptime(end_datetime, "%m/%d/%Y %H:%M").strftime("%Y-%m-%dT%H:%M")
+        
+                        # Save updated data
+                        conn = sqlite3.connect(self.database)
+                        pd.DataFrame(table_data).to_sql("manual_blend_dash_input", conn, if_exists="replace", index=False)
+                        conn.close()
+                        return self.create_gantt_figure(self.fetch_data()), table_data
+                        
+                    else:
+                        # Save updated data
+                        conn = sqlite3.connect(self.database)
+                        pd.DataFrame(table_data).to_sql("manual_blend_dash_input", conn, if_exists="replace", index=False)
+                        conn.close()
+                        return self.create_gantt_figure(self.fetch_data()), table_data
+
+            # Initial load
+            return self.create_gantt_figure(data), data.to_dict("records")
 
     def run(self):
         """Run the Dash app."""
         self.app.run_server(debug=True)
 
+class PeriodManager:
+    def __init__(self):
+        self.periods = {}
+
+    def calculate_periods(self, start_time):
+        now = start_time
+
+        # Define next 6AM and 6PM
+        if now.hour >= 6 and now.hour < 18: 
+            next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
+
+        elif now.hour >= 18:
+            next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+        else:  
+            next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            next_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
+
+        # Preplan ends at the closest 6AM or 6PM
+        preplan_end = min(next_6am, next_6pm)
+
+        # Period 1 and Period 2 follow the preplan period
+        period_1_start = preplan_end
+        period_1_end = period_1_start + timedelta(hours=12)
+        period_2_start = period_1_end
+        period_2_end = period_2_start + timedelta(hours=12)
+
+        self.periods = {
+            "preplan_start": now,
+            "preplan_end": preplan_end,
+            "preplan_duration": (preplan_end - now).total_seconds() / 3600,
+            "period_1_start": period_1_start,
+            "period_1_end": period_1_end,
+            "period_1_duration": (period_1_end - period_1_start).total_seconds() / 3600,
+            "period_2_start": period_2_start,
+            "period_2_end": period_2_end,
+            "period_2_duration": (period_2_end - period_2_start).total_seconds() / 3600,
+        }
+
+    def get_periods(self):
+        return self.periods
 
 # Run the app
 if __name__ == "__main__":
-    app = BlendSchedulerApp()
+    db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
+    periods = PeriodManager()
+    periods.calculate_periods(datetime.now())
+    app = ManualBlendDash(periods, db_path, 8050)
     app.run()

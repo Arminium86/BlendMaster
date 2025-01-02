@@ -7,6 +7,8 @@ from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
+from classes.ManualCaseModeller import ManualCaseModeller
+from GUI.ManualBlendDash import ManualBlendDash
 
 class Run:
     
@@ -19,6 +21,8 @@ class Run:
         self.case_bridge.dataframe_signal.connect(gui.display_decision_dataframe)
         self.case_bridge.input_request_signal.connect(gui.display_decision_output)
         self.case_modeller = None
+        self.manual_case_modeller = None
+        self.manual_blend_dash = None
     
     def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs):
 
@@ -66,7 +70,7 @@ class Run:
 
         stockpile_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
-        # Initialize and run CaseModeller
+        # Initialise and run CaseModeller
         self.case_modeller = CaseModeller(
             stockpiles=stockpile_data_objects,
             grade_blocks=[], # Placeholder
@@ -88,36 +92,53 @@ class Run:
             # Restore the original print and input functions
             builtins.print = original_print
             builtins.input = original_input
+        
+    #     # Initialise ManualCaseModeller
+    #     self.manual_case_modeller = ManualCaseModeller(
+    #         stockpiles=stockpile_data_objects,
+    #         grade_blocks=[], # Placeholder
+    #         equipment=equipment_data_objects,
+    #         expit_payload_transactions=expit_payload_transactions,
+    #         periods=periods
+    #     )
+
+    #     # Initialise ManualBlendDash
+    #     self.manual_blend_dash = ManualBlendDash(periods = periods)
+    
+    # def execute_manual(self):
+    #     #this method is called from inside the main GUI
+        
+    #     self.manual_case_modeller.run()
 
 class CaseModellerBridge(QObject):
-    output_signal = pyqtSignal(str)  # Emit CaseModeller's outputs to the GUI
-    dataframe_signal = pyqtSignal(object)  # Use object to pass a DataFrame
-    input_request_signal = pyqtSignal(str)  # Emit input requests to the GUI
-    input_response_signal = pyqtSignal(str)  # Emit responses back to CaseModeller
-
+    output_signal = pyqtSignal(str)
+    dataframe_signal = pyqtSignal(object)
+    input_request_signal = pyqtSignal(str)
+    input_response_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)  # Forwards errors to the GUI
 
     def __init__(self):
         super().__init__()
         self._input_response = None
 
     def print(self, message):
-            """Redirect print to the GUI."""
-            if isinstance(message, pd.DataFrame):
-                self.dataframe_signal.emit(message)  # Emit DataFrame directly
-            else:
-                self.output_signal.emit(str(message))  # Emit as string
+        if isinstance(message, pd.DataFrame):
+            self.dataframe_signal.emit(message)
+        else:
+            self.output_signal.emit(str(message))
 
     def input(self, prompt):
-        """Redirect input to the GUI."""
         self.input_request_signal.emit(prompt)
         loop = QEventLoop()
-
-        # Wait for the input response
         self.input_response_signal.connect(lambda text: loop.quit())
         loop.exec_()
         return self._input_response
 
     def send_input(self, user_input):
-        """Receive input from the GUI and send it back to CaseModeller."""
         self._input_response = user_input
         self.input_response_signal.emit(user_input)
+
+    def handle_exception(self, exception):
+        """Handle exceptions raised by the Case Modeller."""
+        error_message = str(exception)
+        self.error_signal.emit(error_message)

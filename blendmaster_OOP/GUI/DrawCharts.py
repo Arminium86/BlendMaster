@@ -436,5 +436,5 @@ class DrawGanttChart:
  # Example Usage
 if __name__ == "__main__":
     db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
-    chart_drawer = DrawGanttChart(db_path)
+    chart_drawer = DrawGanttChart(db_path, 8051)
     chart_drawer.run_app()

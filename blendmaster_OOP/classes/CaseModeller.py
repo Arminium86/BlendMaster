@@ -214,12 +214,18 @@ class CaseModeller:
             steady_state_start_time = self.current_time
             steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
             
-            self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
-                                                self.expit_payload_transactions,
-                                                steady_state_start_time,
-                                                steady_state_end_time,
-                                                self.steady_state_tracker
-                                                )
+            try:
+                self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
+                                                    self.expit_payload_transactions,
+                                                    steady_state_start_time,
+                                                    steady_state_end_time,
+                                                    self.steady_state_tracker
+                                                    )
+            except ValueError as e:
+                error_message = str(e)
+                print(f"Caught Error: {error_message}")
+                raise
+
             self.advance_time()
             
             self.decision_point_results = pd.DataFrame()
@@ -233,12 +239,18 @@ class CaseModeller:
             steady_state_start_time = self.current_time
             steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
 
-            self.balance_tracker.update_balances(self.decision_point_results, 
-                                                self.expit_payload_transactions,
-                                                steady_state_start_time,
-                                                steady_state_end_time,
-                                                self.steady_state_tracker
-                                                )
+            try:
+                self.balance_tracker.update_balances(self.decision_point_results, 
+                                                    self.expit_payload_transactions,
+                                                    steady_state_start_time,
+                                                    steady_state_end_time,
+                                                    self.steady_state_tracker
+                                                    )
+            except ValueError as e:
+                error_message = str(e)
+                print(f"Caught Error: {error_message}")
+                raise
+
             self.advance_time()
             
             self.decision_point_results = pd.DataFrame()
