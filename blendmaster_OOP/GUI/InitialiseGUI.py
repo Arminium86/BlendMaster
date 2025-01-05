@@ -11,6 +11,7 @@ from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
+import pandas as pd, sqlite3
 
 class UserInputs(QMainWindow):
     def __init__(self):
@@ -84,12 +85,18 @@ class UserInputs(QMainWindow):
 
         self.setup_profiles_tab()
 
+        # Add Setup Blends tab
+        self.blend_config_tab = QWidget()
+        self.tabs.addTab(self.blend_config_tab, "Setup Blends (Manual)")
+        self.setup_blends_tab_layout = QVBoxLayout(self.blend_config_tab)
+
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
         self.tabs.setTabEnabled(3, False)  # Disable Decision tab
         self.tabs.setTabEnabled(4, False)  # Disable Results tab
         self.tabs.setTabEnabled(5, False)  # Disable Profiles tab
+        self.tabs.setTabEnabled(6, False)  # Disable Setup Blends tab
 
         # Initialise main program
         self.run_program = Run(self)
@@ -158,7 +165,7 @@ class UserInputs(QMainWindow):
         layout.addRow(expit_label, self.expit_mode)
 
         # --- Input 3: Select File ---
-        file_label = QLabel("Select File:")
+        file_label = QLabel("Select APS Mining.csv:")
         file_label.setStyleSheet("font-weight: bold;")
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
@@ -175,8 +182,8 @@ class UserInputs(QMainWindow):
 
         layout.addRow(file_label, file_layout)
 
-        # --- Input 4: Optimized Blend Choices ---
-        blend_label = QLabel("Optimized Blend Choices:")
+        # --- Input 4: Optimised Blend Choices ---
+        blend_label = QLabel("Optimised Blend Choices:")
         blend_label.setStyleSheet("font-weight: bold;")
         self.blend_mode = QComboBox()
         self.blend_mode.addItems(["Select Best Result Automatically", "Prompt User at Decision Point"])
@@ -309,7 +316,7 @@ class UserInputs(QMainWindow):
         for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
             # "Use" Column (Checkbox)
             use_checkbox = QCheckBox()
-            use_checkbox.setChecked(False)  # Default to unchecked
+            use_checkbox.setChecked(True)  # Default to checked
 
             # Center the checkbox using a QWidget and layout
             checkbox_widget = QWidget()
@@ -610,9 +617,11 @@ class UserInputs(QMainWindow):
             # Handle or log the error
             self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
 
-        # Conditional logic based oÜn whether the execution was successful
+        # Conditional logic based on whether the execution was successful
         if success:
             self.update_decision_point_tab_state()
+            self.setup_blends_tab()
+            self.tabs.setTabEnabled(6, True)
             self.start_dash_thread()
         else:
             # Handle alternative flow if an exception occurred
@@ -780,6 +789,442 @@ class UserInputs(QMainWindow):
     def show_error_popup(self, error_message):
         """Display an error message in a popup."""
         QMessageBox.critical(self, "Error", error_message)
+    
+    def setup_blends_tab(self):
+        
+        self.crusher_rate = 0  # Default crusher rate
+
+        # Crusher rate input
+        self.crusher_rate_input = QLineEdit()
+        self.crusher_rate_input.setText("1000")
+        self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
+
+        # Set a fixed width for the input field
+        self.crusher_rate_input.setFixedWidth(100)  # Adjust the width as needed
+
+        crusher_label = QLabel("Crusher Rate:")
+        crusher_font = crusher_label.font()
+        crusher_font.setBold(True)
+        crusher_label.setFont(crusher_font)
+        
+        crusher_layout = QHBoxLayout()
+        crusher_layout.addWidget(crusher_label)
+        crusher_layout.addWidget(self.crusher_rate_input)
+        crusher_layout.addStretch()  # Add stretch to align inputs neatly
+
+
+        self.setup_blends_tab_layout.addLayout(crusher_layout)
+
+        # Blend configuration table
+        blend_config_label = QLabel("Blend Configuration")
+        blend_config_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+        blend_config_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+        self.setup_blends_tab_layout.addWidget(blend_config_label)
+
+        self.blend_config_table = CustomTableWidget()
+        self.setup_blend_config_table()
+        self.setup_blends_tab_layout.addWidget(self.blend_config_table)
+
+        # Blend results table
+        blend_results_label = QLabel("Blend Results")
+        blend_results_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+        blend_results_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+        self.setup_blends_tab_layout.addWidget(blend_results_label)
+
+        self.blend_results_table = CustomTableWidget()
+        self.setup_blend_results_table()
+        self.setup_blends_tab_layout.addWidget(self.blend_results_table)
+
+        # Create Submit Button
+        submit_button = QPushButton("Submit")
+        submit_button.clicked.connect(self.store_blend_results)
+
+        # Align button to the bottom-left using layout
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(submit_button)
+        button_layout.addStretch()  # Push the button to the left
+
+        self.setup_blends_tab_layout.addLayout(button_layout)
+
+    def setup_blend_config_table(self):
+        headers = [
+            "Stockpile Name", "Balance (WMT)", "Projected Balance (WMT)", "Projected Last Payload Delivered",
+            "Use Projected Balance", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
+            "Blend ID", "Weight", "Reclaim Rate", "Source Ratio"
+        ]
+        self.blend_config_table.setColumnCount(len(headers))
+        self.blend_config_table.setHorizontalHeaderLabels(headers)
+
+        # Remove row indices
+        self.blend_config_table.verticalHeader().setVisible(False)
+
+        # Bold headers
+        header_font = self.blend_config_table.horizontalHeader().font()
+        header_font.setBold(True)
+        self.blend_config_table.horizontalHeader().setFont(header_font)
+
+        # Populate blend config table
+        self.populate_blend_config_table()
+
+        # Format columns
+        self.format_blend_config_table()
+
+        # Connect cell changes to trigger updates
+        self.blend_config_table.cellChanged.connect(self.update_reclaim_rate)
+        
+        # Connect edits to update results
+        self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
+
+    def populate_blend_config_table(self):
+        # Fetch build report data
+        build_report_df = self.fetch_build_report()
+
+        self.blend_config_table.setRowCount(len(self.updated_stockpile_data))
+
+        for row_idx, (stockpile_name, attributes) in enumerate(self.updated_stockpile_data.items()):
+            # Stockpile Name (Bold Content)
+            stockpile_item = QTableWidgetItem(stockpile_name)
+            stockpile_item.setFlags(Qt.ItemIsEnabled)
+            stockpile_item.setTextAlignment(Qt.AlignCenter)
+
+            font = stockpile_item.font()
+            font.setBold(True)
+            stockpile_item.setFont(font)
+
+            self.blend_config_table.setItem(row_idx, 0, stockpile_item)
+
+            # Attributes
+            keys = [key.lower() for key in ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]]
+            for key in keys:
+                # Safely get the value, default to 0 if None
+                value = attributes.get(key, 0) or 0
+
+                if key == "balance":
+                    col_idx = 1  # Balance column
+                    item = QTableWidgetItem(f"{float(value):.0f}")  # Format as integer (no decimals)
+                else:
+                    col_idx = keys.index(key) + 4  # Offset for additional columns
+                    item = QTableWidgetItem(f"{float(value):.2f}")  # Format as float (2 decimals)
+
+                item.setFlags(Qt.ItemIsEnabled)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.blend_config_table.setItem(row_idx, col_idx, item)
+
+            # Projected Balance and Last Payload Delivered
+            projected_balance_item = QTableWidgetItem("")
+            last_payload_item = QTableWidgetItem("")
+            projected_balance_item.setFlags(Qt.ItemIsEnabled)
+            last_payload_item.setFlags(Qt.ItemIsEnabled)
+            projected_balance_item.setTextAlignment(Qt.AlignCenter)
+            last_payload_item.setTextAlignment(Qt.AlignCenter)
+
+            # Check if the stockpile is in the build report
+            stockpile_records = build_report_df[build_report_df["stockpile"] == stockpile_name]
+            if not stockpile_records.empty:
+                latest_record = stockpile_records.sort_values("delivered_datetime", ascending=False).iloc[0]
+                projected_balance_item.setText(str(latest_record["closing_balance"]))
+                last_payload_item.setText(str(latest_record["delivered_datetime"]))
+
+            self.blend_config_table.setItem(row_idx, 2, projected_balance_item)  # Projected Balance
+            self.blend_config_table.setItem(row_idx, 3, last_payload_item)  # Last Payload Delivered
+
+            # Use Projected Balance (Checkbox)
+            use_projected_checkbox = QCheckBox()
+            use_projected_checkbox.setEnabled(projected_balance_item.text() != "")  # Enable only if projected balance exists
+            use_projected_checkbox.stateChanged.connect(self.update_blend_results)  # Update results on state change
+
+            checkbox_widget = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_widget)
+            checkbox_layout.addWidget(use_projected_checkbox)
+            checkbox_layout.setAlignment(Qt.AlignCenter)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            self.blend_config_table.setCellWidget(row_idx, 4, checkbox_widget)
+
+            # Blend ID (Dropdown with "None" default)
+            blend_id_combo = QComboBox()
+            blend_id_combo.addItems(["None"] + [str(i) for i in range(1, 6)])  # Add "None" option
+            blend_id_combo.setCurrentText("None")  # Set default to "None"
+            blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
+            self.blend_config_table.setCellWidget(row_idx, len(keys) + 4, blend_id_combo)  
+
+            # Weight (Editable)
+            weight_item = QTableWidgetItem("0")
+            weight_item.setTextAlignment(Qt.AlignCenter)
+            weight_item.setForeground(QColor("green"))
+            self.blend_config_table.setItem(row_idx, len(keys) + 5, weight_item)  
+
+            # Reclaim Rate (Auto-calculated)
+            reclaim_item = QTableWidgetItem("0")
+            reclaim_item.setFlags(Qt.ItemIsEnabled)  # Make it uneditable
+            reclaim_item.setTextAlignment(Qt.AlignCenter)
+            self.blend_config_table.setItem(row_idx, len(keys) + 6, reclaim_item)  
+
+            # Source Ratio (Auto-calculated)
+            ratio_item = QTableWidgetItem("0")
+            ratio_item.setFlags(Qt.ItemIsEnabled)  # Make it uneditable
+            ratio_item.setTextAlignment(Qt.AlignCenter)
+            self.blend_config_table.setItem(row_idx, len(keys) + 7, ratio_item)  
+
+
+        # Resize headers to fit content
+        self.blend_config_table.resizeColumnsToContents()
+
+    def on_blend_data_change(self):
+        """Recalculate and update blend results whenever blend data changes."""
+        self.update_reclaim_rate()  # Update reclaim rates
+        self.update_blend_results()  # Refresh blend results table
+
+    def update_reclaim_rate(self):
+        """
+        Calculate and update the Reclaim Rate for each stockpile based on its Blend ID and Weight.
+        """
+        try:
+            self.crusher_rate = float(self.crusher_rate_input.text())
+        except ValueError:
+            self.crusher_rate = 1000  # Default crusher rate
+
+        # Temporarily disconnect the signal to prevent recursion
+        self.blend_config_table.blockSignals(True)
+
+        try:
+            # Initialize a dictionary to store total weights for each blend ID
+            blend_weights = {str(i): 0 for i in range(1, 6)}
+
+            # Step 1: Calculate total weights for each blend ID
+            for row_idx in range(self.blend_config_table.rowCount()):
+                try:
+                    blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  # Adjusted column index
+                    weight_item = self.blend_config_table.item(row_idx, 11)  # Adjusted column index
+                    blend_id = blend_id_combo.currentText()
+                    if blend_id == "None":
+                        continue
+                    weight = float(weight_item.text())
+                    blend_weights[blend_id] += weight
+                except (ValueError, AttributeError):
+                    continue
+
+            # Step 2: Calculate and update Reclaim Rate for each stockpile
+            for row_idx in range(self.blend_config_table.rowCount()):
+                try:
+                    blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  
+                    weight_item = self.blend_config_table.item(row_idx, 11)  
+                    reclaim_item = self.blend_config_table.item(row_idx, 12)  
+                    ratio_item = self.blend_config_table.item(row_idx, 13)  
+
+                    blend_id = blend_id_combo.currentText()
+                    if blend_id == "None":
+                        if reclaim_item:
+                            reclaim_item.setText("0")
+                            ratio_item.setText("0.00")
+                        continue
+
+                    weight = float(weight_item.text())
+                    total_weight = blend_weights.get(blend_id, 0)
+
+                    # Calculate ratio and reclaim rate
+                    if total_weight > 0:
+                        ratio = weight / total_weight
+                    else:
+                        ratio = 0
+
+                    reclaim_rate = ratio * self.crusher_rate
+
+                    # Update the reclaim rate cell
+                    if not reclaim_item:
+                        reclaim_item = QTableWidgetItem()
+                        self.blend_config_table.setItem(row_idx, 12, reclaim_item)
+                        self.blend_config_table.setItem(row_idx, 13, ratio_item)
+
+
+                    reclaim_item.setText(f"{reclaim_rate:.0f}")
+                    reclaim_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
+                    reclaim_item.setTextAlignment(Qt.AlignCenter)  # Center-align the text
+
+                    ratio_item.setText(f"{ratio:.2f}")
+                    ratio_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
+                    ratio_item.setTextAlignment(Qt.AlignCenter)  # Center-align the text
+
+                except (ValueError, AttributeError):
+                    continue
+
+        finally:
+            # Reconnect the signal after updates are complete
+            self.blend_config_table.blockSignals(False)
+
+        # Optional: Resize columns to fit updated content
+        self.blend_config_table.resizeColumnsToContents()
+
+    def setup_blend_results_table(self):
+        headers = [
+            "Blend ID", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
+            "Balance", "Max Duration", "Available"
+        ]
+        self.blend_results_table.setColumnCount(len(headers))
+        self.blend_results_table.setHorizontalHeaderLabels(headers)
+
+        # Remove row indices
+        self.blend_results_table.verticalHeader().setVisible(False)
+
+        # Bold headers
+        header_font = self.blend_results_table.horizontalHeader().font()
+        header_font.setBold(True)
+        self.blend_results_table.horizontalHeader().setFont(header_font)
+
+        # Set up rows for each blend ID
+        self.blend_results_table.setRowCount(5)
+        self.update_blend_results()
+
+        # Connect edits to update results
+        self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
+
+    def update_blend_results(self):
+        """
+        Recalculate and update the Blend Results Table, ensuring unused Blend IDs are cleared.
+        """
+        # Initialize a dictionary to aggregate data for each blend ID
+        blend_data = {str(i): {"weights": [], "grades": [], "balances": [], "available": []} for i in range(1, 6)}
+
+        # Aggregate data from blend configuration table
+        for row_idx in range(self.blend_config_table.rowCount()):
+            try:
+                blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10) # Column index for Blend ID
+                blend_id = blend_id_combo.currentText()
+
+                # Skip calculations if Blend ID is "None"
+                if blend_id == "None":
+                    continue
+
+                weight = float(self.blend_config_table.item(row_idx, 11).text()) # Column index for Weight
+                use_projected = (
+                    self.blend_config_table.cellWidget(row_idx, 4)
+                    .layout()
+                    .itemAt(0)
+                    .widget()
+                    .isChecked()
+                )
+                balance = (
+                    float(self.blend_config_table.item(row_idx, 2).text())  # Projected Balance
+                    if use_projected
+                    else float(self.blend_config_table.item(row_idx, 1).text())  # Actual Balance
+                )
+                available = (
+                    self.blend_config_table.item(row_idx, 3).text()  # Last Payload Delivered
+                    if use_projected
+                    else "Now"
+                )
+
+                grades = [float(self.blend_config_table.item(row_idx, col).text()) for col in range(5, 10)]
+                blend_data[blend_id]["weights"].append(weight)
+                blend_data[blend_id]["grades"].append([grade * weight for grade in grades])
+                blend_data[blend_id]["balances"].append(balance * weight)
+                blend_data[blend_id]["available"].append(available)
+            except (ValueError, AttributeError):
+                continue
+
+        # Update the Blend Results Table
+        for blend_id, data in blend_data.items():
+            row_idx = int(blend_id) - 1
+            total_weight = sum(data["weights"])
+
+            if total_weight > 0:
+                # Calculate weighted averages
+                avg_grades = [sum(grades) / total_weight for grades in zip(*data["grades"])]
+                balance = min(data["balances"])
+                max_duration = balance / self.crusher_rate if self.crusher_rate > 0 else 0
+                available_status = "Now"
+                if any(avail != "Now" for avail in data["available"]):
+                    # Extract all datetimes from "available" (excluding "Now")
+                    datetime_values = [avail for avail in data["available"] if avail != "Now"]
+                    # Get the minimum datetime
+                    available_status = min(datetime_values)
+                else:
+                    available_status = "Now"
+
+                # Update blend results table
+                self.blend_results_table.setItem(row_idx, 0, self.create_centered_item(blend_id))
+                for col_idx, avg_grade in enumerate(avg_grades, start=1):
+                    self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
+                self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.1f}"))
+                self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
+                item = QTableWidgetItem(available_status)
+                item.setTextAlignment(Qt.AlignCenter)
+
+                # Apply green color for "Now", purple otherwise
+                if available_status == "Now":
+                    item.setForeground(QBrush(QColor("green")))
+                else:
+                    item.setForeground(QBrush(QColor("purple")))
+
+                self.blend_results_table.setItem(row_idx, 8, item)
+            
+            else:
+                # Clear unused blend ID rows
+                for col_idx in range(self.blend_results_table.columnCount()):
+                    self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(""))
+
+        # Ensure headers resize to fit updated content
+        self.blend_results_table.resizeColumnsToContents()
+
+    def create_centered_item(self, text):
+        """
+        Helper method to create a centered QTableWidgetItem with the given text.
+        """
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        return item
+    
+    def store_blend_results(self):
+        """
+        Store the blend results table data into self.saved_blends_for_schedule.
+        """
+        self.saved_blends_for_schedule = []
+
+        # Iterate through rows of the blend results table
+        for row_idx in range(self.blend_results_table.rowCount()):
+            blend_data = {}
+            for col_idx in range(self.blend_results_table.columnCount()):
+                header = self.blend_results_table.horizontalHeaderItem(col_idx).text()
+                cell_item = self.blend_results_table.item(row_idx, col_idx)
+
+                if cell_item:
+                    blend_data[header] = cell_item.text()
+                else:
+                    blend_data[header] = None  # Handle empty cells
+
+            # Skip rows that are entirely empty
+            if any(value is not None and value != "" for value in blend_data.values()):
+                self.saved_blends_for_schedule.append(blend_data)
+
+        print("Saved blends for schedule:", self.saved_blends_for_schedule)  # Debugging output
+
+    def fetch_build_report(self):
+        """
+        Fetch the build report from the database.
+        """
+        conn = sqlite3.connect("blendmaster.db")
+        df = pd.read_sql("SELECT * FROM build_report", conn)
+        conn.close()
+        return df
+
+    def format_blend_config_table(self):
+        """
+        Apply column formatting for the blend configuration table.
+        """
+        # Format Balance and Projected Balance columns (no decimal places)
+        for row_idx in range(self.blend_config_table.rowCount()):
+            for col_idx in [1, 2]:  # Balance and Projected Balance columns
+                item = self.blend_config_table.item(row_idx, col_idx)
+                if item and item.text():
+                    item.setText(f"{float(item.text()):.0f}")  # No decimal places
+                    item.setTextAlignment(Qt.AlignCenter)
+
+        # Format Grade columns (two decimal places)
+        for row_idx in range(self.blend_config_table.rowCount()):
+            for col_idx in range(5, 10):  # Grade columns
+                item = self.blend_config_table.item(row_idx, col_idx)
+                if item and item.text():
+                    item.setText(f"{float(item.text()):.2f}")  # Two decimal places
+                    item.setTextAlignment(Qt.AlignCenter)
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
