@@ -44,10 +44,12 @@ class CaseModeller:
             # Run optimization and only advance time if successful
             self.run_optimization_step()
             self.steady_state_tracker += 1
-        # Save blend results to database
-        self.save_optimised_blend_report()
+
         # Save stockpile build report to database
         self.save_build_report()
+
+        # Save blend results to database
+        self.save_optimised_blend_report()
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""

@@ -7,8 +7,6 @@ from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
-from classes.ManualCaseModeller import ManualCaseModeller
-from GUI.ManualBlendDash import ManualBlendDash
 
 class Run:
     
@@ -93,23 +91,6 @@ class Run:
             builtins.print = original_print
             builtins.input = original_input
         
-    #     # Initialise ManualCaseModeller
-    #     self.manual_case_modeller = ManualCaseModeller(
-    #         stockpiles=stockpile_data_objects,
-    #         grade_blocks=[], # Placeholder
-    #         equipment=equipment_data_objects,
-    #         expit_payload_transactions=expit_payload_transactions,
-    #         periods=periods
-    #     )
-
-    #     # Initialise ManualBlendDash
-    #     self.manual_blend_dash = ManualBlendDash(periods = periods)
-    
-    # def execute_manual(self):
-    #     #this method is called from inside the main GUI
-        
-    #     self.manual_case_modeller.run()
-
 class CaseModellerBridge(QObject):
     output_signal = pyqtSignal(str)
     dataframe_signal = pyqtSignal(object)

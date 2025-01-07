@@ -1,14 +1,25 @@
-import pandas as pd
 import sqlite3
-import dash
-from dash import dcc, html, dash_table
-import plotly.express as px
+import pandas as pd
 import random
+import requests
+import dash
+from dash import dcc, html, Input, Output, dash_table, Dash
+import plotly.express as px
+from flask import Flask, jsonify
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
+        """
+        Initialize the DrawStockProfiles instance.
+        :param db_path: Path to the SQLite database.
+        :param port: Port to run the Dash app.
+        """
         self.db_path = db_path
         self.port = port
+        self.app = Dash(__name__, server=Flask(__name__))  # Flask server for custom routes
+        self.setup_layout()  # Set up the initial layout
+        self.setup_callbacks()  # Set up the callbacks
+        self.setup_routes()  # Set up custom Flask routes
 
     def fetch_data(self):
         """
@@ -27,10 +38,12 @@ class DrawStockProfiles:
     def create_charts(self, data):
         """
         Create individual charts for each unique stockpile with random colors.
+        :param data: DataFrame containing the data for the charts.
+        :return: List of Dash Graph components.
         """
         if data.empty:
             print("No data available to create charts.")
-            return []
+            return [html.Div("No data available.")]
 
         # Preprocess data: round and add aliases
         data['Balance'] = data['balance'].round(1).fillna('None')
@@ -43,7 +56,7 @@ class DrawStockProfiles:
             if col.startswith('grade_'):
                 alias = col.replace('grade_', 'Grade ').capitalize()
                 data[alias] = data[col].round(2).astype(str) + '%'
-        
+
         # Generate a random color for each unique stockpile
         unique_stockpiles = data['stockpile'].unique()
         random_colors = {stockpile: self.generate_random_color() for stockpile in unique_stockpiles}
@@ -52,76 +65,95 @@ class DrawStockProfiles:
 
         for stockpile in unique_stockpiles:
             stockpile_data = data[data['stockpile'] == stockpile]
-            stockpile_color = random_colors[stockpile]  # Get the color for this stockpile
+            stockpile_color = random_colors[stockpile]
 
             fig = px.area(
-                        stockpile_data,
-                        x='time',
-                        y='Balance',  # Use the alias column
-                        color_discrete_sequence=[stockpile_color],  # Apply the stockpile's random color
-                        hover_data={
-                            'Balance': True,  # Include rounded balance
-                            'Steady State Number': True,  # Include alias
-                            'Agent': True,  # Include alias
-                            'Source or Destination': True,  # Include alias
-                            **{alias: True for alias in stockpile_data.columns if alias.startswith('Grade ')}  # Include grades
-                        },
-                        title=f"Stockpile: {stockpile}"
-                    )
-            # Set the title color to match the chart's color
-            fig.update_layout(
-            title=dict(
-                text=f"Stockpile: {stockpile}",
-                font=dict(color=stockpile_color)  # Set title font color
-            ),
-            xaxis_title='Time',
-            yaxis_title='Balance',
-            legend_title='Stockpile'
+                stockpile_data,
+                x='time',
+                y='Balance',
+                color_discrete_sequence=[stockpile_color],
+                hover_data={
+                    'Balance': True,
+                    'Steady State Number': True,
+                    'Agent': True,
+                    'Source or Destination': True,
+                    **{alias: True for alias in stockpile_data.columns if alias.startswith('Grade ')}
+                },
+                title=f"Stockpile: {stockpile}"
             )
-            charts.append(dcc.Graph(figure=fig))  # Append to the Dash layout
+            fig.update_layout(
+                title=dict(
+                    text=f"Stockpile: {stockpile}",
+                    font=dict(color=stockpile_color)
+                ),
+                xaxis_title='Time',
+                yaxis_title='Balance',
+                legend_title='Stockpile'
+            )
+            charts.append(dcc.Graph(figure=fig))
 
         return charts
 
-    def run_app(self):
+    def setup_layout(self):
         """
-        Run a Dash app to display charts in a scrollable column.
+        Set up the initial layout of the app.
         """
-        # Fetch data
-        data = self.fetch_data()
-        if 'time' in data.columns:
-            data['time'] = pd.to_datetime(data['time'], errors='coerce')
-
-        # Create charts
-        charts = self.create_charts(data)
-
-        # Initialize Dash app
-        app = dash.Dash(__name__)
-        app.layout = html.Div(
-            style={'overflowY': 'scroll', 'height': '100vh'},  # Enable vertical scrolling
+        self.app.layout = html.Div(
             children=[
-                html.Div(
-                    style={'padding': '10px'},
-                    children=charts  # Insert charts
-                )
+                dcc.Input(id="manual-refresh", type="hidden"),  # Add the hidden input component
+                html.Div(id="chart-container", children=[]),
             ]
         )
-        # Run the Dash app
-        app.run_server(debug=True, port=self.port, use_reloader=False)
 
-    def generate_random_color(self):
+    def setup_callbacks(self):
+        """
+        Set up the callbacks for the app.
+        """
+        @self.app.callback(
+            Output("chart-container", "children"),
+            Input("manual-refresh", "value")
+        )
+        def update_charts(_):
+            """
+            Callback to update charts dynamically when triggered.
+            """
+            data = self.fetch_data()
+            if 'time' in data.columns:
+                data['time'] = pd.to_datetime(data['time'], errors='coerce')
+            return self.create_charts(data)
+
+    def setup_routes(self):
+        """
+        Set up custom routes for triggering refresh externally.
+        """
+        @self.app.server.route("/trigger-refresh", methods=["POST"])
+        def trigger_refresh():
+            """
+            HTTP route to trigger the Dash callback manually.
+            """
+            # Trigger the callback by setting a value for the "manual-refresh" input
+            self.app.callback_map["chart-container.children"]["inputs"][0]["value"] = "refresh"
+            return jsonify({"status": "success", "message": "Refresh triggered"})
+
+    def run_app(self):
+        """
+        Run the Dash app server.
+        """
+        self.app.run_server(debug=True, port=self.port, use_reloader=False)
+
+    @staticmethod
+    def generate_random_color():
         """
         Generate a random hex color, excluding intense magenta-like colors.
+        :return: Hex color code as a string.
         """
         while True:
-            # Generate random RGB components
             r, g, b = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-            
-            # Exclude intense magenta-like colors (high red and blue, low green)
-            if not (r > 200 and b > 200 and g < 100):
+            if not (r > 200 and b > 200 and g < 100):  # Exclude intense magenta-like colors
                 return f"#{r:02x}{g:02x}{b:02x}"
 
 class DrawGanttChart:
-    def __init__(self, db_path, port=8050):
+    def __init__(self, db_path, port):
         """
         Initialize the Gantt chart generator.
         :param db_path: Path to the SQLite database.
@@ -232,13 +264,13 @@ class DrawGanttChart:
             "crusher_actual_grade_mn": "Grade Mn (%)"
         }
         self.app.layout = html.Div(
-            style={'display': 'flex', 'flex-direction': 'column', 'padding': '20px'},
+            style={'display': 'flex', 'flexDirection': 'column', 'padding': '20px'},
             children=[
                 # Gantt Chart
                 html.Div(
                     style={
                         'width': '100%',  # Ensure the Gantt chart container spans full width
-                        'padding-bottom': '20px',  # Optional padding below the chart
+                        'paddingBottom': '20px',  # Optional padding below the chart
                     },
                     children=[
                         html.H2("Gantt Chart & Blend Details"),
@@ -432,9 +464,3 @@ class DrawGanttChart:
         Run the Dash app.
         """
         self.app.run_server(debug=True, port=self.port, use_reloader=False)
-
- # Example Usage
-if __name__ == "__main__":
-    db_path = r"C:\BlendMaster\blendmaster_OOP\blendmaster.db"  # SQLite database path
-    chart_drawer = DrawGanttChart(db_path, 8051)
-    chart_drawer.run_app()

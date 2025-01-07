@@ -90,6 +90,35 @@ class UserInputs(QMainWindow):
         self.tabs.addTab(self.blend_config_tab, "Setup Blends (Manual)")
         self.setup_blends_tab_layout = QVBoxLayout(self.blend_config_tab)
 
+        # Add Sequence tab
+        self.blend_sequence_tab = QWidget()
+        self.tabs.addTab(self.blend_sequence_tab, "Blend Sequence (Manual Gantt)")
+        self.blend_sequence_tab_layout = QVBoxLayout(self.blend_sequence_tab)
+
+         # Add the CustomWebEngineView at the top to display the Dash app
+        self.manual_gantt_view = CustomWebEngineView()
+        self.blend_sequence_tab_layout.addWidget(self.manual_gantt_view)
+        
+        # Add the horizontal layout for the two tables at the bottom
+        self.blend_sequence_table_layout = QHBoxLayout()
+
+        # Left Table: Blend Results Table (View Only) - Create a new instance
+        self.blend_results_table_view = CustomTableWidget()
+        self.blend_results_table_view.setEditTriggers(QTableWidget.NoEditTriggers)  # Make uneditable
+
+        # Add the new table to the layout
+        self.blend_sequence_table_layout.addWidget(self.blend_results_table_view)
+
+        # Right Table: Placeholder Table for real-time updates
+        self.blend_sequence_table = CustomTableWidget()
+        self.blend_sequence_table_layout.addWidget(self.blend_sequence_table)
+
+        # Add the horizontal layout to the main layout of the tab
+        self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout)
+
+        # Workflow control on stockpile profiles chart
+        self.load_profiles_first_call = True
+
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
         self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
@@ -97,6 +126,8 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(4, False)  # Disable Results tab
         self.tabs.setTabEnabled(5, False)  # Disable Profiles tab
         self.tabs.setTabEnabled(6, False)  # Disable Setup Blends tab
+        self.tabs.setTabEnabled(7, False)  # Disable Blend Sequence tab
+
 
         # Initialise main program
         self.run_program = Run(self)
@@ -697,9 +728,23 @@ class UserInputs(QMainWindow):
         self.profiles_layout.addWidget(self.load_profile_chart_button)
 
     def load_profiles(self):
+
+        if not self.load_profiles_first_call:
+       
+            # Send a request to trigger the refresh
+            try:
+                requests.post("http://localhost:8051/trigger-refresh", timeout=5)  # Timeout after 5 seconds
+            except requests.exceptions.Timeout:
+                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
+            except requests.exceptions.RequestException as e:
+                QMessageBox.critical(None, "Error", f"Failed to trigger refresh: {e}")
+
         # Load the Dash app into the QWebEngineView
         self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
-   
+
+        self.load_profiles_first_call = False
+
+
     def start_dash_thread(self):
         """Start the Dash app in a separate thread."""
         db_path = "blendmaster.db"
@@ -722,7 +767,7 @@ class UserInputs(QMainWindow):
             self.tabs.setTabEnabled(5, True)  # Enable profiles tab
 
         else:
-            self.tabs.setTabEnabled(3, False)
+            self.tabs.setTabEnabled(3, True)
             self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
             self.tabs.setTabEnabled(5, True)  # Enable profiles tab
             self.tabs.setCurrentIndex(4)  # Switch to Results (optimised) tab
@@ -1057,7 +1102,7 @@ class UserInputs(QMainWindow):
     def setup_blend_results_table(self):
         headers = [
             "Blend ID", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
-            "Balance", "Max Duration", "Available"
+            "Balance (WMT)", "Max Duration (hrs)", "Available"
         ]
         self.blend_results_table.setColumnCount(len(headers))
         self.blend_results_table.setHorizontalHeaderLabels(headers)
@@ -1195,8 +1240,11 @@ class UserInputs(QMainWindow):
             if any(value is not None and value != "" for value in blend_data.values()):
                 self.saved_blends_for_schedule.append(blend_data)
 
-        print("Saved blends for schedule:", self.saved_blends_for_schedule)  # Debugging output
-
+        QMessageBox.information(self, "Blend Setup", "Blend results successfully saved.")
+        self.update_sequence_tab()
+        self.tabs.setTabEnabled(7, True)
+        self.tabs.setCurrentIndex(7)  
+    
     def fetch_build_report(self):
         """
         Fetch the build report from the database.
@@ -1225,6 +1273,51 @@ class UserInputs(QMainWindow):
                 if item and item.text():
                     item.setText(f"{float(item.text()):.2f}")  # Two decimal places
                     item.setTextAlignment(Qt.AlignCenter)
+    
+    def update_sequence_tab(self):
+        
+
+        self.manual_gantt_view.setUrl(QUrl("http://localhost:8050"))
+
+        # Populate data from saved_blends_for_schedule into blend_results_table_view
+        self.blend_results_table_view.setRowCount(len(self.saved_blends_for_schedule))  # Set row count
+        self.blend_results_table_view.setColumnCount(len(self.saved_blends_for_schedule[0].keys()))  # Set column count
+
+        # Set column headers from the dictionary keys
+        self.blend_results_table_view.setHorizontalHeaderLabels(self.saved_blends_for_schedule[0].keys())
+
+        # Make headers bold
+        header_font = self.blend_results_table_view.horizontalHeader().font()
+        header_font.setBold(True)
+        self.blend_results_table_view.horizontalHeader().setFont(header_font)
+
+        # Remove row index (vertical header)
+        self.blend_results_table_view.verticalHeader().setVisible(False)
+
+        # Iterate over the saved_blends_for_schedule to populate rows
+        for row_idx, row_data in enumerate(self.saved_blends_for_schedule):
+            for col_idx, (key, value) in enumerate(row_data.items()):
+                # Create the table item
+                item = QTableWidgetItem(str(value))
+                
+                # Center-align the text
+                item.setTextAlignment(Qt.AlignCenter)
+                
+                # Conditionally format the "Available" column
+                if key == "Available":
+                    if str(value) == "Now":
+                        item.setForeground(QColor("green"))
+                    else:
+                        item.setForeground(QColor("purple"))
+
+                # Set the table item
+                self.blend_results_table_view.setItem(row_idx, col_idx, item)
+
+        # Resize columns to fit contents
+        self.blend_results_table_view.resizeColumnsToContents()
+
+        # Additional Setup: Load the Dash app into the CustomWebEngineView
+        #self.start_dash_thread()
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

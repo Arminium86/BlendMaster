@@ -16,7 +16,7 @@ class BalanceTracker:
         self.build_report = [] # Store transactions that meet the condition
         
     def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
-        """Update balance and grades after each optimization step."""
+        """Update balance and grades after each optimisation step."""
         
         # Loop through user choice of decision point results and deplete balances
         for _, transaction in filtered_decision_point_results_to_user_choice.iterrows():
