@@ -88,7 +88,12 @@ class DrawStockProfiles:
                 ),
                 xaxis_title='Time',
                 yaxis_title='Balance',
-                legend_title='Stockpile'
+                legend_title='Stockpile',
+                font=dict(
+                family="Segoe UI",  # Set the font
+                size=14,            # Font size
+                color="black"       # Font color (optional)
+                )
             )
             charts.append(dcc.Graph(figure=fig))
 

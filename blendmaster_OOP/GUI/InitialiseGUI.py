@@ -116,8 +116,9 @@ class UserInputs(QMainWindow):
         # Add the horizontal layout to the main layout of the tab
         self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout)
 
-        # Workflow control on stockpile profiles chart
+        # Workflow controls
         self.load_profiles_first_call = True
+        self.setup_blends_tab_first_call = True
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -637,27 +638,55 @@ class UserInputs(QMainWindow):
     for outer_key, outer_value in self.calendar_inputs.items()
 }
         
-        success = False  # Flag to track whether execution was successful
+        # Initialise the shared object and stop event
+        status = {'success': False}
+        stop_event = threading.Event()
 
-        try:
-            # Call main optimised run
-            self.run_program.execute(self.start_time, self.expit_mode, self.file_path, self.blend_mode, self.updated_stockpile_data, self.calendar_inputs)
-            success = True  # Set flag to True if no exception occurs
+        # Create and start the thread
+        execution_thread = threading.Thread(
+            target=self.execute_run_program_in_thread, args=(status, stop_event)
+        )
+        execution_thread.start()
 
-        except Exception as e:
-            # Handle or log the error
-            self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
+        # Wait for the thread to complete with a 3-minute timeout
+        execution_thread.join(timeout=3 * 60)  # 3 minutes in seconds
+
+        # Check if the thread is still alive after the timeout
+        if execution_thread.is_alive():
+            QMessageBox.critical(None, "Timeout", "Optimisation thread timed out. Signaling to stop.")
+            stop_event.set()  # Signal the thread to stop (for graceful handling)
+
+            # Optionally, perform any forced cleanup actions if needed
+            execution_thread.join()  # Wait for thread to exit gracefully
 
         # Conditional logic based on whether the execution was successful
-        if success:
+        if status['success']:
             self.update_decision_point_tab_state()
             self.setup_blends_tab()
             self.tabs.setTabEnabled(6, True)
-            self.start_dash_thread()
+            self.start_dash_optimised_charts_thread()
         else:
-            # Handle alternative flow if an exception occurred
-            self.tabs.setCurrentIndex(1)  
+            # Handle alternative flow if an exception occurred or timeout
+            self.tabs.setCurrentIndex(1)
             self.setup_stockpile_table()
+
+    def execute_run_program_in_thread(self, status, stop_event):
+        try:
+            # Call main optimised run
+            self.run_program.execute(
+                self.start_time,
+                self.expit_mode,
+                self.file_path,
+                self.blend_mode,
+                self.updated_stockpile_data,
+                self.calendar_inputs
+            )
+            if not stop_event.is_set():  # If not stopped, mark as success
+                status['success'] = True
+        except Exception as e:
+            # Handle or log the error
+            self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
+            status['success'] = False
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
@@ -744,8 +773,7 @@ class UserInputs(QMainWindow):
 
         self.load_profiles_first_call = False
 
-
-    def start_dash_thread(self):
+    def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
         db_path = "blendmaster.db"
         self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
@@ -837,59 +865,62 @@ class UserInputs(QMainWindow):
     
     def setup_blends_tab(self):
         
-        self.crusher_rate = 0  # Default crusher rate
-
-        # Crusher rate input
-        self.crusher_rate_input = QLineEdit()
-        self.crusher_rate_input.setText("1000")
-        self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
-
-        # Set a fixed width for the input field
-        self.crusher_rate_input.setFixedWidth(100)  # Adjust the width as needed
-
-        crusher_label = QLabel("Crusher Rate:")
-        crusher_font = crusher_label.font()
-        crusher_font.setBold(True)
-        crusher_label.setFont(crusher_font)
+        if self.setup_blends_tab_first_call:
         
-        crusher_layout = QHBoxLayout()
-        crusher_layout.addWidget(crusher_label)
-        crusher_layout.addWidget(self.crusher_rate_input)
-        crusher_layout.addStretch()  # Add stretch to align inputs neatly
+            self.crusher_rate = 1000  # Default crusher rate
 
+            # Crusher rate input
+            self.crusher_rate_input = QLineEdit()
+            self.crusher_rate_input.setText("1000")
+            self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
 
-        self.setup_blends_tab_layout.addLayout(crusher_layout)
+            # Set a fixed width for the input field
+            self.crusher_rate_input.setFixedWidth(100)  # Adjust the width as needed
 
-        # Blend configuration table
-        blend_config_label = QLabel("Blend Configuration")
-        blend_config_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
-        blend_config_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
-        self.setup_blends_tab_layout.addWidget(blend_config_label)
+            crusher_label = QLabel("Crusher Rate:")
+            crusher_font = crusher_label.font()
+            crusher_font.setBold(True)
+            crusher_label.setFont(crusher_font)
+            
+            crusher_layout = QHBoxLayout()
+            crusher_layout.addWidget(crusher_label)
+            crusher_layout.addWidget(self.crusher_rate_input)
+            crusher_layout.addStretch()  # Add stretch to align inputs neatly
 
-        self.blend_config_table = CustomTableWidget()
-        self.setup_blend_config_table()
-        self.setup_blends_tab_layout.addWidget(self.blend_config_table)
+            self.setup_blends_tab_layout.addLayout(crusher_layout)
 
-        # Blend results table
-        blend_results_label = QLabel("Blend Results")
-        blend_results_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
-        blend_results_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
-        self.setup_blends_tab_layout.addWidget(blend_results_label)
+            # Blend configuration table
+            blend_config_label = QLabel("Blend Configuration")
+            blend_config_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+            blend_config_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+            self.setup_blends_tab_layout.addWidget(blend_config_label)
 
-        self.blend_results_table = CustomTableWidget()
-        self.setup_blend_results_table()
-        self.setup_blends_tab_layout.addWidget(self.blend_results_table)
+            self.blend_config_table = CustomTableWidget()
+            self.setup_blend_config_table()
+            self.setup_blends_tab_layout.addWidget(self.blend_config_table)
 
-        # Create Submit Button
-        submit_button = QPushButton("Submit")
-        submit_button.clicked.connect(self.store_blend_results)
+            # Blend results table
+            blend_results_label = QLabel("Blend Results")
+            blend_results_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+            blend_results_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+            self.setup_blends_tab_layout.addWidget(blend_results_label)
 
-        # Align button to the bottom-left using layout
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(submit_button)
-        button_layout.addStretch()  # Push the button to the left
+            self.blend_results_table = CustomTableWidget()
+            self.setup_blend_results_table()
+            self.setup_blends_tab_layout.addWidget(self.blend_results_table)
 
-        self.setup_blends_tab_layout.addLayout(button_layout)
+            # Create Submit Button
+            submit_button = QPushButton("Submit")
+            submit_button.clicked.connect(self.store_blend_results)
+
+            # Align button to the bottom-left using layout
+            button_layout = QHBoxLayout()
+            button_layout.addWidget(submit_button)
+            button_layout.addStretch()  # Push the button to the left
+
+            self.setup_blends_tab_layout.addLayout(button_layout)
+
+            self.setup_blends_tab_first_call = False
 
     def setup_blend_config_table(self):
         headers = [
@@ -1275,7 +1306,6 @@ class UserInputs(QMainWindow):
                     item.setTextAlignment(Qt.AlignCenter)
     
     def update_sequence_tab(self):
-        
 
         self.manual_gantt_view.setUrl(QUrl("http://localhost:8050"))
 
@@ -1317,7 +1347,7 @@ class UserInputs(QMainWindow):
         self.blend_results_table_view.resizeColumnsToContents()
 
         # Additional Setup: Load the Dash app into the CustomWebEngineView
-        #self.start_dash_thread()
+        #self.start_dash_optimised_charts_thread()
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
