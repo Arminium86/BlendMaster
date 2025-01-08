@@ -6,12 +6,13 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont
-from PyQt5.QtCore import Qt, QUrl, QTimer
+from PyQt5.QtCore import Qt, QUrl, QTimer, QDateTime
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
-from datetime import datetime
+from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
 import pandas as pd, sqlite3
+from classes.PeriodManager import PeriodManager
 
 class UserInputs(QMainWindow):
     def __init__(self):
@@ -95,9 +96,21 @@ class UserInputs(QMainWindow):
         self.tabs.addTab(self.blend_sequence_tab, "Blend Sequence (Manual Gantt)")
         self.blend_sequence_tab_layout = QVBoxLayout(self.blend_sequence_tab)
 
-         # Add the CustomWebEngineView at the top to display the Dash app
+        # Add the CustomWebEngineView at the top to display the Dash app
         self.manual_gantt_view = CustomWebEngineView()
-        self.blend_sequence_tab_layout.addWidget(self.manual_gantt_view)
+        
+        # Create a frame for manual_gantt_view
+        self.manual_gantt_view_frame = QFrame()
+        self.manual_gantt_view_frame.setFrameShape(QFrame.Box)  # Set the frame shape (Box, Panel, etc.)
+        self.manual_gantt_view_frame.setLineWidth(1)  # Set the thickness of the frame
+
+        # Create a layout for the frame
+        self.manual_gantt_view_layout = QVBoxLayout(self.manual_gantt_view_frame)
+        self.manual_gantt_view_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins inside the frame
+        self.manual_gantt_view_layout.addWidget(self.manual_gantt_view)  # Add the WebEngineView to the frame
+        
+        # Add it to the tab
+        self.blend_sequence_tab_layout.addWidget(self.manual_gantt_view_frame)
         
         # Add the horizontal layout for the two tables at the bottom
         self.blend_sequence_table_layout = QHBoxLayout()
@@ -106,12 +119,21 @@ class UserInputs(QMainWindow):
         self.blend_results_table_view = CustomTableWidget()
         self.blend_results_table_view.setEditTriggers(QTableWidget.NoEditTriggers)  # Make uneditable
 
-        # Add the new table to the layout
-        self.blend_sequence_table_layout.addWidget(self.blend_results_table_view)
+        # Add the new table and label to the layout
+        self.blend_results_table_view_external_layout = QVBoxLayout()
+        blend_results_label = QLabel("Blend Results")
+        blend_results_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+        blend_results_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+      
+        self.blend_results_table_view_external_layout.addWidget(blend_results_label)
+        self.blend_results_table_view_external_layout.addWidget(self.blend_results_table_view)
 
-        # Right Table: Placeholder Table for real-time updates
+        self.blend_sequence_table_layout.addLayout(self.blend_results_table_view_external_layout)
+
+        # Right Table: table for real-time updates
+        self.blend_sequence_table_external_layout = QVBoxLayout()
+        self.blend_sequence_table_layout.addLayout(self.blend_sequence_table_external_layout)
         self.blend_sequence_table = CustomTableWidget()
-        self.blend_sequence_table_layout.addWidget(self.blend_sequence_table)
 
         # Add the horizontal layout to the main layout of the tab
         self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout)
@@ -119,6 +141,8 @@ class UserInputs(QMainWindow):
         # Workflow controls
         self.load_profiles_first_call = True
         self.setup_blends_tab_first_call = True
+        self.setup_blend_sequence_table_first_call = True
+
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -130,7 +154,7 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(7, False)  # Disable Blend Sequence tab
 
 
-        # Initialise main program
+        # Initialise main optimisation program
         self.run_program = Run(self)
 
     def setup_site_configuration(self):
@@ -1324,30 +1348,525 @@ class UserInputs(QMainWindow):
         # Remove row index (vertical header)
         self.blend_results_table_view.verticalHeader().setVisible(False)
 
-        # Iterate over the saved_blends_for_schedule to populate rows
+       # Iterate over the saved_blends_for_schedule to populate rows
         for row_idx, row_data in enumerate(self.saved_blends_for_schedule):
             for col_idx, (key, value) in enumerate(row_data.items()):
-                # Create the table item
-                item = QTableWidgetItem(str(value))
-                
-                # Center-align the text
-                item.setTextAlignment(Qt.AlignCenter)
                 
                 # Conditionally format the "Available" column
                 if key == "Available":
+                    item = QTableWidgetItem(str(value))
+                    item.setTextAlignment(Qt.AlignCenter)
                     if str(value) == "Now":
                         item.setForeground(QColor("green"))
                     else:
                         item.setForeground(QColor("purple"))
+                    self.blend_results_table_view.setItem(row_idx, col_idx, item)
 
-                # Set the table item
-                self.blend_results_table_view.setItem(row_idx, col_idx, item)
+                # Handle other columns as standard table items
+                else:
+                    item = QTableWidgetItem(str(value))
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self.blend_results_table_view.setItem(row_idx, col_idx, item)
 
         # Resize columns to fit contents
         self.blend_results_table_view.resizeColumnsToContents()
 
+        self.setup_blend_sequence_table()
+
         # Additional Setup: Load the Dash app into the CustomWebEngineView
         #self.start_dash_optimised_charts_thread()
+
+    def set_start_and_end_datetime(self, periods):
+        # Set start and end datetime
+        self.default_start_datetime = periods.get_periods()["preplan_start"]
+        self.default_end_datetime = periods.get_periods()["period_2_end"]
+        self.default_start_datetime_str = periods.get_periods()["preplan_start"].strftime("%Y-%m-%d %H:%M")
+        self.default_end_datetime_str = periods.get_periods()["period_2_end"].strftime("%Y-%m-%d %H:%M")
+    
+    def setup_blend_sequence_table(self):
+        
+        self.blend_sequence_table.clearContents()  
+
+        # Add new column for Early Start Flag
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
+        self.blend_sequence_table.setColumnCount(len(headers))
+        self.blend_sequence_table.setHorizontalHeaderLabels(headers)
+
+        # Prepopulate the table
+        blend_ids = sorted([blend["Blend ID"] for blend in self.saved_blends_for_schedule])
+        row_data = []
+        current_start = self.default_start_datetime
+
+        # Populate rows for Blend IDs in self.saved_blends_for_schedule
+        for blend_id in blend_ids:
+            blend_data = next(item for item in self.saved_blends_for_schedule if item["Blend ID"] == blend_id)
+            duration = float(blend_data["Max Duration (hrs)"])
+            end_datetime = current_start + timedelta(hours=duration)
+            end_datetime_str = end_datetime.strftime("%Y-%m-%d %H:%M")
+            origin = "User Defined"
+
+            # Conditional formatting logic for Early Start Flag
+            available_time_str = blend_data["Available"]
+            try:
+                if available_time_str == "Now":
+                    available_time = self.default_start_datetime
+                else:
+                    available_time = datetime.strptime(available_time_str, "%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                QMessageBox.critical(None, "Error", f"Error parsing Available column: {e}")
+                available_time = None
+
+            if available_time and current_start >= available_time:
+                early_start_flag = "On Time"
+                flag_color = QColor("green")
+            else:
+                early_start_flag = "Early"
+                flag_color = QColor("red")
+
+            current_start_str = current_start.strftime("%Y-%m-%d %H:%M")
+
+            row_data.append({
+                "Blend ID": blend_id,
+                "Origin": origin,
+                "Start Datetime": current_start_str,
+                "Duration (hrs)": duration,
+                "End Datetime": end_datetime_str,
+                "Early Start Flag": early_start_flag,
+                "Flag Color": flag_color,
+                "Max Duration": duration
+            })
+            current_start = end_datetime
+
+        # Add rows for missing Blend IDs
+        all_blend_ids = set(range(1, 6))  # Default blend IDs 1-5
+        missing_blend_ids = [blend_id for blend_id in all_blend_ids if str(blend_id) not in blend_ids]
+
+        for blend_id in sorted(missing_blend_ids):
+            duration = (self.default_end_datetime - self.default_start_datetime).total_seconds() / 3600
+            row_data.append({
+                "Blend ID": blend_id,
+                "Origin": "Default",
+                "Start Datetime": self.default_start_datetime.strftime("%Y-%m-%d %H:%M"),
+                "Duration (hrs)": duration,
+                "End Datetime": self.default_end_datetime.strftime("%Y-%m-%d %H:%M"),
+                "Early Start Flag": "N/A",
+                "Flag Color": None,
+                "Max Duration": duration
+            })
+
+        self.blend_sequence_table.setRowCount(len(row_data))
+        for row, data in enumerate(row_data):
+            for col, key in enumerate(headers):
+
+                if key == "Blend ID":
+                    blend_dropdown = QComboBox()
+                    blend_dropdown.addItems([str(i) for i in range(1, 6)])  # Blend IDs 1 to 5
+                    blend_dropdown.currentIndexChanged.connect(lambda _, row=row: self.update_blend_id(row))
+                    self.blend_sequence_table.setCellWidget(row, col, blend_dropdown)
+                    blend_dropdown.setCurrentText(str(data[key]))  # Set initial value
+                    self.blend_sequence_table.setCellWidget(row, col, blend_dropdown)
+
+                # Add editable field for Duration
+                elif key == "Duration (hrs)":
+                    duration_item = QTableWidgetItem(str(data[key]))
+                    duration_item.setFlags(duration_item.flags() | Qt.ItemIsEditable)  # Make editable
+                    duration_item.setTextAlignment(Qt.AlignCenter)
+                    self.blend_sequence_table.setItem(row, col, duration_item)
+
+                # Add a date-time picker for Start Datetime
+                elif key == "Start Datetime":
+                    date_edit = QDateTimeEdit()
+                    date_edit.setCalendarPopup(True)
+                    date_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+                    date_edit.setAlignment(Qt.AlignCenter)
+                    date_edit.dateTimeChanged.connect(lambda dt, row=row: self.update_row_datetime(row, dt))
+                    self.blend_sequence_table.setCellWidget(row, col, date_edit)
+                    
+                    # Set the value to the date picker from data[key]
+                    date_value = data[key]
+                    if date_value:  # Ensure the value exists
+                        date_edit.setDateTime(datetime.strptime(date_value, "%Y-%m-%d %H:%M"))
+
+                    # Place the date picker in the table cell
+                    self.blend_sequence_table.setCellWidget(row, col, date_edit)
+
+                # Add a read-only field for Early Start Flag with color formatting
+                elif key == "Early Start Flag":
+                    flag_item = QTableWidgetItem(data[key])
+                    flag_item.setTextAlignment(Qt.AlignCenter)
+                    if data["Flag Color"] is not None:
+                        flag_item.setBackground(data["Flag Color"])
+                    flag_item.setFlags(flag_item.flags() & ~Qt.ItemIsEditable)  # Make read-only
+                    self.blend_sequence_table.setItem(row, col, flag_item)
+
+                # Remaining hours
+                elif key == "Remaining Hrs":
+                    remaining_hrs_item = QTableWidgetItem()
+                    remaining_hrs_item.setFlags(remaining_hrs_item.flags() | ~Qt.ItemIsEditable) 
+                    remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
+                    self.blend_sequence_table.setItem(row, col, remaining_hrs_item)
+                    
+                # Handle other fields (like Origin and End Datetime)
+                else:
+                    item = QTableWidgetItem(str(data[key]))
+                    item.setTextAlignment(Qt.AlignCenter)
+                    if key in ["Origin", "End Datetime"]:  # Make these read-only
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.blend_sequence_table.setItem(row, col, item)
+
+        # Adjust column widths to contents
+        self.blend_sequence_table.resizeColumnsToContents()
+
+        # Set up signal for detecting edits
+        self.blend_sequence_table.cellChanged.connect(self.on_cell_changed)
+
+        # Add button to add rows
+        add_row_button = QPushButton("Add Row")
+        add_row_button.setFixedWidth(120)
+        add_row_button.clicked.connect(self.add_blank_row)
+    
+        # Blend sequence table
+        blend_sequence_label = QLabel("Sequence")
+        blend_sequence_label.setAlignment(Qt.AlignLeft)  # Center-align the caption
+        blend_sequence_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
+        
+        if self.setup_blend_sequence_table_first_call:
+            
+            self.blend_sequence_table_external_layout.addWidget(blend_sequence_label)
+    
+            # Layout to contain the table and button
+            self.blend_sequence_table_external_layout.addWidget(self.blend_sequence_table)
+            self.blend_sequence_table_external_layout.addWidget(add_row_button)
+
+        store_button = QPushButton("Submit Table")
+        store_button.setFixedWidth(120)
+        store_button.clicked.connect(self.store_blend_sequence_table)
+        
+        if self.setup_blend_sequence_table_first_call:
+            
+            # Add the button to the layout
+            self.blend_sequence_table_external_layout.addWidget(store_button)
+            
+        self.setup_blend_sequence_table_first_call = False
+        
+        self.update_remaining_hrs()
+
+        self.blend_sequence_table.viewport().update()
+        self.blend_sequence_table_external_layout.update()
+
+    def update_row_datetime(self, row, new_datetime):
+        """Update all cells in a row when Start Datetime changes."""
+        try:
+            # Retrieve and parse duration
+            duration_item = self.blend_sequence_table.item(row, 3)
+            
+            duration = float(duration_item.text()) if duration_item and duration_item.text().strip() else 0.0
+
+            # Calculate new start and end datetimes
+            start_datetime = new_datetime.toPyDateTime()
+            end_datetime = start_datetime + timedelta(hours=duration)
+
+            # Update End Datetime cell
+            end_item = self.blend_sequence_table.item(row, 4)
+            if end_item:
+                end_item.setText(end_datetime.strftime("%Y-%m-%d %H:%M"))
+                
+            # Update Early Start Flag based on new Start Datetime
+            blend_id_widget = self.blend_sequence_table.cellWidget(row, 0)
+            blend_id = int(blend_id_widget.currentText()) if blend_id_widget else None
+
+            blend_data = next((b for b in self.saved_blends_for_schedule if b["Blend ID"] == blend_id), None)
+            if blend_data:
+                available_time_str = blend_data["Available"]
+                available_time = (self.default_start_datetime if available_time_str == "Now" else datetime.strptime(available_time_str, "%Y-%m-%d %H:%M:%S"))
+                
+                early_start_flag = "On Time" if start_datetime >= available_time else "Early"
+                flag_color = QColor("green") if start_datetime >= available_time else QColor("red")
+
+                flag_item = self.blend_sequence_table.item(row, 5)
+                if flag_item:
+                    flag_item.setText(early_start_flag)
+                    flag_item.setBackground(flag_color)
+
+        except Exception as e:
+            QMessageBox.warning(None, "Warning", f"Could not update row {row}: {e}")
+
+    def add_blank_row(self):
+        current_row_count = self.blend_sequence_table.rowCount()
+        self.blend_sequence_table.insertRow(current_row_count)
+
+        # Add default values for the new row
+        default_start_datetime = self.default_start_datetime.strftime("%Y-%m-%d %H:%M")
+        default_duration = 1.0  # Default duration in hours
+        default_end_datetime = (self.default_start_datetime + timedelta(hours=default_duration)).strftime("%Y-%m-%d %H:%M")
+
+        # Populate each column
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
+        for col, key in enumerate(headers):
+            
+            if key == "Blend ID":
+                blend_dropdown = QComboBox()
+                blend_dropdown.addItems([str(i) for i in range(1, 6)])  # Blend IDs 1 to 5
+                blend_dropdown.currentIndexChanged.connect(lambda _, row=current_row_count: self.update_blend_id(row))
+                self.blend_sequence_table.setCellWidget(current_row_count, col, blend_dropdown)
+                blend_dropdown.setCurrentText(str(1))  # Set initial default value
+                self.blend_sequence_table.setCellWidget(current_row_count, col, blend_dropdown)
+                self.update_blend_id(current_row_count)
+                self.update_early_start_conditional_format()
+            
+            if key == "Start Datetime":
+                # Add a calendar picker
+                date_edit = QDateTimeEdit()
+                date_edit.setCalendarPopup(True)
+                date_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+                date_edit.setDateTime(self.default_start_datetime)
+                date_edit.setAlignment(Qt.AlignCenter)
+                date_edit.dateTimeChanged.connect(lambda dt, row=current_row_count: self.update_row_datetime(row, dt))
+                self.blend_sequence_table.setCellWidget(current_row_count, col, date_edit)
+
+            elif key == "Duration (hrs)":
+                # Add default duration
+                item = QTableWidgetItem(str(default_duration))
+                item.setTextAlignment(Qt.AlignCenter)
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+
+            elif key == "End Datetime":
+                # Add default end datetime
+                item = QTableWidgetItem(default_end_datetime)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make it non-editable
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+
+            elif key == "Early Start Flag":
+                # Default flag for new rows (e.g., "N/A")
+                item = QTableWidgetItem("N/A")
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setBackground(QColor("white"))  # Neutral background color for new rows
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make it non-editable
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+
+            elif key == "Remaining Hrs":
+                # Remaining hours
+                item = QTableWidgetItem()
+                item.setFlags(item.flags() | ~Qt.ItemIsEditable) 
+                item.setTextAlignment(Qt.AlignCenter)
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+
+            elif key == "Origin":
+                item = QTableWidgetItem("Select Blend ID")
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+
+            else:
+                # Other columns, like Blend ID and Origin, can be left blank or with default values
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignCenter)
+                if key in ["Origin", "End Datetime"]:  # Make these read-only
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.blend_sequence_table.setItem(current_row_count, col, item)
+        
+        self.update_remaining_hrs()
+
+    def update_blend_id(self, row):
+        blend_dropdown = self.blend_sequence_table.cellWidget(row, 0)
+        if blend_dropdown:
+            blend_id = int(blend_dropdown.currentText())
+
+        # Update the Origin based on the new Blend ID
+        origin_item = self.blend_sequence_table.item(row, 1)
+
+        if origin_item is None:
+            # Create a new QTableWidgetItem if it doesn't exist
+            origin_item = QTableWidgetItem()
+            self.blend_sequence_table.setItem(row, 1, origin_item)
+
+        origin_item.setText("User Defined" if blend_id in [int(b["Blend ID"]) for b in self.saved_blends_for_schedule] else "Default")
+
+    def on_cell_changed(self, row, column):
+        if column == 3:  # Assuming "Duration (hrs)" is the 3rd column
+            self.on_duration_changed(row)
+        
+        self.update_early_start_conditional_format()
+        self.update_remaining_hrs()
+
+    def on_duration_changed(self, row):
+        try:
+            # Retrieve updated duration
+            duration_item = self.blend_sequence_table.item(row, 3)
+            if duration_item:
+                duration = float(duration_item.text())
+                
+            # Update End Datetime
+            start_datetime_widget = self.blend_sequence_table.cellWidget(row, 2)  # Access the widget in the cell
+            if isinstance(start_datetime_widget, QDateTimeEdit):  # Check if it's a QDateTimeEdit
+                start_datetime = start_datetime_widget.dateTime().toPyDateTime()  # Convert to Python datetime
+            else:
+                start_datetime = None  # Handle case where the widget is not set
+
+            # Ensure both duration and start_datetime are valid before calculating
+            if duration_item and start_datetime:
+                end_datetime = start_datetime + timedelta(hours=duration)
+
+            end_datetime_item = self.blend_sequence_table.item(row, 4)
+            if end_datetime_item:
+                end_datetime_item.setText(end_datetime.strftime("%Y-%m-%d %H:%M"))
+        except Exception as e:
+            QMessageBox.warning(None, "Invalid Duration", f"Error updating row {row}: {e}")
+
+    def store_blend_sequence_table(self):
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag"]
+
+        self.stored_blend_sequence_table_for_gantt = []  # Reset stored table
+        for row in range(self.blend_sequence_table.rowCount()):
+            row_data = {}
+            for col, header in enumerate(headers):
+                item = self.blend_sequence_table.item(row, col) or self.blend_sequence_table.cellWidget(row, col)
+                if isinstance(item, QTableWidgetItem):
+                    row_data[header] = item.text() if item else None
+                elif isinstance(item, QComboBox):
+                    row_data[header] = item.currentText() if item else None
+                elif isinstance(item, QDateTimeEdit):
+                    row_data[header] = item.dateTime().toString("yyyy-MM-dd HH:mm") if item else None
+            self.stored_blend_sequence_table_for_gantt.append(row_data)
+
+        QMessageBox.information(None, "Success", "Table data has been stored!")
+
+    def update_early_start_conditional_format(self):
+        """
+        Updates the 6th column of `self.blend_sequence_table` based on conditional formatting logic.
+        """
+        row_count = self.blend_sequence_table.rowCount()
+
+        for row in range(row_count):
+            # Retrieve the combo box for Blend ID (first column)
+            blend_id_widget = self.blend_sequence_table.cellWidget(row, 0)
+            blend_id = blend_id_widget.currentText() if blend_id_widget else None
+
+            # Retrieve the second column (User Defined text)
+            user_defined_item = self.blend_sequence_table.item(row, 1)
+            user_defined_text = user_defined_item.text() if user_defined_item else None
+
+            # Retrieve the calendar picker for Start Time (third column)
+            start_time_widget = self.blend_sequence_table.cellWidget(row, 2)
+            start_time = start_time_widget.dateTime().toString("yyyy-MM-dd HH:mm:ss") if start_time_widget else None
+
+            # Retrieve the 6th column item (Early Start Flag)
+            early_start_item = self.blend_sequence_table.item(row, 5)
+
+            # Ensure required fields are valid and "User Defined" condition is met
+            if not blend_id or not start_time or user_defined_text != "User Defined":
+                early_start_flag = "N/A"
+                flag_color = QColor("white")
+                foreground_color = QColor("black")
+                if early_start_item is None:
+                    early_start_item = QTableWidgetItem()
+                early_start_item.setText(early_start_flag)
+                early_start_item.setBackground(flag_color)
+                early_start_item.setForeground(foreground_color)
+                early_start_item.setTextAlignment(Qt.AlignCenter)
+                continue
+
+            try:
+                current_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                QMessageBox.critical(None, "Error", f"Error parsing Start Time: {e}")
+                continue
+
+            # Find the corresponding blend data in `self.saved_blends_for_schedule`
+            try:
+                blend_data = next(item for item in self.saved_blends_for_schedule if item["Blend ID"] == blend_id)
+            except StopIteration:
+                QMessageBox.warning(None, "Warning", f"Blend ID {blend_id} not found in saved blends.")
+                continue
+
+            available_time_str = blend_data.get("Available", "")
+            try:
+                if available_time_str == "Now":
+                    available_time = self.default_start_datetime
+                else:
+                    available_time = datetime.strptime(available_time_str, "%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                QMessageBox.critical(None, "Error", f"Error parsing Available column: {e}")
+                available_time = None
+
+            # Determine the Early Start Flag and apply conditional formatting
+            if available_time and current_start >= available_time:
+                early_start_flag = "On Time"
+                flag_color = QColor("green")
+            else:
+                early_start_flag = "Early"
+                flag_color = QColor("red")
+
+            # Update the 6th column with the Early Start Flag and apply background color
+            if early_start_item is None:
+                early_start_item = QTableWidgetItem()
+                self.blend_sequence_table.setItem(row, 5, early_start_item)
+
+            early_start_item.setText(early_start_flag)
+            early_start_item.setBackground(flag_color)
+            early_start_item.setForeground(QColor("white"))
+            early_start_item.setTextAlignment(Qt.AlignCenter)
+
+    def update_remaining_hrs(self):
+        """
+        Updates the "Remaining Hrs" column in self.blend_sequence_table.
+        If a Blend ID is present in more than one row, the aggregate duration of its rows is considered.
+        """
+        row_count = self.blend_sequence_table.rowCount()
+        blend_remaining_map = {}  # Tracks remaining hours for each Blend ID
+
+        for row in range(row_count):
+            # Get the "Duration (Hrs)" value
+            duration_item = self.blend_sequence_table.item(row, 3) 
+            scheduled_duration = float(duration_item.text()) if duration_item and duration_item.text() else 0
+
+            # Get the Blend ID value
+            blend_id_widget = self.blend_sequence_table.cellWidget(row, 0) 
+            blend_id = blend_id_widget.currentText() if blend_id_widget else None
+
+            if not blend_id:
+                continue
+
+            # Find the max duration for the Blend ID in self.saved_blends_for_schedule
+            try:
+                blend_data = next(b for b in self.saved_blends_for_schedule if str(b["Blend ID"]) == blend_id)
+                max_duration = float(blend_data["Max Duration (hrs)"])
+            except StopIteration:
+                # If Blend ID not found, set max_duration to scheduled_duration
+                max_duration = scheduled_duration
+
+            # Calculate remaining hours based on whether Blend ID has been encountered before
+            if blend_id not in blend_remaining_map:
+                # First occurrence of Blend ID
+                remaining_hrs = max_duration - scheduled_duration
+            else:
+                # Subsequent occurrence: subtract from the remaining hrs of the row above
+                previous_remaining = blend_remaining_map[blend_id]
+                remaining_hrs = previous_remaining - scheduled_duration
+
+            # Update the map with the current remaining hours for this Blend ID
+            blend_remaining_map[blend_id] = remaining_hrs
+
+            # Update the "Remaining Hrs" column
+            remaining_hrs_item = self.blend_sequence_table.item(row, 6)  
+            if remaining_hrs_item is None:
+                # Create a new item if it doesn't exist
+                remaining_hrs_item = QTableWidgetItem()
+                self.blend_sequence_table.setItem(row, 6, remaining_hrs_item)
+
+            # Set the value of "Remaining Hrs" and conditionally format
+            remaining_hrs_item.setText(f"{remaining_hrs:.2f}")
+            if remaining_hrs >= 0:
+                remaining_hrs_item.setBackground(QColor("green"))
+                remaining_hrs_item.setForeground(QColor("white"))
+            else:
+                remaining_hrs_item.setBackground(QColor("red"))
+                remaining_hrs_item.setForeground(QColor("white"))
+
+            # Center align the text
+            remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
+            remaining_hrs_item.setFlags(remaining_hrs_item.flags() | ~Qt.ItemIsEditable) 
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

@@ -90,6 +90,9 @@ class Run:
             # Restore the original print and input functions
             builtins.print = original_print
             builtins.input = original_input
+
+        # Set start and end datetime in main GUI
+        self.gui.set_start_and_end_datetime(periods=periods)
         
 class CaseModellerBridge(QObject):
     output_signal = pyqtSignal(str)
