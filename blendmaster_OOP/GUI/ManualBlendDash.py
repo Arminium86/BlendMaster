@@ -6,57 +6,55 @@ import pandas as pd
 import random
 
 class ManualBlendDash:
-    def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port=8050):
-        """
-        Constructor for the ManualBlendDash class.
-        :param stored_blend_sequence_table_for_gantt: List of dictionaries containing blend sequence details.
-        :param manual_gantt_legend_and_tooltip: List of dictionaries for legend and tooltip data.
-        :param port: Port number for the Dash app.
-        """
+    def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port, crusher_rate):
         self.stored_blend_sequence_table_for_gantt = stored_blend_sequence_table_for_gantt
         self.manual_gantt_legend_and_tooltip = manual_gantt_legend_and_tooltip
         self.port = port
+        self.crusher_rate = crusher_rate
         self.app = dash.Dash(__name__)
         self.colors = [
-            'rgb(77, 148, 204)',  # Sharper Pale Blue
-            'rgb(50, 200, 50)',   # Sharper Pale Green
-            'rgb(255, 255, 51)',  # Sharper Pale Yellow
-            'rgb(160, 80, 160)',  # Sharper Pale Purple
-            'rgb(255, 160, 100)'  # Sharper Pale Orange
+            'rgb(77, 148, 204)', 'rgb(50, 200, 50)', 'rgb(255, 255, 51)',
+            'rgb(160, 80, 160)', 'rgb(255, 160, 100)'
         ]
         self.color_mapping = {}
-        self.layout = self.create_layout()
+        self.create_layout()
 
     def create_layout(self):
         """
         Create the layout for the Dash app.
         """
-        return html.Div([
+        self.app.layout = html.Div([
             html.H1("Gantt Chart"),
             dcc.Graph(id="gantt-chart"),
-            html.Div(id="legend-placeholder"),
-            html.Div(id="tooltip-placeholder")
+            dcc.Store(id="chart-data", data=self.stored_blend_sequence_table_for_gantt)  # Store for dynamic updates
         ])
 
-    def create_gantt_chart(self):
+    def create_gantt_chart(self, chart_data):
         """
         Create the Gantt chart using Plotly Express.
         """
-        # Convert stored_blend_sequence_table_for_gantt to a DataFrame
-        df = pd.DataFrame(self.stored_blend_sequence_table_for_gantt)
+        df = pd.DataFrame(chart_data)
 
-        # Assign random colors for 'User Defined' blends
         def assign_color_and_border(row):
+            """
+            Assign unique colors for User Defined Blend IDs
+            and make non-User Defined fully transparent.
+            """
             if row['Origin'] == 'User Defined':
                 if row['Blend ID'] not in self.color_mapping:
-                    self.color_mapping[row['Blend ID']] = random.choice(self.colors)
-                return self.color_mapping[row['Blend ID']], "black"  # Color and black border
+                    # Assign a unique random color for each Blend ID
+                    available_colors = set(self.colors) - set(self.color_mapping.values())
+                    if available_colors:
+                        self.color_mapping[row['Blend ID']] = random.choice(list(available_colors))
+                    else:
+                        self.color_mapping[row['Blend ID']] = random.choice(self.colors)  # Fallback if all colors are used
+                return self.color_mapping[row['Blend ID']], "black"  # Visible color and black border
             else:
-                return "rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"  # Fully invisible (no color, transparent border)
+                return "rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"  # Fully transparent for non-User Defined
 
+        # Apply the color and border assignment
         df[['Color', 'Border Color']] = df.apply(
-            lambda row: pd.Series(assign_color_and_border(row)),
-            axis=1
+            lambda row: pd.Series(assign_color_and_border(row)), axis=1
         )
 
         # Convert datetime strings to datetime objects
@@ -67,73 +65,89 @@ class ManualBlendDash:
         tooltip_df = pd.DataFrame(self.manual_gantt_legend_and_tooltip)
         df = pd.merge(df, tooltip_df, on="Blend ID", how="left")
 
+        # Calculate the new column 'Feed Tonnes'
+        df['Feed Tonnes'] = df['Duration (hrs)'].astype(float) * self.crusher_rate
+
+        # Combine hover data into a categorical column for the legend
+        df['Hover Info'] = df.apply(
+            lambda row: (
+                "Blend ID: " + row['Blend ID'] +
+                "<br>Start: " + row['Start Datetime'].strftime('%Y-%m-%d %H:%M') +
+                "<br>End: " + row['End Datetime'].strftime('%Y-%m-%d %H:%M') +
+                "<br>Grade Fe: " + str(row['Grade Fe']) +
+                "<br>Grade Si: " + str(row['Grade Si']) +
+                "<br>Grade Al: " + str(row['Grade Al']) +
+                "<br>Grade P: " + str(row['Grade P']) +
+                "<br>Grade Mn: " + str(row['Grade Mn']) +
+                "<br>Feed Tonnes: " + f"{row['Feed Tonnes']:.0f}" +
+                "<br>Duration (hrs): " + f"{float(row['Duration (hrs)']):.1f}" +
+                "<br>"  # Add a blank line at the end
+            ) if row['Origin'] == 'User Defined' else "",
+            axis=1
+        )
+
         # Create the Gantt chart
         fig = px.timeline(
             df,
             x_start="Start Datetime",
             x_end="End Datetime",
             y="Blend ID",
-            hover_data={
-                "Blend ID": True,
-                "Start Datetime": True,
-                "End Datetime": True,
-                "Tooltip Info": True,  # Show custom tooltip info
-                "Color": False,  # Hide color in tooltips
-                "Border Color": False  # Hide border color in tooltips
-            }
+            color="Hover Info",
+            hover_data={"Hover Info": False},  # Only show Hover Info for hover
+            color_discrete_map={row['Hover Info']: row['Color'] for _, row in df.iterrows()}
         )
 
-        # Update color and add conditional borders
-        fig.update_traces(
-            marker=dict(
-                color=df['Color'],
-                line=dict(
-                    color=df['Border Color'],  # Use transparent for invisible bars
-                    width=df['Border Color'].apply(lambda x: 1 if x != "rgba(0, 0, 0, 0)" else 0)  # Width only for visible borders
-                )
-            )
-        )
+        # Reverse the Y-axis order
+        fig.update_yaxes(autorange="reversed")
 
-        # Reverse the Y-axis order if needed
+        # Customize the bars
+        for trace in fig.data:
+            hover_info = trace.name
+            row = df[df['Hover Info'] == hover_info]
+            if row.empty or row['Origin'].iloc[0] != 'User Defined':
+                trace.marker.opacity = 0  # Fully transparent for non-User Defined
+                trace.marker.line.width = 0  # No border
+            else:
+                trace.marker.line.color = row['Border Color'].iloc[0]  # Add border color
+                trace.marker.line.width = 2  # Border width
+
+        # Customize the legend appearance
         fig.update_layout(
-            title="Gantt Chart",
-            xaxis_title="Datetime",
-            yaxis_title="Blend IDs",
-            yaxis=dict(categoryorder="category descending"),  # Reverse Y-axis
-            showlegend=False
+            legend_title="Blend Details",
+            legend=dict(
+                orientation="v",
+                x=1.05,
+                y=1,
+                bgcolor="rgba(255, 255, 255, 0.8)",
+                bordercolor="black",
+                borderwidth=2
+            )
         )
 
         return fig
 
-
-    def run(self):
+    def run_app(self):
         """
         Run the Dash app.
         """
-        self.app.layout = self.layout
-
         @self.app.callback(
             Output("gantt-chart", "figure"),
-            Input("gantt-chart", "id")
+            Input("chart-data", "data")
         )
-        def update_gantt_chart(_):
-            return self.create_gantt_chart()
+        def update_gantt_chart(chart_data):
+            """
+            Callback to update the Gantt chart when chart-data changes.
+            """
+            if chart_data:
+                return self.create_gantt_chart(chart_data)
+            return dash.no_update
 
-        self.app.run_server(port=self.port)
+        self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
-# Example Usage
-if __name__ == "__main__":
-    # Example data
-    stored_blend_sequence_table_for_gantt = [
-        {"Blend ID": "B1", "Origin": "User Defined", "Start Datetime": "2025-01-01T08:00:00", "Duration (hrs)": "4", "End Datetime": "2025-01-01T12:00:00", "Early Start Flag": "False"},
-        {"Blend ID": "B2", "Origin": "System Generated", "Start Datetime": "2025-01-01T12:00:00", "Duration (hrs)": "3", "End Datetime": "2025-01-01T15:00:00", "Early Start Flag": "True"},
-        {"Blend ID": "B3", "Origin": "User Defined", "Start Datetime": "2025-01-01T15:00:00", "Duration (hrs)": "2", "End Datetime": "2025-01-01T17:00:00", "Early Start Flag": "False"}
-    ]
-
-    manual_gantt_legend_and_tooltip = [
-        {"Blend ID": "B1", "Tooltip Info": "B1 details: High Priority"},
-        {"Blend ID": "B3", "Tooltip Info": "B3 details: Medium Priority"}
-    ]
-
-    app = ManualBlendDash(stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip)
-    app.run()
+    def update_data(self, new_data):
+        """
+        Update the stored blend sequence data programmatically.
+        """
+        self.stored_blend_sequence_table_for_gantt = new_data
+        # Update the `dcc.Store` component with the new data
+        self.app.layout.children[-1].data = new_data  # Update the data directly

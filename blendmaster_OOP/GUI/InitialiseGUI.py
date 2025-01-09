@@ -11,6 +11,7 @@ from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
+from GUI.ManualBlendDash import ManualBlendDash
 import pandas as pd, sqlite3
 from classes.PeriodManager import PeriodManager
 
@@ -110,7 +111,7 @@ class UserInputs(QMainWindow):
         self.manual_gantt_view_layout.addWidget(self.manual_gantt_view)  # Add the WebEngineView to the frame
         
         # Add it to the tab
-        self.blend_sequence_tab_layout.addWidget(self.manual_gantt_view_frame)
+        self.blend_sequence_tab_layout.addWidget(self.manual_gantt_view_frame, stretch=1)
         
         # Add the horizontal layout for the two tables at the bottom
         self.blend_sequence_table_layout = QHBoxLayout()
@@ -136,7 +137,7 @@ class UserInputs(QMainWindow):
         self.blend_sequence_table = CustomTableWidget()
 
         # Add the horizontal layout to the main layout of the tab
-        self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout)
+        self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout, stretch=1)
 
         # Workflow controls
         self.load_profiles_first_call = True
@@ -747,6 +748,10 @@ class UserInputs(QMainWindow):
     def load_gantt_chart(self):
         # Load the Dash app into the QWebEngineView
         self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+    
+    def load_manual_gantt_chart(self):
+        # Load the Dash app into the QWebEngineView
+        self.manual_gantt_view.setUrl(QUrl("http://localhost:8052"))
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
@@ -1296,7 +1301,7 @@ class UserInputs(QMainWindow):
                 self.saved_blends_for_schedule.append(blend_data)
 
         QMessageBox.information(self, "Blend Setup", "Blend results successfully saved.")
-        self.update_sequence_tab()
+        self.setup_sequence_tab()
         self.tabs.setTabEnabled(7, True)
         self.tabs.setCurrentIndex(7)  
     
@@ -1329,9 +1334,22 @@ class UserInputs(QMainWindow):
                     item.setText(f"{float(item.text()):.2f}")  # Two decimal places
                     item.setTextAlignment(Qt.AlignCenter)
     
-    def update_sequence_tab(self):
+    def setup_sequence_tab(self):
+       
+        default_duration = str((self.default_end_datetime - self.default_start_datetime).total_seconds() / 3600)
+        self.stored_blend_sequence_table_for_gantt_default = [
+        {"Blend ID": "1", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
+        {"Blend ID": "2", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
+        {"Blend ID": "3", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
+        {"Blend ID": "4", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
+        {"Blend ID": "5", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""}
+        ]
+        self.stored_blend_sequence_table_for_gantt = []
 
-        self.manual_gantt_view.setUrl(QUrl("http://localhost:8050"))
+        self.manual_gantt_legend_and_tooltip = self.saved_blends_for_schedule
+        
+        self.start_or_update_dash_manual_chart_thread()
+        self.load_manual_gantt_chart()     
 
         # Populate data from saved_blends_for_schedule into blend_results_table_view
         self.blend_results_table_view.setRowCount(len(self.saved_blends_for_schedule))  # Set row count
@@ -1540,7 +1558,7 @@ class UserInputs(QMainWindow):
 
         store_button = QPushButton("Submit Table")
         store_button.setFixedWidth(120)
-        store_button.clicked.connect(self.store_blend_sequence_table)
+        store_button.clicked.connect(self.submit_blend_sequence_table_to_gantt)
         
         if self.setup_blend_sequence_table_first_call:
             
@@ -1714,10 +1732,33 @@ class UserInputs(QMainWindow):
         except Exception as e:
             QMessageBox.warning(None, "Invalid Duration", f"Error updating row {row}: {e}")
 
-    def store_blend_sequence_table(self):
-        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag"]
+    def submit_blend_sequence_table_to_gantt(self):
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
 
-        self.stored_blend_sequence_table_for_gantt = []  # Reset stored table
+        self.stored_blend_sequence_table_for_gantt = []
+        
+        # Check for negative values in "Remaining Hrs"
+        for row in range(self.blend_sequence_table.rowCount()):
+            item = self.blend_sequence_table.item(row, headers.index("Remaining Hrs"))
+            if item:
+                try:
+                    remaining_hrs = float(item.text())
+                    if remaining_hrs < 0:
+                        QMessageBox.warning(
+                            None,
+                            "Warning",
+                            "One or more rows have negative values in 'Remaining Hrs'. Data has not been stored."
+                        )
+                        return  # Exit the method without storing any data
+                except ValueError:
+                    QMessageBox.warning(
+                        None,
+                        "Warning",
+                        "Invalid value detected in 'Remaining Hrs'. Data has not been stored."
+                    )
+                    return
+
+        # If all rows are valid, store data
         for row in range(self.blend_sequence_table.rowCount()):
             row_data = {}
             for col, header in enumerate(headers):
@@ -1729,6 +1770,10 @@ class UserInputs(QMainWindow):
                 elif isinstance(item, QDateTimeEdit):
                     row_data[header] = item.dateTime().toString("yyyy-MM-dd HH:mm") if item else None
             self.stored_blend_sequence_table_for_gantt.append(row_data)
+        
+        self.start_or_update_dash_manual_chart_thread()
+
+        self.load_manual_gantt_chart()  
 
         QMessageBox.information(None, "Success", "Table data has been stored!")
 
@@ -1867,6 +1912,19 @@ class UserInputs(QMainWindow):
             # Center align the text
             remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
             remaining_hrs_item.setFlags(remaining_hrs_item.flags() | ~Qt.ItemIsEditable) 
+
+    def start_or_update_dash_manual_chart_thread(self):
+        """Update or start the Dash app."""
+        gantt_data = self.stored_blend_sequence_table_for_gantt or self.stored_blend_sequence_table_for_gantt_default
+
+        if hasattr(self, 'draw_manual_gantt_chart') and self.dash_thread_manual_gantt.is_alive():
+            # Update data in the running Dash app
+            self.draw_manual_gantt_chart.update_data(gantt_data)  
+        else:
+            # Start the Dash app if not already running
+            self.draw_manual_gantt_chart = ManualBlendDash(gantt_data, self.manual_gantt_legend_and_tooltip, port=8052, crusher_rate=self.crusher_rate)
+            self.dash_thread_manual_gantt = threading.Thread(target=self.draw_manual_gantt_chart.run_app, daemon=True)
+            self.dash_thread_manual_gantt.start()
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
