@@ -1,9 +1,11 @@
 import dash
-from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.express as px
 import pandas as pd
 import random
+import requests
+from dash import dcc, html, Input, Output, dash_table, Dash
+from flask import Flask, jsonify
 
 class ManualBlendDash:
     def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port, crusher_rate):
@@ -93,7 +95,7 @@ class ManualBlendDash:
             x_end="End Datetime",
             y="Blend ID",
             color="Hover Info",
-            hover_data={"Hover Info": False},  # Only show Hover Info for hover
+            hover_data={"Hover Info": True},  # Only show Hover Info for hover
             color_discrete_map={row['Hover Info']: row['Color'] for _, row in df.iterrows()}
         )
 
@@ -124,6 +126,8 @@ class ManualBlendDash:
             )
         )
 
+        self.grade_profile_data = df
+
         return fig
 
     def run_app(self):
@@ -151,3 +155,73 @@ class ManualBlendDash:
         self.stored_blend_sequence_table_for_gantt = new_data
         # Update the `dcc.Store` component with the new data
         self.app.layout.children[-1].data = new_data  # Update the data directly
+    
+    def return_grade_profile_data(self):
+        return self.grade_profile_data
+
+class DrawGradeProfiles:
+    def __init__(self, data, port):
+        # Initialize Dash app
+        self.app = dash.Dash(__name__)
+        self.port = port
+        self.df = data
+        
+        # Set up the layout
+        self.app.layout = html.Div(id='main-container', children=[
+            dcc.Store(id='df-store', data=self.df.to_dict('records')),
+            html.Div(id='charts-container')
+        ])
+        
+        # Set up callbacks
+        self.app.callback(
+            Output('charts-container', 'children'),
+            Input('df-store', 'data')
+        )(self.update_charts)
+    
+    def update_charts(self, data):
+        """Generate charts dynamically based on the DataFrame."""
+        df = pd.DataFrame(data)
+        
+        # Filter for 'User Defined' Origin
+        df = df[df['Origin'] == 'User Defined']
+        if df.empty:
+            return [html.Div("No data available for 'User Defined' Origin.")]
+        
+        # Sort the DataFrame by 'Start Datetime' first, then 'End Datetime'
+        df['Start Datetime'] = pd.to_datetime(df['Start Datetime'])
+        df['End Datetime'] = pd.to_datetime(df['End Datetime'])
+        df = df.sort_values(by=['Start Datetime', 'End Datetime'])
+        
+        grade_columns = ['Grade Fe', 'Grade Si', 'Grade Al', 'Grade P', 'Grade Mn']
+        colors = [
+            'rgb(77, 148, 204)', 
+            'rgb(50, 200, 50)', 
+            'rgb(255, 255, 51)',
+            'rgb(160, 80, 160)', 
+            'rgb(255, 160, 100)'
+        ]
+        
+        charts = []
+        for i, grade in enumerate(grade_columns):
+            # Create one chart per grade as a single data series
+            fig = px.line(
+                df,
+                x='Start Datetime',
+                y=grade,
+                title=f'{grade} Over Time',
+                labels={'x': 'Datetime', 'y': grade},
+                hover_data={grade: True, 'Start Datetime': True, 'End Datetime': True}
+            )
+            fig.update_traces(line_color=colors[i % len(colors)], mode='lines+markers')
+            charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
+        
+        return charts
+
+    def update_data(self, new_data):
+        """Update the DataFrame and refresh charts."""
+        self.df = new_data
+        self.app.layout.children[0].data = self.df.to_dict('records')  # Update the stored data
+    
+    def run_app(self):
+        """Run the Dash app."""
+        self.app.run_server(port=self.port)

@@ -11,7 +11,7 @@ from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
-from GUI.ManualBlendDash import ManualBlendDash
+from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
 import pandas as pd, sqlite3
 from classes.PeriodManager import PeriodManager
 
@@ -139,11 +139,12 @@ class UserInputs(QMainWindow):
         # Add the horizontal layout to the main layout of the tab
         self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout, stretch=1)
 
+        self.setup_grade_profile_tab()
+
         # Workflow controls
         self.load_profiles_first_call = True
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
-
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -153,7 +154,7 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(5, False)  # Disable Profiles tab
         self.tabs.setTabEnabled(6, False)  # Disable Setup Blends tab
         self.tabs.setTabEnabled(7, False)  # Disable Blend Sequence tab
-
+        self.tabs.setTabEnabled(8, False)  # Disable Grade Profile tab
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -801,6 +802,11 @@ class UserInputs(QMainWindow):
         self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
 
         self.load_profiles_first_call = False
+    
+    def load_grade_profiles(self):
+
+        # Load the Dash app into the QWebEngineView
+        self.blend_grade_profile_chart_view.setUrl(QUrl("http://localhost:8053"))
 
     def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
@@ -1556,7 +1562,7 @@ class UserInputs(QMainWindow):
             self.blend_sequence_table_external_layout.addWidget(self.blend_sequence_table)
             self.blend_sequence_table_external_layout.addWidget(add_row_button)
 
-        store_button = QPushButton("Submit Table")
+        store_button = QPushButton("Submit")
         store_button.setFixedWidth(120)
         store_button.clicked.connect(self.submit_blend_sequence_table_to_gantt)
         
@@ -1775,7 +1781,11 @@ class UserInputs(QMainWindow):
 
         self.load_manual_gantt_chart()  
 
-        QMessageBox.information(None, "Success", "Table data has been stored!")
+        self.start_or_update_dash_manual_grade_profile_thread()
+
+        self.load_grade_profiles()
+
+        QMessageBox.information(None, "Success", "Blend sequence stored!")
 
     def update_early_start_conditional_format(self):
         """
@@ -1925,6 +1935,55 @@ class UserInputs(QMainWindow):
             self.draw_manual_gantt_chart = ManualBlendDash(gantt_data, self.manual_gantt_legend_and_tooltip, port=8052, crusher_rate=self.crusher_rate)
             self.dash_thread_manual_gantt = threading.Thread(target=self.draw_manual_gantt_chart.run_app, daemon=True)
             self.dash_thread_manual_gantt.start()
+
+    def setup_grade_profile_tab(self):
+# Create a tab for Grade Profiles (Manual)
+        self.grade_profile_tab = QWidget()
+        self.tabs.addTab(self.grade_profile_tab, "Grade Profiles (Manual)")
+
+        # Create the main layout for the tab
+        self.grade_profile_layout = QVBoxLayout(self.grade_profile_tab)
+
+        # Create the bottom frame
+        self.grade_profile_frame = QFrame()
+        self.grade_profile_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
+        self.grade_profile_frame.setLineWidth(2)  # Set the frame's border width
+        self.grade_profile_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
+
+        # Add the frame to the layout
+        self.grade_profile_layout.addWidget(self.grade_profile_frame)
+
+        # Create a layout for the frame
+        self.grade_profile_frame_layout = QVBoxLayout(self.grade_profile_frame)
+
+        # Add the custom chart view to the frame layout
+        self.blend_grade_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
+        self.blend_grade_profile_chart_view.setStyleSheet("border: 1px solid black;")
+        self.grade_profile_frame_layout.addWidget(self.blend_grade_profile_chart_view)
+
+        # Add a button to load the chart
+        self.load_grade_profile_chart_button = QPushButton("Load or Update Chart")
+        self.load_grade_profile_chart_button.setFixedWidth(200)
+        self.load_grade_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
+        self.load_grade_profile_chart_button.clicked.connect(self.load_grade_profiles)  # Connect button to function
+
+        # Add the button to the layout at the bottom-left
+        self.grade_profile_layout.addWidget(self.load_grade_profile_chart_button)
+
+    def start_or_update_dash_manual_grade_profile_thread(self):
+        """Update or start the Dash app."""
+    
+        self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
+        gade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
+
+        if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
+            # Update data in the running Dash app
+            self.draw_grade_profile_chart.update_data(gade_profile_data)  
+        else:
+            # Start the Dash app if not already running
+            self.draw_grade_profile_chart = DrawGradeProfiles(gade_profile_data, 8053)
+            self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
+            self.dash_thread_grade_profile.start()
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
