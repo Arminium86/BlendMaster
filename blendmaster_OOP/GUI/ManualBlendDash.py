@@ -70,23 +70,32 @@ class ManualBlendDash:
         # Calculate the new column 'Feed Tonnes'
         df['Feed Tonnes'] = df['Duration (hrs)'].astype(float) * self.crusher_rate
 
+        df['Blend ID Name'] = "Blend ID: " + df["Blend ID"]
+
         # Combine hover data into a categorical column for the legend
-        df['Hover Info'] = df.apply(
+        df['Details'] = df.apply(
             lambda row: (
-                "Blend ID: " + row['Blend ID'] +
-                "<br>Start: " + row['Start Datetime'].strftime('%Y-%m-%d %H:%M') +
-                "<br>End: " + row['End Datetime'].strftime('%Y-%m-%d %H:%M') +
-                "<br>Grade Fe: " + str(row['Grade Fe']) +
-                "<br>Grade Si: " + str(row['Grade Si']) +
-                "<br>Grade Al: " + str(row['Grade Al']) +
-                "<br>Grade P: " + str(row['Grade P']) +
-                "<br>Grade Mn: " + str(row['Grade Mn']) +
+                "<br>Grade Fe: " + str(row['Grade Fe']) + "%" +
+                "<br>Grade Si: " + str(row['Grade Si']) + "%" +
+                "<br>Grade Al: " + str(row['Grade Al']) + "%" +
+                "<br>Grade P: " + str(row['Grade P']) + "%" +
+                "<br>Grade Mn: " + str(row['Grade Mn']) + "%" +
                 "<br>Feed Tonnes: " + f"{row['Feed Tonnes']:.0f}" +
-                "<br>Duration (hrs): " + f"{float(row['Duration (hrs)']):.1f}" +
+                "<br>Duration (hrs): " + f"{float(row['Duration (hrs)']):.1f}<br>" +
+                (
+                    "<br>Sources:" + 
+                    "<br>" + 
+                    "<br>".join(
+                        f"{source} @ {ratio}%" 
+                        for source, ratio in zip(row['Sources'].split(','), row['Source Ratios'].split(','))
+                    ) 
+                    if row['Sources'] and row['Source Ratios'] else ""
+                ) +
                 "<br>"  # Add a blank line at the end
             ) if row['Origin'] == 'User Defined' else "",
             axis=1
         )
+
 
         # Create the Gantt chart
         fig = px.timeline(
@@ -94,9 +103,15 @@ class ManualBlendDash:
             x_start="Start Datetime",
             x_end="End Datetime",
             y="Blend ID",
-            color="Hover Info",
-            hover_data={"Hover Info": True},  # Only show Hover Info for hover
-            color_discrete_map={row['Hover Info']: row['Color'] for _, row in df.iterrows()}
+            color="Details",
+            hover_name="Blend ID Name",
+            hover_data={
+                "Blend ID": False,
+                "Start Datetime": True,
+                "End Datetime": True,
+                "Details": True
+                },  # Only show Hover Info for hover
+            color_discrete_map={row['Details']: row['Color'] for _, row in df.iterrows()}
         )
 
         # Reverse the Y-axis order
@@ -105,7 +120,7 @@ class ManualBlendDash:
         # Customize the bars
         for trace in fig.data:
             hover_info = trace.name
-            row = df[df['Hover Info'] == hover_info]
+            row = df[df['Details'] == hover_info]
             if row.empty or row['Origin'].iloc[0] != 'User Defined':
                 trace.marker.opacity = 0  # Fully transparent for non-User Defined
                 trace.marker.line.width = 0  # No border
@@ -178,8 +193,21 @@ class DrawGradeProfiles:
             Input('df-store', 'data')
         )(self.update_charts)
     
+    def transform_data(self, df, grade_columns):
+        """Transform the data to create a 'time' column and expand the rows."""
+        records = []
+        for _, row in df.iterrows():
+            for grade in grade_columns:
+                records.append({'time': row['Start Datetime'], 'grade': row[grade], 'element': grade})
+                records.append({'time': row['End Datetime'], 'grade': row[grade], 'element': grade})
+        
+        transformed_df = pd.DataFrame(records)
+        transformed_df['time'] = pd.to_datetime(transformed_df['time'])
+        transformed_df = transformed_df.sort_values(by='time')
+        return transformed_df
+
     def update_charts(self, data):
-        """Generate charts dynamically based on the DataFrame."""
+        """Generate separate charts for each grade dynamically."""
         df = pd.DataFrame(data)
         
         # Filter for 'User Defined' Origin
@@ -187,32 +215,33 @@ class DrawGradeProfiles:
         if df.empty:
             return [html.Div("No data available for 'User Defined' Origin.")]
         
-        # Sort the DataFrame by 'Start Datetime' first, then 'End Datetime'
-        df['Start Datetime'] = pd.to_datetime(df['Start Datetime'])
-        df['End Datetime'] = pd.to_datetime(df['End Datetime'])
-        df = df.sort_values(by=['Start Datetime', 'End Datetime'])
-        
+        # Columns for grades
         grade_columns = ['Grade Fe', 'Grade Si', 'Grade Al', 'Grade P', 'Grade Mn']
-        colors = [
-            'rgb(77, 148, 204)', 
-            'rgb(50, 200, 50)', 
-            'rgb(255, 255, 51)',
-            'rgb(160, 80, 160)', 
-            'rgb(255, 160, 100)'
-        ]
+        colors = {
+            'Grade Fe': 'rgb(77, 148, 204)',
+            'Grade Si': 'rgb(50, 200, 50)',
+            'Grade Al': 'rgb(255, 255, 51)',
+            'Grade P': 'rgb(160, 80, 160)',
+            'Grade Mn': 'rgb(255, 160, 100)',
+        }
         
+        # Transform the data
+        transformed_df = self.transform_data(df, grade_columns)
+        
+        # Create separate charts for each grade
         charts = []
-        for i, grade in enumerate(grade_columns):
-            # Create one chart per grade as a single data series
+        for grade in grade_columns:
+            truncated_title = grade[:-2]
+            grade_data = transformed_df[transformed_df['element'] == grade]
             fig = px.line(
-                df,
-                x='Start Datetime',
-                y=grade,
-                title=f'{grade} Over Time',
-                labels={'x': 'Datetime', 'y': grade},
-                hover_data={grade: True, 'Start Datetime': True, 'End Datetime': True}
+                grade_data,
+                x='time',
+                y='grade',
+                title=f'{truncated_title} Grade Profile',
+                labels={'time': 'Time', 'grade': grade},
+                color_discrete_sequence=[colors[grade]]
             )
-            fig.update_traces(line_color=colors[i % len(colors)], mode='lines+markers')
+            fig.update_traces(mode='lines+markers')
             charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
         
         return charts
@@ -225,3 +254,4 @@ class DrawGradeProfiles:
     def run_app(self):
         """Run the Dash app."""
         self.app.run_server(port=self.port)
+

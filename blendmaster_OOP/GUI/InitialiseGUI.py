@@ -3,7 +3,6 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QAbstractItemView, QCheckBox
 )
-
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtCore import Qt, QUrl, QTimer, QDateTime
@@ -14,6 +13,7 @@ from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
 import pandas as pd, sqlite3
 from classes.PeriodManager import PeriodManager
+
 
 class UserInputs(QMainWindow):
     def __init__(self):
@@ -145,6 +145,8 @@ class UserInputs(QMainWindow):
         self.load_profiles_first_call = True
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
+        self.setup_stockpile_table_first_call = True
+        self.setup_calendar_first_call = True
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -309,22 +311,22 @@ class UserInputs(QMainWindow):
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
-        self.time_mode = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
+        self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
 
-        if self.time_mode == 2:  # If "Set Time" is selected
-           self.start_time = self.start_time.dateTime().toPyDateTime()
+        if self.time_mode_choice == 2:  # If "Set Time" is selected
+           self.start_time_choice = self.start_time.dateTime().toPyDateTime()
 
-        else: self.start_time = datetime.now()
+        else: self.start_time_choice = datetime.now()
 
-        self.expit_mode = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
-        self.file_path = self.file_path.text()
-        self.blend_mode = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
+        self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+        self.file_path_choice = self.file_path.text()
+        self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
         
-        self.hub_input = self.hub_input.currentText().strip()
-        self.mine_input = self.mine_input.currentText().strip()
+        self.hub_input_choice = self.hub_input.currentText().strip()
+        self.mine_input_choice = self.mine_input.currentText().strip()
 
-        if self.hub_input and self.mine_input and self.time_mode and self.start_time and self.expit_mode and self.file_path and self.blend_mode: 
-            QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input}, Mine: {self.mine_input}.")
+        if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.file_path_choice and self.blend_mode_choice: 
+            QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
             
             # Fetch stockpile data and create setup task
             self.fetch_stockpile_data()
@@ -337,9 +339,9 @@ class UserInputs(QMainWindow):
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
-        hub_input = self.hub_input
-        mine_input = self.mine_input
-        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time)
+        hub_input = self.hub_input_choice
+        mine_input = self.mine_input_choice
+        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time_choice)
     
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -425,22 +427,25 @@ class UserInputs(QMainWindow):
         # Resize Columns
         self.stockpile_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        # Connect cellChanged signal to a slot for live formatting
-        self.stockpile_table.cellChanged.connect(self.handle_cell_change)
+        if self.setup_stockpile_table_first_call:
+            # Connect cellChanged signal to a slot for live formatting
+            self.stockpile_table.cellChanged.connect(self.handle_cell_change)
 
-        # Add Submit Button at the Bottom
-        submit_button = QPushButton("Submit")
-        submit_button.clicked.connect(self.store_stockpile_table)
+            # Add Submit Button at the Bottom
+            submit_button = QPushButton("Submit")
+            submit_button.clicked.connect(self.store_stockpile_table)
 
-        # Align button to the bottom-left using layout
-        button_layout = QHBoxLayout()
-        
-        # Don't add the button if returning from the calendar
-        if not self.calendar_inputs:
-            button_layout.addWidget(submit_button)  
-            button_layout.addStretch()  # Push the button to the left
+            # Align button to the bottom-left using layout
+            button_layout = QHBoxLayout()
+            
+            # Don't add the button if returning from the calendar
+            if not self.calendar_inputs:
+                button_layout.addWidget(submit_button)  
+                button_layout.addStretch()  # Push the button to the left
 
-        self.stockpile_tab_layout.addLayout(button_layout)
+            self.stockpile_tab_layout.addLayout(button_layout)
+            
+            self.setup_stockpile_table_first_call = False
 
     def handle_cell_change(self, row, column):
         """Handle live formatting for the Reclaim Threshold column."""
@@ -595,20 +600,22 @@ class UserInputs(QMainWindow):
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        # Add Submit Button at bottom-Right
-        submit_button = QPushButton("Submit")
-        submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
+        if self.setup_calendar_first_call:
+            # Add Submit Button at bottom-Right
+            submit_button = QPushButton("Submit")
+            submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
 
-        # Align button to bottom-right
-        button_layout = QHBoxLayout()
-        
-        # Check if the button already exists in the layout
-        if not self.calendar_inputs:
-          button_layout.addWidget(submit_button) 
-          button_layout.addStretch()  # Push any other content (if any) to the right
+            # Align button to bottom-right
+            button_layout = QHBoxLayout()
+            
+            # Check if the button already exists in the layout
+            if not self.calendar_inputs:
+                button_layout.addWidget(submit_button) 
+                button_layout.addStretch()  # Push any other content (if any) to the right
 
-        # Add table and button layout to the main tab layout
-        self.main_tab_layout.addLayout(button_layout)
+            # Add table and button layout to the main tab layout
+            self.main_tab_layout.addLayout(button_layout)
+            self.setup_calendar_first_call = False
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -700,10 +707,10 @@ class UserInputs(QMainWindow):
         try:
             # Call main optimised run
             self.run_program.execute(
-                self.start_time,
-                self.expit_mode,
-                self.file_path,
-                self.blend_mode,
+                self.start_time_choice,
+                self.expit_mode_choice,
+                self.file_path_choice,
+                self.blend_mode_choice,
                 self.updated_stockpile_data,
                 self.calendar_inputs
             )
@@ -804,6 +811,8 @@ class UserInputs(QMainWindow):
         self.load_profiles_first_call = False
     
     def load_grade_profiles(self):
+        
+        self.start_or_update_dash_manual_grade_profile_thread()
 
         # Load the Dash app into the QWebEngineView
         self.blend_grade_profile_chart_view.setUrl(QUrl("http://localhost:8053"))
@@ -1168,7 +1177,7 @@ class UserInputs(QMainWindow):
     def setup_blend_results_table(self):
         headers = [
             "Blend ID", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
-            "Balance (WMT)", "Max Duration (hrs)", "Available"
+            "Balance (WMT)", "Max Duration (hrs)", "Available", "Sources", "Source Ratios"
         ]
         self.blend_results_table.setColumnCount(len(headers))
         self.blend_results_table.setHorizontalHeaderLabels(headers)
@@ -1193,19 +1202,19 @@ class UserInputs(QMainWindow):
         Recalculate and update the Blend Results Table, ensuring unused Blend IDs are cleared.
         """
         # Initialize a dictionary to aggregate data for each blend ID
-        blend_data = {str(i): {"weights": [], "grades": [], "balances": [], "available": []} for i in range(1, 6)}
+        blend_data = {str(i): {"weights": [], "grades": [], "balances": [], "available": [], "sources": [], "source_ratios": []} for i in range(1, 6)}
 
         # Aggregate data from blend configuration table
         for row_idx in range(self.blend_config_table.rowCount()):
             try:
-                blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10) # Column index for Blend ID
+                blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  # Column index for Blend ID
                 blend_id = blend_id_combo.currentText()
 
                 # Skip calculations if Blend ID is "None"
                 if blend_id == "None":
                     continue
 
-                weight = float(self.blend_config_table.item(row_idx, 11).text()) # Column index for Weight
+                weight = float(self.blend_config_table.item(row_idx, 11).text())  # Column index for Weight
                 use_projected = (
                     self.blend_config_table.cellWidget(row_idx, 4)
                     .layout()
@@ -1225,10 +1234,17 @@ class UserInputs(QMainWindow):
                 )
 
                 grades = [float(self.blend_config_table.item(row_idx, col).text()) for col in range(5, 10)]
+
+                sources = self.blend_config_table.item(row_idx, 0).text()
+                source_ratios = self.blend_config_table.item(row_idx, 13).text()
+
                 blend_data[blend_id]["weights"].append(weight)
                 blend_data[blend_id]["grades"].append([grade * weight for grade in grades])
                 blend_data[blend_id]["balances"].append(balance * weight)
                 blend_data[blend_id]["available"].append(available)
+                blend_data[blend_id]["sources"].append(sources)
+                blend_data[blend_id]["source_ratios"].append(source_ratios)
+
             except (ValueError, AttributeError):
                 continue
 
@@ -1244,12 +1260,14 @@ class UserInputs(QMainWindow):
                 max_duration = balance / self.crusher_rate if self.crusher_rate > 0 else 0
                 available_status = "Now"
                 if any(avail != "Now" for avail in data["available"]):
-                    # Extract all datetimes from "available" (excluding "Now")
                     datetime_values = [avail for avail in data["available"] if avail != "Now"]
-                    # Get the minimum datetime
                     available_status = min(datetime_values)
                 else:
                     available_status = "Now"
+
+                # Create comma-separated strings for sources and source ratios
+                sources_combined = ", ".join(data["sources"])
+                source_ratios_combined = ", ".join(data["source_ratios"])
 
                 # Update blend results table
                 self.blend_results_table.setItem(row_idx, 0, self.create_centered_item(blend_id))
@@ -1257,17 +1275,19 @@ class UserInputs(QMainWindow):
                     self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
                 self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.1f}"))
                 self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
+                self.blend_results_table.setItem(row_idx, 9, self.create_centered_item(sources_combined))
+                self.blend_results_table.setItem(row_idx, 10, self.create_centered_item(source_ratios_combined))
+
                 item = QTableWidgetItem(available_status)
                 item.setTextAlignment(Qt.AlignCenter)
 
-                # Apply green color for "Now", purple otherwise
                 if available_status == "Now":
                     item.setForeground(QBrush(QColor("green")))
                 else:
                     item.setForeground(QBrush(QColor("purple")))
 
                 self.blend_results_table.setItem(row_idx, 8, item)
-            
+
             else:
                 # Clear unused blend ID rows
                 for col_idx in range(self.blend_results_table.columnCount()):
@@ -1781,9 +1801,7 @@ class UserInputs(QMainWindow):
 
         self.load_manual_gantt_chart()  
 
-        self.start_or_update_dash_manual_grade_profile_thread()
-
-        self.load_grade_profiles()
+        self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
 
         QMessageBox.information(None, "Success", "Blend sequence stored!")
 
@@ -1937,7 +1955,7 @@ class UserInputs(QMainWindow):
             self.dash_thread_manual_gantt.start()
 
     def setup_grade_profile_tab(self):
-# Create a tab for Grade Profiles (Manual)
+        # Create a tab for Grade Profiles (Manual)
         self.grade_profile_tab = QWidget()
         self.tabs.addTab(self.grade_profile_tab, "Grade Profiles (Manual)")
 
@@ -1973,7 +1991,6 @@ class UserInputs(QMainWindow):
     def start_or_update_dash_manual_grade_profile_thread(self):
         """Update or start the Dash app."""
     
-        self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
         gade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
 
         if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
@@ -1984,6 +2001,7 @@ class UserInputs(QMainWindow):
             self.draw_grade_profile_chart = DrawGradeProfiles(gade_profile_data, 8053)
             self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
             self.dash_thread_grade_profile.start()
+            self.draw_grade_profile_chart.update_data(gade_profile_data)  
 
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
