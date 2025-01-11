@@ -33,8 +33,11 @@ class Run:
         periods.calculate_periods(start_time)
 
         # Process APS expit data (mining.csv)
-        expit_data_handler = ExpitDataHandler(file_path)
-        expit_payload_transactions = expit_data_handler.process_transactions()
+        if file_path:
+            expit_data_handler = ExpitDataHandler()
+            expit_payload_transactions = expit_data_handler.process_transactions()
+        else:
+            expit_payload_transactions = None
 
         # User interaction required to choose between original time and updated time methods
         user_interaction_mode = expit_mode
@@ -47,21 +50,20 @@ class Run:
 
         database_manager = DatabaseManager()
 
-        if user_interaction_mode == 2:
+        if user_interaction_mode == 2 and file_path:
 
             expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, start_time)
             #expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
             expit_payload_transactions_copy = expit_payload_transactions.copy()
             database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
-        elif user_interaction_mode == 1:
+        elif user_interaction_mode == 1 and file_path:
             #expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
             expit_payload_transactions_copy = expit_payload_transactions.copy()
             database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
 
         else: 
-            print("Invalid input. Please enter a number.")
-            return  # Exit execution for invalid input
+            print("No APS schedule imported.")
 
         # Load input data (this is combined user input and opening inventories)
         input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions)

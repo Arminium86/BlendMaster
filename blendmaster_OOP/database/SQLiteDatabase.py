@@ -116,39 +116,41 @@ class DatabaseManager:
 
         cursor.execute('DELETE FROM build_report')
 
-        results['steady_state_start_datetime'] = pd.to_datetime(results['steady_state_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        results['steady_state_end_datetime'] = pd.to_datetime(results['steady_state_end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        results['mining_start_datetime'] = pd.to_datetime(results['mining_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        if not results.empty:
 
-        # Insert each row from the DataFrame into the database
-        for _, row in results.iterrows():
-            cursor.execute('''
-            INSERT INTO build_report VALUES (
-            :steady_state_number, 
-            :steady_state_start_datetime, 
-            :steady_state_end_datetime, 
-            :agent, 
-            :mining_start_datetime, 
-            :source, 
-            :stockpile, 
-            :payload, 
-            :delivered_datetime, 
-            :closing_balance, 
-            :grade_fe, 
-            :grade_si, 
-            :grade_al, 
-            :grade_p, 
-            :grade_mn
-            )
-            ''', row.to_dict())
+            results['steady_state_start_datetime'] = pd.to_datetime(results['steady_state_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            results['steady_state_end_datetime'] = pd.to_datetime(results['steady_state_end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            results['mining_start_datetime'] = pd.to_datetime(results['mining_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            # Insert each row from the DataFrame into the database
+            for _, row in results.iterrows():
+                cursor.execute('''
+                INSERT INTO build_report VALUES (
+                :steady_state_number, 
+                :steady_state_start_datetime, 
+                :steady_state_end_datetime, 
+                :agent, 
+                :mining_start_datetime, 
+                :source, 
+                :stockpile, 
+                :payload, 
+                :delivered_datetime, 
+                :closing_balance, 
+                :grade_fe, 
+                :grade_si, 
+                :grade_al, 
+                :grade_p, 
+                :grade_mn
+                )
+                ''', row.to_dict())
 
         # Commit and close the connection
         conn.commit()
         conn.close()
 
-        print(f"Build report saved to database {database_name}")
-        print(f"Expit payload transactions saved to database {database_name}")
+        print(f"Build report (if used) saved to database {database_name}")
+        print(f"Expit payload transactions (if used) saved to database {database_name}")
 
     def write_expit_payload_transactions_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it

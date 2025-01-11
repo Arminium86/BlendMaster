@@ -4,8 +4,9 @@ from datetime import timedelta
 class ExpitDataHandler:
     def __init__(self, input_data):
         self.data = pd.read_csv(input_data)
-        self._preprocess_data()
-        self._group_data()
+        if self.data:
+            self._preprocess_data()
+            self._group_data()
 
     def _preprocess_data(self):
         # Explicit datetime parsing with the correct format
@@ -42,7 +43,6 @@ class ExpitDataHandler:
             (self.data["Source.Type"] == "Reserve") &
             (self.data["Destination.Type"] == "Stockpile")
         ].sort_values(by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"])
-
 
     def _group_data(self):
         # Create WeightedRate column without directly inserting into the fragmented DataFrame
@@ -86,134 +86,137 @@ class ExpitDataHandler:
             by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"]
         )
 
-
     def process_transactions(self):
-        results = []
-        for agent, group in self.data.groupby("Agent.Name"):
-            group = group.reset_index(drop=True)
-            for i in range(len(group)):
-                # Fetch row dynamically for current iteration
-                tonnes = group.at[i, "Mining.wetTonnes"]
-                row = group.iloc[i]  # For other attributes that remain static per row
-                
-                if tonnes <= 0:
-                    continue  # Skip rows with no remaining tonnes
-                
-                payload = row["HaulageResult.TruckPayload"]
-                start_time = row["Time.StartTime"]
-                destination = row["Destination.FullName"]
-                source_name = row["Source.FullName"]
-                load_time = payload / row["HaulageResult.LoaderProductionRate.Wtph"]
-                num_trips = tonnes / payload
-                int_trips = int(num_trips)
+        if self.data:
+            results = []
+            for agent, group in self.data.groupby("Agent.Name"):
+                group = group.reset_index(drop=True)
+                for i in range(len(group)):
+                    # Fetch row dynamically for current iteration
+                    tonnes = group.at[i, "Mining.wetTonnes"]
+                    row = group.iloc[i]  # For other attributes that remain static per row
+                    
+                    if tonnes <= 0:
+                        continue  # Skip rows with no remaining tonnes
+                    
+                    payload = row["HaulageResult.TruckPayload"]
+                    start_time = row["Time.StartTime"]
+                    destination = row["Destination.FullName"]
+                    source_name = row["Source.FullName"]
+                    load_time = payload / row["HaulageResult.LoaderProductionRate.Wtph"]
+                    num_trips = tonnes / payload
+                    int_trips = int(num_trips)
 
-                for trip in range(int_trips):
-                    if trip == 0:
-                        delivery_time = (
-                            start_time +
-                            timedelta(hours=load_time +
-                                    row["HaulageResult.Times.LoadedTravel"] / 60 +
-                                    row["HaulageResult.Times.SpotAtDump"] / 60 +
-                                    row["HaulageResult.Times.Dumping"] / 60)
-                        )
-                        mining_start_time = start_time
-                    else:
-                        delivery_time = (
-                            delivery_time +
+                    for trip in range(int_trips):
+                        if trip == 0:
+                            delivery_time = (
+                                start_time +
+                                timedelta(hours=load_time +
+                                        row["HaulageResult.Times.LoadedTravel"] / 60 +
+                                        row["HaulageResult.Times.SpotAtDump"] / 60 +
+                                        row["HaulageResult.Times.Dumping"] / 60)
+                            )
+                            mining_start_time = start_time
+                        else:
+                            delivery_time = (
+                                delivery_time +
+                                timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                        load_time)
+                            )
+                            mining_start_time = (mining_start_time +
                             timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                        load_time)
+                            )
+                        results.append({
+                            "agent": agent,
+                            "source": source_name,
+                            "start_datetime": mining_start_time,
+                            "payload": payload,
+                            "source_grade_fe": row["Mining.grades_fe"],
+                            "source_grade_si": row["Mining.grades_si"],
+                            "source_grade_al": row["Mining.grades_al"],
+                            "source_grade_mn": row["Mining.grades_mn"],
+                            "source_grade_p": row["Mining.grades_p"],
+                            "destination": destination,
+                            "delivered_datetime": delivery_time
+                        })
+
+                    # Handle fractional tonnes (top-up case)
+                    fractional_tonnes = tonnes % payload
+                    weighted_grades = {
+                        "Grade_fe": row["Mining.grades_fe"],
+                        "Grade_si": row["Mining.grades_si"],
+                        "Grade_al": row["Mining.grades_al"],
+                        "Grade_mn": row["Mining.grades_mn"],
+                        "Grade_p": row["Mining.grades_p"]
+                    }  # Default to current row's grades in case no top-up happens
+
+                    if fractional_tonnes > 0:
+                        next_row = group.iloc[i + 1] if i + 1 < len(group) else None
+                        if next_row is not None:
+                            next_start_time = next_row["Time.StartTime"]
+                            next_destination = next_row["Destination.FullName"]
+
+                            if next_start_time == row["Time.EndTime"] and next_destination == destination:
+                                top_up_tonnes = min(payload - fractional_tonnes, group.at[i + 1, "Mining.wetTonnes"])
+                                fractional_tonnes += top_up_tonnes
+
+                                # Weighted average grades for the top-up
+                                total_tonnes = group.at[i, "Mining.wetTonnes"] + top_up_tonnes
+                                weighted_grades = {
+                                    "Grade_fe": (row["Mining.grades_fe"] * group.at[i, "Mining.wetTonnes"] +
+                                                next_row["Mining.grades_fe"] * top_up_tonnes) / total_tonnes,
+                                    "Grade_si": (row["Mining.grades_si"] * group.at[i, "Mining.wetTonnes"] +
+                                                next_row["Mining.grades_si"] * top_up_tonnes) / total_tonnes,
+                                    "Grade_al": (row["Mining.grades_al"] * group.at[i, "Mining.wetTonnes"] +
+                                                next_row["Mining.grades_al"] * top_up_tonnes) / total_tonnes,
+                                    "Grade_mn": (row["Mining.grades_mn"] * group.at[i, "Mining.wetTonnes"] +
+                                                next_row["Mining.grades_mn"] * top_up_tonnes) / total_tonnes,
+                                    "Grade_p": (row["Mining.grades_p"] * group.at[i, "Mining.wetTonnes"] +
+                                                next_row["Mining.grades_p"] * top_up_tonnes) / total_tonnes,
+                                }
+
+                                # Update the next row's tonnes
+                                group.at[i + 1, "Mining.wetTonnes"] -= top_up_tonnes
+                                if group.at[i + 1, "Mining.wetTonnes"] <= 0:
+                                    group.at[i + 1, "Mining.wetTonnes"] = 0  # Mark as used
+
+                            delivery_time = (
+                                delivery_time +
+                                timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
                                     load_time)
-                        )
-                        mining_start_time = (mining_start_time +
-                        timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
-                                    load_time)
-                        )
-                    results.append({
-                        "agent": agent,
-                        "source": source_name,
-                        "start_datetime": mining_start_time,
-                        "payload": payload,
-                        "source_grade_fe": row["Mining.grades_fe"],
-                        "source_grade_si": row["Mining.grades_si"],
-                        "source_grade_al": row["Mining.grades_al"],
-                        "source_grade_mn": row["Mining.grades_mn"],
-                        "source_grade_p": row["Mining.grades_p"],
-                        "destination": destination,
-                        "delivered_datetime": delivery_time
-                    })
-
-                # Handle fractional tonnes (top-up case)
-                fractional_tonnes = tonnes % payload
-                weighted_grades = {
-                    "Grade_fe": row["Mining.grades_fe"],
-                    "Grade_si": row["Mining.grades_si"],
-                    "Grade_al": row["Mining.grades_al"],
-                    "Grade_mn": row["Mining.grades_mn"],
-                    "Grade_p": row["Mining.grades_p"]
-                }  # Default to current row's grades in case no top-up happens
-
-                if fractional_tonnes > 0:
-                    next_row = group.iloc[i + 1] if i + 1 < len(group) else None
-                    if next_row is not None:
-                        next_start_time = next_row["Time.StartTime"]
-                        next_destination = next_row["Destination.FullName"]
-
-                        if next_start_time == row["Time.EndTime"] and next_destination == destination:
-                            top_up_tonnes = min(payload - fractional_tonnes, group.at[i + 1, "Mining.wetTonnes"])
-                            fractional_tonnes += top_up_tonnes
-
-                            # Weighted average grades for the top-up
-                            total_tonnes = group.at[i, "Mining.wetTonnes"] + top_up_tonnes
-                            weighted_grades = {
-                                "Grade_fe": (row["Mining.grades_fe"] * group.at[i, "Mining.wetTonnes"] +
-                                            next_row["Mining.grades_fe"] * top_up_tonnes) / total_tonnes,
-                                "Grade_si": (row["Mining.grades_si"] * group.at[i, "Mining.wetTonnes"] +
-                                            next_row["Mining.grades_si"] * top_up_tonnes) / total_tonnes,
-                                "Grade_al": (row["Mining.grades_al"] * group.at[i, "Mining.wetTonnes"] +
-                                            next_row["Mining.grades_al"] * top_up_tonnes) / total_tonnes,
-                                "Grade_mn": (row["Mining.grades_mn"] * group.at[i, "Mining.wetTonnes"] +
-                                            next_row["Mining.grades_mn"] * top_up_tonnes) / total_tonnes,
-                                "Grade_p": (row["Mining.grades_p"] * group.at[i, "Mining.wetTonnes"] +
-                                            next_row["Mining.grades_p"] * top_up_tonnes) / total_tonnes,
-                            }
-
-                            # Update the next row's tonnes
-                            group.at[i + 1, "Mining.wetTonnes"] -= top_up_tonnes
-                            if group.at[i + 1, "Mining.wetTonnes"] <= 0:
-                                group.at[i + 1, "Mining.wetTonnes"] = 0  # Mark as used
-
-                        delivery_time = (
-                            delivery_time +
+                            )
+                            
+                            mining_start_time = (mining_start_time +
                             timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
-                                   load_time)
-                        )
-                        
-                        mining_start_time = (mining_start_time +
-                        timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
-                                    load_time)
-                        )
+                                        load_time)
+                            )
 
-                    # Append the topped-up trip
-                    results.append({
-                        "agent": agent,
-                        "source": source_name,
-                        "start_datetime": mining_start_time,
-                        "payload": fractional_tonnes,
-                        "source_grade_fe": weighted_grades["Grade_fe"],
-                        "source_grade_si": weighted_grades["Grade_si"],
-                        "source_grade_al": weighted_grades["Grade_al"],
-                        "source_grade_mn": weighted_grades["Grade_mn"],
-                        "source_grade_p": weighted_grades["Grade_p"],
-                        "destination": destination,
-                        "delivered_datetime": delivery_time
-                    })
+                        # Append the topped-up trip
+                        results.append({
+                            "agent": agent,
+                            "source": source_name,
+                            "start_datetime": mining_start_time,
+                            "payload": fractional_tonnes,
+                            "source_grade_fe": weighted_grades["Grade_fe"],
+                            "source_grade_si": weighted_grades["Grade_si"],
+                            "source_grade_al": weighted_grades["Grade_al"],
+                            "source_grade_mn": weighted_grades["Grade_mn"],
+                            "source_grade_p": weighted_grades["Grade_p"],
+                            "destination": destination,
+                            "delivered_datetime": delivery_time
+                        })
 
-        return pd.DataFrame(results)
+            return pd.DataFrame(results)
     
     def get_current_block(self, agent):
         """Retrieve the current or last block a load agent has interacted with in FMS."""
-        return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
+        if self.data:
+            return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
 
     def update_transactions(self, expit_payload_transactions, now):
+       
+        if self.data:   
             
             updated_transactions = expit_payload_transactions
             

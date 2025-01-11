@@ -25,74 +25,76 @@ class BalanceTracker:
             if self.balance[name] != 0:
                 self.balance[name] -= transaction["source_actual_tonnes"]
        
-        # Sort the DataFrame by delivered_datetime (old to new)
-        expit_payload_transactions = expit_payload_transactions.sort_values(by=["destination", "delivered_datetime"])
+        if expit_payload_transactions:
 
-        # Loop through expit payload transactions and build stockpiles
-        for _, transaction in expit_payload_transactions.iterrows():
-            name = transaction["destination"].replace("Stockpiles/", "")
-            delivered_datetime = transaction["delivered_datetime"]
-            payload = transaction["payload"]
-            agent = transaction["agent"]
-            source = transaction["source"]
-            mining_start_datetime = transaction["start_datetime"]
+            # Sort the DataFrame by delivered_datetime (old to new)
+            expit_payload_transactions = expit_payload_transactions.sort_values(by=["destination", "delivered_datetime"])
 
-            # Check if the transaction is within the time range
-            if steady_state_start_time <= delivered_datetime < steady_state_end_time:
-                if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
-                    # Perform weighted averaging for each grade
-                    current_balance = self.balance[name]
-                    updated_balance = current_balance + payload
-                    
-                    self.grade_fe[name] = (
-                        (self.grade_fe[name] * current_balance + transaction["source_grade_fe"] * payload)
-                        / updated_balance
-                    )
-                    self.grade_si[name] = (
-                        (self.grade_si[name] * current_balance + transaction["source_grade_si"] * payload)
-                        / updated_balance
-                    )
-                    self.grade_al[name] = (
-                        (self.grade_al[name] * current_balance + transaction["source_grade_al"] * payload)
-                        / updated_balance
-                    )
-                    self.grade_p[name] = (
-                        (self.grade_p[name] * current_balance + transaction["source_grade_p"] * payload)
-                        / updated_balance
-                    )
-                    self.grade_mn[name] = (
-                        (self.grade_mn[name] * current_balance + transaction["source_grade_mn"] * payload)
-                        / updated_balance
-                    )
-                    
-                    # Update the balance
-                    self.balance[name] = updated_balance
-                    
-                    # Add the used transaction to the tracked list
-                    self.build_report.append({
-                        "steady_state_number": steady_state_tracker,
-                        "steady_state_start_datetime": steady_state_start_time,
-                        "steady_state_end_datetime": steady_state_end_time,
-                        "agent": agent,
-                        "mining_start_datetime": mining_start_datetime,
-                        "source": source,
-                        "stockpile": name,
-                        "payload": payload,
-                        "delivered_datetime": delivered_datetime,
-                        "closing_balance": updated_balance,
-                        "grade_fe": self.grade_fe[name],
-                        "grade_si": self.grade_si[name],
-                        "grade_al": self.grade_al[name],
-                        "grade_p": self.grade_p[name],
-                        "grade_mn": self.grade_mn[name]
+            # Loop through expit payload transactions and build stockpiles
+            for _, transaction in expit_payload_transactions.iterrows():
+                name = transaction["destination"].replace("Stockpiles/", "")
+                delivered_datetime = transaction["delivered_datetime"]
+                payload = transaction["payload"]
+                agent = transaction["agent"]
+                source = transaction["source"]
+                mining_start_datetime = transaction["start_datetime"]
+
+                # Check if the transaction is within the time range
+                if steady_state_start_time <= delivered_datetime < steady_state_end_time:
+                    if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
+                        # Perform weighted averaging for each grade
+                        current_balance = self.balance[name]
+                        updated_balance = current_balance + payload
                         
-                    })
-                
-                elif (name in self.state) and ((self.state[name] == "Reclaim") or (self.state[name] == "Off")):
-                    continue
+                        self.grade_fe[name] = (
+                            (self.grade_fe[name] * current_balance + transaction["source_grade_fe"] * payload)
+                            / updated_balance
+                        )
+                        self.grade_si[name] = (
+                            (self.grade_si[name] * current_balance + transaction["source_grade_si"] * payload)
+                            / updated_balance
+                        )
+                        self.grade_al[name] = (
+                            (self.grade_al[name] * current_balance + transaction["source_grade_al"] * payload)
+                            / updated_balance
+                        )
+                        self.grade_p[name] = (
+                            (self.grade_p[name] * current_balance + transaction["source_grade_p"] * payload)
+                            / updated_balance
+                        )
+                        self.grade_mn[name] = (
+                            (self.grade_mn[name] * current_balance + transaction["source_grade_mn"] * payload)
+                            / updated_balance
+                        )
+                        
+                        # Update the balance
+                        self.balance[name] = updated_balance
+                        
+                        # Add the used transaction to the tracked list
+                        self.build_report.append({
+                            "steady_state_number": steady_state_tracker,
+                            "steady_state_start_datetime": steady_state_start_time,
+                            "steady_state_end_datetime": steady_state_end_time,
+                            "agent": agent,
+                            "mining_start_datetime": mining_start_datetime,
+                            "source": source,
+                            "stockpile": name,
+                            "payload": payload,
+                            "delivered_datetime": delivered_datetime,
+                            "closing_balance": updated_balance,
+                            "grade_fe": self.grade_fe[name],
+                            "grade_si": self.grade_si[name],
+                            "grade_al": self.grade_al[name],
+                            "grade_p": self.grade_p[name],
+                            "grade_mn": self.grade_mn[name]
+                            
+                        })
+                    
+                    elif (name in self.state) and ((self.state[name] == "Reclaim") or (self.state[name] == "Off")):
+                        continue
 
-                else: 
-                    raise ValueError(f"Stockpile '{name}' is not selected or found in Stockpile Inventories. Either select the stockpile by ticking the 'Use' option or remove the transactions to this destination from APS output.")
+                    else: 
+                        raise ValueError(f"Stockpile '{name}' is not selected or found in Stockpile Inventories. Either select the stockpile by ticking the 'Use' option or remove the transactions to this destination from APS output.")
                      
     def get_build_transactions(self):
         """Retrieve the list of build transactions."""

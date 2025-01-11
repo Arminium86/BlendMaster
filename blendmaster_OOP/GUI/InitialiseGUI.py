@@ -210,7 +210,7 @@ class UserInputs(QMainWindow):
         layout.addRow(QLabel("Set Date & Time:"), self.start_time)
 
         # --- Input 2: Expit Transactions ---
-        expit_label = QLabel("Expit Transactions:")
+        expit_label = QLabel("Expit Transactions (optional):")
         expit_label.setStyleSheet("font-weight: bold;")
         self.expit_mode = QComboBox()
         self.expit_mode.addItems(["Execute Original Expit Transactions", "Update Transactions Based on Current Time"])
@@ -225,7 +225,7 @@ class UserInputs(QMainWindow):
         layout.addRow(expit_label, self.expit_mode)
 
         # --- Input 3: Select File ---
-        file_label = QLabel("Select APS Mining.csv:")
+        file_label = QLabel("Select APS Mining.csv (optional):")
         file_label.setStyleSheet("font-weight: bold;")
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
@@ -278,7 +278,6 @@ class UserInputs(QMainWindow):
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
-            and bool(self.file_path.text())
             and self.blend_mode.currentIndex() != -1
         )
         self.submit_button.setEnabled(all_fields_populated)
@@ -325,7 +324,7 @@ class UserInputs(QMainWindow):
         self.hub_input_choice = self.hub_input.currentText().strip()
         self.mine_input_choice = self.mine_input.currentText().strip()
 
-        if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.file_path_choice and self.blend_mode_choice: 
+        if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
             QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
             
             # Fetch stockpile data and create setup task
@@ -394,12 +393,16 @@ class UserInputs(QMainWindow):
 
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
+           
+            if self.calendar_inputs:
+                keys = [key.lower() for key in keys]
+       
             for col_idx, key in enumerate(keys, start=2):  # Start after "Use" and "Stockpile Name"
                 value = attributes.get(key, 0)  # Default to 0 if key is missing
 
-                if key == "BALANCE":
+                if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
-                    value = round(float(value))
+                    value = round(float(value)) if value else 0
                     balance_item = QTableWidgetItem(str(value))
                     balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     balance_item.setTextAlignment(Qt.AlignCenter)  # Center-align value

@@ -231,7 +231,7 @@ class DrawGradeProfiles:
         # Create separate charts for each grade
         charts = []
         for grade in grade_columns:
-            truncated_title = grade[:-2]
+            truncated_title = grade.split()[-1]  # Splits the string and takes the last part
             grade_data = transformed_df[transformed_df['element'] == grade]
             fig = px.line(
                 grade_data,

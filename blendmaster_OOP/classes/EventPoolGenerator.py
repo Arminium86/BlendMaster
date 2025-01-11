@@ -157,12 +157,21 @@ class EventPoolGenerator:
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
         stockpile.balance = balance_tracker.get_balance(stockpile.name)
-        if ((stockpile_state == "Auto" and 
-            self.expit_transactions_complete(stockpile, current_time)
-            ) 
-            or stockpile_state == "Reclaim"): return True
-        
-        else: return False
+        if (
+            ((stockpile_state == "Auto" and self.expit_transactions_complete(stockpile, current_time)) 
+            
+            or stockpile_state == "Reclaim") and 
+           
+            all(grade is not None for grade in [
+                stockpile.grade_fe, stockpile.grade_si, stockpile.grade_al, stockpile.grade_mn, stockpile.grade_p
+            ]) and 
+            
+            stockpile.balance >= 0
+        ):
+            return True
+
+        else:
+            return False
     
     def expit_transactions_complete(self, stockpile: StockpileData, current_time):
 

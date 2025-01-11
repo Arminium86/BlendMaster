@@ -87,9 +87,15 @@ class DataLoader:
 
             # Filter transactions related to the current stockpile
             stockpile_id = record
-            stockpile_transactions = self.expit_payload_transactions[
-                self.expit_payload_transactions["destination"].str.replace("Stockpiles/", "", regex=False) == stockpile_id
-            ].to_dict(orient='records')
+            
+            if self.expit_payload_transactions:
+                
+                stockpile_transactions = self.expit_payload_transactions[
+                    self.expit_payload_transactions["destination"].str.replace("Stockpiles/", "", regex=False) == stockpile_id
+                ].to_dict(orient='records')
+            
+            else:
+                stockpile_transactions = None
 
 
             if not stockpile_transactions:
