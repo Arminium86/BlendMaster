@@ -25,7 +25,7 @@ class BalanceTracker:
             if self.balance[name] != 0:
                 self.balance[name] -= transaction["source_actual_tonnes"]
        
-        if expit_payload_transactions:
+        if not expit_payload_transactions.empty:
 
             # Sort the DataFrame by delivered_datetime (old to new)
             expit_payload_transactions = expit_payload_transactions.sort_values(by=["destination", "delivered_datetime"])

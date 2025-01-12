@@ -4,7 +4,7 @@ from datetime import timedelta
 class ExpitDataHandler:
     def __init__(self, input_data):
         self.data = pd.read_csv(input_data)
-        if self.data:
+        if not self.data.empty:
             self._preprocess_data()
             self._group_data()
 
@@ -87,7 +87,7 @@ class ExpitDataHandler:
         )
 
     def process_transactions(self):
-        if self.data:
+        if not self.data.empty:
             results = []
             for agent, group in self.data.groupby("Agent.Name"):
                 group = group.reset_index(drop=True)
@@ -211,12 +211,12 @@ class ExpitDataHandler:
     
     def get_current_block(self, agent):
         """Retrieve the current or last block a load agent has interacted with in FMS."""
-        if self.data:
+        if not self.data.empty:
             return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
 
     def update_transactions(self, expit_payload_transactions, now):
        
-        if self.data:   
+        if not self.data.empty:   
             
             updated_transactions = expit_payload_transactions
             

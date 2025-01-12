@@ -1,24 +1,25 @@
-import sys, threading, requests, time
+import sys, threading, requests
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QAbstractItemView, QCheckBox
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont
-from PyQt5.QtCore import Qt, QUrl, QTimer, QDateTime
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
+from PyQt5.QtCore import Qt, QUrl
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
 import pandas as pd, sqlite3
-from classes.PeriodManager import PeriodManager
+
 
 
 class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BlendMaster PoC v0.1.0 © 2024 Fortescue - MOPP")
+        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon.png")) 
         self.setGeometry(100, 100, 800, 600)
 
         # Placeholder for OpeningStockpileInventories
@@ -73,12 +74,15 @@ class UserInputs(QMainWindow):
         input_layout = QHBoxLayout()
         self.decision_input = QLineEdit()
         self.decision_input.setPlaceholderText("Enter your input here...")
+        self.decision_input.setFixedWidth(300)
         self.decision_input.returnPressed.connect(self.handle_decision_input)
-        input_layout.addWidget(self.decision_input)
+        input_layout.addWidget(self.decision_input, alignment=Qt.AlignLeft)
 
-        self.enter_button = QPushButton("Enter")
+        self.enter_button = QPushButton("Submit")
+        self.enter_button.setFixedWidth(200)
         self.enter_button.clicked.connect(self.handle_decision_input)
-        input_layout.addWidget(self.enter_button)
+        input_layout.addWidget(self.enter_button, alignment=Qt.AlignLeft)
+        input_layout.setAlignment(Qt.AlignLeft)
 
         self.decision_point_tab_layout.addLayout(input_layout)  # Add input field and button at the bottom
 
@@ -147,6 +151,7 @@ class UserInputs(QMainWindow):
         self.setup_blend_sequence_table_first_call = True
         self.setup_stockpile_table_first_call = True
         self.setup_calendar_first_call = True
+        self.stockpile_data_use_column = {}
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -264,6 +269,8 @@ class UserInputs(QMainWindow):
 
         layout.addRow(button_layout)
 
+        self.update_mine_dropdown()
+
         # Connect input field changes to form validation
         self.hub_input.currentIndexChanged.connect(self.validate_form)
         self.mine_input.currentIndexChanged.connect(self.validate_form)
@@ -335,6 +342,9 @@ class UserInputs(QMainWindow):
 
         else:
             QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
+        
+        # Initialise Calendar every time submitting Site Configuration
+        self.calendar_inputs = {}
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
@@ -365,17 +375,23 @@ class UserInputs(QMainWindow):
         header_font.setBold(True)
         self.stockpile_table.horizontalHeader().setFont(header_font)
 
-        # Choose data source based on calendar_inputs
-        data_source = self.updated_stockpile_data if self.calendar_inputs else self.stockpile_data
+        # Choose data source
+        data_source = self.stockpile_data
 
         # Set Table Dimensions
         self.stockpile_table.setRowCount(len(self.stockpile_data))
 
         # Populate Stockpile Data
         for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
+           
             # "Use" Column (Checkbox)
             use_checkbox = QCheckBox()
-            use_checkbox.setChecked(True)  # Default to checked
+            
+            if self.stockpile_data_use_column:
+                # Set the checkbox state based on the value in self.stockpile_data_use_column
+                use_checkbox.setChecked(self.stockpile_data_use_column.get(stockpile_name, True))  # Default to unchecked if not found
+            else:
+                use_checkbox.setChecked(True)  # Default to checked
 
             # Center the checkbox using a QWidget and layout
             checkbox_widget = QWidget()
@@ -490,8 +506,12 @@ class UserInputs(QMainWindow):
             checkbox_widget = self.stockpile_table.cellWidget(row, 0)  # Get the widget in the "Use" column
             if checkbox_widget:
                 checkbox = checkbox_widget.layout().itemAt(0).widget()  # Extract the QCheckBox
-                if checkbox.isChecked():  # Check if the checkbox is checked
+                
+                if checkbox.isChecked():
+                    # Get the stockpile name from the relevant column (assuming column 1 for name)
                     stockpile_name = self.stockpile_table.item(row, 1).text()
+                    # Store the stockpile name and its "Use" status (True for checked, False otherwise)
+                    self.stockpile_data_use_column[stockpile_name] = True
 
                     # Retrieve Reclaim Threshold
                     reclaim_item = self.stockpile_table.item(row, self.stockpile_table.columnCount() - 1)
@@ -500,6 +520,11 @@ class UserInputs(QMainWindow):
                     # Update stockpile data
                     updated_stockpile_data[stockpile_name] = self.stockpile_data.get(stockpile_name, {})
                     updated_stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+
+                else:
+                    # Optional: Store unchecked stockpiles
+                    stockpile_name = self.stockpile_table.item(row, 1).text()
+                    self.stockpile_data_use_column[stockpile_name] = False
 
                 
         # Update stockpile_data with filtered data
@@ -674,27 +699,12 @@ class UserInputs(QMainWindow):
     for outer_key, outer_value in self.calendar_inputs.items()
 }
         
-        # Initialise the shared object and stop event
+        # Initialise the shared object
         status = {'success': False}
-        stop_event = threading.Event()
 
-        # Create and start the thread
-        execution_thread = threading.Thread(
-            target=self.execute_run_program_in_thread, args=(status, stop_event)
-        )
-        execution_thread.start()
-
-        # Wait for the thread to complete with a 3-minute timeout
-        execution_thread.join(timeout=3 * 60)  # 3 minutes in seconds
-
-        # Check if the thread is still alive after the timeout
-        if execution_thread.is_alive():
-            QMessageBox.critical(None, "Timeout", "Optimisation thread timed out. Signaling to stop.")
-            stop_event.set()  # Signal the thread to stop (for graceful handling)
-
-            # Optionally, perform any forced cleanup actions if needed
-            execution_thread.join()  # Wait for thread to exit gracefully
-
+        self.update_decision_point_tab_state()
+        self.execute_run_program_in_thread(status)
+        
         # Conditional logic based on whether the execution was successful
         if status['success']:
             self.update_decision_point_tab_state()
@@ -706,7 +716,7 @@ class UserInputs(QMainWindow):
             self.tabs.setCurrentIndex(1)
             self.setup_stockpile_table()
 
-    def execute_run_program_in_thread(self, status, stop_event):
+    def execute_run_program_in_thread(self, status):
         try:
             # Call main optimised run
             self.run_program.execute(
@@ -717,8 +727,8 @@ class UserInputs(QMainWindow):
                 self.updated_stockpile_data,
                 self.calendar_inputs
             )
-            if not stop_event.is_set():  # If not stopped, mark as success
-                status['success'] = True
+            # if not stop_event.is_set():  # If not stopped, mark as success
+            status['success'] = True
         except Exception as e:
             # Handle or log the error
             self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
@@ -835,7 +845,7 @@ class UserInputs(QMainWindow):
     
     def update_decision_point_tab_state(self):
         """Enable or disable the Decision Point tab based on blend_mode."""
-        if self.blend_mode == 2:
+        if self.blend_mode_choice == 2:
             self.tabs.setTabEnabled(3, True)
             self.tabs.setCurrentIndex(3)
             self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab

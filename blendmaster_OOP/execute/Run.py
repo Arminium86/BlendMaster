@@ -34,7 +34,7 @@ class Run:
 
         # Process APS expit data (mining.csv)
         if file_path:
-            expit_data_handler = ExpitDataHandler()
+            expit_data_handler = ExpitDataHandler(file_path)
             expit_payload_transactions = expit_data_handler.process_transactions()
         else:
             expit_payload_transactions = None

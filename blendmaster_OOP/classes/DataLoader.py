@@ -3,9 +3,10 @@ import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
+from pandas import DataFrame
 
 class DataLoader:
-    def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions):
+    def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions: DataFrame):
         self.stockpile_data = stockpile_data
         self.calendar_inputs = calendar_inputs
         self.expit_payload_transactions = expit_payload_transactions
@@ -88,7 +89,7 @@ class DataLoader:
             # Filter transactions related to the current stockpile
             stockpile_id = record
             
-            if self.expit_payload_transactions:
+            if not self.expit_payload_transactions.empty:
                 
                 stockpile_transactions = self.expit_payload_transactions[
                     self.expit_payload_transactions["destination"].str.replace("Stockpiles/", "", regex=False) == stockpile_id
