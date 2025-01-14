@@ -31,7 +31,7 @@ class CaseModeller:
         self.steady_state_tracker = 0
         self.blend_option = 1
         self.user_blend_choice = None
-        self.blend_ID = 2
+        self.blend_ID = 1
         self.decision_point_results = pd.DataFrame()
         self.decision_point_results_to_display = pd.DataFrame()
         self.decision_point_results_to_display_filtered_to_current_blend_choice = pd.DataFrame()
@@ -165,10 +165,11 @@ class CaseModeller:
 
                 if self.steady_state_tracker != 0:
                     if not list(current_filtered_sources) == list(previous_filtered_sources):
-                        self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
+                        #self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
                         self.blend_ID += 1
                     else: pass
                 else: pass
+
 
             elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
                 
@@ -176,7 +177,7 @@ class CaseModeller:
                     print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
                     print("Blend fully depleted.")
                     self.user_blend_choice = input("Choose new blend: ")
-                    self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
+                    #self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
                     self.blend_ID += 1
                     # Cast user choice to appropriate type
                     try:

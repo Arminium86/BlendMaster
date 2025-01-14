@@ -1,4 +1,4 @@
-import sys, threading, requests
+import sys, threading, requests, os, pickle
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox
@@ -12,15 +12,16 @@ from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
 import pandas as pd, sqlite3
-
-
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlendMaster PoC v0.1.0 © 2024 Fortescue - MOPP")
-        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon.png")) 
+        self.setWindowTitle("BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP")
+        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon.ico")) 
         self.setGeometry(100, 100, 800, 600)
+
+        self.initialise_all_variables()
 
         # Placeholder for OpeningStockpileInventories
         self.opening_stockpile_inventories = OpeningStockpileInventories()
@@ -256,10 +257,25 @@ class UserInputs(QMainWindow):
 
         layout.addRow(blend_label, self.blend_mode)
 
-         # Submit Button
+        # Save and load button
+        self.save_button = QPushButton("Save Project")
+        self.save_button.setFixedWidth(100)
+        self.save_button.clicked.connect(self.save_state)
+
+        self.load_button = QPushButton("Load Project")
+        self.load_button.setFixedWidth(100)
+        self.load_button.clicked.connect(self.load_state)
+
+        save_load_button_layout = QHBoxLayout()
+        save_load_button_layout.addWidget(self.save_button)
+        save_load_button_layout.addWidget(self.load_button)
+        save_load_button_layout.addStretch()
+        layout.addRow(save_load_button_layout)
+        
+        # Submit Button
         self.submit_button = QPushButton("Submit")
         self.submit_button.setFixedWidth(100)
-        self.submit_button.setEnabled(False)  # Initially disabled
+        self.submit_button.setEnabled(True)  # Initially disabled
 
         self.submit_button.clicked.connect(self.handle_site_config_submit)
 
@@ -444,7 +460,16 @@ class UserInputs(QMainWindow):
             self.stockpile_table.setItem(row_idx, len(headers) - 1, reclaim_item)
 
         # Resize Columns
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+
 
         if self.setup_stockpile_table_first_call:
             # Connect cellChanged signal to a slot for live formatting
@@ -627,7 +652,7 @@ class UserInputs(QMainWindow):
 
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-
+       
         if self.setup_calendar_first_call:
             # Add Submit Button at bottom-Right
             submit_button = QPushButton("Submit")
@@ -2016,6 +2041,124 @@ class UserInputs(QMainWindow):
             self.dash_thread_grade_profile.start()
             self.draw_grade_profile_chart.update_data(gade_profile_data)  
 
+    def save_state(self):
+        """Save the application state to a file using pickle."""
+        try:
+            
+            # Save the enabled/disabled state of tabs
+            tab_states = {index: self.tabs.isTabEnabled(index) for index in range(self.tabs.count())}
+
+            # Combine all class variables into a dictionary
+            state_to_save = {
+                "tab_states": tab_states,
+                "blend_mode_choice": self.blend_mode_choice,
+                "calendar_inputs": self.calendar_inputs,
+                "crusher_rate": self.crusher_rate,
+                "default_end_datetime": self.default_end_datetime,
+                "default_end_datetime_str": self.default_end_datetime_str,
+                "default_start_datetime": self.default_start_datetime,
+                "default_start_datetime_str": self.default_start_datetime_str,
+                "expit_mode_choice": self.expit_mode_choice,
+                "file_path_choice": self.file_path_choice,
+                "mine_input_choice": self.mine_input_choice,
+                "opening_stockpile_inventories": self.opening_stockpile_inventories,
+                "saved_blends_for_schedule": self.saved_blends_for_schedule,
+                "start_time_choice": self.start_time_choice,
+                "stockpile_data": self.stockpile_data,
+                "stockpile_data_use_column": self.stockpile_data_use_column,
+                "stored_blend_sequence_table_for_gantt": self.stored_blend_sequence_table_for_gantt,
+                "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
+                "time_mode_choice": self.time_mode_choice,
+                "updated_stockpile_data": self.updated_stockpile_data,
+            }
+            # Generate a timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+
+            # Use the timestamp in the filename
+            filename = f'blendmaster_{timestamp}.prj'
+            
+            # Serialize the dictionary to a file
+            with open(filename, 'wb') as file:
+                pickle.dump(state_to_save, file)
+
+            QMessageBox.information(self, "BlendMaster", "Project saved successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save project: {str(e)}")
+
+    def load_state(self):
+        """Load the application state from a user-selected file."""
+        try:
+            # Open a file dialog for the user to select the file
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "Select Project File to Load", 
+                "",  # Starting directory (empty string means current directory)
+                "Project Files (*.prj);;All Files (*)"  # File filters
+            )
+            
+            if not file_path:  # If no file was selected, return early
+                return
+
+            # Load the selected file
+            with open(file_path, 'rb') as file:
+                loaded_state = pickle.load(file)
+
+            # Unpack loaded state into variables
+            self.blend_mode_choice = loaded_state.get("blend_mode_choice", None)
+            self.crusher_rate = loaded_state.get("crusher_rate", None)
+            self.calendar_inputs = loaded_state.get("calendar_inputs", None)
+            self.default_end_datetime = loaded_state.get("default_end_datetime", None)
+            self.default_end_datetime_str = loaded_state.get("default_end_datetime_str", "")
+            self.default_start_datetime = loaded_state.get("default_start_datetime", None)
+            self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
+            self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
+            self.file_path_choice = loaded_state.get("file_path_choice", "")
+            self.mine_input_choice = loaded_state.get("mine_input_choice", None)
+            self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
+            self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule", None)
+            self.start_time_choice = loaded_state.get("start_time_choice", None)
+            self.stockpile_data = loaded_state.get("stockpile_data", None)
+            self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", None)
+            self.stored_blend_sequence_table_for_gantt = loaded_state.get("stored_blend_sequence_table_for_gantt", None)
+            self.stored_blend_sequence_table_for_gantt_default = loaded_state.get("stored_blend_sequence_table_for_gantt_default", None)
+            self.time_mode_choice = loaded_state.get("time_mode_choice", None)
+            self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
+
+            tab_states = loaded_state.get("tab_states", {})
+            for index, enabled in tab_states.items():
+                self.tabs.setTabEnabled(index, enabled)
+
+            QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
+        except FileNotFoundError:
+            QMessageBox.warning(self, "Error", "No saved projects found!")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+        
+        self.handle_site_config_submit()
+        self.store_stockpile_table()
+        self.store_calendar_inputs()
+        
+    def initialise_all_variables(self):
+        self.blend_mode_choice = None
+        self.calendar_inputs = None
+        self.crusher_rate = None
+        self.default_end_datetime = None
+        self.default_end_datetime_str = None
+        self.default_start_datetime = None
+        self.default_start_datetime_str = None
+        self.expit_mode_choice = None
+        self.file_path_choice = None
+        self.mine_input_choice = None
+        self.opening_stockpile_inventories = None
+        self.saved_blends_for_schedule = None
+        self.start_time_choice = None
+        self.stockpile_data = None
+        self.stockpile_data_use_column = None
+        self.stored_blend_sequence_table_for_gantt = None
+        self.stored_blend_sequence_table_for_gantt_default = None
+        self.time_mode_choice = None
+        self.updated_stockpile_data = None
+    
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):  # Check for Enter key

@@ -7,6 +7,7 @@ from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
+from pandas import DataFrame
 
 class Run:
     
@@ -25,8 +26,8 @@ class Run:
     def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs):
 
         # Install required libraries
-        requirements = Requirements()
-        requirements.install_requirements()
+        #requirements = Requirements()
+        #requirements.install_requirements()
 
         # Initialize periods
         periods = PeriodManager()
@@ -37,7 +38,7 @@ class Run:
             expit_data_handler = ExpitDataHandler(file_path)
             expit_payload_transactions = expit_data_handler.process_transactions()
         else:
-            expit_payload_transactions = None
+            expit_payload_transactions = DataFrame()
 
         # User interaction required to choose between original time and updated time methods
         user_interaction_mode = expit_mode

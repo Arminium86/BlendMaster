@@ -4,17 +4,21 @@ from datetime import datetime
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
-        # Snowflake connection
-        conn = snowflake.connector.connect(
-            user='armin.sabet@fortescue.com',
-            account='wn74261.ap-southeast-2',
-            warehouse='WH_EDW_SELFSERVICE',
-            database='AA_OPERATIONS_MANAGEMENT',
-            authenticator='externalbrowser',
-            role='EDW_ARMIN.SABET',
-            login_timeout=60,  # Increase login timeout
-            network_timeout=300  # Increase network timeout
-        )
+        
+        # Personal account Snowflake connection
+        # conn = snowflake.connector.connect(
+        #     user='armin.sabet@fortescue.com',
+        #     account='wn74261.ap-southeast-2',
+        #     warehouse='WH_EDW_SELFSERVICE',
+        #     database='AA_OPERATIONS_MANAGEMENT',
+        #     authenticator='externalbrowser',
+        #     role='EDW_ARMIN.SABET',
+        #     login_timeout=60,  # Increase login timeout
+        #     network_timeout=300  # Increase network timeout
+        # )
+
+        # Call the function to connect (service account)
+        conn = self.connect_snowflake_with_service_account()
         
         start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
         
@@ -123,4 +127,31 @@ class OpeningStockpileInventories:
         conn.commit()
         conn.close()
         print(f"Stockpile inventories saved to database {database_name}")
+    
+    def connect_snowflake_with_service_account(self):
+        try:
+            # Connect to Snowflake using service account credentials
+            conn = snowflake.connector.connect(
+                user='SVC_APS',  
+                password='AlastriSnowflake123',  
+                account='wn74261.ap-southeast-2',  
+                warehouse='WH_EDW_SELFSERVICE', 
+                database='AA_OPERATIONS_MANAGEMENT',  
+                schema='SELFSERVICE',  
+                role='SVC_APS',  
+                login_timeout=60,  
+                network_timeout=300 
+            )
+
+            # Confirm the connection is open
+            if conn.is_closed():
+                print("Failed to connect to Snowflake.")
+                return None
+
+            print("Connection established successfully.")
+            return conn
+
+        except snowflake.connector.errors.Error as e:
+            print(f"Error connecting to Snowflake: {e}")
+            return None
 
