@@ -209,7 +209,7 @@ class ExpitDataHandler:
 
             return pd.DataFrame(results)
     
-    def get_current_block(self, agent):
+    def get_current_block(self, agent, time):
         """Retrieve the current or last block a load agent has interacted with in FMS."""
         if not self.data.empty:
             return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
@@ -227,7 +227,7 @@ class ExpitDataHandler:
             
             for agent, group in grouped:
                 # Get current block info for the agent
-                current_block_name, current_block_mined_tonnes = self.get_current_block(agent)
+                current_block_name, current_block_mined_tonnes = self.get_current_block(agent, now)
 
                 # Sort transactions for the agent
                 group = group.sort_values(by=["start_datetime"]).reset_index()

@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
@@ -132,6 +132,8 @@ class UserInputs(QMainWindow):
       
         self.blend_results_table_view_external_layout.addWidget(blend_results_label)
         self.blend_results_table_view_external_layout.addWidget(self.blend_results_table_view)
+
+        self.blend_results_table = None
 
         self.blend_sequence_table_layout.addLayout(self.blend_results_table_view_external_layout)
 
@@ -335,6 +337,17 @@ class UserInputs(QMainWindow):
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
 
+        # Create the dialog
+        self.progress_dialog = QProgressDialog("Processing...", None, 0, 0)
+        self.progress_dialog.setWindowTitle("BlendMaster")
+        self.progress_dialog.setCancelButton(None)  # Disable cancel button
+        self.progress_dialog.setModal(True)
+        self.progress_dialog.resize(300, self.progress_dialog.height())  # Set a specific width
+        self.progress_dialog.setFixedWidth(300)  # Fix the width without changing height
+        self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
+        self.progress_dialog.setWindowFlag(Qt.WindowStaysOnTopHint)  # Make it always on top
+        self.progress_dialog.show()
+
         if not self.is_project_loaded:
         
             self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
@@ -352,7 +365,7 @@ class UserInputs(QMainWindow):
             self.mine_input_choice = self.mine_input.currentText().strip()
 
             if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
-                QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+                QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
                 
                 # Fetch stockpile data and create setup task
                 self.fetch_stockpile_data()
@@ -393,6 +406,8 @@ class UserInputs(QMainWindow):
 
             else:
                 QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")   
+
+        self.progress_dialog.close()
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
@@ -556,6 +571,7 @@ class UserInputs(QMainWindow):
 
     def store_stockpile_table(self):
         """Store stockpile details entered by the user, filtering by the 'Use' column."""
+        
         updated_stockpile_data = {}
 
         for row in range(self.stockpile_table.rowCount()):
@@ -764,7 +780,7 @@ class UserInputs(QMainWindow):
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
-        
+
         self.submit_calendar_first_call = False
         
         self.calendar_inputs = {}
@@ -835,7 +851,7 @@ class UserInputs(QMainWindow):
             # Handle alternative flow if an exception occurred or timeout
             self.tabs.setCurrentIndex(1)
             self.setup_stockpile_table()
-
+        
     def execute_run_program_in_thread(self, status):
         try:
             # Call main optimised run
@@ -1082,6 +1098,7 @@ class UserInputs(QMainWindow):
             blend_results_label.setStyleSheet("font-weight: bold; font-size: 22px;")  # Optional: Styling for the label
             self.setup_blends_tab_layout.addWidget(blend_results_label)
 
+            self.blend_results_table
             self.blend_results_table = CustomTableWidget()
             self.setup_blend_results_table()
             self.setup_blends_tab_layout.addWidget(self.blend_results_table)
@@ -1098,6 +1115,9 @@ class UserInputs(QMainWindow):
             self.setup_blends_tab_layout.addLayout(button_layout)
 
             self.setup_blends_tab_first_call = False
+
+        # Populate weights and Blend IDs if project is loaded
+        self.populate_blend_config_weights_and_ids()
 
     def setup_blend_config_table(self):
         headers = [
@@ -1194,17 +1214,17 @@ class UserInputs(QMainWindow):
             self.blend_config_table.setCellWidget(row_idx, 4, checkbox_widget)
 
             # Blend ID (Dropdown with "None" default)
-            blend_id_combo = QComboBox()
-            blend_id_combo.addItems(["None"] + [str(i) for i in range(1, 6)])  # Add "None" option
-            blend_id_combo.setCurrentText("None")  # Set default to "None"
-            blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
-            self.blend_config_table.setCellWidget(row_idx, len(keys) + 4, blend_id_combo)  
-
+            self.blend_id_combo = QComboBox()
+            self.blend_id_combo.addItems(["None"] + [str(i) for i in range(1, 6)])  # Add "None" option
+            self.blend_id_combo.setCurrentText("None")  # Set default to "None"
+            self.blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
+            self.blend_config_table.setCellWidget(row_idx, len(keys) + 4, self.blend_id_combo)  
+            
             # Weight (Editable)
             weight_item = QTableWidgetItem("0")
             weight_item.setTextAlignment(Qt.AlignCenter)
             weight_item.setForeground(QColor("green"))
-            self.blend_config_table.setItem(row_idx, len(keys) + 5, weight_item)  
+            self.blend_config_table.setItem(row_idx, len(keys) + 5, weight_item)
 
             # Reclaim Rate (Auto-calculated)
             reclaim_item = QTableWidgetItem("0")
@@ -1330,12 +1350,56 @@ class UserInputs(QMainWindow):
         # Connect edits to update results
         self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
 
+    def populate_blend_config_weights_and_ids(self):
+
+        self.blend_id_combo.currentIndexChanged.disconnect(self.on_blend_data_change)
+        self.blend_config_table.itemChanged.disconnect(self.on_blend_data_change)     
+        self.crusher_rate_input.textChanged.disconnect(self.on_blend_data_change)
+
+        if self.is_project_loaded and self.blend_config_table_inputs:
+            # Loop through the 5 keys in self.blend_config_table_inputs
+            for row_idx, key in enumerate(self.blend_config_table_inputs.keys()):
+                # Get the row data from the dictionary
+                row_data = self.blend_config_table_inputs[key]
+
+                # Process columns 10 (QComboBox) and 11 (weights) together
+                sources_list = row_data['sources'] if isinstance(row_data['sources'], list) else row_data['sources'].split(",")
+                weights_list = row_data['weights'] if isinstance(row_data['weights'], list) else row_data['weights'].split(",")
+
+                # Loop through sources and weights simultaneously
+                for source, weight in zip(sources_list, weights_list):
+                    # Find the matching row in the first column
+                    for table_row in range(self.blend_config_table.rowCount()):
+                        table_item = self.blend_config_table.item(table_row, 0)  # Get the first column
+                        if table_item and table_item.text() == source.strip():  # Match the source
+                            # Set the value in the combo box (Column 10)
+                            combo_box = self.blend_config_table.cellWidget(table_row, 10)
+                            if isinstance(combo_box, QComboBox):
+                                combo_box.setCurrentText(key)
+                                combo_box.setStyleSheet("QComboBox { text-align: center; }")  # Center align text
+
+
+
+                            # Set the value in column 11 (weights)
+                            weights_item = QTableWidgetItem(str(round(weight)).strip())
+                            weights_item.setTextAlignment(Qt.AlignCenter)
+                            self.blend_config_table.setItem(table_row, 11, weights_item)
+
+                            break
+
+        if self.is_project_loaded and self.crusher_rate_input_value:
+            self.crusher_rate_input.setText(self.crusher_rate_input_value)
+        
+        self.blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
+        self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
+        self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
+
     def update_blend_results(self):
         """
         Recalculate and update the Blend Results Table, ensuring unused Blend IDs are cleared.
         """
         # Initialize a dictionary to aggregate data for each blend ID
-        blend_data = {str(i): {"weights": [], "grades": [], "balances": [], "available": [], "sources": [], "source_ratios": []} for i in range(1, 6)}
+        self.blend_data_from_config_table_inputs = {str(i): {"weights": [], "grades": [], "balances": [], "available": [], "sources": [], "source_ratios": []} for i in range(1, 6)}
 
         # Aggregate data from blend configuration table
         for row_idx in range(self.blend_config_table.rowCount()):
@@ -1371,18 +1435,18 @@ class UserInputs(QMainWindow):
                 sources = self.blend_config_table.item(row_idx, 0).text()
                 source_ratios = self.blend_config_table.item(row_idx, 13).text()
 
-                blend_data[blend_id]["weights"].append(weight)
-                blend_data[blend_id]["grades"].append([grade * weight for grade in grades])
-                blend_data[blend_id]["balances"].append(balance * weight)
-                blend_data[blend_id]["available"].append(available)
-                blend_data[blend_id]["sources"].append(sources)
-                blend_data[blend_id]["source_ratios"].append(source_ratios)
+                self.blend_data_from_config_table_inputs[blend_id]["weights"].append(weight)
+                self.blend_data_from_config_table_inputs[blend_id]["grades"].append([grade * weight for grade in grades])
+                self.blend_data_from_config_table_inputs[blend_id]["balances"].append(balance * weight)
+                self.blend_data_from_config_table_inputs[blend_id]["available"].append(available)
+                self.blend_data_from_config_table_inputs[blend_id]["sources"].append(sources)
+                self.blend_data_from_config_table_inputs[blend_id]["source_ratios"].append(source_ratios)
 
             except (ValueError, AttributeError):
                 continue
 
         # Update the Blend Results Table
-        for blend_id, data in blend_data.items():
+        for blend_id, data in self.blend_data_from_config_table_inputs.items():
             row_idx = int(blend_id) - 1
             total_weight = sum(data["weights"])
 
@@ -2138,6 +2202,10 @@ class UserInputs(QMainWindow):
 
     def save_state(self):
         """Save the application state to a file using pickle."""
+        
+        self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
+        self.crusher_rate_input_value = self.crusher_rate_input.text()
+        
         try:
             
             # Save the enabled/disabled state of tabs
@@ -2166,6 +2234,8 @@ class UserInputs(QMainWindow):
                 "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
                 "time_mode_choice": self.time_mode_choice,
                 "updated_stockpile_data": self.updated_stockpile_data,
+                "blend_config_table_inputs":  self.blend_config_table_inputs,
+                "crusher_rate_input_value": self.crusher_rate_input_value,
             }
             # Generate a timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -2221,12 +2291,13 @@ class UserInputs(QMainWindow):
             self.stored_blend_sequence_table_for_gantt_default = loaded_state.get("stored_blend_sequence_table_for_gantt_default", None)
             self.time_mode_choice = loaded_state.get("time_mode_choice", None)
             self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
+            self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
+            self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
 
             tab_states = loaded_state.get("tab_states", {})
             for index, enabled in tab_states.items():
                 self.tabs.setTabEnabled(index, enabled)
 
-            QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
         except FileNotFoundError:
             QMessageBox.warning(self, "Error", "No saved projects found!")
         except Exception as e:
@@ -2235,6 +2306,8 @@ class UserInputs(QMainWindow):
         self.handle_site_config_submit()
         self.store_stockpile_table()
         self.store_calendar_inputs()
+
+        QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
         
     def initialise_all_variables(self):
         self.blend_mode_choice = None
@@ -2257,6 +2330,8 @@ class UserInputs(QMainWindow):
         self.stored_blend_sequence_table_for_gantt_default = None
         self.time_mode_choice = None
         self.updated_stockpile_data = None
+        self.blend_config_table_inputs = None
+        self.crusher_rate_input_value = None
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
