@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
-from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtCore import Qt, QUrl, QDateTime
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
@@ -51,7 +51,6 @@ class UserInputs(QMainWindow):
         self.main_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
-        self.calendar_inputs = {}
 
         # Calendar table
         self.main_table = CustomTableWidget()
@@ -153,6 +152,8 @@ class UserInputs(QMainWindow):
         self.setup_stockpile_table_first_call = True
         self.setup_calendar_first_call = True
         self.stockpile_data_use_column = {}
+        self.submit_calendar_first_call = True
+        self.is_project_loaded = False
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -333,34 +334,65 @@ class UserInputs(QMainWindow):
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
-        self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
 
-        if self.time_mode_choice == 2:  # If "Set Time" is selected
-           self.start_time_choice = self.start_time.dateTime().toPyDateTime()
-
-        else: self.start_time_choice = datetime.now()
-
-        self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
-        self.file_path_choice = self.file_path.text()
-        self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
+        if not self.is_project_loaded:
         
-        self.hub_input_choice = self.hub_input.currentText().strip()
-        self.mine_input_choice = self.mine_input.currentText().strip()
+            self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
 
-        if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
-            QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+            if self.time_mode_choice == 2:  # If "Set Time" is selected
+                self.start_time_choice = self.start_time.dateTime().toPyDateTime()
+
+            else: self.start_time_choice = datetime.now()
+
+            self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+            self.file_path_choice = self.file_path.text()
+            self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
             
-            # Fetch stockpile data and create setup task
-            self.fetch_stockpile_data()
-            self.setup_stockpile_table()
-            self.tabs.setTabEnabled(1, True)
-            self.tabs.setCurrentIndex(1)  # Switch to the next tab
+            self.hub_input_choice = self.hub_input.currentText().strip()
+            self.mine_input_choice = self.mine_input.currentText().strip()
 
+            if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
+                QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+                
+                # Fetch stockpile data and create setup task
+                self.fetch_stockpile_data()
+                self.setup_stockpile_table()
+                self.tabs.setTabEnabled(1, True)
+                self.tabs.setCurrentIndex(1)  # Switch to the next tab
+
+            else:
+                QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
+            
+            # Initialise Calendar every time submitting Site Configuration
+            #self.calendar_inputs = {}
         else:
-            QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
-        
-        # Initialise Calendar every time submitting Site Configuration
-        self.calendar_inputs = {}
+            
+            self.time_mode.setCurrentIndex(self.time_mode_choice - 1)
+            self.start_time.setDateTime(QDateTime(
+                self.start_time_choice.year,
+                self.start_time_choice.month,
+                self.start_time_choice.day,
+                self.start_time_choice.hour,
+                self.start_time_choice.minute,
+                self.start_time_choice.second
+            ))
+            self.expit_mode.setCurrentText(str(self.expit_mode_choice))
+            self.file_path.setText(str(self.file_path_choice))
+            self.blend_mode.setCurrentText(str(self.blend_mode_choice))
+            self.hub_input.setCurrentText(str(self.hub_input_choice))
+            self.mine_input.setCurrentText(str(self.mine_input_choice))
+
+            if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
+                QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+                
+                # Fetch stockpile data and create setup task
+                self.fetch_stockpile_data()
+                self.setup_stockpile_table()
+                self.tabs.setTabEnabled(1, True)
+                self.tabs.setCurrentIndex(1)  # Switch to the next tab
+
+            else:
+                QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")   
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
@@ -426,7 +458,7 @@ class UserInputs(QMainWindow):
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
            
-            if self.calendar_inputs:
+            if not self.submit_calendar_first_call:
                 keys = [key.lower() for key in keys]
        
             for col_idx, key in enumerate(keys, start=2):  # Start after "Use" and "Stockpile Name"
@@ -483,7 +515,7 @@ class UserInputs(QMainWindow):
             button_layout = QHBoxLayout()
             
             # Don't add the button if returning from the calendar
-            if not self.calendar_inputs:
+            if self.submit_calendar_first_call:
                 button_layout.addWidget(submit_button)  
                 button_layout.addStretch()  # Push the button to the left
 
@@ -571,50 +603,71 @@ class UserInputs(QMainWindow):
     
     def setup_calendar(self):
         """Setup for the main table with a Submit button."""
-        headers = ["", "Preplan", "Period_1", "Period_2"]  # Column headers
-        rows = []
+            
+        self.calendar_headers = ["", "Preplan", "Period_1", "Period_2"]  # Column headers
+        self.calendar_rows = []
 
         # Static Rows with default values of 0
 
-        rows.extend([
+        self.calendar_rows.extend([
             ("Reclaim Equipment", [False, False, False], "green", ["", "", ""]),
-            ("  Max Reclaim Rate", [True, True, True], "green", ["1000", "1000", "1000"]),
+            {"reclaim_equipment_max_reclaim_rate": ("  Max Reclaim Rate", [True, True, True], "green", ["1000", "1000", "1000"])},
 
             ("Crusher", [False, False, False], "blue", ["", "", ""]),
-            ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"]),
+            {"crusher_rate": ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"])},
 
             ("  Target", [False, False, False], "blue", ["", "", ""]),
             ("    Fe", [False, False, False], "blue", ["", "", ""]),
-            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
-            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+            {"crusher_target_fe_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
+            {"crusher_target_fe_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
 
             ("    Si", [False, False, False], "blue", ["", "", ""]),
-            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
-            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+            {"crusher_target_si_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
+            {"crusher_target_si_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
 
             ("    Al", [False, False, False], "blue", ["", "", ""]),
-            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
-            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+            {"crusher_target_al_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
+            {"crusher_target_al_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
 
             ("    P", [False, False, False], "blue", ["", "", ""]),
-            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
-            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+            {"crusher_target_p_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
+            {"crusher_target_p_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
 
             ("    Mn", [False, False, False], "blue", ["", "", ""]),
-            ("      Min", [True, True, True], "blue", ["0", "0", "0"]),
-            ("      Max", [True, True, True], "blue", ["100", "100", "100"]),
+            {"crusher_target_mn_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
+            {"crusher_target_mn_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
         ])
 
         # Dynamically Add Stockpile Rows with default values
-        rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
+        self.calendar_rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
 
         for stockpile in self.updated_stockpile_data_keys:
-            rows.append((f"  {stockpile}", [False, False, False], "red", ["", "", ""]))
-            rows.append((f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"]))
-            rows.append((f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"]))
-            rows.append((f"    Cost", [True, True, True], "red", ["0", "0", "0"]))
-            rows.append((f"    Cash", [True, True, True], "red", ["10", "10", "10"]))
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
 
+        self.populate_calendar()
+       
+        if self.setup_calendar_first_call:
+            # Add Submit Button at bottom-Right
+            submit_button = QPushButton("Submit")
+            submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
+
+            # Align button to bottom-right
+            button_layout = QHBoxLayout()
+            
+            button_layout.addWidget(submit_button) 
+            button_layout.addStretch()  # Push any other content (if any) to the right
+
+            # Add table and button layout to the main tab layout
+            self.main_tab_layout.addLayout(button_layout)
+            self.setup_calendar_first_call = False
+        
+        self.load_calendar_inputs()
+    
+    def populate_calendar(self):
         # Define Parent Colors
         parent_colors = {
             "green": QColor(200, 255, 200),
@@ -623,9 +676,9 @@ class UserInputs(QMainWindow):
         }
 
         # Configure the main table
-        self.main_table.setColumnCount(len(headers))
-        self.main_table.setRowCount(len(rows))
-        self.main_table.setHorizontalHeaderLabels(headers)
+        self.main_table.setColumnCount(len(self.calendar_headers))
+        self.main_table.setRowCount(len(self.calendar_rows))
+        self.main_table.setHorizontalHeaderLabels(self.calendar_headers)
         self.main_table.verticalHeader().setVisible(False)
 
         # Bold Font for Captions
@@ -633,7 +686,15 @@ class UserInputs(QMainWindow):
         bold_font.setBold(True)
 
         # Populate Table
-        for row_idx, (caption, editables, color_group, default_values) in enumerate(rows):
+        for row_idx, row in enumerate(self.calendar_rows):
+            if isinstance(row, tuple):  # Unpack tuples
+                caption, editables, color_group, default_values = row
+                # Process the tuple as needed
+            elif isinstance(row, dict):  # Handle dictionaries
+                for key, value in row.items():
+                    caption, editables, color_group, default_values = value
+                    # Process the dictionary value (tuple) as needed
+            
             # Caption Column
             item_caption = QTableWidgetItem(caption)
             item_caption.setFlags(Qt.ItemIsEnabled)  # Non-editable
@@ -652,26 +713,60 @@ class UserInputs(QMainWindow):
 
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-       
-        if self.setup_calendar_first_call:
-            # Add Submit Button at bottom-Right
-            submit_button = QPushButton("Submit")
-            submit_button.clicked.connect(self.store_calendar_inputs)  # Connect to store_calendar_inputs method
 
-            # Align button to bottom-right
-            button_layout = QHBoxLayout()
+    def load_calendar_inputs(self):
             
-            # Check if the button already exists in the layout
-            if not self.calendar_inputs:
-                button_layout.addWidget(submit_button) 
-                button_layout.addStretch()  # Push any other content (if any) to the right
+            if self.is_project_loaded or not self.submit_calendar_first_call:
+                
+                self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", list(self.calendar_inputs["reclaim_equipment_max_reclaim_rate"].values()))
+                self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", list(self.calendar_inputs["crusher_rate"].values()))
+                self.calendar_rows[6]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_min"].values()))
+                self.calendar_rows[7]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_max"].values()))
+                self.calendar_rows[9]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_min"].values()))
+                self.calendar_rows[10]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_max"].values()))
+                self.calendar_rows[12]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_min"].values()))
+                self.calendar_rows[13]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_max"].values()))
+                self.calendar_rows[15]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_min"].values()))
+                self.calendar_rows[16]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_max"].values()))
+                self.calendar_rows[18]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_min"].values()))
+                self.calendar_rows[19]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_max"].values()))
 
-            # Add table and button layout to the main tab layout
-            self.main_tab_layout.addLayout(button_layout)
-            self.setup_calendar_first_call = False
+                
+                start_index = 21
+                calendar_index = start_index  # Start populating calendar_rows at index 21
+
+                for stockpile in self.updated_stockpile_data_keys:
+                    # Populate the rows using calendar_index
+                    self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
+                        f"  {stockpile}", [False, False, False], "red", ["", "", ""]
+                    )
+                    self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
+                        f"    State", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
+                    )
+                    self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
+                        f"    Maximum Quantity", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
+                    )
+                    self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
+                        f"    Cost", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
+                    )
+                    self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
+                        f"    Cash", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
+                    )
+
+                    # Increment calendar_index by 5 for the next stockpile
+                    calendar_index += 5
+
+                    self.populate_calendar()
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
+        
+        self.submit_calendar_first_call = False
+        
         self.calendar_inputs = {}
 
         # Connect the error signal to a popup display method
@@ -723,7 +818,7 @@ class UserInputs(QMainWindow):
     }
     for outer_key, outer_value in self.calendar_inputs.items()
 }
-        
+                
         # Initialise the shared object
         status = {'success': False}
 
@@ -2061,6 +2156,7 @@ class UserInputs(QMainWindow):
                 "expit_mode_choice": self.expit_mode_choice,
                 "file_path_choice": self.file_path_choice,
                 "mine_input_choice": self.mine_input_choice,
+                "hub_input_choice": self.hub_input_choice,
                 "opening_stockpile_inventories": self.opening_stockpile_inventories,
                 "saved_blends_for_schedule": self.saved_blends_for_schedule,
                 "start_time_choice": self.start_time_choice,
@@ -2087,6 +2183,7 @@ class UserInputs(QMainWindow):
 
     def load_state(self):
         """Load the application state from a user-selected file."""
+        self.is_project_loaded = True
         try:
             # Open a file dialog for the user to select the file
             file_path, _ = QFileDialog.getOpenFileName(
@@ -2114,6 +2211,7 @@ class UserInputs(QMainWindow):
             self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
             self.file_path_choice = loaded_state.get("file_path_choice", "")
             self.mine_input_choice = loaded_state.get("mine_input_choice", None)
+            self.hub_input_choice = loaded_state.get("hub_input_choice", None)
             self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
             self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule", None)
             self.start_time_choice = loaded_state.get("start_time_choice", None)
@@ -2149,6 +2247,7 @@ class UserInputs(QMainWindow):
         self.expit_mode_choice = None
         self.file_path_choice = None
         self.mine_input_choice = None
+        self.hub_input_choice = None
         self.opening_stockpile_inventories = None
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
