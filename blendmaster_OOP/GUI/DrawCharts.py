@@ -178,6 +178,8 @@ class DrawGanttChart:
             query = "SELECT * FROM optimised_blend_report"
             data = pd.read_sql(query, conn)
             conn.close()
+            self.debug_blend_ID(data)
+            self.push_results_to_database(data)
             return data
         except Exception as e:
             print(f"Error fetching data: {e}")
@@ -469,3 +471,95 @@ class DrawGanttChart:
         Run the Dash app.
         """
         self.app.run_server(debug=True, port=self.port, use_reloader=False)
+    
+    def debug_blend_ID(self, data):
+
+        # Sort data to process sequentially
+        data.sort_values(['steady_state_number', 'source'], inplace=True)
+
+        # Initialize variables
+        blend_id = 1
+        previous_sources = {}  # Tracks sources seen in previous steady states
+
+        # Create a new blend_ID column
+        data['blend_ID'] = None
+
+        # Iterate through the DataFrame
+        for steady_state in sorted(data['steady_state_number'].unique()):
+            # Get rows for the current steady_state_number
+            current_data = data[data['steady_state_number'] == steady_state]
+            current_sources = tuple(sorted(current_data['source'].unique()))  # Unique and sorted combination of sources
+
+            # Check if this combination has been seen before
+            if current_sources in previous_sources.values():
+                # Assign the existing blend ID
+                existing_blend_id = [k for k, v in previous_sources.items() if v == current_sources][0]
+                data.loc[data['steady_state_number'] == steady_state, 'blend_ID'] = existing_blend_id
+            else:
+                # Assign a new blend ID
+                data.loc[data['steady_state_number'] == steady_state, 'blend_ID'] = blend_id
+                previous_sources[blend_id] = current_sources
+                blend_id += 1
+
+        # Convert blend_ID column to integer
+        data['blend_ID'] = data['blend_ID'].astype(int)
+
+    def push_results_to_database(self, dataframe):
+        # Connect to the SQLite database or create it
+        database_name = 'blendmaster.db'
+        conn = sqlite3.connect(database_name)
+        cursor = conn.cursor()
+
+        # Create the table or use it if it already exists
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS optimised_blend_report (
+            start_datetime TEXT,
+            end_datetime TEXT,
+            steady_state_number INTEGER,
+            blend_option TEXT,
+            blend_ID TEXT,
+            steady_state_duration INTEGER,
+            period INTEGER,
+            source TEXT,
+            source_blend_ratio REAL,
+            source_opening_balance REAL,
+            source_actual_tonnes REAL,
+            source_closing_balance REAL,
+            source_grade_fe REAL,
+            source_grade_si REAL,
+            source_grade_al REAL,
+            source_grade_p REAL,
+            source_grade_mn REAL,
+            equipment TEXT,
+            equipment_rate_input REAL,
+            equipment_rate_output REAL,
+            crusher_actual_tonnes REAL,
+            crusher_rate_input REAL,
+            crusher_rate_output REAL,
+            crusher_actual_grade_fe REAL,
+            crusher_actual_grade_si REAL,
+            crusher_actual_grade_al REAL,
+            crusher_actual_grade_p REAL,
+            crusher_actual_grade_mn REAL,
+            crusher_grade_target_min_fe REAL,
+            crusher_grade_target_max_fe REAL,
+            crusher_grade_target_min_si REAL,
+            crusher_grade_target_max_si REAL,
+            crusher_grade_target_min_al REAL,
+            crusher_grade_target_max_al REAL,
+            crusher_grade_target_min_p REAL,
+            crusher_grade_target_max_p REAL,
+            crusher_grade_target_min_mn REAL,
+            crusher_grade_target_max_mn REAL
+        )
+        ''')
+
+        # Clear existing data in the table
+        cursor.execute('DELETE FROM optimised_blend_report')
+
+        # Insert the data from the DataFrame into the database table
+        dataframe.to_sql('optimised_blend_report', conn, if_exists='append', index=False)
+
+        # Commit the transaction and close the connection
+        conn.commit()
+        conn.close()

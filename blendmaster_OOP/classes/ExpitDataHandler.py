@@ -1,5 +1,8 @@
 import pandas as pd
 from datetime import timedelta
+import snowflake.connector
+from datetime import datetime
+from pandas import DataFrame
 
 class ExpitDataHandler:
     def __init__(self, input_data):
@@ -88,7 +91,7 @@ class ExpitDataHandler:
 
     def process_transactions(self):
         if not self.data.empty:
-            results = []
+            self.results = []
             for agent, group in self.data.groupby("Agent.Name"):
                 group = group.reset_index(drop=True)
                 for i in range(len(group)):
@@ -127,7 +130,7 @@ class ExpitDataHandler:
                             timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
                                         load_time)
                             )
-                        results.append({
+                        self.results.append({
                             "agent": agent,
                             "source": source_name,
                             "start_datetime": mining_start_time,
@@ -193,7 +196,7 @@ class ExpitDataHandler:
                             )
 
                         # Append the topped-up trip
-                        results.append({
+                        self.results.append({
                             "agent": agent,
                             "source": source_name,
                             "start_datetime": mining_start_time,
@@ -207,12 +210,89 @@ class ExpitDataHandler:
                             "delivered_datetime": delivery_time
                         })
 
-            return pd.DataFrame(results)
+            return pd.DataFrame(self.results)
     
-    def get_current_block(self, agent, time):
-        """Retrieve the current or last block a load agent has interacted with in FMS."""
-        if not self.data.empty:
-            return "Reserves/EW/WED06/01/475/101/475/BS03_3", 1910
+
+    def get_latest_block_and_mined_tonnes(self, agent):
+        """
+        Retrieve the current or last block and mined tonnes for a load agent,
+        with the block transformed to the desired naming convention.
+
+        Parameters:
+            agent (str): The load equipment identifier (e.g., 'EX8107').
+
+        Returns:
+            tuple: A tuple containing the transformed block name and mined tonnes, or (None, None) if no records are found.
+        """
+        try:
+            # Establish connection to Snowflake
+            conn = self.connect_snowflake_with_service_account()
+
+            # Define the query
+            query = f"""
+            WITH LatestTransaction AS (
+                SELECT OPERATION, SOURCE_FMS
+                FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
+                WHERE CONTAINS(LOAD_EQUIPMENT, %(agent)s) 
+                AND CONTAINS(SOURCE_CAT_TO_DEST_CAT, 'Gradeblock')
+                ORDER BY TRANSACTION_DATETIME DESC
+                LIMIT 1
+            ),
+            SummedData AS (
+                SELECT SOURCE_FMS, OPERATION, SUM(WMT_REPORTING) AS TOTAL_WMT_REPORTING
+                FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
+                WHERE CONTAINS(SOURCE_FMS, (
+                    SELECT SOURCE_FMS FROM LatestTransaction
+                ))
+                GROUP BY SOURCE_FMS, OPERATION
+            )
+            SELECT l.OPERATION AS OPERATION, 
+                l.SOURCE_FMS AS BLOCK, 
+                s.TOTAL_WMT_REPORTING AS MINED_TONNES
+            FROM LatestTransaction l
+            JOIN SummedData s
+            ON l.SOURCE_FMS = s.SOURCE_FMS;
+            """
+
+            # Execute the query
+            with conn.cursor() as cursor:
+                cursor.execute(query, {'agent': agent})
+                result = cursor.fetchone()
+
+            if result:
+                source_fms = result[1]  # SOURCE_FMS
+                mined_tonnes = result[2]  # TOTAL_WMT_REPORTING
+
+                # Extract the first two parts from self.results' "source" column
+                if self.results and 'source' in self.results[0]:
+                    source_parts = self.results[0]['source'].split('/')[:2]
+                    prefix = '/'.join(source_parts)
+                else:
+                    raise ValueError("self.results does not contain a valid 'source' format.")
+
+                # Transform the block to the desired naming convention
+                parts = source_fms.split('_')
+                transformed_block = (
+                    f"{prefix}/"
+                    f"{parts[0]}/"  # VOQ05
+                    f"{parts[1]}/"  # 01
+                    f"{int(parts[2]):03}/"  # Drop leading zero, ensure 3 digits
+                    f"{parts[3]}/"  # 004
+                    f"{int(parts[4]):03}/"  # Drop leading zero, ensure 3 digits
+                    f"{parts[5][:2]}_{parts[5][2:]}")
+
+                return transformed_block, mined_tonnes
+
+            else:
+                return None, None
+
+        except Exception as e:
+            print(f"Error retrieving block and mined tonnes: {e}")
+            return None, None
+
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
 
     def update_transactions(self, expit_payload_transactions, now):
        
@@ -226,61 +306,92 @@ class ExpitDataHandler:
             updated_groups = []  # Store updated groups here
             
             for agent, group in grouped:
-                # Get current block info for the agent
-                current_block_name, current_block_mined_tonnes = self.get_current_block(agent, now)
+                # Get latest block info for the agent
+                current_block_name, current_block_mined_tonnes = self.get_latest_block_and_mined_tonnes(agent)
 
-                # Sort transactions for the agent
-                group = group.sort_values(by=["start_datetime"]).reset_index()
+                if current_block_mined_tonnes and current_block_name:
 
-                # Find the first row where `current_block_name` matches
-                filtered_rows = group[group["source"].str.contains(current_block_name, na=False)]
-                    
-                if not filtered_rows.empty:
-                    block_row = filtered_rows.iloc[0]
-                    block_index = block_row.name  # Get index of the matching row
+                    # Sort transactions for the agent
+                    group = group.sort_values(by=["start_datetime"]).reset_index()
 
-                    # Skip rows until payload sum meets or exceeds `current_block_mined_tonnes`
-                    cumulative_payload = 0
-                    skip_until_index = None
-                    
-                    for idx in range(block_index, len(group)):
-                        cumulative_payload += group.at[idx, "payload"]
-                        if cumulative_payload >= current_block_mined_tonnes:
-                            skip_until_index = idx
-                            break
-                    
-                    # Keep only the rows after `skip_until_index`
-                    if skip_until_index is not None:
-                        group = group.iloc[skip_until_index:]
+                    # Find the first row where `current_block_name` matches
+                    filtered_rows = group[group["source"].str.contains(current_block_name, na=False)]
                         
-                        # Calculate time difference and update `delivered_datetime`
-                        for idx, row in group.iterrows():
-                            if idx == skip_until_index:
-                                # Compute time difference
-                                time_diff = now - row["start_datetime"]
+                    if not filtered_rows.empty:
+                        block_row = filtered_rows.iloc[0]
+                        block_index = block_row.name  # Get index of the matching row
 
-                            # Update `delivered_datetime`
-                            if time_diff.total_seconds() > 0:
-                                updated_delivery_time = row["delivered_datetime"] + time_diff
-                                updated_mining_start_time = row["start_datetime"] + time_diff
-                            else:
-                                updated_delivery_time = row["delivered_datetime"] - abs(time_diff)
-                                updated_mining_start_time = row["start_datetime"] - abs(time_diff)
+                        # Skip rows until payload sum meets or exceeds `current_block_mined_tonnes`
+                        cumulative_payload = 0
+                        skip_until_index = None
+                        
+                        for idx in range(block_index, len(group)):
+                            cumulative_payload += group.at[idx, "payload"]
+                            if cumulative_payload >= current_block_mined_tonnes:
+                                skip_until_index = idx
+                                break
+                        
+                        # Keep only the rows after `skip_until_index`
+                        if skip_until_index is not None:
+                            group = group.iloc[skip_until_index:]
+                            
+                            # Calculate time difference and update `delivered_datetime`
+                            for idx, row in group.iterrows():
+                                if idx == skip_until_index:
+                                    # Compute time difference
+                                    time_diff = now - row["start_datetime"]
 
-                            group.at[idx, "delivered_datetime"] = updated_delivery_time
-                            group.at[idx, "start_datetime"] = updated_mining_start_time
-        
-                    print(fr"Expit payload transactions updated for {agent}.")
-                
-                else:
-                    print(fr"Current block not found for {agent}. Original expit payload transactions will be executed for this agent.")
-                    block_row = None
-                    block_index = None
+                                # Update `delivered_datetime`
+                                if time_diff.total_seconds() > 0:
+                                    updated_delivery_time = row["delivered_datetime"] + time_diff
+                                    updated_mining_start_time = row["start_datetime"] + time_diff
+                                else:
+                                    updated_delivery_time = row["delivered_datetime"] - abs(time_diff)
+                                    updated_mining_start_time = row["start_datetime"] - abs(time_diff)
 
-                # Append the updated group
-                updated_groups.append(group)
+                                group.at[idx, "delivered_datetime"] = updated_delivery_time
+                                group.at[idx, "start_datetime"] = updated_mining_start_time
+            
+                        print(fr"Expit payload transactions updated for {agent}.")
+                    
+                    else:
+                        print(fr"Current block not found for {agent}. Original expit payload transactions will be executed for this agent.")
+                        block_row = None
+                        block_index = None
+
+                    # Append the updated group
+                    updated_groups.append(group)
+
+                else: continue
 
             # Concatenate all updated groups into one DataFrame
             updated_transactions = pd.concat(updated_groups, ignore_index=True)
             
             return updated_transactions
+
+    def connect_snowflake_with_service_account(self):
+        try:
+            # Connect to Snowflake using service account credentials
+            conn = snowflake.connector.connect(
+                user='SVC_APS',  
+                password='AlastriSnowflake123',  
+                account='wn74261.ap-southeast-2',  
+                warehouse='WH_EDW_SELFSERVICE', 
+                database='AA_OPERATIONS_MANAGEMENT',  
+                schema='SELFSERVICE',  
+                role='SVC_APS',  
+                login_timeout=60,  
+                network_timeout=300 
+            )
+
+            # Confirm the connection is open
+            if conn.is_closed():
+                print("Failed to connect to Snowflake.")
+                return None
+
+            print("Connection established successfully.")
+            return conn
+
+        except snowflake.connector.errors.Error as e:
+            print(f"Error connecting to Snowflake: {e}")
+            return None

@@ -253,5 +253,5 @@ class DrawGradeProfiles:
     
     def run_app(self):
         """Run the Dash app."""
-        self.app.run_server(port=self.port)
+        self.app.run_server(port=self.port, debug=True, use_reloader=False)
 

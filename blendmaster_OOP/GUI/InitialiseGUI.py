@@ -222,7 +222,7 @@ class UserInputs(QMainWindow):
         expit_label = QLabel("Expit Transactions (optional):")
         expit_label.setStyleSheet("font-weight: bold;")
         self.expit_mode = QComboBox()
-        self.expit_mode.addItems(["Execute Original Expit Transactions", "Update Transactions Based on Current Time"])
+        self.expit_mode.addItems(["Use Original Expit Transactions", "Update Transactions on Current Time"])
         self.expit_mode.setFixedWidth(300)
 
         # Expit options are active only when time starts at "Now"
@@ -376,8 +376,6 @@ class UserInputs(QMainWindow):
             else:
                 QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
             
-            # Initialise Calendar every time submitting Site Configuration
-            #self.calendar_inputs = {}
         else:
             
             self.time_mode.setCurrentIndex(self.time_mode_choice - 1)
@@ -472,12 +470,20 @@ class UserInputs(QMainWindow):
 
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
-           
-            if not self.submit_calendar_first_call:
-                keys = [key.lower() for key in keys]
        
             for col_idx, key in enumerate(keys, start=2):  # Start after "Use" and "Stockpile Name"
-                value = attributes.get(key, 0)  # Default to 0 if key is missing
+
+                try:
+                    value = attributes[key]
+                except KeyError:
+                    # Transform keys and retry
+                    keys = [k.lower() for k in keys]  # Transform all keys to lowercase
+                    if key.lower() in attributes:
+                        value = attributes[key.lower()]  # Try accessing with the transformed key
+                    else:
+                        # Show error message if the key is still not found
+                        QMessageBox.warning(self, "Error", f"Unable to find value for key: {key}")
+                        value = 0  # Or handle the absence of value appropriately
 
                 if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
@@ -756,27 +762,99 @@ class UserInputs(QMainWindow):
                     self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
                         f"  {stockpile}", [False, False, False], "red", ["", "", ""]
                     )
-                    self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
-                        f"    State", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
-                    )
-                    self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
-                        f"    Maximum Quantity", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
-                    )
-                    self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
-                        f"    Cost", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
-                    )
-                    self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
-                        f"    Cash", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
-                    )
+                    try:
+                        self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
+                            f"    State", [True, True, True], "red",
+                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
+                        )
+                        self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
+                            f"    Maximum Quantity", [True, True, True], "red",
+                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
+                        )
+                        self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
+                            f"    Cost", [True, True, True], "red",
+                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
+                        )
+                        self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
+                            f"    Cash", [True, True, True], "red",
+                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
+                        )
 
-                    # Increment calendar_index by 5 for the next stockpile
-                    calendar_index += 5
+                        # Increment calendar_index by 5 for the next stockpile
+                        calendar_index += 5
 
-                    self.populate_calendar()
+                        self.populate_calendar()
+
+                    except: 
+
+                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
+                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
+                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
+                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
+                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
+
+                        self.populate_calendar()
+
+                        self.store_calendar_inputs_no_run
+
+                        QMessageBox.information(self, "BlendMaster", f"{stockpile} added to calendar")
+
+    def store_calendar_inputs_no_run(self):
+        """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
+
+        self.submit_calendar_first_call = False
+        
+        self.calendar_inputs = {}
+
+        # Connect the error signal to a popup display method
+        self.run_program.case_bridge.error_signal.connect(self.show_error_popup)
+        
+        # Capture column headers for periods
+        headers = [self.main_table.horizontalHeaderItem(col).text().strip() for col in range(1, self.main_table.columnCount())]
+
+        # A stack to track the current hierarchy
+        hierarchy = []
+
+        for row_idx in range(self.main_table.rowCount()):
+            # Get the caption for the row (e.g., "Crusher", "  Rate")
+            caption_item = self.main_table.item(row_idx, 0)
+            if not caption_item:
+                continue  # Skip if no caption exists (shouldn't happen)
+
+            caption = caption_item.text()
+
+            # Adjust hierarchy based on indentation
+            indent_level = (len(caption) - len(caption.lstrip()))/2
+            while len(hierarchy) > indent_level:
+                hierarchy.pop()
+
+            # Add the current name to the hierarchy
+            current_name = caption.strip().replace(" ", "_").lower()
+            hierarchy.append(current_name)
+
+            # Generate the full key by joining the hierarchy
+            full_key = "_".join(hierarchy)
+
+            # Retrieve the values for Preplan, Period_1, Period_2, etc.
+            row_data = {}
+            for col_idx, header in enumerate(headers, start=1):
+                item = self.main_table.item(row_idx, col_idx)
+                value = item.text().strip() if item and item.text().strip() else None  # Get the value
+                row_data[header] = value
+
+            # Store the data in the dictionary
+            self.calendar_inputs[full_key] = row_data
+
+        # Modify types
+        self.calendar_inputs = {
+    outer_key: {
+        inner_key: (
+            int(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+        )
+        for inner_key, inner_value in outer_value.items()
+    }
+    for outer_key, outer_value in self.calendar_inputs.items()
+}
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -1378,8 +1456,6 @@ class UserInputs(QMainWindow):
                                 combo_box.setCurrentText(key)
                                 combo_box.setStyleSheet("QComboBox { text-align: center; }")  # Center align text
 
-
-
                             # Set the value in column 11 (weights)
                             weights_item = QTableWidgetItem(str(round(weight)).strip())
                             weights_item.setTextAlignment(Qt.AlignCenter)
@@ -1523,7 +1599,7 @@ class UserInputs(QMainWindow):
             if any(value is not None and value != "" for value in blend_data.values()):
                 self.saved_blends_for_schedule.append(blend_data)
 
-        QMessageBox.information(self, "Blend Setup", "Blend results successfully saved.")
+        QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
         self.setup_sequence_tab()
         self.tabs.setTabEnabled(7, True)
         self.tabs.setCurrentIndex(7)  
@@ -2000,7 +2076,7 @@ class UserInputs(QMainWindow):
 
         self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
 
-        QMessageBox.information(None, "Success", "Blend sequence stored!")
+        QMessageBox.information(self, "BlendMaster", "Blend sequence stored!")
 
     def update_early_start_conditional_format(self):
         """
