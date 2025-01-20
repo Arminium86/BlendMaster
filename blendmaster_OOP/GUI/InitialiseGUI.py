@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
-from PyQt5.QtCore import Qt, QUrl, QDateTime
+from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
@@ -18,7 +18,7 @@ class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP")
-        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon.ico")) 
+        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon_2.ico")) 
         self.setGeometry(100, 100, 800, 600)
 
         self.initialise_all_variables()
@@ -77,12 +77,14 @@ class UserInputs(QMainWindow):
         self.decision_input.setFixedWidth(300)
         self.decision_input.returnPressed.connect(self.handle_decision_input)
         input_layout.addWidget(self.decision_input, alignment=Qt.AlignLeft)
+        self.decision_input.setEnabled(False)
 
         self.enter_button = QPushButton("Submit")
         self.enter_button.setFixedWidth(200)
         self.enter_button.clicked.connect(self.handle_decision_input)
         input_layout.addWidget(self.enter_button, alignment=Qt.AlignLeft)
         input_layout.setAlignment(Qt.AlignLeft)
+        self.enter_button.setEnabled(False)
 
         self.decision_point_tab_layout.addLayout(input_layout)  # Add input field and button at the bottom
 
@@ -175,6 +177,15 @@ class UserInputs(QMainWindow):
         self.site_config_tab = QWidget()
         self.tabs.addTab(self.site_config_tab, "Site Configuration")
         layout = QFormLayout(self.site_config_tab)
+        self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
+        self.site_config_tab.setStyleSheet("""
+            #siteConfigTab {
+                background-image: url('C:/BlendMaster/blendmaster_OOP/resources/background.png');
+                background-repeat: no-repeat;
+                background-position: center;
+                background-attachment: fixed;
+            }
+        """)
 
         # Dropdown lists for Hub and Mine
         self.hub_input = QComboBox()
@@ -345,7 +356,7 @@ class UserInputs(QMainWindow):
         self.progress_dialog.resize(300, self.progress_dialog.height())  # Set a specific width
         self.progress_dialog.setFixedWidth(300)  # Fix the width without changing height
         self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
-        self.progress_dialog.setWindowFlag(Qt.WindowStaysOnTopHint)  # Make it always on top
+        #self.progress_dialog.setWindowFlag(Qt.WindowStaysOnTopHint)  # Make it always on top
         self.progress_dialog.show()
 
         if not self.is_project_loaded:
@@ -1062,11 +1073,15 @@ class UserInputs(QMainWindow):
         if self.blend_mode_choice == 2:
             self.tabs.setTabEnabled(3, True)
             self.tabs.setCurrentIndex(3)
+            self.decision_input.setEnabled(True) # Enable the input
+            self.enter_button.setEnabled(True) # Enable the button
             self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
             self.tabs.setTabEnabled(5, True)  # Enable profiles tab
 
         else:
             self.tabs.setTabEnabled(3, True)
+            self.decision_input.setEnabled(False) # Disable the input
+            self.enter_button.setEnabled(False) # Disable the button
             self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
             self.tabs.setTabEnabled(5, True)  # Enable profiles tab
             self.tabs.setCurrentIndex(4)  # Switch to Results (optimised) tab
@@ -1643,7 +1658,9 @@ class UserInputs(QMainWindow):
         {"Blend ID": "4", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
         {"Blend ID": "5", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""}
         ]
-        self.stored_blend_sequence_table_for_gantt = []
+        
+        if not self.is_project_loaded:
+            self.stored_blend_sequence_table_for_gantt = []
 
         self.manual_gantt_legend_and_tooltip = self.saved_blends_for_schedule
         
@@ -1864,8 +1881,11 @@ class UserInputs(QMainWindow):
             # Add the button to the layout
             self.blend_sequence_table_external_layout.addWidget(store_button)
             
+        if self.is_project_loaded and self.setup_blend_sequence_table_first_call:
+            self.populate_blend_sequence_table_if_project_is_loaded()
+       
         self.setup_blend_sequence_table_first_call = False
-        
+
         self.update_remaining_hrs()
 
         self.blend_sequence_table.viewport().update()
@@ -2032,10 +2052,11 @@ class UserInputs(QMainWindow):
             QMessageBox.warning(None, "Invalid Duration", f"Error updating row {row}: {e}")
 
     def submit_blend_sequence_table_to_gantt(self):
+                
         headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
 
         self.stored_blend_sequence_table_for_gantt = []
-        
+                
         # Check for negative values in "Remaining Hrs"
         for row in range(self.blend_sequence_table.rowCount()):
             item = self.blend_sequence_table.item(row, headers.index("Remaining Hrs"))
@@ -2061,7 +2082,7 @@ class UserInputs(QMainWindow):
         for row in range(self.blend_sequence_table.rowCount()):
             row_data = {}
             for col, header in enumerate(headers):
-                item = self.blend_sequence_table.item(row, col) or self.blend_sequence_table.cellWidget(row, col)
+                item = self.blend_sequence_table.cellWidget(row, col) or self.blend_sequence_table.item(row, col)
                 if isinstance(item, QTableWidgetItem):
                     row_data[header] = item.text() if item else None
                 elif isinstance(item, QComboBox):
@@ -2153,6 +2174,37 @@ class UserInputs(QMainWindow):
             early_start_item.setBackground(flag_color)
             early_start_item.setForeground(QColor("white"))
             early_start_item.setTextAlignment(Qt.AlignCenter)
+
+    def populate_blend_sequence_table_if_project_is_loaded(self):
+
+        # Ensure the table has enough rows to match the stored data
+        while self.blend_sequence_table.rowCount() < len(self.stored_blend_sequence_table_for_gantt):
+            self.add_blank_row()  # Use the method to insert rows with the correct format
+
+        # Iterate through the stored data and update the table
+        for row_index, row_data in enumerate(self.stored_blend_sequence_table_for_gantt):
+            # Update "Blend ID" (QComboBox)
+            blend_id = row_data.get("Blend ID")
+            combo_box = self.blend_sequence_table.cellWidget(row_index, 0)
+            if isinstance(combo_box, QComboBox) and blend_id is not None:
+                combo_box.setCurrentText(blend_id)
+
+            # Update "Start Datetime" (QDateTimeEdit)
+            start_datetime = row_data.get("Start Datetime")
+            datetime_widget = self.blend_sequence_table.cellWidget(row_index, 2)
+            if isinstance(datetime_widget, QDateTimeEdit) and start_datetime is not None:
+                datetime_widget.setDateTime(QDateTime.fromString(start_datetime, "yyyy-MM-dd HH:mm"))
+
+            # Update "Duration (hrs)" (QTableWidgetItem)
+            duration = row_data.get("Duration (hrs)")
+            duration_item = self.blend_sequence_table.item(row_index, 3)
+            if isinstance(duration_item, QTableWidgetItem):
+                duration_item.setText(duration if duration is not None else "")
+            else:  # Create a new QTableWidgetItem if not already set
+                self.blend_sequence_table.setItem(row_index, 3, QTableWidgetItem(duration if duration is not None else ""))
+            
+            self.on_cell_changed(row_index,3)
+            self.update_blend_id(row_index)
 
     def update_remaining_hrs(self):
         """
@@ -2382,6 +2434,8 @@ class UserInputs(QMainWindow):
         self.handle_site_config_submit()
         self.store_stockpile_table()
         self.store_calendar_inputs()
+        self.on_blend_data_change()
+        self.store_blend_results()
 
         QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
         

@@ -75,6 +75,7 @@ class ManualBlendDash:
         # Combine hover data into a categorical column for the legend
         df['Details'] = df.apply(
             lambda row: (
+                "<br>Blend ID: " + str(row['Blend ID']) +
                 "<br>Grade Fe: " + str(row['Grade Fe']) + "%" +
                 "<br>Grade Si: " + str(row['Grade Si']) + "%" +
                 "<br>Grade Al: " + str(row['Grade Al']) + "%" +
