@@ -164,11 +164,13 @@ class ManualBlendDash:
 
         self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
-    def update_data(self, new_data):
+    def update_data(self, new_data, manual_gantt_legend_and_tooltip):
         """
         Update the stored blend sequence data programmatically.
         """
         self.stored_blend_sequence_table_for_gantt = new_data
+        self.manual_gantt_legend_and_tooltip = manual_gantt_legend_and_tooltip
+        
         # Update the `dcc.Store` component with the new data
         self.app.layout.children[-1].data = new_data  # Update the data directly
     
@@ -196,15 +198,34 @@ class DrawGradeProfiles:
     
     def transform_data(self, df, grade_columns):
         """Transform the data to create a 'time' column and expand the rows."""
+        
+        # Sort by Start Time
+        df = df.sort_values(by='Start Datetime').reset_index(drop=True)
+
+        # Add the sequence column
+        sequence = []
+        current_sequence = 1
+        previous_blend_id = None
+
+        for _, row in df.iterrows():
+            if row['Blend ID'] != previous_blend_id:
+                current_sequence += 1
+            sequence.append(current_sequence)
+            previous_blend_id = row['Blend ID']
+
+        df['Sequence'] = sequence
+        
+        # Prepare records for plotting
         records = []
         for _, row in df.iterrows():
             for grade in grade_columns:
-                records.append({'time': row['Start Datetime'], 'grade': row[grade], 'element': grade})
-                records.append({'time': row['End Datetime'], 'grade': row[grade], 'element': grade})
+                records.append({'sequence': row['Sequence'], 'time': row['Start Datetime'], 'grade': row[grade], 'element': grade})
+                records.append({'sequence': row['Sequence'], 'time': row['End Datetime'], 'grade': row[grade], 'element': grade})
         
         transformed_df = pd.DataFrame(records)
         transformed_df['time'] = pd.to_datetime(transformed_df['time'])
-        transformed_df = transformed_df.sort_values(by='time')
+        
+        transformed_df = transformed_df.sort_values(by=['sequence', 'time'])
         return transformed_df
 
     def update_charts(self, data):

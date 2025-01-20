@@ -275,6 +275,7 @@ class UserInputs(QMainWindow):
         self.save_button = QPushButton("Save Project")
         self.save_button.setFixedWidth(100)
         self.save_button.clicked.connect(self.save_state)
+        self.save_button.setEnabled(False)
 
         self.load_button = QPushButton("Load Project")
         self.load_button.setFixedWidth(100)
@@ -936,6 +937,7 @@ class UserInputs(QMainWindow):
             self.setup_blends_tab()
             self.tabs.setTabEnabled(6, True)
             self.start_dash_optimised_charts_thread()
+
         else:
             # Handle alternative flow if an exception occurred or timeout
             self.tabs.setCurrentIndex(1)
@@ -1614,11 +1616,12 @@ class UserInputs(QMainWindow):
             if any(value is not None and value != "" for value in blend_data.values()):
                 self.saved_blends_for_schedule.append(blend_data)
 
-        QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
         self.setup_sequence_tab()
         self.tabs.setTabEnabled(7, True)
         self.tabs.setCurrentIndex(7)  
-    
+        self.save_button.setEnabled(True)
+        QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
+
     def fetch_build_report(self):
         """
         Fetch the build report from the database.
@@ -2097,7 +2100,7 @@ class UserInputs(QMainWindow):
 
         self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
 
-        QMessageBox.information(self, "BlendMaster", "Blend sequence stored!")
+        QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
 
     def update_early_start_conditional_format(self):
         """
@@ -2272,7 +2275,7 @@ class UserInputs(QMainWindow):
 
         if hasattr(self, 'draw_manual_gantt_chart') and self.dash_thread_manual_gantt.is_alive():
             # Update data in the running Dash app
-            self.draw_manual_gantt_chart.update_data(gantt_data)  
+            self.draw_manual_gantt_chart.update_data(gantt_data, self.manual_gantt_legend_and_tooltip)  
         else:
             # Start the Dash app if not already running
             self.draw_manual_gantt_chart = ManualBlendDash(gantt_data, self.manual_gantt_legend_and_tooltip, port=8052, crusher_rate=self.crusher_rate)
@@ -2316,17 +2319,17 @@ class UserInputs(QMainWindow):
     def start_or_update_dash_manual_grade_profile_thread(self):
         """Update or start the Dash app."""
     
-        gade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
+        grade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
 
         if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
             # Update data in the running Dash app
-            self.draw_grade_profile_chart.update_data(gade_profile_data)  
+            self.draw_grade_profile_chart.update_data(grade_profile_data)  
         else:
             # Start the Dash app if not already running
-            self.draw_grade_profile_chart = DrawGradeProfiles(gade_profile_data, 8053)
+            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, 8053)
             self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
             self.dash_thread_grade_profile.start()
-            self.draw_grade_profile_chart.update_data(gade_profile_data)  
+            self.draw_grade_profile_chart.update_data(grade_profile_data)  
 
     def save_state(self):
         """Save the application state to a file using pickle."""
