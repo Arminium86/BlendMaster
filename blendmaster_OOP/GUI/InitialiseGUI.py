@@ -47,6 +47,15 @@ class UserInputs(QMainWindow):
         self.stockpile_table = CustomTableWidget()
         self.stockpile_tab_layout.addWidget(self.stockpile_table)
 
+        # Add AMT Stockpile Tab
+        self.AMT_stockpile_tab = QWidget()
+        self.tabs.addTab(self.AMT_stockpile_tab, "AMT Stockpiles")
+        self.AMT_stockpile_tab_layout = QHBoxLayout(self.AMT_stockpile_tab)
+
+        # Stockpile AMT Table
+        self.AMT_stockpile_table = CustomTableWidget()
+        self.AMT_stockpile_tab_layout.addWidget(self.AMT_stockpile_table)
+
         # Add calendar Tab
         self.main_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Calendar")
@@ -154,20 +163,23 @@ class UserInputs(QMainWindow):
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
         self.setup_stockpile_table_first_call = True
+        self.setup_AMT_stockpile_table_first_call = True
         self.setup_calendar_first_call = True
         self.stockpile_data_use_column = {}
+        self.stockpile_data_AMT_column = {}
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
-        self.tabs.setTabEnabled(2, False)  # Disable Calendar tab
-        self.tabs.setTabEnabled(3, False)  # Disable Decision tab
-        self.tabs.setTabEnabled(4, False)  # Disable Results tab
-        self.tabs.setTabEnabled(5, False)  # Disable Profiles tab
-        self.tabs.setTabEnabled(6, False)  # Disable Setup Blends tab
-        self.tabs.setTabEnabled(7, False)  # Disable Blend Sequence tab
-        self.tabs.setTabEnabled(8, False)  # Disable Grade Profile tab
+        self.tabs.setTabEnabled(2, False)  # Disable AMT Stockpile tab
+        self.tabs.setTabEnabled(3, False)  # Disable Calendar tab
+        self.tabs.setTabEnabled(4, False)  # Disable Decision tab
+        self.tabs.setTabEnabled(5, False)  # Disable Results tab
+        self.tabs.setTabEnabled(6, False)  # Disable Profiles tab
+        self.tabs.setTabEnabled(7, False)  # Disable Setup Blends tab
+        self.tabs.setTabEnabled(8, False)  # Disable Blend Sequence tab
+        self.tabs.setTabEnabled(9, False)  # Disable Grade Profile tab
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -430,7 +442,9 @@ class UserInputs(QMainWindow):
         # Define Headers (Add "Use" Column)
         headers = [
             "Use",
+            "AMT",
             "Stockpile Name",
+            "Build",
             "Balance (WMT)",
             "Grade Fe (%)",
             "Grade Si (%)",
@@ -459,12 +473,18 @@ class UserInputs(QMainWindow):
            
             # "Use" Column (Checkbox)
             use_checkbox = QCheckBox()
+
+            AMT_checkbox = QCheckBox()
+
             
             if self.stockpile_data_use_column:
                 # Set the checkbox state based on the value in self.stockpile_data_use_column
-                use_checkbox.setChecked(self.stockpile_data_use_column.get(stockpile_name, True))  # Default to unchecked if not found
+                use_checkbox.setChecked(self.stockpile_data_use_column.get(stockpile_name, True))  # Default to checked if not found
+                AMT_checkbox.setChecked(self.stockpile_data_AMT_column.get(stockpile_name, False))  # Default to checked if not found
+
             else:
                 use_checkbox.setChecked(True)  # Default to checked
+                AMT_checkbox.setChecked(False)
 
             # Center the checkbox using a QWidget and layout
             checkbox_widget = QWidget()
@@ -474,16 +494,24 @@ class UserInputs(QMainWindow):
             layout.setContentsMargins(0, 0, 0, 0)  # Remove any extra padding
             self.stockpile_table.setCellWidget(row_idx, 0, checkbox_widget)
 
+            # Center the checkbox using a QWidget and layout (AMT)
+            AMT_checkbox_widget = QWidget()
+            AMT_layout = QHBoxLayout(AMT_checkbox_widget)
+            AMT_layout.addWidget(AMT_checkbox)
+            AMT_layout.setAlignment(Qt.AlignCenter)  # Center the checkbox
+            AMT_layout.setContentsMargins(0, 0, 0, 0)  # Remove any extra padding
+            self.stockpile_table.setCellWidget(row_idx, 1, AMT_checkbox_widget)
+
             # Stockpile Name (Center-align)
             stockpile_item = QTableWidgetItem(str(stockpile_name))
             stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
             stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
-            self.stockpile_table.setItem(row_idx, 1, stockpile_item)
+            self.stockpile_table.setItem(row_idx, 2, stockpile_item)
 
             # Attributes (Balance and Grades, Center-aligned)
-            keys = ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
+            keys = ["BUILD", "BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
        
-            for col_idx, key in enumerate(keys, start=2):  # Start after "Use" and "Stockpile Name"
+            for col_idx, key in enumerate(keys, start=3):  # Start after "Use", "AMT", "Stockpile Name"
 
                 try:
                     value = attributes[key]
@@ -509,6 +537,13 @@ class UserInputs(QMainWindow):
                         font.setBold(True)
                         balance_item.setFont(font)
                     self.stockpile_table.setItem(row_idx, col_idx, balance_item)
+
+                elif key == "BUILD" or key == 'build':
+                    build_item = QTableWidgetItem(value)
+                    build_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                    build_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
+                    self.stockpile_table.setItem(row_idx, col_idx, build_item)
+                
                 else:
                     # Round grade values to 2 decimal points
                     value = round(float(value), 2) if value else 0
@@ -526,15 +561,16 @@ class UserInputs(QMainWindow):
 
         # Resize Columns
         self.stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
-
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeToContents)
 
         if self.setup_stockpile_table_first_call:
             # Connect cellChanged signal to a slot for live formatting
@@ -559,17 +595,20 @@ class UserInputs(QMainWindow):
     def handle_cell_change(self, row, column):
         """Handle live formatting for the Reclaim Threshold column."""
         headers = [
+            "Use",
+            "AMT",
             "Stockpile Name",
+            "Build",
             "Balance (WMT)",
-            "Grade Fe",
-            "Grade Si",
-            "Grade Al",
-            "Grade P",
-            "Grade Mn",
-            "Reclaim Threshold"
+            "Grade Fe (%)",
+            "Grade Si (%)",
+            "Grade Al (%)",
+            "Grade P (%)",
+            "Grade Mn (%)",
+            "Reclaim Threshold (WMT)"
         ]
 
-        if column == headers.index("Reclaim Threshold"):  # Check if the changed cell is in the Reclaim Threshold column
+        if column == headers.index("Reclaim Threshold (WMT)"):  # Check if the changed cell is in the Reclaim Threshold column
             reclaim_item = self.stockpile_table.item(row, column)
             balance_item = self.stockpile_table.item(row, headers.index("Balance (WMT)"))
 
@@ -595,14 +634,26 @@ class UserInputs(QMainWindow):
         for row in range(self.stockpile_table.rowCount()):
             # Check if "Use" column checkbox is checked
             checkbox_widget = self.stockpile_table.cellWidget(row, 0)  # Get the widget in the "Use" column
+            AMT_checkbox_widget = self.stockpile_table.cellWidget(row, 1)  # Get the widget in the "AMT" column
+
             if checkbox_widget:
                 checkbox = checkbox_widget.layout().itemAt(0).widget()  # Extract the QCheckBox
                 
                 if checkbox.isChecked():
-                    # Get the stockpile name from the relevant column (assuming column 1 for name)
-                    stockpile_name = self.stockpile_table.item(row, 1).text()
+                    # Get the stockpile name from the relevant column (assuming column 2 for name)
+                    stockpile_name = self.stockpile_table.item(row, 2).text()
                     # Store the stockpile name and its "Use" status (True for checked, False otherwise)
                     self.stockpile_data_use_column[stockpile_name] = True
+                    
+                    if AMT_checkbox_widget:
+                        AMT_checkbox = AMT_checkbox_widget.layout().itemAt(0).widget()  # Extract the AMT QCheckBox
+
+                        if AMT_checkbox.isChecked():
+                            # Store the stockpile name and its "AMT" status (True for checked, False otherwise)
+                            self.stockpile_data_AMT_column[stockpile_name] = True
+
+                        else:
+                            self.stockpile_data_AMT_column[stockpile_name] = False
 
                     # Retrieve Reclaim Threshold
                     reclaim_item = self.stockpile_table.item(row, self.stockpile_table.columnCount() - 1)
@@ -611,10 +662,11 @@ class UserInputs(QMainWindow):
                     # Update stockpile data
                     updated_stockpile_data[stockpile_name] = self.stockpile_data.get(stockpile_name, {})
                     updated_stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+                    updated_stockpile_data[stockpile_name]["AMT"] = self.stockpile_data_AMT_column[stockpile_name]
 
                 else:
                     # Optional: Store unchecked stockpiles
-                    stockpile_name = self.stockpile_table.item(row, 1).text()
+                    stockpile_name = self.stockpile_table.item(row, 2).text()
                     self.stockpile_data_use_column[stockpile_name] = False
 
                 
@@ -632,9 +684,76 @@ class UserInputs(QMainWindow):
 
         # Enable the next tab (Calendar Tab)
         self.setup_calendar()
+        self.setup_AMT_stockpile_table()
         self.tabs.setTabEnabled(2, True)
-        self.tabs.setCurrentIndex(2)  # Switch to Calendar tab
+        self.tabs.setCurrentIndex(2)  # Switch to AMT tab
     
+    def setup_AMT_stockpile_table(self):
+        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+        # Define Headers (Add "Use" Column)
+        headers = [
+            "Stockpile Name"
+        ]
+        self.AMT_stockpile_table.setColumnCount(len(headers))
+        self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
+        self.AMT_stockpile_table.verticalHeader().setVisible(False)
+
+        # Bold headers
+        header_font = self.AMT_stockpile_table.horizontalHeader().font()
+        header_font.setBold(True)
+        self.AMT_stockpile_table.horizontalHeader().setFont(header_font)
+
+        # Choose data source
+        data_source = {
+            key: value for key, value in self.updated_stockpile_data.items() if value.get("amt", False)
+        }
+
+        builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
+
+        self.get_AMT_stockpile_data(builds)
+
+        # Set Table Dimensions
+        self.AMT_stockpile_table.setRowCount(len(data_source))
+
+        # Populate Stockpile Data
+        for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
+           
+            if attributes["amt"]:
+
+                # Stockpile Name (Center-align)
+                stockpile_item = QTableWidgetItem(str(stockpile_name))
+                stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
+                stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
+                self.AMT_stockpile_table.setItem(row_idx, 0, stockpile_item)
+
+        # Resize Columns
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+
+        if self.setup_AMT_stockpile_table_first_call:
+
+            # Add Submit Button at the Bottom
+            submit_button = QPushButton("Submit")
+            submit_button.clicked.connect(self.store_AMT_stockpile_table)
+
+            # Align button to the bottom-left using layout
+            button_layout = QHBoxLayout()
+            
+            # Don't add the button if returning from the calendar
+            if self.submit_calendar_first_call:
+                button_layout.addWidget(submit_button)  
+                button_layout.addStretch()  # Push the button to the left
+
+            self.AMT_stockpile_tab_layout.addLayout(button_layout)
+            
+            self.setup_AMT_stockpile_table_first_call = False  
+
+    def get_AMT_stockpile_data(self, builds):
+        QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
+        self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds)
+
+    def store_AMT_stockpile_table(self):
+        return 
+
     def setup_calendar(self):
         """Setup for the main table with a Submit button."""
             
