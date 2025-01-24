@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from datetime import datetime, timedelta
-from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles
+from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
 import pandas as pd, sqlite3
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -160,6 +160,7 @@ class UserInputs(QMainWindow):
 
         # Workflow controls
         self.load_profiles_first_call = True
+        self.load_AMT_map_first_call = True
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
         self.setup_stockpile_table_first_call = True
@@ -690,9 +691,10 @@ class UserInputs(QMainWindow):
     
     def setup_AMT_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+        
         # Define Headers (Add "Use" Column)
         headers = [
-            "Stockpile Name"
+            "AMT Stockpile Name"
         ]
         self.AMT_stockpile_table.setColumnCount(len(headers))
         self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
@@ -711,6 +713,8 @@ class UserInputs(QMainWindow):
         builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
 
         self.get_AMT_stockpile_data(builds)
+
+        self.start_dash_AMT_map_thread()
 
         # Set Table Dimensions
         self.AMT_stockpile_table.setRowCount(len(data_source))
@@ -731,29 +735,59 @@ class UserInputs(QMainWindow):
 
         if self.setup_AMT_stockpile_table_first_call:
 
+            # AMT map view inside a QFrame
+            self.AMT_map_view = CustomWebEngineView()
+
+            # Frame to surround the map view
+            self.AMT_map_frame = QFrame()
+            self.AMT_map_frame.setFrameShape(QFrame.Box)
+            self.AMT_map_frame.setFrameShadow(QFrame.Sunken)
+            self.AMT_map_frame.setLineWidth(1)
+            self.AMT_map_frame.setStyleSheet("border: 0.5px solid black;")
+            frame_layout = QVBoxLayout()
+            frame_layout.addWidget(self.AMT_map_view)
+            self.AMT_map_frame.setLayout(frame_layout)
+
+            # Horizontal layout for map view and button
+            self.AMT_stockpile_tab_vertical_layout = QVBoxLayout()
+            self.AMT_stockpile_tab_vertical_layout.addWidget(self.AMT_map_frame)
+
+            # Add a button to load the chart
+            self.load_AMT_button = QPushButton("Load or Update AMT Map")
+            self.load_AMT_button.setFixedWidth(200)
+            self.load_AMT_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional styling
+            self.load_AMT_button.clicked.connect(self.load_AMT_map)  # Connect button to function
+            self.AMT_stockpile_tab_vertical_layout.addWidget(self.load_AMT_button)
+
             # Add Submit Button at the Bottom
             submit_button = QPushButton("Submit")
-            submit_button.clicked.connect(self.store_AMT_stockpile_table)
+            submit_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional styling
+            submit_button.clicked.connect(self.store_hex_sequence_table)
 
             # Align button to the bottom-left using layout
             button_layout = QHBoxLayout()
-            
-            # Don't add the button if returning from the calendar
-            if self.submit_calendar_first_call:
-                button_layout.addWidget(submit_button)  
-                button_layout.addStretch()  # Push the button to the left
+            button_layout.addWidget(submit_button)
+            button_layout.addStretch()  # Push the button to the left
+            self.AMT_stockpile_tab_vertical_layout.addLayout(button_layout)
 
-            self.AMT_stockpile_tab_layout.addLayout(button_layout)
+            # Add the vertical layout to the main layout
+            self.AMT_stockpile_tab_layout.addLayout(self.AMT_stockpile_tab_vertical_layout, stretch=1)
             
             self.setup_AMT_stockpile_table_first_call = False  
 
     def get_AMT_stockpile_data(self, builds):
-        QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
-        self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds)
+        if any(self.stockpile_data_AMT_column.values()):
+            QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
+            self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds)
+        
+        else:    
+            QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
 
-    def store_AMT_stockpile_table(self):
-        return 
-
+    def store_hex_sequence_table(self):
+        self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
+        self.tabs.setTabEnabled(3, True)
+        self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
+        
     def setup_calendar(self):
         """Setup for the main table with a Submit button."""
             
@@ -1054,7 +1088,7 @@ class UserInputs(QMainWindow):
         if status['success']:
             self.update_decision_point_tab_state()
             self.setup_blends_tab()
-            self.tabs.setTabEnabled(6, True)
+            self.tabs.setTabEnabled(7, True)
             self.start_dash_optimised_charts_thread()
 
         else:
@@ -1111,6 +1145,23 @@ class UserInputs(QMainWindow):
 
         # Add the button to the layout (you can position it as needed)
         self.results_layout.addWidget(self.load_chart_button)
+
+    def load_AMT_map(self):
+
+        if not self.load_AMT_map_first_call:
+    
+            # Send a request to trigger the refresh
+            try:
+                requests.post("http://localhost:8054/trigger-refresh", timeout=5)  # Timeout after 5 seconds
+            except requests.exceptions.Timeout:
+                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
+            except requests.exceptions.RequestException as e:
+                QMessageBox.critical(None, "Error", f"Failed to trigger refresh: {e}")
+
+        # Load the Dash app into the QWebEngineView
+        self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
+
+        self.load_AMT_map_first_call = False
 
     def load_gantt_chart(self):
         # Load the Dash app into the QWebEngineView
@@ -1188,24 +1239,33 @@ class UserInputs(QMainWindow):
 
         self.dash_thread_stockpile_profile = threading.Thread(target=self.draw_stockpile_profile_chart.run_app, daemon=True)
         self.dash_thread_stockpile_profile.start()
+
+    def start_dash_AMT_map_thread(self):
+        """Start the Dash app in a separate thread."""
+        db_path = "blendmaster.db"
+        self.draw_AMT_map = DrawAMTStockpile(db_path, port=8054)
+        
+        # Use a thread to run the Dash app server
+        self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
+        self.dash_thread_AMT_map.start()
     
     def update_decision_point_tab_state(self):
         """Enable or disable the Decision Point tab based on blend_mode."""
         if self.blend_mode_choice == 2:
-            self.tabs.setTabEnabled(3, True)
-            self.tabs.setCurrentIndex(3)
+            self.tabs.setTabEnabled(4, True)
+            self.tabs.setCurrentIndex(4)
             self.decision_input.setEnabled(True) # Enable the input
             self.enter_button.setEnabled(True) # Enable the button
-            self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
-            self.tabs.setTabEnabled(5, True)  # Enable profiles tab
+            self.tabs.setTabEnabled(5, True)  # Enable Results (optimised) tab
+            self.tabs.setTabEnabled(6, True)  # Enable profiles tab
 
         else:
-            self.tabs.setTabEnabled(3, True)
+            self.tabs.setTabEnabled(4, True)
             self.decision_input.setEnabled(False) # Disable the input
             self.enter_button.setEnabled(False) # Disable the button
-            self.tabs.setTabEnabled(4, True)  # Enable Results (optimised) tab
-            self.tabs.setTabEnabled(5, True)  # Enable profiles tab
-            self.tabs.setCurrentIndex(4)  # Switch to Results (optimised) tab
+            self.tabs.setTabEnabled(5, True)  # Enable Results (optimised) tab
+            self.tabs.setTabEnabled(6, True)  # Enable profiles tab
+            self.tabs.setCurrentIndex(5)  # Switch to Results (optimised) tab
 
     def handle_decision_input(self):
         """Send input from the Decision Point tab to the CaseModellerBridge."""
@@ -1736,8 +1796,8 @@ class UserInputs(QMainWindow):
                 self.saved_blends_for_schedule.append(blend_data)
 
         self.setup_sequence_tab()
-        self.tabs.setTabEnabled(7, True)
-        self.tabs.setCurrentIndex(7)  
+        self.tabs.setTabEnabled(8, True)
+        self.tabs.setCurrentIndex(8)  
         self.save_button.setEnabled(True)
         QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
 
@@ -2217,7 +2277,7 @@ class UserInputs(QMainWindow):
 
         self.load_manual_gantt_chart()  
 
-        self.tabs.setTabEnabled(8, True)  # Enable Grade Profile tab
+        self.tabs.setTabEnabled(9, True)  # Enable Grade Profile tab
 
         QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
 

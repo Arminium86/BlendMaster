@@ -161,7 +161,9 @@ class DataLoader:
                 grade_p=nested_record["grade_p"],
                 grade_mn=nested_record["grade_mn"],
                 auto_turnover_datetime=nested_record["auto_turnover_datetime"],
-                is_ready=nested_record["is_ready"]
+                is_ready=nested_record["is_ready"],
+                is_AMT=nested_record["amt"]
+
             )
             for record, nested_record in stockpile_data.items()
         ]

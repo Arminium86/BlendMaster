@@ -167,6 +167,12 @@ class DrawAMTStockpile:
             (filtered_data["long"] >= lower_bound_long) & (filtered_data["long"] <= upper_bound_long)
         ]
 
+        # Round latitude, longitude, and grades to 2 decimal places for tooltips
+        filtered_data["lat_tooltip"] = filtered_data["lat"].round(2)
+        filtered_data["long_tooltip"] = filtered_data["long"].round(2)
+        for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
+            filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
+
         colors = filtered_data.apply(
             lambda row: "black" if row["hex"] in self.selected_points else
             "red" if row["hex_updated"] == "True" and row["balance"] <= 0 else
@@ -192,17 +198,21 @@ class DrawAMTStockpile:
                     "black": "Selected",
                     "blue": "Other"
                 }.get(color, "Other"),
-                customdata=group[["hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]],
+                customdata=group[[
+                    "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip", 
+                    "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip", 
+                    "lat_tooltip", "long_tooltip"
+                ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
-                    "Latitude: %{x:.9f}<br>" +
-                    "Longitude: %{y:.9f}<br>" +
-                    "Balance: %{customdata[1]}<br>" +
-                    "Fe Grade: %{customdata[2]}<br>" +
-                    "Si Grade: %{customdata[3]}<br>" +
-                    "Al Grade: %{customdata[4]}<br>" +
-                    "P Grade: %{customdata[5]}<br>" +
-                    "Mn Grade: %{customdata[6]}<extra></extra>"
+                    "Latitude: %{customdata[7]:.2f}<br>" +
+                    "Longitude: %{customdata[8]:.2f}<br>" +
+                    "Balance: %{customdata[1]}t<br>" +
+                    "Fe Grade: %{customdata[2]:.2f}%<br>" +
+                    "Si Grade: %{customdata[3]:.2f}%<br>" +
+                    "Al Grade: %{customdata[4]:.2f}%<br>" +
+                    "P Grade: %{customdata[5]:.2f}%<br>" +
+                    "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
                 )
             ))
 
@@ -222,6 +232,7 @@ class DrawAMTStockpile:
             )
 
         return fig
+
 
     def run(self):
         self.app.run_server(port=self.port, debug=True)

@@ -4,7 +4,7 @@ class StockpileData:
         max_quantity_preplan, max_quantity_period_1, max_quantity_period_2,
         cost_preplan, cost_period_1, cost_period_2,
         cash_preplan, cash_period_1, cash_period_2,
-        equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready
+        equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready, is_AMT
     ):
         self._name = name
         self._balance = balance
@@ -29,6 +29,7 @@ class StockpileData:
         self._grade_mn = grade_mn
         self._auto_turnover_datetime = auto_turnover_datetime
         self._is_ready = is_ready
+        self._is_AMT = is_AMT
 
     # Getters
     @property
@@ -123,6 +124,10 @@ class StockpileData:
     def is_ready(self):
         return self._is_ready
     
+    @property
+    def is_AMT(self):
+        return self._is_AMT
+    
     # Setters
     @name.setter
     def name(self, value):
@@ -216,6 +221,10 @@ class StockpileData:
     def is_ready(self, value):
         self._is_ready = value
 
+    @is_AMT.setter
+    def is_AMT(self, value):
+        self._is_AMT = value
+
     # Method to retrieve the original dictionary
     def to_dict(self):
         return {
@@ -241,5 +250,7 @@ class StockpileData:
             "grade_p": self._grade_p,
             "grade_mn": self._grade_mn,
             "auto_turnover_datetime": self._auto_turnover_datetime,
-            "is_ready": self._is_ready
+            "is_ready": self._is_ready,
+            "is_AMT": self._is_AMT
+
         }
