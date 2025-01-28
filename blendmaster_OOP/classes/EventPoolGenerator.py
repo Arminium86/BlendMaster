@@ -150,13 +150,13 @@ class EventPoolGenerator:
         """Update each event's balance in the pool based on the balance tracker."""
         for event in event_pool:
             if event.is_stockpile:
-                event.balance = balance_tracker.get_balance(event.stockpile)
+                event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p  = balance_tracker.get_balance(event.stockpile)
             elif event.is_grade_block:
                 event.balance = balance_tracker.get_balance(event.grade_block)
     
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
-        stockpile.balance = balance_tracker.get_balance(stockpile.name)
+        stockpile.balance, stockpile.grade_fe, stockpile.grade_si, stockpile.grade_al, stockpile.grade_mn, stockpile.grade_p = balance_tracker.get_balance(stockpile.name)
         if (
             ((stockpile_state == "Auto" and self.expit_transactions_complete(stockpile, current_time)) 
             

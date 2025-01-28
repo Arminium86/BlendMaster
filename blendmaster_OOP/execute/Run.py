@@ -1,6 +1,6 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
 from PyQt5.QtCore import QObject, pyqtSignal, QEventLoop
-import builtins, pandas as pd
+import builtins, pandas as pd, traceback
 from classes.CaseModeller import CaseModeller
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
@@ -23,7 +23,7 @@ class Run:
         self.manual_case_modeller = None
         self.manual_blend_dash = None
     
-    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs):
+    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table):
 
         # Install required libraries
         #requirements = Requirements()
@@ -67,7 +67,7 @@ class Run:
             print("No APS schedule imported.")
 
         # Load input data (this is combined user input and opening inventories)
-        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions)
+        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table)
 
         stockpile_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
@@ -79,7 +79,8 @@ class Run:
             crusher_targets=crusher_target_data,
             expit_payload_transactions=expit_payload_transactions,
             periods=periods,
-            user_interaction_mode=blend_mode
+            user_interaction_mode=blend_mode,
+            hex_sequence_table = hex_sequence_table
         )
 
         # Monkey-patch print and input
@@ -89,6 +90,10 @@ class Run:
             builtins.print = self.case_bridge.print
             builtins.input = self.case_bridge.input
             self.case_modeller.run()  # Run the CaseModeller logic
+        
+        except Exception as e:
+            self.case_bridge.handle_exception(e)
+        
         finally:
             # Restore the original print and input functions
             builtins.print = original_print
@@ -127,5 +132,7 @@ class CaseModellerBridge(QObject):
 
     def handle_exception(self, exception):
         """Handle exceptions raised by the Case Modeller."""
-        error_message = str(exception)
-        self.error_signal.emit(error_message)
+        # Extract the traceback information
+        tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
+        error_message = "".join(tb_lines)  # Combine the traceback into a single string
+        self.error_signal.emit(error_message)  # Emit the full traceback to the GUI

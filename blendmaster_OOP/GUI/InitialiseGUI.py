@@ -1105,7 +1105,8 @@ class UserInputs(QMainWindow):
                 self.file_path_choice,
                 self.blend_mode_choice,
                 self.updated_stockpile_data,
-                self.calendar_inputs
+                self.calendar_inputs,
+                self.hex_sequence_table
             )
             # if not stop_event.is_set():  # If not stopped, mark as success
             status['success'] = True
@@ -1809,7 +1810,7 @@ class UserInputs(QMainWindow):
         df = pd.read_sql("SELECT * FROM build_report", conn)
         conn.close()
         return df
-
+    
     def format_blend_config_table(self):
         """
         Apply column formatting for the blend configuration table.

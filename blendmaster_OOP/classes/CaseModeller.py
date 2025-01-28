@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import List
 
 class CaseModeller:
-    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods: PeriodManager , user_interaction_mode):
+    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods: PeriodManager , user_interaction_mode, hex_sequence_table):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -22,7 +22,7 @@ class CaseModeller:
         self.current_time = periods.get_periods()["preplan_start"]
         self.start_time = periods.get_periods()["preplan_start"]
         self.period_tracker = "preplan"
-        self.balance_tracker = BalanceTracker(stockpiles, grade_blocks, self.period_tracker)
+        self.balance_tracker = BalanceTracker(stockpiles, grade_blocks, self.period_tracker, hex_sequence_table)
         self.expit_payload_transactions = expit_payload_transactions
         self.event_pool = EventPoolGenerator(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
@@ -37,6 +37,7 @@ class CaseModeller:
         self.decision_point_results_to_display_filtered_to_current_blend_choice = pd.DataFrame()
         self.user_interaction_mode = user_interaction_mode
         self.database_manager = DatabaseManager()
+        self.total_AMT_stockpile_balances = self.balance_tracker.return_total_AMT_stockpile_balances()
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -229,6 +230,8 @@ class CaseModeller:
                 print(f"Caught Error: {error_message}")
                 raise
 
+            self.total_AMT_stockpile_balances = self.balance_tracker.return_total_AMT_stockpile_balances()
+            
             self.advance_time()
             
             self.decision_point_results = pd.DataFrame()
@@ -253,6 +256,8 @@ class CaseModeller:
                 error_message = str(e)
                 print(f"Caught Error: {error_message}")
                 raise
+
+            self.total_AMT_stockpile_balances = self.balance_tracker.return_total_AMT_stockpile_balances()
 
             self.advance_time()
             
@@ -327,9 +332,9 @@ class CaseModeller:
                     "period": self.period_tracker,
                     "source": transaction["source"],
                     "source_blend_ratio": round(transaction["equipment_rate_output"] / result["crusher_rate_output"], 2) if result["crusher_rate_output"] != 0 else 0,
-                    "source_opening_balance": transaction["opening_balance"],
+                    "source_opening_balance": self.total_AMT_stockpile_balances[transaction["source"]] if transaction["source"] in self.total_AMT_stockpile_balances else transaction["opening_balance"],
                     "source_actual_tonnes": transaction["actual_tonnes"],
-                    "source_closing_balance": transaction["opening_balance"] - transaction["actual_tonnes"],
+                    "source_closing_balance": (self.total_AMT_stockpile_balances[transaction["source"]] if transaction["source"] in self.total_AMT_stockpile_balances else transaction["opening_balance"]) - transaction["actual_tonnes"],
                     "source_grade_fe": transaction["grade_fe"],
                     "source_grade_si": transaction["grade_si"],
                     "source_grade_al": transaction["grade_al"],
@@ -341,11 +346,11 @@ class CaseModeller:
                     "crusher_actual_tonnes": result["crusher_actual_tonnes"],
                     "crusher_rate_input": result["crusher_rate_input"],
                     "crusher_rate_output": result["crusher_rate_output"],
-                    "crusher_actual_grade_fe": result["crusher_actual_grade_fe"],
-                    "crusher_actual_grade_si": result["crusher_actual_grade_si"],
-                    "crusher_actual_grade_al": result["crusher_actual_grade_al"],
-                    "crusher_actual_grade_p": result["crusher_actual_grade_p"],
-                    "crusher_actual_grade_mn": result["crusher_actual_grade_mn"],
+                    "crusher_actual_grade_fe": 0 if self.blend_option == "No blend" else result["crusher_actual_grade_fe"],
+                    "crusher_actual_grade_si": 0 if self.blend_option == "No blend" else result["crusher_actual_grade_si"],
+                    "crusher_actual_grade_al": 0 if self.blend_option == "No blend" else result["crusher_actual_grade_al"],
+                    "crusher_actual_grade_p": 0 if self.blend_option == "No blend" else result["crusher_actual_grade_p"],
+                    "crusher_actual_grade_mn": 0 if self.blend_option == "No blend" else result["crusher_actual_grade_mn"],
                     "crusher_grade_target_min_fe": result["crusher_grade_target_min_fe"],
                     "crusher_grade_target_max_fe": result["crusher_grade_target_max_fe"],
                     "crusher_grade_target_min_si": result["crusher_grade_target_min_si"],

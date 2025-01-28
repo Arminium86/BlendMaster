@@ -6,15 +6,17 @@ from classes.GradeBlockData import GradeBlockData
 from pandas import DataFrame
 
 class DataLoader:
-    def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions: DataFrame):
+    def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions: DataFrame, hex_sequence_table: list):
         self.stockpile_data = stockpile_data
         self.calendar_inputs = calendar_inputs
         self.expit_payload_transactions = expit_payload_transactions
+        self.hex_sequence_table = hex_sequence_table
 
     def load_data(self):
         """Loads data from GUI and returns it in structured format."""
 
         # Convert data to a list of dictionaries for easy access (grade block not implemented)
+        self.set_first_hex_tonnes_and_grades_to_AMT_stockpile()
         stockpile_data = self.process_stockpile_data()
         calendar_inputs = self.calendar_inputs
         stockpile_data_objects = self.create_stockpile_data_objects(stockpile_data, calendar_inputs)
@@ -189,3 +191,22 @@ class DataLoader:
             )
             for record in grade_block_data_dicts
         ]
+
+    def set_first_hex_tonnes_and_grades_to_AMT_stockpile(self):
+        for stockpile_name, stockpile_data in self.stockpile_data.items():
+            # Check if the stockpile has 'amt' set to True
+            if stockpile_data.get('amt'):
+                # Find the corresponding entry in hex_sequence_table with sequence == 1
+                corresponding_hex = next(
+                    (hex_entry for hex_entry in self.hex_sequence_table
+                    if hex_entry['footprint'] == stockpile_name and hex_entry['sequence'] == 1),
+                    None
+                )
+                if corresponding_hex:
+                    # Update the balance and grades in stockpile_data
+                    stockpile_data['balance'] = corresponding_hex['balance']
+                    for key in corresponding_hex:
+                        if key.startswith('grade_'):
+                            stockpile_data[key] = corresponding_hex[key]
+
+
