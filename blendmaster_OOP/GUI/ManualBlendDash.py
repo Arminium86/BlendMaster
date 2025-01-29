@@ -198,36 +198,179 @@ class DrawGradeProfiles:
             Input('df-store', 'data')
         )(self.update_charts)
     
+
     def transform_data(self, df, grade_columns, hex_sequence_table, updated_stockpile_data):
-        """Transform the data to create a 'time' column and expand the rows."""
-        
+        """Transform the data to create a 'time' column and expand the rows, modifying records where grade is 'AMT'."""
+
+        grade_key_mapping = {
+            "grade_fe": "Grade Fe",
+            "grade_si": "Grade Si",
+            "grade_al": "Grade Al",
+            "grade_p": "Grade P",
+            "grade_mn": "Grade Mn",
+        }
+
+        # Rename the keys in hex_sequence_table
+        hex_sequence_table = [
+            {grade_key_mapping.get(k, k): v for k, v in entry.items()} for entry in hex_sequence_table
+        ]
+
+        # Rename the keys inside updated_stockpile_data (nested dict)
+        updated_stockpile_data = {
+            stockpile: {grade_key_mapping.get(k, k): v for k, v in grades.items()}
+            for stockpile, grades in updated_stockpile_data.items()
+        }
+
         # Sort by Start Time
         df = df.sort_values(by='Start Datetime').reset_index(drop=True)
 
-        # Add the sequence column
+        # Identify records that need modification (any grade column has "AMT")
+        amt_records = df[df[grade_columns].eq("AMT").any(axis=1)].copy()
+
+        # Remove original records that had "AMT"
+        df = df[~df.index.isin(amt_records.index)].reset_index(drop=True)
+
+        new_records = []
+
+        for _, row in amt_records.iterrows():
+            blend_id = row["Blend ID"]
+            sources = row["Sources"].split(",")  # Sources from df (comma-separated)
+            source_ratios = list(map(float, row["Source Ratios"].split(",")))  # Corresponding ratios
+            feed_tonnes = row["Feed Tonnes"]
+            max_duration = row["Max Duration (hrs)"]
+            start_datetime = row["Start Datetime"]
+
+            # Compute Blend ID reclaim rate
+            blend_reclaim_rate = float(feed_tonnes) / float(max_duration)
+
+            # Compute reclaim rate for each source
+            source_reclaim_rates = {source.strip(): blend_reclaim_rate * ratio for source, ratio in zip(sources, source_ratios)}
+
+            # Process sources found in hex_sequence_table
+            source_hex_data = [hex_row for hex_row in hex_sequence_table if hex_row["footprint"].strip() in [s.strip() for s in sources]]
+
+            if not source_hex_data:
+                continue  # Skip if no matching hexes found
+
+            source_hex_data.sort(key=lambda x: x["sequence"])  # Ensure order
+
+            current_time = start_datetime
+            remaining_duration = row["Duration (hrs)"]
+
+            while float(remaining_duration) > 0 and source_hex_data:
+                min_duration = float("inf")
+                hex_entries = []
+
+                for hex_row in source_hex_data:
+                    footprint = hex_row["footprint"]
+                    hex_balance = hex_row["balance"]
+                    source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
+
+                    if source_reclaim_rate == 0:
+                        continue  # Skip if reclaim rate is 0
+
+                    hex_duration = hex_balance / source_reclaim_rate
+                    min_duration = min(min_duration, hex_duration)
+                    hex_entries.append((hex_row, hex_duration, footprint))
+
+                # Ensure we do not exceed the total remaining duration
+                if float(min_duration) > float(remaining_duration):
+                    min_duration = remaining_duration
+
+                # Generate new records
+                new_start_time = current_time
+                new_end_time = pd.to_datetime(new_start_time) + pd.to_timedelta(min_duration, unit="h")
+
+                total_feed_tonnes = 0
+                weighted_grades = {grade: 0 for grade in grade_columns}
+                total_weight = 0
+
+                for hex_row, hex_duration, footprint in hex_entries:
+                    hex_balance = hex_row["balance"]
+                    hex_grades = {grade: hex_row[grade] for grade in grade_columns}
+
+                    # Determine feed tonnes for this segment
+                    source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
+                    calculated_balance = source_reclaim_rate * min_duration
+
+                    total_feed_tonnes += hex_balance + calculated_balance
+                    total_weight += hex_balance + calculated_balance
+
+                    # Compute weighted average for grades
+                    for grade in grade_columns:
+                        hex_grade = hex_grades[grade]
+                        weighted_grades[grade] += hex_grade * (hex_balance + calculated_balance)
+
+                # **Handle sources missing from `hex_sequence_table`**
+                for source in sources:
+                    if source not in [hex_entry[2] for hex_entry in hex_entries]:  # If source is NOT in hex_sequence_table
+                        source_reclaim_rate = source_reclaim_rates.get(source, 0)
+                        if source_reclaim_rate > 0:
+                            calculated_balance = source_reclaim_rate * min_duration  # Compute missing source balance
+                            total_feed_tonnes += calculated_balance
+                            total_weight += calculated_balance
+
+                            if source in updated_stockpile_data:
+                                source_grades = updated_stockpile_data[source]
+                                for grade in grade_columns:
+                                    weighted_grades[grade] += source_grades[grade] * calculated_balance
+
+                # Normalize grade values
+                for grade in grade_columns:
+                    if total_weight > 0:
+                        weighted_grades[grade] /= total_weight
+
+                # Create new record
+                new_records.append({
+                    "Blend ID": blend_id,
+                    "Origin": row["Origin"],
+                    "Start Datetime": new_start_time,
+                    "Duration (hrs)": min_duration,
+                    "End Datetime": new_end_time,
+                    "Feed Tonnes": total_feed_tonnes,
+                    **weighted_grades
+                })
+
+                # Update time tracking
+                current_time = new_end_time
+                remaining_duration = float(remaining_duration) - min_duration
+
+                # Remove fully depleted hexes
+                source_hex_data = [hex_row for hex_row, hex_duration, _ in hex_entries if hex_duration > min_duration]
+
+        # Convert new records to DataFrame
+        if new_records:
+            new_df = pd.DataFrame(new_records)
+            df = pd.concat([df, new_df], ignore_index=True)
+
+        # Re-sort the data
+        df["Start Datetime"] = pd.to_datetime(df["Start Datetime"], errors="coerce")
+        df = df.sort_values(by="Start Datetime").reset_index(drop=True)
+
+        # Generate sequence column
         sequence = []
         current_sequence = 1
         previous_blend_id = None
 
         for _, row in df.iterrows():
-            if row['Blend ID'] != previous_blend_id:
+            if row["Blend ID"] != previous_blend_id:
                 current_sequence += 1
             sequence.append(current_sequence)
-            previous_blend_id = row['Blend ID']
+            previous_blend_id = row["Blend ID"]
 
-        df['Sequence'] = sequence
-        
+        df["Sequence"] = sequence
+
         # Prepare records for plotting
         records = []
         for _, row in df.iterrows():
             for grade in grade_columns:
-                records.append({'sequence': row['Sequence'], 'time': row['Start Datetime'], 'grade': row[grade], 'element': grade})
-                records.append({'sequence': row['Sequence'], 'time': row['End Datetime'], 'grade': row[grade], 'element': grade})
-        
+                records.append({"sequence": row["Sequence"], "time": row["Start Datetime"], "grade": row[grade], "element": grade})
+                records.append({"sequence": row["Sequence"], "time": row["End Datetime"], "grade": row[grade], "element": grade})
+
         transformed_df = pd.DataFrame(records)
-        transformed_df['time'] = pd.to_datetime(transformed_df['time'])
-        
-        transformed_df = transformed_df.sort_values(by=['sequence', 'time'])
+        transformed_df["time"] = pd.to_datetime(transformed_df["time"])
+
+        transformed_df = transformed_df.sort_values(by=["sequence", "time"])
         return transformed_df
 
     def update_charts(self, data):

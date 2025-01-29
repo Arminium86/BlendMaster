@@ -2539,7 +2539,8 @@ class UserInputs(QMainWindow):
 
     def start_or_update_dash_manual_grade_profile_thread(self):
         """Update or start the Dash app."""
-    
+        hex_sequence_table = copy.deepcopy(self.hex_sequence_table)
+        updated_stockpile_data = copy.deepcopy(self.updated_stockpile_data)
         grade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
 
         if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
@@ -2547,7 +2548,7 @@ class UserInputs(QMainWindow):
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
         else:
             # Start the Dash app if not already running
-            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, self.hex_sequence_table, self.updated_stockpile_data, 8053)
+            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, hex_sequence_table, updated_stockpile_data, 8053)
             self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
             self.dash_thread_grade_profile.start()
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
