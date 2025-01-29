@@ -76,11 +76,11 @@ class ManualBlendDash:
         df['Details'] = df.apply(
             lambda row: (
                 "<br>Blend ID: " + str(row['Blend ID']) +
-                "<br>Grade Fe: " + str(row['Grade Fe']) + "%" +
-                "<br>Grade Si: " + str(row['Grade Si']) + "%" +
-                "<br>Grade Al: " + str(row['Grade Al']) + "%" +
-                "<br>Grade P: " + str(row['Grade P']) + "%" +
-                "<br>Grade Mn: " + str(row['Grade Mn']) + "%" +
+                "<br>Grade Fe: " + (str(row['Grade Fe']) if row['Grade Fe'] == "AMT" else f"{row['Grade Fe']}%") +
+                "<br>Grade Si: " + (str(row['Grade Si']) if row['Grade Si'] == "AMT" else f"{row['Grade Si']}%") +
+                "<br>Grade Al: " + (str(row['Grade Al']) if row['Grade Al'] == "AMT" else f"{row['Grade Al']}%") +
+                "<br>Grade P: " + (str(row['Grade P']) if row['Grade P'] == "AMT" else f"{row['Grade P']}%") +
+                "<br>Grade Mn: " + (str(row['Grade Mn']) if row['Grade Mn'] == "AMT" else f"{row['Grade Mn']}%") +
                 "<br>Feed Tonnes: " + f"{row['Feed Tonnes']:.0f}" +
                 "<br>Duration (hrs): " + f"{float(row['Duration (hrs)']):.1f}<br>" +
                 (
@@ -178,11 +178,13 @@ class ManualBlendDash:
         return self.grade_profile_data
 
 class DrawGradeProfiles:
-    def __init__(self, data, port):
+    def __init__(self, data, hex_sequence_table, updated_stockpile_data, port):
         # Initialize Dash app
         self.app = dash.Dash(__name__)
         self.port = port
         self.df = data
+        self.hex_sequence_table = hex_sequence_table
+        self.updated_stockpile_data = updated_stockpile_data
         
         # Set up the layout
         self.app.layout = html.Div(id='main-container', children=[
@@ -196,7 +198,7 @@ class DrawGradeProfiles:
             Input('df-store', 'data')
         )(self.update_charts)
     
-    def transform_data(self, df, grade_columns):
+    def transform_data(self, df, grade_columns, hex_sequence_table, updated_stockpile_data):
         """Transform the data to create a 'time' column and expand the rows."""
         
         # Sort by Start Time
@@ -248,7 +250,7 @@ class DrawGradeProfiles:
         }
         
         # Transform the data
-        transformed_df = self.transform_data(df, grade_columns)
+        transformed_df = self.transform_data(df, grade_columns, self.hex_sequence_table, self.updated_stockpile_data)
         
         # Create separate charts for each grade
         charts = []

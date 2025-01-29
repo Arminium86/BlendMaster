@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle
+import sys, threading, requests, os, pickle, copy
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog
@@ -785,8 +785,24 @@ class UserInputs(QMainWindow):
 
     def store_hex_sequence_table(self):
         self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
+        self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
+        self.total_AMT_stockpile_balances = {}
+        self.populate_total_AMT_stockpile_balances()
         self.tabs.setTabEnabled(3, True)
         self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
+   
+    def populate_total_AMT_stockpile_balances(self):
+        # Extract unique footprints from the hex sequence table
+        unique_footprints = set(hex_entry.get('footprint') for hex_entry in self.hex_sequence_table if 'footprint' in hex_entry)
+
+        # Calculate the total balance for each unique footprint
+        for footprint in unique_footprints:
+            filtered_hexes = [
+                hex_entry for hex_entry in self.hex_sequence_table
+                if hex_entry.get('footprint') == footprint
+            ]
+            total_balance = sum(hex_entry.get('balance', 0) for hex_entry in filtered_hexes)
+            self.total_AMT_stockpile_balances[footprint] = total_balance
         
     def setup_calendar(self):
         """Setup for the main table with a Submit button."""
@@ -1106,7 +1122,7 @@ class UserInputs(QMainWindow):
                 self.blend_mode_choice,
                 self.updated_stockpile_data,
                 self.calendar_inputs,
-                self.hex_sequence_table
+                self.hex_sequence_table_argument
             )
             # if not stop_event.is_set():  # If not stopped, mark as success
             status['success'] = True
@@ -1444,15 +1460,33 @@ class UserInputs(QMainWindow):
             # Attributes
             keys = [key.lower() for key in ["BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]]
             for key in keys:
-                # Safely get the value, default to 0 if None
-                value = attributes.get(key, 0) or 0
+                
+                # Conventional vs AMT stockpile
+                is_amt =  attributes.get("amt", False)
+                
+                if not is_amt:
+                    
+                    # Safely get the value, default to 0 if None
+                    value = attributes.get(key, 0) or 0
 
-                if key == "balance":
-                    col_idx = 1  # Balance column
-                    item = QTableWidgetItem(f"{float(value):.0f}")  # Format as integer (no decimals)
+                    if key == "balance":
+                        col_idx = 1  # Balance column
+                        item = QTableWidgetItem(f"{float(value):.0f}")  # Format as integer (no decimals)
+                    else:
+                        col_idx = keys.index(key) + 4  # Offset for additional columns
+                        item = QTableWidgetItem(f"{float(value):.2f}")  # Format as float (2 decimals)
                 else:
-                    col_idx = keys.index(key) + 4  # Offset for additional columns
-                    item = QTableWidgetItem(f"{float(value):.2f}")  # Format as float (2 decimals)
+                    
+                    # Safely get the value, default to 0 if None
+                    balance = self.total_AMT_stockpile_balances.get(stockpile_name, 0) or 0
+
+                    if key == "balance":
+                        col_idx = 1  # Balance column
+                        item = QTableWidgetItem(f"{float(balance):.0f}")  # Format as integer (no decimals)
+                    else:
+                        col_idx = keys.index(key) + 4  # Offset for additional columns
+                        item = QTableWidgetItem("AMT")
+
 
                 item.setFlags(Qt.ItemIsEnabled)
                 item.setTextAlignment(Qt.AlignCenter)
@@ -1703,13 +1737,13 @@ class UserInputs(QMainWindow):
                     else "Now"
                 )
 
-                grades = [float(self.blend_config_table.item(row_idx, col).text()) for col in range(5, 10)]
+                grades = [float(self.blend_config_table.item(row_idx, col).text()) if self.blend_config_table.item(row_idx, col).text() != "AMT" else "AMT" for col in range(5, 10)]
 
                 sources = self.blend_config_table.item(row_idx, 0).text()
                 source_ratios = self.blend_config_table.item(row_idx, 13).text()
 
                 self.blend_data_from_config_table_inputs[blend_id]["weights"].append(weight)
-                self.blend_data_from_config_table_inputs[blend_id]["grades"].append([grade * weight for grade in grades])
+                self.blend_data_from_config_table_inputs[blend_id]["grades"].append([grade * weight if grade != "AMT" else "AMT" for grade in grades])
                 self.blend_data_from_config_table_inputs[blend_id]["balances"].append(balance * weight)
                 self.blend_data_from_config_table_inputs[blend_id]["available"].append(available)
                 self.blend_data_from_config_table_inputs[blend_id]["sources"].append(sources)
@@ -1725,7 +1759,11 @@ class UserInputs(QMainWindow):
 
             if total_weight > 0:
                 # Calculate weighted averages
-                avg_grades = [sum(grades) / total_weight for grades in zip(*data["grades"])]
+                if not any("AMT" in grades for grades in data["grades"]):
+                    avg_grades = [sum(grades) / total_weight for grades in zip(*data["grades"])]
+                else:
+                    avg_grades = ["AMT" for grades in zip(*data["grades"])]
+
                 balance = min(data["balances"])
                 max_duration = balance / self.crusher_rate if self.crusher_rate > 0 else 0
                 available_status = "Now"
@@ -1742,7 +1780,10 @@ class UserInputs(QMainWindow):
                 # Update blend results table
                 self.blend_results_table.setItem(row_idx, 0, self.create_centered_item(blend_id))
                 for col_idx, avg_grade in enumerate(avg_grades, start=1):
-                    self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
+                    if avg_grade == "AMT":
+                        self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item("AMT"))
+                    else:
+                        self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
                 self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.1f}"))
                 self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
                 self.blend_results_table.setItem(row_idx, 9, self.create_centered_item(sources_combined))
@@ -1827,7 +1868,7 @@ class UserInputs(QMainWindow):
         for row_idx in range(self.blend_config_table.rowCount()):
             for col_idx in range(5, 10):  # Grade columns
                 item = self.blend_config_table.item(row_idx, col_idx)
-                if item and item.text():
+                if item and item.text() and item.text() != "AMT":
                     item.setText(f"{float(item.text()):.2f}")  # Two decimal places
                     item.setTextAlignment(Qt.AlignCenter)
     
@@ -2506,7 +2547,7 @@ class UserInputs(QMainWindow):
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
         else:
             # Start the Dash app if not already running
-            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, 8053)
+            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, self.hex_sequence_table, self.updated_stockpile_data, 8053)
             self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
             self.dash_thread_grade_profile.start()
             self.draw_grade_profile_chart.update_data(grade_profile_data)  

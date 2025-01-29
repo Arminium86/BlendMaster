@@ -759,7 +759,7 @@ class DrawAMTStockpile:
                 x=group["long"],
                 y=group["lat"],
                 mode="markers",
-                marker=dict(size=20, symbol="hexagon", color=color),
+                marker=dict(size=30, symbol="hexagon", color=color),
                 name={
                     "green": "Not Started",
                     "red": "Negative Balance",
