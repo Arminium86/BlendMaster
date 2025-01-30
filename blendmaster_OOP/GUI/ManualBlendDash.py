@@ -198,7 +198,6 @@ class DrawGradeProfiles:
             Input('df-store', 'data')
         )(self.update_charts)
     
-
     def transform_data(self, df, grade_columns, hex_sequence_table, updated_stockpile_data):
         """Transform the data to create a 'time' column and expand the rows, modifying records where grade is 'AMT'."""
 
@@ -222,6 +221,7 @@ class DrawGradeProfiles:
         }
 
         # Sort by Start Time
+        df["Start Datetime"] = pd.to_datetime(df["Start Datetime"], errors="coerce")
         df = df.sort_values(by='Start Datetime').reset_index(drop=True)
 
         # Identify records that need modification (any grade column has "AMT")
@@ -234,7 +234,7 @@ class DrawGradeProfiles:
 
         for _, row in amt_records.iterrows():
             blend_id = row["Blend ID"]
-            sources = row["Sources"].split(",")  # Sources from df (comma-separated)
+            sources = [s.strip() for s in row["Sources"].split(",")]  # Strip spaces from sources
             source_ratios = list(map(float, row["Source Ratios"].split(",")))  # Corresponding ratios
             feed_tonnes = row["Feed Tonnes"]
             max_duration = row["Max Duration (hrs)"]
@@ -244,38 +244,48 @@ class DrawGradeProfiles:
             blend_reclaim_rate = float(feed_tonnes) / float(max_duration)
 
             # Compute reclaim rate for each source
-            source_reclaim_rates = {source.strip(): blend_reclaim_rate * ratio for source, ratio in zip(sources, source_ratios)}
+            source_reclaim_rates = {source: blend_reclaim_rate * ratio for source, ratio in zip(sources, source_ratios)}
 
-            # Process sources found in hex_sequence_table
-            source_hex_data = [hex_row for hex_row in hex_sequence_table if hex_row["footprint"].strip() in [s.strip() for s in sources]]
-
+            # Filter relevant hexes from hex_sequence_table
+            source_hex_data = [hex_row for hex_row in hex_sequence_table if hex_row["footprint"].strip() in sources]
             if not source_hex_data:
                 continue  # Skip if no matching hexes found
 
             source_hex_data.sort(key=lambda x: x["sequence"])  # Ensure order
 
-            current_time = start_datetime
-            remaining_duration = row["Duration (hrs)"]
+            # Group hexes by stockpile (footprint)
+            stockpile_hex_groups = {}
+            for hex_row in source_hex_data:
+                footprint = hex_row["footprint"].strip()
+                if footprint not in stockpile_hex_groups:
+                    stockpile_hex_groups[footprint] = []
+                stockpile_hex_groups[footprint].append(hex_row)
 
-            while float(remaining_duration) > 0 and source_hex_data:
+            current_time = start_datetime
+            remaining_duration = float(row["Duration (hrs)"])
+
+            while remaining_duration > 0 and source_hex_data:
                 min_duration = float("inf")
                 hex_entries = []
 
-                for hex_row in source_hex_data:
-                    footprint = hex_row["footprint"]
+                # Determine min duration considering all stockpiles in Blend ID
+                for footprint, hex_list in stockpile_hex_groups.items():
+                    if not hex_list:
+                        continue
+                    
+                    hex_row = hex_list[0]  # Get first hex in sequence for this stockpile
                     hex_balance = hex_row["balance"]
                     source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
 
                     if source_reclaim_rate == 0:
-                        continue  # Skip if reclaim rate is 0
+                        continue
 
                     hex_duration = hex_balance / source_reclaim_rate
-                    min_duration = min(min_duration, hex_duration)
                     hex_entries.append((hex_row, hex_duration, footprint))
+                    min_duration = min(hex_duration for _, hex_duration, _ in hex_entries)
 
                 # Ensure we do not exceed the total remaining duration
-                if float(min_duration) > float(remaining_duration):
-                    min_duration = remaining_duration
+                min_duration = min(min_duration, remaining_duration)
 
                 # Generate new records
                 new_start_time = current_time
@@ -293,20 +303,22 @@ class DrawGradeProfiles:
                     source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
                     calculated_balance = source_reclaim_rate * min_duration
 
-                    total_feed_tonnes += hex_balance + calculated_balance
-                    total_weight += hex_balance + calculated_balance
+                    hex_balance = min(hex_balance, calculated_balance)
+
+                    total_feed_tonnes += hex_balance
+                    total_weight += hex_balance
 
                     # Compute weighted average for grades
                     for grade in grade_columns:
                         hex_grade = hex_grades[grade]
-                        weighted_grades[grade] += hex_grade * (hex_balance + calculated_balance)
+                        weighted_grades[grade] += hex_grade * (hex_balance)
 
-                # **Handle sources missing from `hex_sequence_table`**
+                # Handle sources missing from `hex_sequence_table` (conventional stockpiles)
                 for source in sources:
-                    if source not in [hex_entry[2] for hex_entry in hex_entries]:  # If source is NOT in hex_sequence_table
+                    if source not in stockpile_hex_groups:  # If source is NOT in hex_sequence_table
                         source_reclaim_rate = source_reclaim_rates.get(source, 0)
                         if source_reclaim_rate > 0:
-                            calculated_balance = source_reclaim_rate * min_duration  # Compute missing source balance
+                            calculated_balance = source_reclaim_rate * min_duration
                             total_feed_tonnes += calculated_balance
                             total_weight += calculated_balance
 
@@ -333,10 +345,21 @@ class DrawGradeProfiles:
 
                 # Update time tracking
                 current_time = new_end_time
-                remaining_duration = float(remaining_duration) - min_duration
+                remaining_duration -= min_duration
 
-                # Remove fully depleted hexes
-                source_hex_data = [hex_row for hex_row, hex_duration, _ in hex_entries if hex_duration > min_duration]
+                # Remove fully depleted hexes from their stockpile lists
+                for footprint, hex_list in stockpile_hex_groups.items():
+                    if hex_list:
+                        # Get the reclaim rate for this footprint
+                        source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
+                        depletion_amount = source_reclaim_rate * min_duration  # Calculate depletion for this stockpile
+                        
+                        if hex_list[0]["balance"] > depletion_amount:
+                            # If hex is NOT fully depleted, update its balance
+                            hex_list[0]["balance"] -= depletion_amount
+                        else:
+                            # If fully depleted, remove the hex from the list
+                            hex_list.pop(0)
 
         # Convert new records to DataFrame
         if new_records:
@@ -344,34 +367,20 @@ class DrawGradeProfiles:
             df = pd.concat([df, new_df], ignore_index=True)
 
         # Re-sort the data
-        df["Start Datetime"] = pd.to_datetime(df["Start Datetime"], errors="coerce")
         df = df.sort_values(by="Start Datetime").reset_index(drop=True)
-
-        # Generate sequence column
-        sequence = []
-        current_sequence = 1
-        previous_blend_id = None
-
-        for _, row in df.iterrows():
-            if row["Blend ID"] != previous_blend_id:
-                current_sequence += 1
-            sequence.append(current_sequence)
-            previous_blend_id = row["Blend ID"]
-
-        df["Sequence"] = sequence
 
         # Prepare records for plotting
         records = []
         for _, row in df.iterrows():
             for grade in grade_columns:
-                records.append({"sequence": row["Sequence"], "time": row["Start Datetime"], "grade": row[grade], "element": grade})
-                records.append({"sequence": row["Sequence"], "time": row["End Datetime"], "grade": row[grade], "element": grade})
+                records.append({"time": row["Start Datetime"], "grade": row[grade], "element": grade})
+                records.append({"time": row["End Datetime"], "grade": row[grade], "element": grade})
 
         transformed_df = pd.DataFrame(records)
         transformed_df["time"] = pd.to_datetime(transformed_df["time"])
 
-        transformed_df = transformed_df.sort_values(by=["sequence", "time"])
         return transformed_df
+
 
     def update_charts(self, data):
         """Generate separate charts for each grade dynamically."""

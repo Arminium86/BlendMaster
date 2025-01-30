@@ -1744,7 +1744,7 @@ class UserInputs(QMainWindow):
 
                 self.blend_data_from_config_table_inputs[blend_id]["weights"].append(weight)
                 self.blend_data_from_config_table_inputs[blend_id]["grades"].append([grade * weight if grade != "AMT" else "AMT" for grade in grades])
-                self.blend_data_from_config_table_inputs[blend_id]["balances"].append(balance * weight)
+                self.blend_data_from_config_table_inputs[blend_id]["balances"].append(balance)
                 self.blend_data_from_config_table_inputs[blend_id]["available"].append(available)
                 self.blend_data_from_config_table_inputs[blend_id]["sources"].append(sources)
                 self.blend_data_from_config_table_inputs[blend_id]["source_ratios"].append(source_ratios)
