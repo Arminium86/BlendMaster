@@ -593,6 +593,8 @@ class DrawAMTStockpile:
     def init_layout(self):
         self.app.layout = dbc.Container([
             html.H5("AMT Stockpile Depletion Sequence"),
+
+            # Dropdown for footprint selection
             dbc.Row([
                 dbc.Col([
                     dcc.Dropdown(
@@ -603,66 +605,98 @@ class DrawAMTStockpile:
                     )
                 ], width=6),
             ]),
+
+            # Hex Size Control (Slider)
             dbc.Row([
-                dcc.Graph(
-                    id="scatter-plot",
-                    config={"scrollZoom": True},
-                    style={"height": "1000px", "width": "1000px"}
-                )
-            ])
-            ,
+                dbc.Col([
+                    html.Label(
+                        "Hexagon Marker Size:",
+                        style={
+                            "fontSize": "16px",  # Font size
+                            "fontWeight": "bold",  # Make text bold
+                            "color": "darkblue",  # Change text color
+                            "fontFamily": "Arial, sans-serif",  # Set font family
+                            "marginBottom": "5px"  # Add space below label
+                        }
+                    ),
+                    dcc.Slider(
+                        id="hex-size-slider",
+                        min=5,
+                        max=50,
+                        step=1,
+                        value=25,  # Default hex size
+                        marks={5: "5", 25: "25", 50: "50"},
+                        tooltip={"placement": "bottom", "always_visible": True}
+                    )
+                ], width=6),
+            ], style={"marginBottom": "20px"}),
+
+            # Graph and Table Layout
             dbc.Row([
-                dash_table.DataTable(
-                    id="selected-table",
-                    columns=[
-                        {"name": col, "id": col} for col in
-                        ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn']
-                    ],
-                    data=[],
-                    row_deletable=True,
-                    editable=False,
-                    style_table={'overflowX': 'auto'},
-                    style_cell={
-                                    'textAlign': 'center',
-                                    'fontFamily': 'Segoe UI',  # Set font to Segoe UI
-                                    'fontSize': '14px',  # Default font size for cells
-                                },
-                    style_header={
-                                    'fontWeight': 'bold',  # Make headers bold
-                                    'fontSize': '16px',  # Increase header font size
-                                    'fontFamily': 'Segoe UI',  # Set font for headers
-                                    'textAlign': 'center'  # Center-align headers
-                                }
-                )
+                # Graph (75% width)
+                dbc.Col([
+                    dcc.Graph(
+                        id="scatter-plot",
+                        config={"scrollZoom": True},
+                        style={"height": "600px", "width": "100%"}
+                    )
+                ], width=9),
+
+                # Table (25% width)
+                dbc.Col([
+                    html.H5("Sequence Table", style={
+                            "textAlign": "center",
+                            "fontSize": "18px",
+                            "fontWeight": "bold",
+                            "marginBottom": "10px"
+                        }),
+                    dash_table.DataTable(
+                        id="selected-table",
+                        columns=[{"name": col, "id": col} for col in
+                                ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
+                                'grade_mn']],
+                        data=[],
+                        row_deletable=True,
+                        editable=False,
+                        style_table={'overflowX': 'auto'},
+                        style_cell={'textAlign': 'center', 'fontFamily': 'Segoe UI', 'fontSize': '10.5px'},
+                        style_header={'fontWeight': 'bold', 'fontSize': '12px', 'fontFamily': 'Segoe UI', 'textAlign': 'center'}
+                    ),
+
+                    # Buttons Below the Table
+                    html.Div([
+                        dbc.Button("Reset Table", id="reset-button", color="danger", size="sm", style={"margin": "10px"}),
+                        dbc.Button("Store Table", id="store-button", color="primary", size="sm", style={"margin": "10px"}),
+                    ], style={"textAlign": "center", "marginTop": "10px"})
+                ], width=3),
             ]),
-            dbc.Row([
-                dbc.Col(dbc.Button("Reset Table", id="reset-button", color="danger", size="sm"), width=12),
-                dbc.Col(dbc.Button("Store Table", id="store-button", color="primary", size="sm"), width=12)
-            ]),
-            ], fluid=False)
+
+        ], fluid=False)
 
         self.init_callbacks()
-    
+
+
     def init_callbacks(self):
         @self.app.callback(
             [Output("selected-table", "data"),
-            Output("scatter-plot", "figure")],
+            Output("scatter-plot", "figure")],  # Single callback handling both
             [Input("scatter-plot", "clickData"),
             Input("footprint-dropdown", "value"),
-            Input("reset-button", "n_clicks")],
+            Input("reset-button", "n_clicks"),
+            Input("hex-size-slider", "value")],  # Add hex size slider input
             [State("selected-table", "data"),
             State("scatter-plot", "relayoutData")]
         )
-        def update_table_and_plot(click_data, selected_footprint, reset_clicks, table_data, relayout_data):
-            triggered = callback_context.triggered_id
+        def update_table_and_plot(click_data, selected_footprint, reset_clicks, hex_size, table_data, relayout_data):
+            triggered = dash.callback_context.triggered_id
 
             # Reset table and scatter plot
             if triggered == "reset-button":
                 self.selected_points = []
-                return [], self.generate_scatter_plot(selected_footprint, None)
+                return [], self.generate_scatter_plot(selected_footprint, None, hex_size)  # Pass hex_size
 
             if not selected_footprint:
-                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data)
+                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, hex_size)
 
             table_data = table_data or []
 
@@ -693,7 +727,7 @@ class DrawAMTStockpile:
                     table_data.append(new_row)
                     self.sequence_counter[selected_footprint] = sequence + 1
 
-            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data)
+            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, hex_size)
 
         @self.app.callback(
             Output("store-button", "n_clicks"),
@@ -705,7 +739,7 @@ class DrawAMTStockpile:
                 self.selected_points = table_data
             return n_clicks
 
-    def generate_scatter_plot(self, selected_footprint, relayout_data):
+    def generate_scatter_plot(self, selected_footprint, relayout_data, hex_size=15):
         if not selected_footprint:
             return go.Figure()
 
@@ -752,14 +786,14 @@ class DrawAMTStockpile:
         )
 
         fig = go.Figure()
-
+        
         # Add traces for each color group
         for color, group in filtered_data.groupby(colors):
             fig.add_trace(go.Scatter(
                 x=group["long"],
                 y=group["lat"],
                 mode="markers",
-                marker=dict(size=30, symbol="hexagon", color=color),
+                marker=dict(size=hex_size, symbol="hexagon", color=color),
                 name={
                     "green": "Not Started",
                     "red": "Negative Balance",
@@ -785,13 +819,29 @@ class DrawAMTStockpile:
                 )
             ))
 
-        fig.update_layout(
-            title=f"Stockpile AMT Map: {selected_footprint}",
-            xaxis_title="Longitude",
-            yaxis_title="Latitude",
-            xaxis_scaleanchor="y",
-            yaxis_scaleanchor="x"
-        )
+            fig.update_layout(
+                title={
+                    "text": f"Stockpile AMT Map: {selected_footprint}",
+                    "font": {
+                        "size": 20,  # Title font size
+                        "family": "Arial, sans-serif",  # Font family
+                        "color": "darkblue"  # Font color
+                    },
+                    "x": 0.5,  # Centers the title
+                },
+                xaxis=dict(
+                    title="Longitude",
+                    titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
+                    tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+                ),
+                yaxis=dict(
+                    title="Latitude",
+                    titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
+                    tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+                ),
+                xaxis_scaleanchor="y",
+                yaxis_scaleanchor="x"
+            )
 
         # Preserve zoom state if relayout data is provided
         if relayout_data and "xaxis.range" in relayout_data and "yaxis.range" in relayout_data:

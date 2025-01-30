@@ -694,7 +694,7 @@ class UserInputs(QMainWindow):
         
         # Define Headers (Add "Use" Column)
         headers = [
-            "AMT Stockpile Name"
+            "AMT Stockpiles"
         ]
         self.AMT_stockpile_table.setColumnCount(len(headers))
         self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
@@ -1030,7 +1030,7 @@ class UserInputs(QMainWindow):
         self.calendar_inputs = {
     outer_key: {
         inner_key: (
-            int(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+            float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
         )
         for inner_key, inner_value in outer_value.items()
     }
@@ -1087,7 +1087,7 @@ class UserInputs(QMainWindow):
         self.calendar_inputs = {
     outer_key: {
         inner_key: (
-            int(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+            float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
         )
         for inner_key, inner_value in outer_value.items()
     }
