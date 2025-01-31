@@ -170,6 +170,8 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = {}
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
+        self.start_dash_AMT_map_thread_first_call = True
+
 
         # Disable tabs initially
         self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
@@ -784,6 +786,7 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
 
     def store_hex_sequence_table(self):
+
         self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
         self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
         self.total_AMT_stockpile_balances = {}
@@ -1167,13 +1170,15 @@ class UserInputs(QMainWindow):
 
         if not self.load_AMT_map_first_call:
     
-            # Send a request to trigger the refresh
             try:
-                requests.post("http://localhost:8054/trigger-refresh", timeout=5)  # Timeout after 5 seconds
-            except requests.exceptions.Timeout:
-                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
-            except requests.exceptions.RequestException as e:
-                QMessageBox.critical(None, "Error", f"Failed to trigger refresh: {e}")
+                response = requests.post("http://localhost:8054/trigger-refresh", timeout=5)
+
+            except requests.exceptions.RequestException:
+                print("Refresh timed out.")
+
+            finally:
+                self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
+
 
         # Load the Dash app into the QWebEngineView
         self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
@@ -1259,12 +1264,18 @@ class UserInputs(QMainWindow):
 
     def start_dash_AMT_map_thread(self):
         """Start the Dash app in a separate thread."""
-        db_path = "blendmaster.db"
-        self.draw_AMT_map = DrawAMTStockpile(db_path, port=8054)
         
-        # Use a thread to run the Dash app server
-        self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
-        self.dash_thread_AMT_map.start()
+        db_path = "blendmaster.db"
+
+        if self.start_dash_AMT_map_thread_first_call:
+
+            self.draw_AMT_map = DrawAMTStockpile(db_path, port=8054, hex_sequence_table=self.hex_sequence_table)
+
+            # Use a thread to run the Dash app server
+            self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
+            self.dash_thread_AMT_map.start()
+
+        self.start_dash_AMT_map_thread_first_call = False
     
     def update_decision_point_tab_state(self):
         """Enable or disable the Decision Point tab based on blend_mode."""
@@ -2589,6 +2600,8 @@ class UserInputs(QMainWindow):
                 "updated_stockpile_data": self.updated_stockpile_data,
                 "blend_config_table_inputs":  self.blend_config_table_inputs,
                 "crusher_rate_input_value": self.crusher_rate_input_value,
+                'hex_sequence_table': self.hex_sequence_table,
+                'stockpile_data_AMT_column': self.stockpile_data_AMT_column
             }
             # Generate a timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -2646,6 +2659,8 @@ class UserInputs(QMainWindow):
             self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
             self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
             self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
+            self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
+            self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
 
             tab_states = loaded_state.get("tab_states", {})
             for index, enabled in tab_states.items():
@@ -2658,6 +2673,7 @@ class UserInputs(QMainWindow):
         
         self.handle_site_config_submit()
         self.store_stockpile_table()
+        self.store_hex_sequence_table()
         self.store_calendar_inputs()
         self.on_blend_data_change()
         self.store_blend_results()
@@ -2680,13 +2696,15 @@ class UserInputs(QMainWindow):
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
         self.stockpile_data = None
-        self.stockpile_data_use_column = None
+        self.stockpile_data_use_column = {}
         self.stored_blend_sequence_table_for_gantt = None
         self.stored_blend_sequence_table_for_gantt_default = None
         self.time_mode_choice = None
         self.updated_stockpile_data = None
         self.blend_config_table_inputs = None
         self.crusher_rate_input_value = None
+        self.hex_sequence_table = None
+        self.stockpile_data_AMT_column = {}
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

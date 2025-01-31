@@ -1,12 +1,12 @@
 import sqlite3
 import pandas as pd
 import random
-import requests
+import requests, time
 import dash
 from dash import dcc, html, Input, Output, dash_table, Dash, State, callback_context
 import dash_bootstrap_components as dbc
 import plotly.express as px
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import plotly.graph_objects as go
 import numpy as np
 
@@ -568,28 +568,30 @@ class DrawGanttChart:
         conn.close()
 
 class DrawAMTStockpile:
-    def __init__(self, db_path, port):
+    def __init__(self, db_path, port, hex_sequence_table):
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = []
         self.sequence_counter = {}
         self.server = self.app.server  # Get Flask server instance
-        self.initial_call = True
         self.data = self.fetch_data()
         self.unique_footprints = self.data['footprint'].unique()
+        self.refresh_call = False
+        self.hex_sequence_table = hex_sequence_table
         self.init_layout()
 
         # Add a Flask route for manual refresh
         @self.server.route("/trigger-refresh", methods=["POST"])
         def trigger_refresh():
-            self.data = self.fetch_data()  # Fetch fresh data
+
+            # Fetch fresh data
+            self.data = self.fetch_data()
             self.unique_footprints = self.data['footprint'].unique()
-            self.initial_call = False
+    
+            self.refresh_call = True
             self.init_layout()
 
-            return jsonify({"status": "success", "message": "Data refreshed"}), 200
-        
     def fetch_data(self):
         try:
             conn = sqlite3.connect(self.db_path)
@@ -603,6 +605,7 @@ class DrawAMTStockpile:
 
     def init_layout(self):
         self.app.layout = dbc.Container([
+
             html.H5("AMT Stockpile Depletion Sequence"),
 
             # Dropdown for footprint selection
@@ -666,7 +669,7 @@ class DrawAMTStockpile:
                         columns=[{"name": col, "id": col} for col in
                                 ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
                                 'grade_mn']],
-                        data=[],
+                        data=self.hex_sequence_table or [],
                         row_deletable=True,
                         editable=False,
                         style_table={'overflowX': 'auto'},
@@ -684,7 +687,7 @@ class DrawAMTStockpile:
 
         ], fluid=False)
 
-        if self.initial_call:
+        if not self.refresh_call:
 
             self.init_callbacks()
 
@@ -749,6 +752,7 @@ class DrawAMTStockpile:
         def store_table(n_clicks, table_data):
             if n_clicks:
                 self.selected_points = table_data
+                
             return n_clicks
 
     def generate_scatter_plot(self, selected_footprint, relayout_data, hex_size=15):
