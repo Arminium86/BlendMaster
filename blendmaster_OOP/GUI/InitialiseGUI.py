@@ -2703,7 +2703,7 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data = None
         self.blend_config_table_inputs = None
         self.crusher_rate_input_value = None
-        self.hex_sequence_table = None
+        self.hex_sequence_table = []
         self.stockpile_data_AMT_column = {}
     
 class CustomTableWidget(QTableWidget):

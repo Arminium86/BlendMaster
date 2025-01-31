@@ -572,7 +572,7 @@ class DrawAMTStockpile:
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-        self.selected_points = []
+        self.selected_points = hex_sequence_table
         self.sequence_counter = {}
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
