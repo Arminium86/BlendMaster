@@ -574,11 +574,22 @@ class DrawAMTStockpile:
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = []
         self.sequence_counter = {}
-
+        self.server = self.app.server  # Get Flask server instance
+        self.initial_call = True
         self.data = self.fetch_data()
         self.unique_footprints = self.data['footprint'].unique()
         self.init_layout()
 
+        # Add a Flask route for manual refresh
+        @self.server.route("/trigger-refresh", methods=["POST"])
+        def trigger_refresh():
+            self.data = self.fetch_data()  # Fetch fresh data
+            self.unique_footprints = self.data['footprint'].unique()
+            self.initial_call = False
+            self.init_layout()
+
+            return jsonify({"status": "success", "message": "Data refreshed"}), 200
+        
     def fetch_data(self):
         try:
             conn = sqlite3.connect(self.db_path)
@@ -673,8 +684,9 @@ class DrawAMTStockpile:
 
         ], fluid=False)
 
-        self.init_callbacks()
+        if self.initial_call:
 
+            self.init_callbacks()
 
     def init_callbacks(self):
         @self.app.callback(
