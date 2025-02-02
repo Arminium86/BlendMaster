@@ -793,7 +793,10 @@ class DrawAMTStockpile:
             filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
 
         colors = filtered_data.apply(
-            lambda row: "black" if row["hex"] in self.selected_points else
+            lambda row: "black" if (
+                row["hex"] in self.selected_points or  # Case: direct string match
+                any(row["hex"] in d.values() for d in self.selected_points if isinstance(d, dict))  # Case: inside dict values
+            ) else
             "red" if row["hex_updated"] == "True" and row["balance"] <= 0 else
             "purple" if row["hex_updated"] == "True" else
             "green" if row["hex_updated"] == "False" else

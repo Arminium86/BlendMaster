@@ -788,12 +788,16 @@ class UserInputs(QMainWindow):
     def store_hex_sequence_table(self):
 
         self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
-        self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
-        self.total_AMT_stockpile_balances = {}
-        self.populate_total_AMT_stockpile_balances()
-        self.tabs.setTabEnabled(3, True)
-        self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
-   
+
+        if not any(not isinstance(item, dict) for item in self.hex_sequence_table):
+            self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
+            self.total_AMT_stockpile_balances = {}
+            self.populate_total_AMT_stockpile_balances()
+            self.tabs.setTabEnabled(3, True)
+            self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
+        else:
+            QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease go back and store the Sequence Table (press the blue button).")
+    
     def populate_total_AMT_stockpile_balances(self):
         # Extract unique footprints from the hex sequence table
         unique_footprints = set(hex_entry.get('footprint') for hex_entry in self.hex_sequence_table if 'footprint' in hex_entry)
@@ -2161,7 +2165,7 @@ class UserInputs(QMainWindow):
                     flag_item.setBackground(flag_color)
 
         except Exception as e:
-            QMessageBox.warning(None, "Warning", f"Could not update row {row}: {e}")
+            QMessageBox.warning(self, "Warning", f"Could not update row {row}: {e}")
 
     def add_blank_row(self):
         current_row_count = self.blend_sequence_table.rowCount()
@@ -2284,7 +2288,7 @@ class UserInputs(QMainWindow):
             if end_datetime_item:
                 end_datetime_item.setText(end_datetime.strftime("%Y-%m-%d %H:%M"))
         except Exception as e:
-            QMessageBox.warning(None, "Invalid Duration", f"Error updating row {row}: {e}")
+            QMessageBox.warning(self, "Invalid Duration", f"Error updating row {row}: {e}")
 
     def submit_blend_sequence_table_to_gantt(self):
                 
@@ -2379,7 +2383,7 @@ class UserInputs(QMainWindow):
             try:
                 blend_data = next(item for item in self.saved_blends_for_schedule if item["Blend ID"] == blend_id)
             except StopIteration:
-                QMessageBox.warning(None, "Warning", f"Blend ID {blend_id} not found in saved blends.")
+                QMessageBox.warning(self, "Warning", f"Blend ID {blend_id} not found in saved blends.")
                 continue
 
             available_time_str = blend_data.get("Available", "")
