@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\BlendMaster\\blendmaster_OOP\\GUI\\InitialiseGUI.py'],
     pathex=['C:\\BlendMaster\\blendmaster_OOP'],
     binaries=[],
-    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.')],
+    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background.png', 'resources')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

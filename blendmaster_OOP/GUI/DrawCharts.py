@@ -9,6 +9,11 @@ import plotly.express as px
 from flask import Flask, jsonify, request
 import plotly.graph_objects as go
 import numpy as np
+import ezdxf
+import base64
+import io
+import re
+
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -616,8 +621,15 @@ class DrawAMTStockpile:
                         options=[{"label": fp, "value": fp} for fp in self.unique_footprints],
                         placeholder="Select a Footprint",
                         style={"marginBottom": "10px"}
+                    ),
+                    dcc.Upload(
+                        id="upload-dxf",
+                        children=dbc.Button("Select DXF", color="secondary", size="md"),
+                        multiple=False,  # Allow only one file at a time
+                        style={"marginBottom": "10px"}
                     )
-                ], width=6),
+                ], 
+                width=6),
             ]),
 
             # Hex Size Control (Slider)
@@ -692,57 +704,144 @@ class DrawAMTStockpile:
             self.init_callbacks()
 
     def init_callbacks(self):
+
         @self.app.callback(
             [Output("selected-table", "data"),
             Output("scatter-plot", "figure")],  # Single callback handling both
             [Input("scatter-plot", "clickData"),
             Input("footprint-dropdown", "value"),
             Input("reset-button", "n_clicks"),
-            Input("hex-size-slider", "value")],  # Add hex size slider input
+            Input("hex-size-slider", "value"),  # Hex size slider input
+            Input("upload-dxf", "contents")],   # Handle DXF file upload
             [State("selected-table", "data"),
+            State("scatter-plot", "figure"),
             State("scatter-plot", "relayoutData")]
         )
-        def update_table_and_plot(click_data, selected_footprint, reset_clicks, hex_size, table_data, relayout_data):
+        def update_table_and_plot(click_data, selected_footprint, reset_clicks, hex_size, dxf_contents, 
+                                table_data, current_fig, relayout_data):
             triggered = dash.callback_context.triggered_id
 
             # Reset table and scatter plot
             if triggered == "reset-button":
                 self.selected_points = []
-                return [], self.generate_scatter_plot(selected_footprint, None, hex_size)  # Pass hex_size
+                return [], self.generate_scatter_plot(selected_footprint, None, current_fig, hex_size)  # Pass hex_size
 
             if not selected_footprint:
-                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, hex_size)
+                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size)
 
             table_data = table_data or []
 
             # Handle point selection/unselection
             if triggered == "scatter-plot" and click_data:
                 clicked_point = click_data["points"][0]
-                clicked_hex = clicked_point["customdata"][0]  # Use customdata[0] for hex value
 
-                if clicked_hex in self.selected_points:
-                    # Unselect point
-                    self.selected_points.remove(clicked_hex)
-                    table_data = [row for row in table_data if row["hex"] != clicked_hex]
-                else:
-                    # Select point
-                    self.selected_points.append(clicked_hex)
-                    sequence = self.sequence_counter.get(selected_footprint, 1)
-                    new_row = {
-                        "footprint": selected_footprint,
-                        "sequence": sequence,
-                        "hex": clicked_hex,
-                        "balance": clicked_point["customdata"][1],
-                        "grade_fe": clicked_point["customdata"][2],
-                        "grade_si": clicked_point["customdata"][3],
-                        "grade_al": clicked_point["customdata"][4],
-                        "grade_p": clicked_point["customdata"][5],
-                        "grade_mn": clicked_point["customdata"][6]
-                    }
-                    table_data.append(new_row)
-                    self.sequence_counter[selected_footprint] = sequence + 1
+                if "customdata" in clicked_point:
 
-            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, hex_size)
+                    clicked_hex = clicked_point["customdata"][0]  # Use customdata[0] for hex value
+
+                    if clicked_hex in self.selected_points:
+                        # Unselect point
+                        self.selected_points.remove(clicked_hex)
+                        table_data = [row for row in table_data if row["hex"] != clicked_hex]
+                    else:
+                        # Select point
+                        self.selected_points.append(clicked_hex)
+                        sequence = self.sequence_counter.get(selected_footprint, 1)
+                        new_row = {
+                            "footprint": selected_footprint,
+                            "sequence": sequence,
+                            "hex": clicked_hex,
+                            "balance": clicked_point["customdata"][1],
+                            "grade_fe": clicked_point["customdata"][2],
+                            "grade_si": clicked_point["customdata"][3],
+                            "grade_al": clicked_point["customdata"][4],
+                            "grade_p": clicked_point["customdata"][5],
+                            "grade_mn": clicked_point["customdata"][6]
+                        }
+                        table_data.append(new_row)
+                        self.sequence_counter[selected_footprint] = sequence + 1
+
+            # Handle DXF or ARCHD file upload and overlay lines
+            if triggered == "upload-dxf" and dxf_contents:
+                try:
+                    # Decode base64 file
+                    content_type, content_string = dxf_contents.split(',')
+                    decoded = base64.b64decode(content_string)
+
+                    # Convert bytes to text (for checking if it's ARCHD format)
+                    decoded_text = None
+                    try:
+                        decoded_text = decoded.decode("utf-8")  # Try to decode as text
+                    except UnicodeDecodeError:
+                        pass  # If it fails, assume it's a binary DXF file
+
+                    # Check if it's an ARCHD file (Starts with "FMT_4")
+                    if decoded_text and decoded_text.startswith("FMT_4"):
+                        print("Detected ARCHD File, Parsing...")
+
+                        # Extract points using regex
+                        points = []
+                        for line in decoded_text.split("\n"):
+                            match = re.match(r"Point:\s+\d+\s+([\d.]+)\s+([\d.]+)", line)
+                            if match:
+                                easting, northing = map(float, match.groups())
+
+                                # Convert Easting/Northing to Latitude/Longitude
+                                latitude = 0.0000088511 * northing - 88.98862
+                                longitude = 0.0000097153 * easting + 112.14090
+
+                                points.append((longitude, latitude))
+
+                        if not points:
+                            print("No valid points found in ARCHD file.")
+                        else:
+                            # Add ARCHD line to the scatter plot
+                            longitudes, latitudes = zip(*points)
+                            current_fig["data"].append(go.Scatter(
+                                x=longitudes,
+                                y=latitudes,
+                                mode="lines+markers",
+                                marker=dict(size=2, color="red"),
+                                line=dict(width=3, color="red"),
+                                name="Line"
+                            ))
+
+                    else:
+                        # Otherwise, assume it's a DXF file and process normally
+                        print("Detected DXF File, Parsing...")
+                        file_stream = io.BytesIO(decoded)
+
+                        # Read DXF file correctly
+                        doc = ezdxf.readfile(file_stream)  
+                        msp = doc.modelspace()
+                        lines = []
+
+                        for entity in msp.query("LINE"):
+                            start_x, start_y = entity.dxf.start.x, entity.dxf.start.y
+                            end_x, end_y = entity.dxf.end.x, entity.dxf.end.y
+
+                            # Convert Easting/Northing to Latitude/Longitude
+                            start_lat = 0.0000088511 * start_y - 88.9692022963
+                            start_lng = 0.0000097153 * start_x + 112.1407671837
+                            end_lat = 0.0000088511 * end_y - 88.9692022963
+                            end_lng = 0.0000097153 * end_x + 112.1407671837
+
+                            lines.append([(start_lng, start_lat), (end_lng, end_lat)])
+
+                        # Add DXF lines to the scatter plot
+                        for line in lines:
+                            current_fig["data"].append(go.Scatter(
+                                x=[line[0][0], line[1][0]],
+                                y=[line[0][1], line[1][1]],
+                                mode="lines",
+                                line=dict(color="black", width=2),
+                                name="DXF Line"
+                            ))
+
+                except Exception as e:
+                    print(f"Error processing file: {e}")
+
+            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size)
 
         @self.app.callback(
             Output("store-button", "n_clicks"),
@@ -755,7 +854,17 @@ class DrawAMTStockpile:
                 
             return n_clicks
 
-    def generate_scatter_plot(self, selected_footprint, relayout_data, hex_size=15):
+    def generate_scatter_plot(self, selected_footprint, relayout_data, existing_fig, hex_size=15):
+
+        # If existing_fig has traces, copy them to fig
+        if existing_fig and existing_fig["data"]:
+            fig = go.Figure()  # Start with an empty figure
+            for trace in existing_fig["data"]:  
+                if trace["mode"] == "lines+markers": 
+                    fig.add_trace(trace)
+        else:
+            fig = go.Figure()  # Create a new figure if no previous traces exist
+        
         if not selected_footprint:
             return go.Figure()
 
@@ -803,8 +912,6 @@ class DrawAMTStockpile:
             "blue",
             axis=1
         )
-
-        fig = go.Figure()
         
         # Add traces for each color group
         for color, group in filtered_data.groupby(colors):
