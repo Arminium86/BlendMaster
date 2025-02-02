@@ -93,7 +93,7 @@ class OpeningStockpileInventories:
         
         # SQL Query with dynamic CONTAINS filter
         query = f"""
-            WITH first_query AS (
+           WITH first_query AS (
                 SELECT 
                     FOOTPRINT,
                     HEX, 
@@ -144,6 +144,14 @@ class OpeningStockpileInventories:
                 )
                 GROUP BY 
                     SOURCEHEX
+            ),
+            hex_coordinates AS (
+                SELECT DISTINCT 
+                    SOURCEHEX, 
+                    SOURCEHEXEASTING, 
+                    SOURCEHEXNORTHING
+                FROM 
+                    AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT
             )
             SELECT 
                 fq.FOOTPRINT,
@@ -159,6 +167,8 @@ class OpeningStockpileInventories:
                 END AS FINAL_WMT,
                 fq.LONGITUDE,
                 fq.LATITUDE,
+                hc.SOURCEHEXEASTING,
+                hc.SOURCEHEXNORTHING,
                 CASE 
                     WHEN sq.SOURCEHEX IS NOT NULL THEN 'True'
                     ELSE 'False'
@@ -166,6 +176,7 @@ class OpeningStockpileInventories:
             FROM 
                 first_query fq
                 LEFT JOIN second_query sq ON fq.HEX = sq.SOURCEHEX
+                LEFT JOIN hex_coordinates hc ON fq.HEX = hc.SOURCEHEX
             ORDER BY 
                 fq.HEX;
         """
@@ -270,6 +281,8 @@ class OpeningStockpileInventories:
             grade_mn REAL,
             lat REAL,
             long REAL,
+            northing REAL,
+            easting REAL,
             hex_updated TEXT
         )
         ''')
@@ -292,6 +305,8 @@ class OpeningStockpileInventories:
                     "grade_mn": row.get("MN", None),
                     "lat": row.get("LATITUDE", None),
                     "long": row.get("LONGITUDE", None),
+                    "northing": row.get("SOURCEHEXNORTHING", None),
+                    "easting": row.get("SOURCEHEXEASTING", None),
                     "hex_updated": row.get("HEX_UPDATED", None)
                 }
 
@@ -301,8 +316,8 @@ class OpeningStockpileInventories:
                     continue
 
                 cursor.execute('''
-                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, hex_updated)
-                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :hex_updated)
+                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, hex_updated)
+                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :hex_updated)
                 ''', mapped_row)
 
         # Commit and close the connection
