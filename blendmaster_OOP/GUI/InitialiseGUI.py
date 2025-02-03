@@ -193,13 +193,28 @@ class UserInputs(QMainWindow):
         self.tabs.addTab(self.site_config_tab, "Site Configuration")
         layout = QFormLayout(self.site_config_tab)
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
-        self.site_config_tab.setStyleSheet("""
-            #siteConfigTab {
-                background-image: url('C:/BlendMaster/blendmaster_OOP/resources/background.png');
+
+        # Get base directory (handles running as a script OR an EXE)
+        if getattr(sys, 'frozen', False):  # Running as a PyInstaller EXE
+            base_dir = sys._MEIPASS
+        else:  # Running as a normal Python script
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Remove "GUI" if it's part of the base directory
+        if "GUI" in base_dir:
+            base_dir = base_dir.split("GUI")[0]  # Get the part before "GUI"
+
+        # Construct path to the background image
+        background_path = os.path.join(base_dir, "resources", "background.png").replace("\\", "/")
+
+
+        self.site_config_tab.setStyleSheet(f"""
+            #siteConfigTab {{
+                background-image: url('{background_path}');
                 background-repeat: no-repeat;
                 background-position: center;
                 background-attachment: fixed;
-            }
+            }}
         """)
 
         # Dropdown lists for Hub and Mine

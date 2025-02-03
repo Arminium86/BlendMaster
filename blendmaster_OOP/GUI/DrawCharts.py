@@ -624,7 +624,7 @@ class DrawAMTStockpile:
                     ),
                     dcc.Upload(
                         id="upload-dxf",
-                        children=dbc.Button("Select DXF", color="secondary", size="md"),
+                        children=dbc.Button("Overlay arch_d", color="secondary", size="md"),
                         multiple=False,  # Allow only one file at a time
                         style={"marginBottom": "10px"}
                     )
