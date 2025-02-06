@@ -13,7 +13,7 @@ import ezdxf
 import base64
 import io
 import re
-
+from collections import defaultdict
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -578,12 +578,13 @@ class DrawAMTStockpile:
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = hex_sequence_table
-        self.sequence_counter = {}
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
         self.unique_footprints = self.data['footprint'].unique()
         self.refresh_call = False
-        self.hex_sequence_table = hex_sequence_table
+        self.clean_up_hex_sequence_table()
+        self.sequence_counter = {}
+        self.update_sequence_counter()
         self.init_layout()
 
         # Add a Flask route for manual refresh
@@ -595,8 +596,33 @@ class DrawAMTStockpile:
             self.unique_footprints = self.data['footprint'].unique()
     
             self.refresh_call = True
+            self.clean_up_hex_sequence_table()
+            self.update_sequence_counter()
             self.init_layout()
 
+    def clean_up_hex_sequence_table(self):
+        """Removes all string entries from self.selected_points."""
+        self.selected_points = [entry for entry in self.selected_points if not isinstance(entry, str)]
+
+    def update_sequence_counter(self):
+        """
+        Populates self.sequence_counter with the highest sequence number for each unique footprint.
+        """
+        sequence_map = {}
+
+        for entry in self.selected_points:
+            if isinstance(entry, dict) and 'footprint' in entry and 'sequence' in entry:
+                footprint = entry['footprint']
+                sequence = entry['sequence']
+                
+                if isinstance(sequence, int):  # Ensure sequence is an integer
+                    if footprint not in sequence_map or sequence > sequence_map[footprint]:
+                        sequence_map[footprint] = sequence
+
+        self.sequence_counter = sequence_map
+
+        self.sequence_counter = {key: value + 1 for key, value in self.sequence_counter.items()}            
+    
     def fetch_data(self):
         try:
             conn = sqlite3.connect(self.db_path)
@@ -681,7 +707,7 @@ class DrawAMTStockpile:
                         columns=[{"name": col, "id": col} for col in
                                 ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
                                 'grade_mn']],
-                        data=self.hex_sequence_table or [],
+                        data=self.selected_points or [],
                         row_deletable=True,
                         editable=False,
                         style_table={'overflowX': 'auto'},
@@ -707,7 +733,7 @@ class DrawAMTStockpile:
 
         @self.app.callback(
             [Output("selected-table", "data"),
-            Output("scatter-plot", "figure")],  # Single callback handling both
+            Output("scatter-plot", "figure")], 
             [Input("scatter-plot", "clickData"),
             Input("footprint-dropdown", "value"),
             Input("reset-button", "n_clicks"),
@@ -724,6 +750,7 @@ class DrawAMTStockpile:
             # Reset table and scatter plot
             if triggered == "reset-button":
                 self.selected_points = []
+                self.sequence_counter = {key: 1 for key, value in self.sequence_counter.items()}
                 return [], self.generate_scatter_plot(selected_footprint, None, current_fig, hex_size)  # Pass hex_size
 
             if not selected_footprint:
@@ -743,6 +770,13 @@ class DrawAMTStockpile:
                         # Unselect point
                         self.selected_points.remove(clicked_hex)
                         table_data = [row for row in table_data if row["hex"] != clicked_hex]
+                        table_data = self.resequence_table_data(table_data)
+                    
+                    elif any(clicked_hex in d.values() for d in self.selected_points if isinstance(d, dict)):
+                        self.selected_points = [d for d in self.selected_points if not (isinstance(d, dict) and clicked_hex in d.values())]
+                        table_data = [row for row in table_data if row["hex"] != clicked_hex]
+                        table_data = self.resequence_table_data(table_data)
+
                     else:
                         # Select point
                         self.selected_points.append(clicked_hex)
@@ -760,6 +794,7 @@ class DrawAMTStockpile:
                         }
                         table_data.append(new_row)
                         self.sequence_counter[selected_footprint] = sequence + 1
+                        table_data = self.resequence_table_data(table_data)
 
             # Handle DXF or ARCHD file upload and overlay lines
             if triggered == "upload-dxf" and dxf_contents:
@@ -978,6 +1013,25 @@ class DrawAMTStockpile:
 
         return fig
 
+    def resequence_table_data(self, table_data):
+        """
+        Resequences the 'sequence' values in table_data for each unique 'footprint', starting from 1.
+        """
+        # Group entries by footprint
+        grouped_data = defaultdict(list)
+        
+        for entry in table_data:
+            if isinstance(entry, dict) and 'footprint' in entry and 'sequence' in entry:
+                grouped_data[entry['footprint']].append(entry)
+        
+        # Sort and resequence each footprint group
+        for footprint, entries in grouped_data.items():
+            entries.sort(key=lambda x: x['sequence'])  # Sort by original sequence
+            for idx, entry in enumerate(entries, start=1):
+                entry['sequence'] = idx  # Assign new sequence starting from 1
+
+        return table_data  # Updated in place
+    
     def run_app(self):
         self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
