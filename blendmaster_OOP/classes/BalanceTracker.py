@@ -1,5 +1,6 @@
 # This tracks source balances and the program runs and provides input to the EventPool for the update functionality
 import pandas as pd
+import copy
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from typing import List
@@ -14,8 +15,9 @@ class BalanceTracker:
         self.grade_p = {item.name: item.grade_p for item in stockpiles + grade_blocks}
         self.grade_mn = {item.name: item.grade_mn for item in stockpiles + grade_blocks}
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
+        self.balance_copy = self.balance.copy()
         self.build_report = [] # Store transactions that meet the condition
-        self.hex_sequence_table = hex_sequence_table
+        self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
         self.total_AMT_stockpile_balances = {}
         self.populate_total_AMT_stockpile_balances()
         
@@ -31,9 +33,9 @@ class BalanceTracker:
 
                 self.process_hex_sequence(name, transaction["source_actual_tonnes"])
             
-            if not self.is_amt.get(name, False) and self.balance[name] != 0:
+            if not self.is_amt.get(name, False) and self.balance_copy[name] != 0:
 
-                self.balance[name] -= transaction["source_actual_tonnes"]
+                self.balance_copy[name] -= transaction["source_actual_tonnes"]
        
         if not expit_payload_transactions.empty:
 
@@ -53,7 +55,7 @@ class BalanceTracker:
                 if steady_state_start_time <= delivered_datetime < steady_state_end_time:
                     if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
                         # Perform weighted averaging for each grade
-                        current_balance = self.balance[name]
+                        current_balance = self.balance_copy[name]
                         updated_balance = current_balance + payload
                         
                         self.grade_fe[name] = (
@@ -78,7 +80,7 @@ class BalanceTracker:
                         )
                         
                         # Update the balance
-                        self.balance[name] = updated_balance
+                        self.balance_copy[name] = updated_balance
                         
                         # Add the used transaction to the tracked list
                         self.build_report.append({
@@ -112,7 +114,7 @@ class BalanceTracker:
     
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""
-        return self.balance.get(name, 0), self.grade_fe.get(name, 0), self.grade_si.get(name, 0), self.grade_al.get(name, 0), self.grade_mn.get(name, 0), self.grade_p.get(name, 0)
+        return self.balance_copy.get(name, 0), self.grade_fe.get(name, 0), self.grade_si.get(name, 0), self.grade_al.get(name, 0), self.grade_mn.get(name, 0), self.grade_p.get(name, 0)
     
     def process_hex_sequence(self, name, reclaimed_tonnes):
         # Filter the hex sequence table for entries matching the stockpile name
@@ -135,7 +137,7 @@ class BalanceTracker:
                 
                 # If the current hex is not fully depleted
                 if current_hex['balance'] > 0:
-                    self.balance[name] = current_hex['balance']
+                    self.balance_copy[name] = current_hex['balance']
                     # Update grades with the current hex
                     for key, value in current_hex.items():
                         if key.startswith('grade_'):
@@ -151,7 +153,7 @@ class BalanceTracker:
                     )
                     # Update with the balance and grades of the next hex (if available)
                     if next_hex:
-                        self.balance[name] = next_hex['balance']
+                        self.balance_copy[name] = next_hex['balance']
                         # Update grades with the next hex
                         for key, value in next_hex.items():
                             if key.startswith('grade_'):
@@ -160,7 +162,7 @@ class BalanceTracker:
                                 else:
                                     print(f"Warning: {key} is not a dictionary, skipping update")
                     else:
-                        self.balance[name] = 0  # No further hexes with positive balance
+                        self.balance_copy[name] = 0  # No further hexes with positive balance
                 
                 return  # Exit after processing the reclaimed tonnes
             
@@ -172,7 +174,7 @@ class BalanceTracker:
         
         # If all hexes are depleted, set the stockpile balance to 0
         if total_balance_sum == 0:
-            self.balance[name] = 0
+            self.balance_copy[name] = 0
 
     def return_total_AMT_stockpile_balances(self):
         return self.total_AMT_stockpile_balances

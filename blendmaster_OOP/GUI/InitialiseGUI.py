@@ -2766,7 +2766,6 @@ class CustomWebEngineView(QWebEngineView):
             # Cancel the download if no path is chosen
             download_item.cancel()
 
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
