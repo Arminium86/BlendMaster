@@ -352,4 +352,14 @@ class OpeningStockpileInventories:
         except snowflake.connector.errors.Error as e:
             print(f"Error connecting to Snowflake: {e}")
             return None
-
+   
+    def clear_AMT_stockpile_database(self):
+        # SQLite connection
+        database_name = 'blendmaster.db'
+        conn = sqlite3.connect(database_name)
+        cursor = conn.cursor()
+        # Clear the table
+        cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
+        # Commit and close the connection
+        conn.commit()
+        conn.close()

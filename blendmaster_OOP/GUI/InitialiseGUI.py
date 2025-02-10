@@ -700,12 +700,15 @@ class UserInputs(QMainWindow):
             for key, value in self.updated_stockpile_data.items()
         }
 
-        # Enable the next tab (Calendar Tab)
-        self.setup_calendar()
-        self.setup_AMT_stockpile_table()
-        self.tabs.setTabEnabled(2, True)
-        self.tabs.setCurrentIndex(2)  # Switch to AMT tab
-    
+        if self.updated_stockpile_data:
+            # Enable the next tab (Calendar Tab)
+            self.setup_calendar()
+            self.setup_AMT_stockpile_table()
+            self.tabs.setTabEnabled(2, True)
+            self.tabs.setCurrentIndex(2)  # Switch to AMT tab
+        else:
+            QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
+
     def setup_AMT_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
         
@@ -796,9 +799,9 @@ class UserInputs(QMainWindow):
         if any(self.stockpile_data_AMT_column.values()):
             QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
             self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds)
-        
         else:    
             QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
+            self.opening_stockpile_inventories.clear_AMT_stockpile_database()
 
     def store_hex_sequence_table(self):
 
@@ -941,66 +944,62 @@ class UserInputs(QMainWindow):
 
     def load_calendar_inputs(self):
             
-            if self.is_project_loaded or not self.submit_calendar_first_call:
-                
-                self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", list(self.calendar_inputs["reclaim_equipment_max_reclaim_rate"].values()))
-                self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", list(self.calendar_inputs["crusher_rate"].values()))
-                self.calendar_rows[6]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_min"].values()))
-                self.calendar_rows[7]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_max"].values()))
-                self.calendar_rows[9]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_min"].values()))
-                self.calendar_rows[10]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_max"].values()))
-                self.calendar_rows[12]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_min"].values()))
-                self.calendar_rows[13]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_max"].values()))
-                self.calendar_rows[15]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_min"].values()))
-                self.calendar_rows[16]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_max"].values()))
-                self.calendar_rows[18]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_min"].values()))
-                self.calendar_rows[19]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_max"].values()))
+        if self.is_project_loaded or not self.submit_calendar_first_call:
+            
+            self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", list(self.calendar_inputs["reclaim_equipment_max_reclaim_rate"].values()))
+            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", list(self.calendar_inputs["crusher_rate"].values()))
+            self.calendar_rows[6]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_min"].values()))
+            self.calendar_rows[7]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_max"].values()))
+            self.calendar_rows[9]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_min"].values()))
+            self.calendar_rows[10]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_max"].values()))
+            self.calendar_rows[12]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_min"].values()))
+            self.calendar_rows[13]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_max"].values()))
+            self.calendar_rows[15]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_min"].values()))
+            self.calendar_rows[16]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_max"].values()))
+            self.calendar_rows[18]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_min"].values()))
+            self.calendar_rows[19]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_max"].values()))
 
-                
-                start_index = 21
-                calendar_index = start_index  # Start populating calendar_rows at index 21
+            
+            start_index = 21
+            calendar_index = start_index  # Start populating calendar_rows at index 21
 
-                for stockpile in self.updated_stockpile_data_keys:
-                    # Populate the rows using calendar_index
-                    self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
-                        f"  {stockpile}", [False, False, False], "red", ["", "", ""]
+            for stockpile in self.updated_stockpile_data_keys:
+                # Populate the rows using calendar_index
+                self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
+                    f"  {stockpile}", [False, False, False], "red", ["", "", ""]
+                )
+                try:
+                    self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
+                        f"    State", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
                     )
-                    try:
-                        self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
-                            f"    State", [True, True, True], "red",
-                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
-                        )
-                        self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
-                            f"    Maximum Quantity", [True, True, True], "red",
-                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
-                        )
-                        self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
-                            f"    Cost", [True, True, True], "red",
-                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
-                        )
-                        self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
-                            f"    Cash", [True, True, True], "red",
-                            list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
-                        )
+                    self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
+                        f"    Maximum Quantity", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
+                    )
+                    self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
+                        f"    Cost", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
+                    )
+                    self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
+                        f"    Cash", [True, True, True], "red",
+                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
+                    )
 
-                        # Increment calendar_index by 5 for the next stockpile
-                        calendar_index += 5
+                    # Increment calendar_index by 5 for the next stockpile
+                    calendar_index += 5
 
-                        self.populate_calendar()
+                except: 
 
-                    except: 
+                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
+                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
+                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
+                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
+                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
 
-                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
-                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
-                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
-                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
-                        self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
-
-                        self.populate_calendar()
-
-                        self.store_calendar_inputs_no_run
-
-                        QMessageBox.information(self, "BlendMaster", f"{stockpile} added to calendar")
+                    QMessageBox.information(self, "BlendMaster", f"{stockpile} added to calendar")
+                    
+            self.store_calendar_inputs_no_run()
 
     def store_calendar_inputs_no_run(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -1050,14 +1049,14 @@ class UserInputs(QMainWindow):
 
         # Modify types
         self.calendar_inputs = {
-    outer_key: {
-        inner_key: (
-            float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
-        )
-        for inner_key, inner_value in outer_value.items()
-    }
-    for outer_key, outer_value in self.calendar_inputs.items()
-}
+            outer_key: {
+                inner_key: (
+                    float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+                )
+                for inner_key, inner_value in outer_value.items()
+            }
+            for outer_key, outer_value in self.calendar_inputs.items()
+        }
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
