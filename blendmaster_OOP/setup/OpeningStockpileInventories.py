@@ -68,21 +68,21 @@ class OpeningStockpileInventories:
             conn.close()
 
     def call_opening_AMT_stockpile_inventories(self, build):
-        # Call the function to connect (service account) (No AMT access - needs a BAZ request)
-        # conn = self.connect_snowflake_with_service_account()
+        # Call the function to connect
+        conn = self.connect_snowflake_with_service_account()
 
         # Personal account Snowflake connection (has AMT access)
-        conn = snowflake.connector.connect(
-            user='armin.sabet@fortescue.com',
-            account='wn74261.ap-southeast-2',
-            warehouse='WH_EDW_SELFSERVICE',
-            database='AA_OPERATIONS_MANAGEMENT',
-            authenticator='externalbrowser',
-            role='EDW_ARMIN.SABET',
-            login_timeout=60,  # Increase login timeout
-            network_timeout=300  # Increase network timeout
-        )
-        
+        # conn = snowflake.connector.connect(
+        #     user='armin.sabet@fortescue.com',
+        #     account='wn74261.ap-southeast-2',
+        #     warehouse='WH_EDW_SELFSERVICE',
+        #     database='AA_OPERATIONS_MANAGEMENT',
+        #     authenticator='externalbrowser',
+        #     role='EDW_ARMIN.SABET',
+        #     login_timeout=60,  # Increase login timeout
+        #     network_timeout=300  # Increase network timeout
+        # )
+
         # Dynamically generate the filters for each query
         if isinstance(build, list):  # If build is a list
             location_filter = " OR ".join([f"CONTAINS(LOCATION_NAME, '{b}')" for b in build])
