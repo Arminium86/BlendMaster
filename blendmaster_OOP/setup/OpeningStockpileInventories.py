@@ -358,8 +358,28 @@ class OpeningStockpileInventories:
         database_name = 'blendmaster.db'
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS opening_AMT_stockpile_inventories (
+            footprint TEXT,
+            hex TEXT,    
+            balance REAL,
+            grade_fe REAL,
+            grade_si REAL,
+            grade_al REAL,
+            grade_p REAL,
+            grade_mn REAL,
+            lat REAL,
+            long REAL,
+            northing REAL,
+            easting REAL,
+            hex_updated TEXT
+        )
+        ''')
+
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
         # Commit and close the connection
         conn.commit()
         conn.close()
+        
