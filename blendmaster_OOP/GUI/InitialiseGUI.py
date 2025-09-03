@@ -61,6 +61,21 @@ class UserInputs(QMainWindow):
         self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
 
+        # Stockpile count inputs
+        stockpile_limit_layout = QHBoxLayout()
+        self.min_stockpiles_input = QLineEdit()
+        self.min_stockpiles_input.setPlaceholderText("Min Stockpiles")
+        self.min_stockpiles_input.setFixedWidth(100)
+        self.max_stockpiles_input = QLineEdit()
+        self.max_stockpiles_input.setPlaceholderText("Max Stockpiles")
+        self.max_stockpiles_input.setFixedWidth(100)
+        stockpile_limit_layout.addWidget(QLabel("Min Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.min_stockpiles_input)
+        stockpile_limit_layout.addWidget(QLabel("Max Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.max_stockpiles_input)
+        stockpile_limit_layout.addStretch()
+        self.main_tab_layout.addLayout(stockpile_limit_layout)
+
         # Calendar table
         self.main_table = CustomTableWidget()
         self.main_tab_layout.addWidget(self.main_table)
@@ -943,7 +958,14 @@ class UserInputs(QMainWindow):
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
     def load_calendar_inputs(self):
-            
+        if self.calendar_inputs:
+            if self.calendar_inputs.get("min_stockpiles") is not None:
+                self.min_stockpiles = self.calendar_inputs["min_stockpiles"]
+                self.min_stockpiles_input.setText(str(self.min_stockpiles))
+            if self.calendar_inputs.get("max_stockpiles") is not None:
+                self.max_stockpiles = self.calendar_inputs["max_stockpiles"]
+                self.max_stockpiles_input.setText(str(self.max_stockpiles))
+
         if self.is_project_loaded or not self.submit_calendar_first_call:
             
             self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", list(self.calendar_inputs["reclaim_equipment_max_reclaim_rate"].values()))
@@ -1058,6 +1080,20 @@ class UserInputs(QMainWindow):
             for outer_key, outer_value in self.calendar_inputs.items()
         }
 
+        # Store stockpile limits
+        min_text = self.min_stockpiles_input.text().strip()
+        max_text = self.max_stockpiles_input.text().strip()
+        try:
+            self.min_stockpiles = int(min_text) if min_text else None
+        except ValueError:
+            self.min_stockpiles = None
+        try:
+            self.max_stockpiles = int(max_text) if max_text else None
+        except ValueError:
+            self.max_stockpiles = None
+        self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
+        self.calendar_inputs["max_stockpiles"] = self.max_stockpiles
+
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
 
@@ -1114,7 +1150,21 @@ class UserInputs(QMainWindow):
     }
     for outer_key, outer_value in self.calendar_inputs.items()
 }
-                
+
+        # Store stockpile limits
+        min_text = self.min_stockpiles_input.text().strip()
+        max_text = self.max_stockpiles_input.text().strip()
+        try:
+            self.min_stockpiles = int(min_text) if min_text else None
+        except ValueError:
+            self.min_stockpiles = None
+        try:
+            self.max_stockpiles = int(max_text) if max_text else None
+        except ValueError:
+            self.max_stockpiles = None
+        self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
+        self.calendar_inputs["max_stockpiles"] = self.max_stockpiles
+
         # Initialise the shared object
         status = {'success': False}
 
@@ -1143,7 +1193,9 @@ class UserInputs(QMainWindow):
                 self.blend_mode_choice,
                 self.updated_stockpile_data,
                 self.calendar_inputs,
-                self.hex_sequence_table_argument
+                self.hex_sequence_table_argument,
+                self.min_stockpiles,
+                self.max_stockpiles
             )
             # if not stop_event.is_set():  # If not stopped, mark as success
             status['success'] = True
@@ -2723,6 +2775,8 @@ class UserInputs(QMainWindow):
         self.crusher_rate_input_value = None
         self.hex_sequence_table = []
         self.stockpile_data_AMT_column = {}
+        self.min_stockpiles = None
+        self.max_stockpiles = None
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

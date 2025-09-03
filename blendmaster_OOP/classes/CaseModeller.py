@@ -10,10 +10,22 @@ from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
 from datetime import timedelta
-from typing import List
+from typing import List, Optional
 
 class CaseModeller:
-    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], equipment: List[EquipmentData], crusher_targets, expit_payload_transactions, periods: PeriodManager , user_interaction_mode, hex_sequence_table):
+    def __init__(
+        self,
+        stockpiles: List[StockpileData],
+        grade_blocks: List[GradeBlockData],
+        equipment: List[EquipmentData],
+        crusher_targets,
+        expit_payload_transactions,
+        periods: PeriodManager,
+        user_interaction_mode,
+        hex_sequence_table,
+        min_stockpiles: Optional[int] = None,
+        max_stockpiles: Optional[int] = None,
+    ):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -38,6 +50,8 @@ class CaseModeller:
         self.user_interaction_mode = user_interaction_mode
         self.database_manager = DatabaseManager()
         self.total_AMT_stockpile_balances = self.balance_tracker.return_total_AMT_stockpile_balances()
+        self.min_stockpiles = min_stockpiles
+        self.max_stockpiles = max_stockpiles
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -64,7 +78,17 @@ class CaseModeller:
         while events:
             events_len = len(events)
             # Run optimization with dynamic steady states
-            result = self.optimizer.run_with_dynamic_steady_state(events, period_crusher_target, self.calculate_initial_steady_state_duration(), self.periods, self.period_tracker, self.current_time, self.stockpiles)
+            result = self.optimizer.run_with_dynamic_steady_state(
+                events,
+                period_crusher_target,
+                self.calculate_initial_steady_state_duration(),
+                self.periods,
+                self.period_tracker,
+                self.current_time,
+                self.stockpiles,
+                self.min_stockpiles,
+                self.max_stockpiles,
+            )
 
             if not result['Linprog_result_object'].success:
                 store_blend_option = self.blend_option

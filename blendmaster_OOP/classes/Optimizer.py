@@ -1,31 +1,96 @@
-# This is the main optimization engine and logic
-from scipy.optimize import linprog
-import numpy as np
+"""Optimization engine for building blends.
+
+This module previously relied on ``scipy.optimize.linprog`` which only
+supported continuous variables.  In order to allow the user to restrict the
+number of stockpiles that can be used in a blend we now require binary
+decision variables.  The solver has therefore been migrated to `PuLP` which
+provides a mixed integer programming interface.
+
+The core linear logic remains the same, but additional binary variables are
+introduced for each stockpile so that we can constrain the total number of
+stockpiles selected in a blend.  The user can provide optional
+``min_stockpiles`` and ``max_stockpiles`` values which are then enforced by the
+optimizer.
+"""
+
 from datetime import timedelta
-from typing import List
+from typing import List, Optional
+from types import SimpleNamespace
+
+from pulp import (
+    LpBinary,
+    LpMinimize,
+    LpProblem,
+    LpStatus,
+    LpVariable,
+    PULP_CBC_CMD,
+    lpSum,
+)
+
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 
 class Optimizer:
 
-    def run_with_dynamic_steady_state(self, event_pool: List[EventData], period_crusher_target, steady_state_duration, periods, period_tracker, current_time, stockpile_data: List[StockpileData]):
+    def run_with_dynamic_steady_state(
+        self,
+        event_pool: List[EventData],
+        period_crusher_target,
+        steady_state_duration,
+        periods,
+        period_tracker,
+        current_time,
+        stockpile_data: List[StockpileData],
+        min_stockpiles: Optional[int] = None,
+        max_stockpiles: Optional[int] = None,
+    ):
         """Runs blending optimization and adjusts steady state if needed."""
         
         steady_state_controller_source = None
         steady_state_controller_tonnes = None
 
-        result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
+        result = self.run_blending_optimization(
+            event_pool,
+            period_crusher_target,
+            steady_state_duration,
+            steady_state_controller_source,
+            steady_state_controller_tonnes,
+            periods,
+            period_tracker,
+            min_stockpiles,
+            max_stockpiles,
+        )
         
         if result['Linprog_result_object'].success: 
             steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data, period_tracker)
-            result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
+            result = self.run_blending_optimization(
+                event_pool,
+                period_crusher_target,
+                steady_state_duration,
+                steady_state_controller_source,
+                steady_state_controller_tonnes,
+                periods,
+                period_tracker,
+                min_stockpiles,
+                max_stockpiles,
+            )
 
             if result['Linprog_result_object'].success: 
                 return result
             
             elif not result['Linprog_result_object'].success: 
                 steady_state_controller_source, steady_state_controller_tonnes = None, None
-                result = self.run_blending_optimization(event_pool, period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker)
+                result = self.run_blending_optimization(
+                    event_pool,
+                    period_crusher_target,
+                    steady_state_duration,
+                    steady_state_controller_source,
+                    steady_state_controller_tonnes,
+                    periods,
+                    period_tracker,
+                    min_stockpiles,
+                    max_stockpiles,
+                )
 
                 if result['Linprog_result_object'].success: 
                     return result
@@ -84,9 +149,20 @@ class Optimizer:
         else: return updated_duration_auto_turnover, "Null", "Null"
     
     @staticmethod
-    def run_blending_optimization(event_pool: List[EventData], period_crusher_target, steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes, periods, period_tracker):
-        """Core linear optimization logic."""
-        dmc = -100  # Default movement cash flow in $/tonne (negative value for linprog to minimize)
+    def run_blending_optimization(
+        event_pool: List[EventData],
+        period_crusher_target,
+        steady_state_duration,
+        steady_state_controller_source,
+        steady_state_controller_tonnes,
+        periods,
+        period_tracker,
+        min_stockpiles: Optional[int] = None,
+        max_stockpiles: Optional[int] = None,
+    ):
+        """Core optimisation logic using a mixed integer solver."""
+
+        dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
 
         # Step 1: Define bounds (how many tonnes each event contributes)
         bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
@@ -222,102 +298,141 @@ class Optimizer:
             # Create the corresponding entry for b_ub for this event
             b_ub_max_quantity.append(event.max_quantity / periods.get_periods()[f"{period_tracker}_duration"])
 
-        # Step 6: Run the optimization
-        
-        if A_eq == None and b_eq == None:
-            result = linprog(c,
-                            A_ub=A_ub
-                            + A_ub_min_feed_ratio
-                            + A_ub_max_feed_ratio
-                            + A_ub_min_crusher_grade_fe 
-                            + A_ub_max_crusher_grade_fe
-                            + A_ub_min_crusher_grade_si 
-                            + A_ub_max_crusher_grade_si
-                            + A_ub_min_crusher_grade_al 
-                            + A_ub_max_crusher_grade_al
-                            + A_ub_min_crusher_grade_p 
-                            + A_ub_max_crusher_grade_p
-                            + A_ub_min_crusher_grade_mn 
-                            + A_ub_max_crusher_grade_mn
-                            + A_ub_max_quantity,
-                            b_ub=b_ub
-                            + b_ub_min_feed_ratio
-                            + b_ub_max_feed_ratio
-                            + b_ub_min_crusher_grade_fe 
-                            + b_ub_max_crusher_grade_fe
-                            + b_ub_min_crusher_grade_si
-                            + b_ub_max_crusher_grade_si
-                            + b_ub_min_crusher_grade_al 
-                            + b_ub_max_crusher_grade_al
-                            + b_ub_min_crusher_grade_p 
-                            + b_ub_max_crusher_grade_p
-                            + b_ub_min_crusher_grade_mn 
-                            + b_ub_max_crusher_grade_mn
-                            + b_ub_max_quantity, 
-                            bounds=bounds, method='highs')
-        
-        else:
-            result = linprog(c,
-                        A_eq=A_eq, 
-                        b_eq=b_eq,  
-                        A_ub=A_ub
-                        + A_ub_min_feed_ratio
-                        + A_ub_max_feed_ratio
-                        + A_ub_min_crusher_grade_fe 
-                        + A_ub_max_crusher_grade_fe
-                        + A_ub_min_crusher_grade_si 
-                        + A_ub_max_crusher_grade_si
-                        + A_ub_min_crusher_grade_al 
-                        + A_ub_max_crusher_grade_al
-                        + A_ub_min_crusher_grade_p 
-                        + A_ub_max_crusher_grade_p
-                        + A_ub_min_crusher_grade_mn 
-                        + A_ub_max_crusher_grade_mn
-                        + A_ub_max_quantity,  
-                        b_ub=b_ub
-                        + b_ub_min_feed_ratio
-                        + b_ub_max_feed_ratio
-                        + b_ub_min_crusher_grade_fe 
-                        + b_ub_max_crusher_grade_fe
-                        + b_ub_min_crusher_grade_si
-                        + b_ub_max_crusher_grade_si
-                        + b_ub_min_crusher_grade_al 
-                        + b_ub_max_crusher_grade_al
-                        + b_ub_min_crusher_grade_p 
-                        + b_ub_max_crusher_grade_p
-                        + b_ub_min_crusher_grade_mn 
-                        + b_ub_max_crusher_grade_mn
-                        + b_ub_max_quantity, 
-                        bounds=bounds, method='highs')
+        # Step 6: Run the optimization using PuLP
+
+        # Combine all inequality constraints and bounds
+        A_ub_total = (
+            A_ub
+            + A_ub_min_feed_ratio
+            + A_ub_max_feed_ratio
+            + A_ub_min_crusher_grade_fe
+            + A_ub_max_crusher_grade_fe
+            + A_ub_min_crusher_grade_si
+            + A_ub_max_crusher_grade_si
+            + A_ub_min_crusher_grade_al
+            + A_ub_max_crusher_grade_al
+            + A_ub_min_crusher_grade_p
+            + A_ub_max_crusher_grade_p
+            + A_ub_min_crusher_grade_mn
+            + A_ub_max_crusher_grade_mn
+            + A_ub_max_quantity
+        )
+
+        b_ub_total = (
+            b_ub
+            + b_ub_min_feed_ratio
+            + b_ub_max_feed_ratio
+            + b_ub_min_crusher_grade_fe
+            + b_ub_max_crusher_grade_fe
+            + b_ub_min_crusher_grade_si
+            + b_ub_max_crusher_grade_si
+            + b_ub_min_crusher_grade_al
+            + b_ub_max_crusher_grade_al
+            + b_ub_min_crusher_grade_p
+            + b_ub_max_crusher_grade_p
+            + b_ub_min_crusher_grade_mn
+            + b_ub_max_crusher_grade_mn
+            + b_ub_max_quantity
+        )
+
+        prob = LpProblem("blending", LpMinimize)
+        x_vars = [
+            LpVariable(f"x_{i}", lowBound=0, upBound=bounds[i][1])
+            for i in range(len(event_pool))
+        ]
+
+        # Objective function
+        prob += lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
+
+        # Inequality constraints
+        for row, rhs in zip(A_ub_total, b_ub_total):
+            prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) <= rhs
+
+        # Equality constraints if applicable
+        if A_eq is not None and b_eq is not None:
+            for row, rhs in zip(A_eq, b_eq):
+                prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) == rhs
+
+        # Binary variables to control the number of stockpiles selected
+        if stockpile_indices and (min_stockpiles is not None or max_stockpiles is not None):
+            y_vars = {}
+            for i in stockpile_indices:
+                y_var = LpVariable(f"y_{i}", cat=LpBinary)
+                y_vars[i] = y_var
+                prob += x_vars[i] <= bounds[i][1] * y_var
+
+            if min_stockpiles is not None:
+                prob += lpSum(y_vars[i] for i in stockpile_indices) >= min_stockpiles
+            if max_stockpiles is not None:
+                prob += lpSum(y_vars[i] for i in stockpile_indices) <= max_stockpiles
+
+        # Solve the problem
+        prob.solve(PULP_CBC_CMD(msg=False))
+
+        success = LpStatus[prob.status] == "Optimal"
+        result = SimpleNamespace(success=success, x=[var.value() for var in x_vars])
 
         if result.success:
-            
+
             transactions = []
             for i, event in enumerate(event_pool):
-                if result.x[i] >= 0:  # Check if the event has happened
-                    transactions.append({
-                    "source": event.to_dict().get('stockpile', event.to_dict().get('grade_block')),
-                    "opening_balance": event.balance,
-                    "actual_tonnes": result.x[i],
-                    "grade_fe": event.grade_fe,
-                    "grade_si": event.grade_si,
-                    "grade_al": event.grade_al,
-                    "grade_p": event.grade_p,
-                    "grade_mn": event.grade_mn,
-                    "equipment": event.equipment,
-                    "equipment_rate_input": event.rate,
-                    "equipment_rate_output": result.x[i] / steady_state_duration if steady_state_duration != 0 else 0,
-                })
+                if result.x[i] >= 0:
+                    transactions.append(
+                        {
+                            "source": event.to_dict().get(
+                                "stockpile", event.to_dict().get("grade_block")
+                            ),
+                            "opening_balance": event.balance,
+                            "actual_tonnes": result.x[i],
+                            "grade_fe": event.grade_fe,
+                            "grade_si": event.grade_si,
+                            "grade_al": event.grade_al,
+                            "grade_p": event.grade_p,
+                            "grade_mn": event.grade_mn,
+                            "equipment": event.equipment,
+                            "equipment_rate_input": event.rate,
+                            "equipment_rate_output": result.x[i]
+                            / steady_state_duration
+                            if steady_state_duration != 0
+                            else 0,
+                        }
+                    )
 
             return {
                 "Linprog_result_object": result,
                 "transactions": transactions,
-                "steady_state_duration": steady_state_duration, 
-                "crusher_actual_grade_fe" : sum(event.grade_fe * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_si" : sum(event.grade_si * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_al" : sum(event.grade_al * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_p" : sum(event.grade_p * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
-                "crusher_actual_grade_mn" : sum(event.grade_mn * result.x[i] for i, event in enumerate(event_pool)) / sum(result.x) if sum(result.x) != 0 else "",
+                "steady_state_duration": steady_state_duration,
+                "crusher_actual_grade_fe": sum(
+                    event.grade_fe * result.x[i] for i, event in enumerate(event_pool)
+                )
+                / sum(result.x)
+                if sum(result.x) != 0
+                else "",
+                "crusher_actual_grade_si": sum(
+                    event.grade_si * result.x[i] for i, event in enumerate(event_pool)
+                )
+                / sum(result.x)
+                if sum(result.x) != 0
+                else "",
+                "crusher_actual_grade_al": sum(
+                    event.grade_al * result.x[i] for i, event in enumerate(event_pool)
+                )
+                / sum(result.x)
+                if sum(result.x) != 0
+                else "",
+                "crusher_actual_grade_p": sum(
+                    event.grade_p * result.x[i] for i, event in enumerate(event_pool)
+                )
+                / sum(result.x)
+                if sum(result.x) != 0
+                else "",
+                "crusher_actual_grade_mn": sum(
+                    event.grade_mn * result.x[i]
+                    for i, event in enumerate(event_pool)
+                )
+                / sum(result.x)
+                if sum(result.x) != 0
+                else "",
                 "crusher_grade_target_min_fe": period_crusher_target["target_fe_min"],
                 "crusher_grade_target_max_fe": period_crusher_target["target_fe_max"],
                 "crusher_grade_target_min_si": period_crusher_target["target_si_min"],
@@ -329,11 +444,14 @@ class Optimizer:
                 "crusher_grade_target_min_mn": period_crusher_target["target_mn_min"],
                 "crusher_grade_target_max_mn": period_crusher_target["target_mn_max"],
                 "crusher_rate_input": period_crusher_target["crusher_rate"],
-                "crusher_rate_output": sum(result.x) / steady_state_duration if steady_state_duration != 0 else 0,
-                "crusher_actual_tonnes": sum(result.x)
+                "crusher_rate_output": sum(result.x) / steady_state_duration
+                if steady_state_duration != 0
+                else 0,
+                "crusher_actual_tonnes": sum(result.x),
             }
 
         else:
-            return {"Linprog_result_object": result,
-                    "steady_state_duration": steady_state_duration
+            return {
+                "Linprog_result_object": result,
+                "steady_state_duration": steady_state_duration,
             }

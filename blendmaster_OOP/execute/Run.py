@@ -23,7 +23,7 @@ class Run:
         self.manual_case_modeller = None
         self.manual_blend_dash = None
     
-    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table):
+    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None):
 
         # Install required libraries
         #requirements = Requirements()
@@ -74,13 +74,15 @@ class Run:
         # Initialise and run CaseModeller
         self.case_modeller = CaseModeller(
             stockpiles=stockpile_data_objects,
-            grade_blocks=[], # Placeholder
+            grade_blocks=[],  # Placeholder
             equipment=equipment_data_objects,
             crusher_targets=crusher_target_data,
             expit_payload_transactions=expit_payload_transactions,
             periods=periods,
             user_interaction_mode=blend_mode,
-            hex_sequence_table = hex_sequence_table
+            hex_sequence_table=hex_sequence_table,
+            min_stockpiles=min_stockpiles,
+            max_stockpiles=max_stockpiles,
         )
 
         # Monkey-patch print and input
