@@ -133,6 +133,13 @@ class CaseModeller:
                 continue
 
         # Check if there is any decision point results
+        self.decision_point_results["source_actual_tonnes"] = (
+            pd.to_numeric(self.decision_point_results["source_actual_tonnes"], errors="coerce").fillna(0)
+        )
+        self.decision_point_results["crusher_actual_tonnes"] = (
+            pd.to_numeric(self.decision_point_results["crusher_actual_tonnes"], errors="coerce").fillna(0)
+        )
+
         if (self.decision_point_results["source_actual_tonnes"] > 0).any():
 
             # Manage user interaction
