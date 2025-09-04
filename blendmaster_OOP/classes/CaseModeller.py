@@ -55,16 +55,17 @@ class CaseModeller:
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
-        while self.current_time < self.periods.get_periods()["period_2_end"]:
-            # Run optimization and only advance time if successful
-            self.run_optimization_step()
-            self.steady_state_tracker += 1
+        try:
+            while self.current_time < self.periods.get_periods()["period_2_end"]:
+                # Run optimization and only advance time if successful
+                self.run_optimization_step()
+                self.steady_state_tracker += 1
+        finally:
+            # Save stockpile build report to database
+            self.save_build_report()
 
-        # Save stockpile build report to database
-        self.save_build_report()
-
-        # Save blend results to database
-        self.save_optimised_blend_report()
+            # Save blend results to database
+            self.save_optimised_blend_report()
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
