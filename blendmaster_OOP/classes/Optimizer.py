@@ -356,10 +356,12 @@ class Optimizer:
         # Binary variables to control the number of stockpiles selected
         if stockpile_indices and (min_stockpiles is not None or max_stockpiles is not None):
             y_vars = {}
+            EPS = 1  # tonnes or an appropriate small value matching model scale
             for i in stockpile_indices:
                 y_var = LpVariable(f"y_{i}", cat=LpBinary)
                 y_vars[i] = y_var
                 prob += x_vars[i] <= bounds[i][1] * y_var
+                prob += x_vars[i] >= EPS * y_var
 
             if min_stockpiles is not None:
                 prob += lpSum(y_vars[i] for i in stockpile_indices) >= min_stockpiles
