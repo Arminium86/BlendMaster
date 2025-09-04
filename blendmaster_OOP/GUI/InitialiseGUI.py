@@ -1582,7 +1582,10 @@ class UserInputs(QMainWindow):
             last_payload_item.setTextAlignment(Qt.AlignCenter)
 
             # Check if the stockpile is in the build report
-            stockpile_records = build_report_df[build_report_df["stockpile"] == stockpile_name]
+            if not build_report_df.empty and "stockpile" in build_report_df.columns:
+                stockpile_records = build_report_df[build_report_df["stockpile"] == stockpile_name]
+            else:
+                stockpile_records = pd.DataFrame()
             if not stockpile_records.empty:
                 latest_record = stockpile_records.sort_values("delivered_datetime", ascending=False).iloc[0]
                 projected_balance_item.setText(str(latest_record["closing_balance"]))
@@ -1929,8 +1932,14 @@ class UserInputs(QMainWindow):
         Fetch the build report from the database.
         """
         conn = sqlite3.connect("blendmaster.db")
-        df = pd.read_sql("SELECT * FROM build_report", conn)
-        conn.close()
+        try:
+            df = pd.read_sql("SELECT * FROM build_report", conn)
+        except sqlite3.OperationalError as e:
+            print(f"Warning: {e}")
+            QMessageBox.warning(self, "Database", "'build_report' table not found in database.")
+            df = pd.DataFrame()
+        finally:
+            conn.close()
         return df
     
     def format_blend_config_table(self):
