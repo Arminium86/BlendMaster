@@ -259,15 +259,15 @@ class Optimizer:
             b_ub_min_feed_ratio = [0] 
        
         elif direct_feed_ratio_min == 1:
-           
-            A_ub_min_feed_ratio = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]] 
-            b_ub_min_feed_ratio = [0] 
+
+            A_ub_min_feed_ratio = [[1 if i in stockpile_indices else 0 for i in range(len(event_pool))]]
+            b_ub_min_feed_ratio = [0]
 
         else:
-            stockpile_coef = direct_feed_ratio_max * 10
-            grade_block_coef = -10 + stockpile_coef
-            A_ub_min_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]] 
-            b_ub_min_feed_ratio = [0]   
+            stockpile_coef = direct_feed_ratio_min * 10
+            grade_block_coef = -10 * (1 - direct_feed_ratio_min)
+            A_ub_min_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]]
+            b_ub_min_feed_ratio = [0]
 
         # Step 5: Maximum quantities for each source
         # Generate a list of indicies for each unique source
