@@ -133,23 +133,27 @@ class CaseModeller:
                 continue
 
         # Check if there is any decision point results
-        self.decision_point_results["source_actual_tonnes"] = (
-            pd.to_numeric(self.decision_point_results["source_actual_tonnes"], errors="coerce").fillna(0)
-        )
-        self.decision_point_results["crusher_actual_tonnes"] = (
-            pd.to_numeric(self.decision_point_results["crusher_actual_tonnes"], errors="coerce").fillna(0)
-        )
+        if "source_actual_tonnes" in self.decision_point_results:
+            self.decision_point_results["source_actual_tonnes"] = (
+                pd.to_numeric(
+                    self.decision_point_results["source_actual_tonnes"],
+                    errors="coerce",
+                ).fillna(0)
+            )
+        if "crusher_actual_tonnes" in self.decision_point_results:
+            self.decision_point_results["crusher_actual_tonnes"] = (
+                pd.to_numeric(
+                    self.decision_point_results["crusher_actual_tonnes"],
+                    errors="coerce",
+                ).fillna(0)
+            )
 
-        if (self.decision_point_results["source_actual_tonnes"] > 0).any():
+        if (
+            "source_actual_tonnes" in self.decision_point_results
+            and (self.decision_point_results["source_actual_tonnes"] > 0).any()
+        ):
 
             # Manage user interaction
-            # Ensure numeric columns for comparison
-            self.decision_point_results["source_actual_tonnes"] = pd.to_numeric(
-                self.decision_point_results["source_actual_tonnes"], errors='coerce'
-            )
-            self.decision_point_results["crusher_actual_tonnes"] = pd.to_numeric(
-                self.decision_point_results["crusher_actual_tonnes"], errors='coerce'
-            )
             
             # Filter results to display
             self.decision_point_results_to_display = self.decision_point_results.loc[
@@ -406,23 +410,28 @@ class CaseModeller:
     def save_optimised_blend_report(self):
         """Save results to an Excel file."""
         # Ensure numeric columns for comparison
-        self.results["source_actual_tonnes"] = pd.to_numeric(
-            self.results["source_actual_tonnes"], errors='coerce'
-        )
-        self.results["crusher_actual_tonnes"] = pd.to_numeric(
-            self.results["crusher_actual_tonnes"], errors='coerce'
-        )
-       
-        self.results = self.results.loc[
-            (
-                (self.results["source_actual_tonnes"] != 0) & 
-                (self.results["crusher_actual_tonnes"] != 0)
-            ) | 
-            (
-                (self.results["source_actual_tonnes"] == 0) & 
-                (self.results["crusher_actual_tonnes"] == 0)
+        if (
+            "source_actual_tonnes" in self.results
+            and "crusher_actual_tonnes" in self.results
+        ):
+            self.results["source_actual_tonnes"] = pd.to_numeric(
+                self.results["source_actual_tonnes"], errors="coerce"
             )
-        ]
+            self.results["crusher_actual_tonnes"] = pd.to_numeric(
+                self.results["crusher_actual_tonnes"], errors="coerce"
+            )
+
+            self.results = self.results.loc[
+                (
+                    (self.results["source_actual_tonnes"] != 0)
+                    & (self.results["crusher_actual_tonnes"] != 0)
+                )
+                |
+                (
+                    (self.results["source_actual_tonnes"] == 0)
+                    & (self.results["crusher_actual_tonnes"] == 0)
+                )
+            ]
 
         #self.results.to_excel(filename, index=False)
         #print(f"All results written to {filename}")
