@@ -31,6 +31,8 @@ from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 
 class Optimizer:
+    MIN_SELECTED_STOCKPILE_BLEND_RATIO = 0.01
+    SOLUTION_TOLERANCE = 1e-6
 
     def run_with_dynamic_steady_state(
         self,
@@ -43,6 +45,7 @@ class Optimizer:
         stockpile_data: List[StockpileData],
         min_stockpiles: Optional[int] = None,
         max_stockpiles: Optional[int] = None,
+        min_stockpile_contribution_ratio: Optional[float] = None,
     ):
         """Runs blending optimization and adjusts steady state if needed."""
         
@@ -59,6 +62,7 @@ class Optimizer:
             period_tracker,
             min_stockpiles,
             max_stockpiles,
+            min_stockpile_contribution_ratio,
         )
         
         if result['Linprog_result_object'].success: 
@@ -73,6 +77,7 @@ class Optimizer:
                 period_tracker,
                 min_stockpiles,
                 max_stockpiles,
+                min_stockpile_contribution_ratio,
             )
 
             if result['Linprog_result_object'].success: 
@@ -90,6 +95,7 @@ class Optimizer:
                     period_tracker,
                     min_stockpiles,
                     max_stockpiles,
+                    min_stockpile_contribution_ratio,
                 )
 
                 if result['Linprog_result_object'].success: 
@@ -159,8 +165,15 @@ class Optimizer:
         period_tracker,
         min_stockpiles: Optional[int] = None,
         max_stockpiles: Optional[int] = None,
+        min_stockpile_contribution_ratio: Optional[float] = None,
     ):
         """Core optimisation logic using a mixed integer solver."""
+
+        if min_stockpile_contribution_ratio is None:
+            min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+
+        if not 0.01 <= min_stockpile_contribution_ratio <= 1:
+            raise ValueError("Min Stockpile Contribution Ratio must be between 0.01 and 1.")
 
         dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
 
@@ -222,13 +235,13 @@ class Optimizer:
         b_ub = [period_crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * steady state duration
 
         # Generate a list of indicies for each unique stockpile
-        unique_stockpiles = {}
+        stockpile_event_indices = {}
         stockpile_indices = []
 
         for i, event in enumerate(event_pool):
             stockpile_name = event.stockpile
-            if event.is_stockpile and stockpile_name not in unique_stockpiles:
-                unique_stockpiles[stockpile_name] = i
+            if event.is_stockpile:
+                stockpile_event_indices.setdefault(stockpile_name, []).append(i)
                 stockpile_indices.append(i)
 
         # Step 4: Add a constraint for grade block to stockpile feed ratio
@@ -354,27 +367,35 @@ class Optimizer:
                 prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) == rhs
 
         # Binary variables to control the number of stockpiles selected
-        if stockpile_indices and (min_stockpiles is not None or max_stockpiles is not None):
+        if stockpile_event_indices and (min_stockpiles is not None or max_stockpiles is not None):
             y_vars = {}
-            EPS = 1  # tonnes or an appropriate small value matching model scale
-            for i in stockpile_indices:
-                y_var = LpVariable(f"y_{i}", cat=LpBinary)
-                y_vars[i] = y_var
-                prob += x_vars[i] <= bounds[i][1] * y_var
-                prob += x_vars[i] >= EPS * y_var
+            total_feed = lpSum(x_vars)
+            max_total_feed = period_crusher_target["crusher_rate"] * steady_state_duration
+
+            for stockpile_name, indices in stockpile_event_indices.items():
+                y_var = LpVariable(f"y_{stockpile_name}", cat=LpBinary)
+                y_vars[stockpile_name] = y_var
+                stockpile_feed = lpSum(x_vars[i] for i in indices)
+                stockpile_feed_upper_bound = sum(bounds[i][1] for i in indices)
+
+                prob += stockpile_feed <= stockpile_feed_upper_bound * y_var
+                prob += (
+                    stockpile_feed
+                    >= min_stockpile_contribution_ratio * total_feed
+                    - max_total_feed * (1 - y_var)
+                )
 
             if min_stockpiles is not None:
-                prob += lpSum(y_vars[i] for i in stockpile_indices) >= min_stockpiles
+                prob += lpSum(y_vars.values()) >= min_stockpiles
             if max_stockpiles is not None:
-                prob += lpSum(y_vars[i] for i in stockpile_indices) <= max_stockpiles
+                prob += lpSum(y_vars.values()) <= max_stockpiles
 
         # Solve the problem
         prob.solve(PULP_CBC_CMD(msg=False))
 
         success = LpStatus[prob.status] == "Optimal"
-        solution_tolerance = 1e-6
         solution_values = [
-            0.0 if abs(var.value() or 0.0) < solution_tolerance else var.value()
+            0.0 if abs(var.value() or 0.0) < Optimizer.SOLUTION_TOLERANCE else var.value()
             for var in x_vars
         ]
         result = SimpleNamespace(success=success, x=solution_values)

@@ -25,6 +25,7 @@ class CaseModeller:
         hex_sequence_table,
         min_stockpiles: Optional[int] = None,
         max_stockpiles: Optional[int] = None,
+        min_stockpile_contribution_ratio: Optional[float] = None,
     ):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
@@ -52,6 +53,7 @@ class CaseModeller:
         self.total_AMT_stockpile_balances = self.balance_tracker.return_total_AMT_stockpile_balances()
         self.min_stockpiles = min_stockpiles
         self.max_stockpiles = max_stockpiles
+        self.min_stockpile_contribution_ratio = min_stockpile_contribution_ratio
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -89,6 +91,7 @@ class CaseModeller:
                 self.stockpiles,
                 self.min_stockpiles,
                 self.max_stockpiles,
+                self.min_stockpile_contribution_ratio,
             )
 
             if not result['Linprog_result_object'].success:

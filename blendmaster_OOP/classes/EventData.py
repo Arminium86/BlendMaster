@@ -176,12 +176,14 @@ class EventData:
         self._auto_turnover_datetime = value
     
      # Boolean methods
+    @property
     def is_stockpile(self) -> bool:
         """
         Check if the event type is 'stockpile'.
         """
         return self._type == "stockpile"
 
+    @property
     def is_grade_block(self) -> bool:
         """
         Check if the event type is 'grade_block'.

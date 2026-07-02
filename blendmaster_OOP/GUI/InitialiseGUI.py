@@ -4,10 +4,11 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
+from classes.Optimizer import Optimizer
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
@@ -75,6 +76,19 @@ class UserInputs(QMainWindow):
         stockpile_limit_layout.addWidget(self.max_stockpiles_input)
         stockpile_limit_layout.addStretch()
         self.main_tab_layout.addLayout(stockpile_limit_layout)
+
+        stockpile_contribution_layout = QHBoxLayout()
+        self.min_stockpile_contribution_ratio_input = QLineEdit()
+        self.min_stockpile_contribution_ratio_input.setPlaceholderText("0.01 - 1")
+        self.min_stockpile_contribution_ratio_input.setText(str(Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO))
+        self.min_stockpile_contribution_ratio_input.setFixedWidth(100)
+        contribution_ratio_validator = QDoubleValidator(0.01, 1.0, 4, self)
+        contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
+        self.min_stockpile_contribution_ratio_input.setValidator(contribution_ratio_validator)
+        stockpile_contribution_layout.addWidget(QLabel("Min Stockpile Contribution Ratio:"))
+        stockpile_contribution_layout.addWidget(self.min_stockpile_contribution_ratio_input)
+        stockpile_contribution_layout.addStretch()
+        self.main_tab_layout.addLayout(stockpile_contribution_layout)
 
         # Calendar table
         self.main_table = CustomTableWidget()
@@ -965,6 +979,9 @@ class UserInputs(QMainWindow):
             if self.calendar_inputs.get("max_stockpiles") is not None:
                 self.max_stockpiles = self.calendar_inputs["max_stockpiles"]
                 self.max_stockpiles_input.setText(str(self.max_stockpiles))
+            if self.calendar_inputs.get("min_stockpile_contribution_ratio") is not None:
+                self.min_stockpile_contribution_ratio = self.calendar_inputs["min_stockpile_contribution_ratio"]
+                self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
 
         if self.is_project_loaded or not self.submit_calendar_first_call:
             
@@ -1080,19 +1097,48 @@ class UserInputs(QMainWindow):
             for outer_key, outer_value in self.calendar_inputs.items()
         }
 
-        # Store stockpile limits
+        self.store_stockpile_constraint_inputs()
+
+    def store_stockpile_constraint_inputs(self):
         min_text = self.min_stockpiles_input.text().strip()
         max_text = self.max_stockpiles_input.text().strip()
+        ratio_text = self.min_stockpile_contribution_ratio_input.text().strip()
+
         try:
             self.min_stockpiles = int(min_text) if min_text else None
         except ValueError:
             self.min_stockpiles = None
+
         try:
             self.max_stockpiles = int(max_text) if max_text else None
         except ValueError:
             self.max_stockpiles = None
+
+        try:
+            self.min_stockpile_contribution_ratio = (
+                float(ratio_text) if ratio_text else Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+            )
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                "Invalid Input",
+                "Min Stockpile Contribution Ratio must be a number from 0.01 to 1.",
+            )
+            return False
+
+        if not 0.01 <= self.min_stockpile_contribution_ratio <= 1:
+            QMessageBox.warning(
+                self,
+                "Invalid Input",
+                "Min Stockpile Contribution Ratio must be between 0.01 and 1.",
+            )
+            return False
+
+        self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
         self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
         self.calendar_inputs["max_stockpiles"] = self.max_stockpiles
+        self.calendar_inputs["min_stockpile_contribution_ratio"] = self.min_stockpile_contribution_ratio
+        return True
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -1151,19 +1197,8 @@ class UserInputs(QMainWindow):
     for outer_key, outer_value in self.calendar_inputs.items()
 }
 
-        # Store stockpile limits
-        min_text = self.min_stockpiles_input.text().strip()
-        max_text = self.max_stockpiles_input.text().strip()
-        try:
-            self.min_stockpiles = int(min_text) if min_text else None
-        except ValueError:
-            self.min_stockpiles = None
-        try:
-            self.max_stockpiles = int(max_text) if max_text else None
-        except ValueError:
-            self.max_stockpiles = None
-        self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
-        self.calendar_inputs["max_stockpiles"] = self.max_stockpiles
+        if not self.store_stockpile_constraint_inputs():
+            return
 
         # Initialise the shared object
         status = {'success': False}
@@ -1179,9 +1214,11 @@ class UserInputs(QMainWindow):
             self.start_dash_optimised_charts_thread()
 
         else:
-            # Handle alternative flow if an exception occurred or timeout
-            self.tabs.setCurrentIndex(1)
-            self.setup_stockpile_table()
+            # Keep the user on the Calendar tab so constraints can be adjusted and rerun.
+            for tab_index in range(4, self.tabs.count()):
+                self.tabs.setTabEnabled(tab_index, False)
+            self.tabs.setTabEnabled(3, True)
+            self.tabs.setCurrentIndex(3)
         
     def execute_run_program_in_thread(self, status):
         try:
@@ -1195,7 +1232,8 @@ class UserInputs(QMainWindow):
                 self.calendar_inputs,
                 self.hex_sequence_table_argument,
                 self.min_stockpiles,
-                self.max_stockpiles
+                self.max_stockpiles,
+                self.min_stockpile_contribution_ratio
             )
             # if not stop_event.is_set():  # If not stopped, mark as success
             status['success'] = True
@@ -2786,6 +2824,7 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = {}
         self.min_stockpiles = None
         self.max_stockpiles = None
+        self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

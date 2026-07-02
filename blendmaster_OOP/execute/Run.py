@@ -5,6 +5,7 @@ from classes.CaseModeller import CaseModeller
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ExpitDataHandler import ExpitDataHandler
+from classes.Optimizer import Optimizer
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
 from pandas import DataFrame
@@ -23,7 +24,7 @@ class Run:
         self.manual_case_modeller = None
         self.manual_blend_dash = None
     
-    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None):
+    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None):
 
         # Install required libraries
         #requirements = Requirements()
@@ -71,6 +72,10 @@ class Run:
 
         stockpile_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
+        min_stockpile_contribution_ratio = self._normalize_stockpile_contribution_ratio(
+            min_stockpile_contribution_ratio
+        )
+
         # Initialise and run CaseModeller
         self.case_modeller = CaseModeller(
             stockpiles=stockpile_data_objects,
@@ -83,26 +88,147 @@ class Run:
             hex_sequence_table=hex_sequence_table,
             min_stockpiles=min_stockpiles,
             max_stockpiles=max_stockpiles,
+            min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
         )
 
         # Monkey-patch print and input
         original_print = builtins.print
         original_input = builtins.input
+        run_exception = None
         try:
             builtins.print = self.case_bridge.print
             builtins.input = self.case_bridge.input
             self.case_modeller.run()  # Run the CaseModeller logic
         
         except Exception as e:
-            self.case_bridge.handle_exception(e)
+            run_exception = e
         
         finally:
             # Restore the original print and input functions
             builtins.print = original_print
             builtins.input = original_input
 
+        if run_exception is not None:
+            raise run_exception
+
+        self._validate_stockpile_count_constraints(
+            min_stockpiles,
+            max_stockpiles,
+            min_stockpile_contribution_ratio,
+        )
+
         # Set start and end datetime in main GUI
         self.gui.set_start_and_end_datetime(periods=periods)
+
+    @staticmethod
+    def _normalize_stockpile_contribution_ratio(min_stockpile_contribution_ratio=None):
+        if min_stockpile_contribution_ratio is None:
+            return Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+
+        min_stockpile_contribution_ratio = float(min_stockpile_contribution_ratio)
+        if not 0.01 <= min_stockpile_contribution_ratio <= 1:
+            raise ValueError("Min Stockpile Contribution Ratio must be between 0.01 and 1.")
+
+        return min_stockpile_contribution_ratio
+
+    def _validate_stockpile_count_constraints(self, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None):
+        if min_stockpiles is None and max_stockpiles is None:
+            return
+
+        min_stockpile_contribution_ratio = self._normalize_stockpile_contribution_ratio(
+            min_stockpile_contribution_ratio
+        )
+
+        results = getattr(self.case_modeller, "results", None)
+        if results is None or results.empty:
+            raise ValueError(self._stockpile_constraint_message(
+                min_stockpiles,
+                max_stockpiles,
+                min_stockpile_contribution_ratio,
+                "No feasible blend was produced.",
+            ))
+
+        results = results.copy()
+        results["source_actual_tonnes"] = pd.to_numeric(
+            results.get("source_actual_tonnes"), errors="coerce"
+        ).fillna(0)
+        results["crusher_actual_tonnes"] = pd.to_numeric(
+            results.get("crusher_actual_tonnes"), errors="coerce"
+        ).fillna(0)
+
+        if "blend_option" in results:
+            failed_blend_labels = {"no blend selected", "no blend found", "no blend", "rare case"}
+            has_failed_blend = (
+                results["blend_option"]
+                .astype(str)
+                .str.lower()
+                .isin(failed_blend_labels)
+                .any()
+            )
+            if has_failed_blend:
+                raise ValueError(self._stockpile_constraint_message(
+                    min_stockpiles,
+                    max_stockpiles,
+                    min_stockpile_contribution_ratio,
+                    "At least one steady state has no feasible blend.",
+                ))
+
+        valid_feed = results[results["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE]
+        if valid_feed.empty:
+            raise ValueError(self._stockpile_constraint_message(
+                min_stockpiles,
+                max_stockpiles,
+                min_stockpile_contribution_ratio,
+                "No crusher feed was selected.",
+            ))
+
+        ratio_tolerance = Optimizer.SOLUTION_TOLERANCE
+        for (steady_state, blend_id), blend_rows in valid_feed.groupby(
+            ["steady_state_number", "blend_ID"], dropna=False
+        ):
+            source_ratios = (
+                blend_rows["source_actual_tonnes"]
+                / blend_rows["crusher_actual_tonnes"].replace(0, pd.NA)
+            ).fillna(0)
+            active_stockpile_count = int(
+                (source_ratios >= min_stockpile_contribution_ratio - ratio_tolerance).sum()
+            )
+
+            if min_stockpiles is not None and active_stockpile_count < min_stockpiles:
+                raise ValueError(self._stockpile_constraint_message(
+                    min_stockpiles,
+                    max_stockpiles,
+                    min_stockpile_contribution_ratio,
+                    f"Steady state {steady_state}, blend {blend_id} only has {active_stockpile_count} stockpile(s) contributing at least {self._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)}.",
+                ))
+
+            if max_stockpiles is not None and active_stockpile_count > max_stockpiles:
+                raise ValueError(self._stockpile_constraint_message(
+                    min_stockpiles,
+                    max_stockpiles,
+                    min_stockpile_contribution_ratio,
+                    f"Steady state {steady_state}, blend {blend_id} has {active_stockpile_count} stockpile(s) contributing at least {self._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)}.",
+                ))
+
+    @staticmethod
+    def _format_stockpile_contribution_ratio(min_stockpile_contribution_ratio):
+        return f"{min_stockpile_contribution_ratio:g} ({min_stockpile_contribution_ratio * 100:g}%)"
+
+    @staticmethod
+    def _stockpile_constraint_message(min_stockpiles, max_stockpiles, min_stockpile_contribution_ratio, detail):
+        constraints = []
+        if min_stockpiles is not None:
+            constraints.append(f"minimum {min_stockpiles}")
+        if max_stockpiles is not None:
+            constraints.append(f"maximum {max_stockpiles}")
+        constraint_text = ", ".join(constraints)
+        return (
+            f"{detail}\n\n"
+            f"BlendMaster could not satisfy the stockpile-count constraints ({constraint_text}) "
+            f"with each selected stockpile contributing at least "
+            f"{Run._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)} of crusher feed. "
+            "Please go back to the Calendar tab, update the stockpile limits or other blend constraints, and rerun."
+        )
         
 class CaseModellerBridge(QObject):
     output_signal = pyqtSignal(str)
