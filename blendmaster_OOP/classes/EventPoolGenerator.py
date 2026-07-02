@@ -79,67 +79,44 @@ class EventPoolGenerator:
         """Updates initial event pool based on stockpile state, reclaim threshold and whether an event occurred in a previous iteration of a steady state (until there is no events left). See method definition."""
         events = []
 
-        if decision_point_results.empty:
-
-            for event in initial_event_pool:
-            
-                if event.is_stockpile:
-
-                    if event.state == "Build":
-                        continue
-                    elif event.state == "Off":
-                        continue
-                    elif event.state == "Auto" and event.balance < event.reclaim_threshold:
-                        continue
-                    elif event.state == "Auto" and event.balance >= event.reclaim_threshold:
-                        events.append(event)
-                    elif event.state == "Reclaim":
-                        events.append(event)
-
-                else: events.append(event)
-            
-        # Exclude events if they are present in decision point results.
-        # Optimisation rows can include text placeholders such as
-        # "No tonnes selected" for infeasible/no-blend options, so coerce the
-        # column before comparing it with numeric thresholds.
-        else:
+        # Exclude events if they already contributed positive tonnes in the
+        # current decision point. The first iteration has no result columns yet.
+        excluded_sources = set()
+        if (
+            not decision_point_results.empty
+            and "source_actual_tonnes" in decision_point_results.columns
+            and "source" in decision_point_results.columns
+        ):
             decision_point_results = decision_point_results.copy()
             decision_point_results["source_actual_tonnes"] = pd.to_numeric(
                 decision_point_results["source_actual_tonnes"], errors="coerce"
             ).fillna(0)
+            excluded_sources = set(
+                decision_point_results.loc[
+                    decision_point_results["source_actual_tonnes"] > 0, "source"
+                ]
+            )
 
-        if (decision_point_results["source_actual_tonnes"] > 0).any():
+        for event in initial_event_pool:
+            if event.is_stockpile and event.stockpile in excluded_sources:
+                continue
 
-            for event in initial_event_pool:
-                            
-                if (event.is_stockpile and 
-                    event.stockpile in decision_point_results["source"].values and 
-                    decision_point_results.loc[
-                        decision_point_results["source"] == event.stockpile, "source_actual_tonnes"
-                    ].gt(0).any()):
+            if event.is_grade_block and event.grade_block in excluded_sources:
+                continue
+
+            if event.is_stockpile:
+                if event.state == "Build":
                     continue
-        
-                elif (event.is_grade_block and 
-                    event.grade_block in decision_point_results["source"].values and 
-                    decision_point_results.loc[
-                        decision_point_results["source"] == event.grade_block, "source_actual_tonnes"
-                    ].gt(0).any()):
+                elif event.state == "Off":
                     continue
-
-                elif event.is_stockpile:
-
-                    if event.state == "Build":
-                        continue
-                    elif event.state == "Off":
-                        continue
-                    elif event.state == "Auto" and event.balance < event.reclaim_threshold:
-                        continue
-                    elif event.state == "Auto" and event.balance >= event.reclaim_threshold:
-                        events.append(event)
-                    elif event.state == "Reclaim":
-                        events.append(event)
-
-                else: events.append(event)
+                elif event.state == "Auto" and event.balance < event.reclaim_threshold:
+                    continue
+                elif event.state == "Auto" and event.balance >= event.reclaim_threshold:
+                    events.append(event)
+                elif event.state == "Reclaim":
+                    events.append(event)
+            else:
+                events.append(event)
 
         return events 
 

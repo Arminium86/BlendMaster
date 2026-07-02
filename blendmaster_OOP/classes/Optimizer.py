@@ -372,7 +372,12 @@ class Optimizer:
         prob.solve(PULP_CBC_CMD(msg=False))
 
         success = LpStatus[prob.status] == "Optimal"
-        result = SimpleNamespace(success=success, x=[var.value() for var in x_vars])
+        solution_tolerance = 1e-6
+        solution_values = [
+            0.0 if abs(var.value() or 0.0) < solution_tolerance else var.value()
+            for var in x_vars
+        ]
+        result = SimpleNamespace(success=success, x=solution_values)
 
         if result.success:
 
