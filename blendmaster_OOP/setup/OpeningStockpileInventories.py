@@ -1,6 +1,10 @@
 import snowflake.connector
 import sqlite3
 from datetime import datetime
+import os
+import snowflake.connector
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
@@ -325,33 +329,98 @@ class OpeningStockpileInventories:
         conn.close()
         print(f"Stockpile AMT inventories saved to database {database_name}")
 
-    def connect_snowflake_with_service_account(self):
-        
-        try:
-            # Connect to Snowflake using service account credentials
-            conn = snowflake.connector.connect(
-                user='SVC_APS',  
-                password='AlastriSnowflake123',  
-                account='wn74261.ap-southeast-2',  
-                warehouse='WH_EDW_SELFSERVICE', 
-                database='AA_OPERATIONS_MANAGEMENT',  
-                schema='SELFSERVICE',  
-                role='SVC_APS',  
-                login_timeout=60,  
-                network_timeout=300 
-            )
+    def connect_snowflake_with_service_account(
+        self,
+        key_path=r"C:\APSConnectionKey\SVC_APS_Private_Key.p8",
+        key_passphrase: str | None = None,
+        user: str = "SVC_APS",
+        warehouse: str = "WH_EDW_SELFSERVICE",
+        database: str = "AA_OPERATIONS_MANAGEMENT",
+        schema: str = "SELFSERVICE",
+        role: str = "SVC_APS",
+    ):
+        """
+        Maintains the original name but switches to Snowflake key-pair (JWT) authentication.
+        Returns an open connection or None if all attempts fail (with detailed errors printed).
+        """
 
-            # Confirm the connection is open
-            if conn.is_closed():
-                print("Failed to connect to Snowflake.")
-                return None
-
-            print("Connection established successfully.")
-            return conn
-
-        except snowflake.connector.errors.Error as e:
-            print(f"Error connecting to Snowflake: {e}")
+        # 1) Validate key file upfront to avoid returning None later without a clear reason
+        if not os.path.exists(key_path):
+            print(f"[Snowflake] Private key file not found: {key_path}")
             return None
+
+        try:
+            with open(key_path, "rb") as f:
+                key_bytes = f.read()
+
+            # Load PEM or DER PKCS#8 key
+            if key_bytes.strip().startswith(b"-----BEGIN"):
+                private_key_obj = serialization.load_pem_private_key(
+                    key_bytes,
+                    password=None if key_passphrase is None else key_passphrase.encode("utf-8"),
+                    backend=default_backend(),
+                )
+            else:
+                private_key_obj = serialization.load_der_private_key(
+                    key_bytes,
+                    password=None if key_passphrase is None else key_passphrase.encode("utf-8"),
+                    backend=default_backend(),
+                )
+
+            # Snowflake expects PKCS#8 DER bytes
+            private_key_der = private_key_obj.private_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        except Exception as e:
+            print(f"[Snowflake] Failed to load private key: {e}")
+            return None
+
+        # 2) Try both common account identifier formats (matches your old code and your ODBC DSN)
+        account_candidates = [
+            "FMG-WN74261",            # from your ODBC snippet
+            "wn74261.ap-southeast-2"  # from your original password-based code
+        ]
+
+        errors = []
+        for account in account_candidates:
+            try:
+                conn = snowflake.connector.connect(
+                    user=user,
+                    account=account,
+                    authenticator="SNOWFLAKE_JWT",
+                    private_key=private_key_der,
+                    warehouse=warehouse,
+                    database=database,
+                    schema=schema,
+                    role=role,
+                    login_timeout=60,
+                    network_timeout=300,
+                )
+
+                # Run a lightweight sanity check so we only return a truly usable connection
+                cur = conn.cursor()
+                try:
+                    cur.execute("select current_user(), current_role(), current_account(), current_region()")
+                    _ = cur.fetchone()
+                finally:
+                    cur.close()
+
+                if conn.is_closed():
+                    raise RuntimeError("Connection reported closed right after opening.")
+
+                print(f"[Snowflake] Connected with key-pair auth (account='{account}').")
+                return conn
+
+            except Exception as e:
+                errors.append(f"account='{account}': {e!s}")
+
+        # If we got here, all attempts failed — print all reasons so you can fix quickly
+        print("[Snowflake] All key-pair connection attempts failed:")
+        for msg in errors:
+            print("  - " + msg)
+        return None
    
     def clear_AMT_stockpile_database(self):
         # SQLite connection
