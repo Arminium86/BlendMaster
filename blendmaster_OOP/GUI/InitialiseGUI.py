@@ -1,11 +1,11 @@
-import sys, threading, requests, os, pickle, copy
+import sys, threading, requests, os, pickle, copy, traceback
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator
-from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir
+from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from classes.Optimizer import Optimizer
@@ -379,6 +379,65 @@ class UserInputs(QMainWindow):
         )
         self.submit_button.setEnabled(all_fields_populated)
 
+    def show_progress_dialog(self, message):
+        if self.progress_dialog:
+            self.progress_dialog.close()
+
+        self.progress_dialog = QProgressDialog(message, None, 0, 0, self)
+        self.progress_dialog.setWindowTitle("BlendMaster")
+        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setModal(False)
+        self.progress_dialog.setWindowModality(Qt.NonModal)
+        self.progress_dialog.resize(320, self.progress_dialog.height())
+        self.progress_dialog.setFixedWidth(320)
+        self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
+        self.progress_dialog.show()
+
+    def close_progress_dialog(self):
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+    def run_background_task(self, message, work_fn, on_success, on_error=None):
+        self.show_progress_dialog(message)
+
+        thread = QThread(self)
+        worker = BackgroundWorker(work_fn)
+        worker.moveToThread(thread)
+        task = (thread, worker)
+        self.background_tasks.append(task)
+
+        def cleanup():
+            try:
+                self.background_tasks.remove(task)
+            except ValueError:
+                pass
+
+        def handle_success(result):
+            self.close_progress_dialog()
+            try:
+                on_success(result)
+            except Exception:
+                self.show_error_popup(traceback.format_exc())
+
+        def handle_error(error_message):
+            self.close_progress_dialog()
+            if on_error:
+                on_error(error_message)
+            else:
+                self.show_error_popup(error_message)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(handle_success)
+        worker.failed.connect(handle_error)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(cleanup)
+        thread.start()
+
     def browse_file(self):
         """Browse to select a file."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "CSV Files (*.csv);;All Files (*)")
@@ -407,18 +466,6 @@ class UserInputs(QMainWindow):
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
-
-        # Create the dialog
-        self.progress_dialog = QProgressDialog("Processing...", None, 0, 0)
-        self.progress_dialog.setWindowTitle("BlendMaster")
-        self.progress_dialog.setCancelButton(None)  # Disable cancel button
-        self.progress_dialog.setModal(True)
-        self.progress_dialog.resize(300, self.progress_dialog.height())  # Set a specific width
-        self.progress_dialog.setFixedWidth(300)  # Fix the width without changing height
-        self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
-        #self.progress_dialog.setWindowFlag(Qt.WindowStaysOnTopHint)  # Make it always on top
-        self.progress_dialog.show()
-
         if not self.is_project_loaded:
         
             self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
@@ -436,13 +483,13 @@ class UserInputs(QMainWindow):
             self.mine_input_choice = self.mine_input.currentText().strip()
 
             if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
-                QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
-                
-                # Fetch stockpile data and create setup task
-                self.fetch_stockpile_data()
-                self.setup_stockpile_table()
-                self.tabs.setTabEnabled(1, True)
-                self.tabs.setCurrentIndex(1)  # Switch to the next tab
+                self.submit_button.setEnabled(False)
+                self.run_background_task(
+                    "Fetching stockpile inventories from Snowflake...",
+                    self.fetch_stockpile_data,
+                    self.finish_site_config_submit,
+                    self.handle_site_config_error,
+                )
 
             else:
                 QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
@@ -465,24 +512,32 @@ class UserInputs(QMainWindow):
             self.mine_input.setCurrentText(str(self.mine_input_choice))
 
             if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
-                QMessageBox.information(self, "Site Configuration Form", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
-                
-                # Fetch stockpile data and create setup task
-                self.fetch_stockpile_data()
-                self.setup_stockpile_table()
-                self.tabs.setTabEnabled(1, True)
-                self.tabs.setCurrentIndex(1)  # Switch to the next tab
+                if not self.stockpile_data:
+                    QMessageBox.warning(self, "Missing Project Data", "The loaded project does not contain stockpile inventory data.")
+                    return
+                self.finish_site_config_submit(self.stockpile_data)
 
             else:
                 QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")   
-
-        self.progress_dialog.close()
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
         hub_input = self.hub_input_choice
         mine_input = self.mine_input_choice
-        self.stockpile_data = self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time_choice)
+        return self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time_choice)
+
+    def finish_site_config_submit(self, stockpile_data):
+        self.submit_button.setEnabled(True)
+        self.stockpile_data = stockpile_data
+        QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+
+        self.setup_stockpile_table()
+        self.tabs.setTabEnabled(1, True)
+        self.tabs.setCurrentIndex(1)  # Switch to the next tab
+
+    def handle_site_config_error(self, error_message):
+        self.submit_button.setEnabled(True)
+        self.show_error_popup(error_message)
     
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -761,8 +816,24 @@ class UserInputs(QMainWindow):
 
         builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
 
-        self.get_AMT_stockpile_data(builds)
+        if self.is_project_loaded:
+            self.finish_AMT_stockpile_table(data_source, getattr(self, "AMT_stockpile_data", {}))
+            return
 
+        if any(self.stockpile_data_AMT_column.values()):
+            self.run_background_task(
+                "Fetching AMT stockpile data from Snowflake...",
+                lambda: self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds),
+                lambda AMT_stockpile_data: self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data),
+            )
+            return
+
+        QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
+        self.opening_stockpile_inventories.clear_AMT_stockpile_database()
+        self.finish_AMT_stockpile_table(data_source, {})
+
+    def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
+        self.AMT_stockpile_data = AMT_stockpile_data
         self.start_dash_AMT_map_thread()
 
         # Set Table Dimensions
@@ -1200,47 +1271,48 @@ class UserInputs(QMainWindow):
         if not self.store_stockpile_constraint_inputs():
             return
 
-        # Initialise the shared object
-        status = {'success': False}
-
         self.update_decision_point_tab_state()
-        self.execute_run_program_in_thread(status)
-        
-        # Conditional logic based on whether the execution was successful
-        if status['success']:
-            self.update_decision_point_tab_state()
-            self.setup_blends_tab()
-            self.tabs.setTabEnabled(7, True)
-            self.start_dash_optimised_charts_thread()
+        self.run_background_task(
+            "Optimising blends...",
+            self.execute_run_program,
+            self.finish_run_program,
+            self.handle_run_program_error,
+        )
 
-        else:
-            # Keep the user on the Calendar tab so constraints can be adjusted and rerun.
-            for tab_index in range(4, self.tabs.count()):
-                self.tabs.setTabEnabled(tab_index, False)
-            self.tabs.setTabEnabled(3, True)
-            self.tabs.setCurrentIndex(3)
-        
-    def execute_run_program_in_thread(self, status):
-        try:
-            # Call main optimised run
-            self.run_program.execute(
-                self.start_time_choice,
-                self.expit_mode_choice,
-                self.file_path_choice,
-                self.blend_mode_choice,
-                self.updated_stockpile_data,
-                self.calendar_inputs,
-                self.hex_sequence_table_argument,
-                self.min_stockpiles,
-                self.max_stockpiles,
-                self.min_stockpile_contribution_ratio
-            )
-            # if not stop_event.is_set():  # If not stopped, mark as success
-            status['success'] = True
-        except Exception as e:
-            # Handle or log the error
-            self.run_program.case_bridge.error_signal.emit(str(e))  # Emit the error to show in the popup
-            status['success'] = False
+    def execute_run_program(self):
+        return self.run_program.execute(
+            self.start_time_choice,
+            self.expit_mode_choice,
+            self.file_path_choice,
+            self.blend_mode_choice,
+            self.updated_stockpile_data,
+            self.calendar_inputs,
+            self.hex_sequence_table_argument,
+            self.min_stockpiles,
+            self.max_stockpiles,
+            self.min_stockpile_contribution_ratio
+        )
+
+    def finish_run_program(self, periods):
+        self.set_start_and_end_datetime(periods=periods)
+        self.update_decision_point_tab_state()
+        self.setup_blends_tab()
+        self.tabs.setTabEnabled(7, True)
+        self.start_dash_optimised_charts_thread()
+
+        if self.project_load_continuation_pending:
+            self.project_load_continuation_pending = False
+            self.on_blend_data_change()
+            self.store_blend_results()
+            QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
+
+    def handle_run_program_error(self, error_message):
+        self.project_load_continuation_pending = False
+        self.show_error_popup(error_message)
+        for tab_index in range(4, self.tabs.count()):
+            self.tabs.setTabEnabled(tab_index, False)
+        self.tabs.setTabEnabled(3, True)
+        self.tabs.setCurrentIndex(3)
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
@@ -2791,11 +2863,8 @@ class UserInputs(QMainWindow):
         self.handle_site_config_submit()
         self.store_stockpile_table()
         self.store_hex_sequence_table()
+        self.project_load_continuation_pending = True
         self.store_calendar_inputs()
-        self.on_blend_data_change()
-        self.store_blend_results()
-
-        QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
         
     def initialise_all_variables(self):
         self.blend_mode_choice = None
@@ -2825,6 +2894,9 @@ class UserInputs(QMainWindow):
         self.min_stockpiles = None
         self.max_stockpiles = None
         self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+        self.progress_dialog = None
+        self.background_tasks = []
+        self.project_load_continuation_pending = False
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
@@ -2866,6 +2938,21 @@ class CustomWebEngineView(QWebEngineView):
         else:
             # Cancel the download if no path is chosen
             download_item.cancel()
+
+class BackgroundWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, work_fn):
+        super().__init__()
+        self.work_fn = work_fn
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            self.finished.emit(self.work_fn())
+        except Exception:
+            self.failed.emit(traceback.format_exc())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -117,8 +117,7 @@ class Run:
             min_stockpile_contribution_ratio,
         )
 
-        # Set start and end datetime in main GUI
-        self.gui.set_start_and_end_datetime(periods=periods)
+        return periods
 
     @staticmethod
     def _normalize_stockpile_contribution_ratio(min_stockpile_contribution_ratio=None):
