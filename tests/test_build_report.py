@@ -40,3 +40,21 @@ def test_blank_build_report_table_created(tmp_path):
 
     assert table_exists
     assert row_count == 0
+
+
+def test_empty_optimised_blend_report_table_created(tmp_path):
+    os.chdir(tmp_path)
+    db_manager = DatabaseManager()
+    empty_df = pd.DataFrame()
+    db_manager.write_optimised_blend_report_to_database(empty_df, periods=None)
+
+    conn = sqlite3.connect('blendmaster.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='optimised_blend_report'")
+    table_exists = cursor.fetchone() is not None
+    cursor.execute('SELECT COUNT(*) FROM optimised_blend_report')
+    row_count = cursor.fetchone()[0]
+    conn.close()
+
+    assert table_exists
+    assert row_count == 0

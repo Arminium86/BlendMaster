@@ -58,6 +58,12 @@ class DatabaseManager:
 
         cursor.execute('DELETE FROM optimised_blend_report')
 
+        if results.empty:
+            conn.commit()
+            conn.close()
+            print(f"Optimised blend report saved to database {database_name}")
+            return
+
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['end_datetime'] = pd.to_datetime(results['end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
