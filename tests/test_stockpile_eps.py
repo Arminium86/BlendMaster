@@ -79,3 +79,40 @@ def test_selected_stockpiles_contribute_non_zero_tonnes():
     assert result["Linprog_result_object"].success
     xs = result["Linprog_result_object"].x
     assert xs[0] > 0 and xs[1] > 0
+
+import pytest
+
+
+def test_event_pool_handles_text_source_actual_tonnes():
+    pd = pytest.importorskip("pandas")
+    if not hasattr(pd, "Series"):
+        pytest.skip("pandas is not installed")
+    from classes.EventPoolGenerator import EventPoolGenerator
+    event = EventData(
+        stockpile="SP1",
+        grade_block=None,
+        event_type="stockpile",
+        equipment="eq",
+        cost=0,
+        cash=0,
+        rate=100,
+        grade_fe=0,
+        grade_si=0,
+        grade_al=0,
+        grade_p=0,
+        grade_mn=0,
+        balance=100,
+        max_quantity=100,
+        reclaim_threshold=0,
+        state="Reclaim",
+        auto_turnover_datetime=None,
+    )
+    decision_point_results = pd.DataFrame(
+        [{"source": "", "source_actual_tonnes": "No tonnes selected"}]
+    )
+
+    events = EventPoolGenerator([], [], []).update_pool_participants(
+        decision_point_results, [event]
+    )
+
+    assert events == []

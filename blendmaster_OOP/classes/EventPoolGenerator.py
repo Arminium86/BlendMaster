@@ -98,12 +98,17 @@ class EventPoolGenerator:
 
                 else: events.append(event)
             
-        # Exclude events if they are present in decision point results 
-        elif (decision_point_results["source_actual_tonnes"] > 0).any():
-            
+        # Exclude events if they are present in decision point results.
+        # Optimisation rows can include text placeholders such as
+        # "No tonnes selected" for infeasible/no-blend options, so coerce the
+        # column before comparing it with numeric thresholds.
+        else:
+            decision_point_results = decision_point_results.copy()
             decision_point_results["source_actual_tonnes"] = pd.to_numeric(
-            decision_point_results["source_actual_tonnes"], errors='coerce'
-            )
+                decision_point_results["source_actual_tonnes"], errors="coerce"
+            ).fillna(0)
+
+        if (decision_point_results["source_actual_tonnes"] > 0).any():
 
             for event in initial_event_pool:
                             
