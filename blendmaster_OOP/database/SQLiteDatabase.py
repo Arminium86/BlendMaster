@@ -5,6 +5,28 @@ from datetime import datetime, timedelta
 from classes.PeriodManager import PeriodManager
 
 class DatabaseManager:
+    @staticmethod
+    def clear_all_tables(database_name='blendmaster.db'):
+        conn = sqlite3.connect(database_name)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                """
+            )
+            table_names = [row[0] for row in cursor.fetchall()]
+
+            for table_name in table_names:
+                safe_table_name = table_name.replace('"', '""')
+                cursor.execute(f'DELETE FROM "{safe_table_name}"')
+
+            conn.commit()
+        finally:
+            conn.close()
 
     def write_optimised_blend_report_to_database (self, results: pd.DataFrame, periods: PeriodManager):
         # Connect to the SQLite database or create it

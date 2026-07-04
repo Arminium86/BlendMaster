@@ -280,26 +280,36 @@ class DrawGanttChart:
             "crusher_actual_grade_mn": "Grade Mn (%)"
         }
         self.app.layout = html.Div(
-            style={'display': 'flex', 'flexDirection': 'column', 'padding': '20px'},
+            style={
+                'display': 'flex',
+                'flexDirection': 'column',
+                'gap': '10px',
+                'padding': '12px',
+                'boxSizing': 'border-box',
+                'fontFamily': 'Segoe UI'
+            },
             children=[
                 # Gantt Chart
                 html.Div(
                     style={
-                        'width': '100%',  # Ensure the Gantt chart container spans full width
-                        'paddingBottom': '20px',  # Optional padding below the chart
+                        'width': '100%',
+                        'paddingBottom': '4px',
                     },
                     children=[
-                        html.H2("Gantt Chart & Blend Details"),
+                        html.H3(
+                            "Gantt Chart & Blend Details",
+                            style={'margin': '0 0 8px 0', 'fontWeight': '600'}
+                        ),
                         dcc.Graph(
                             id="gantt-chart",
                             style={
-                                'width': '100%',  # Ensure the chart spans full width
-                                'height': '100vh',  # Adjust height as needed
-                                'border': '2px solid black',  # Add a black border
-                                'padding': '0',  # Remove padding
-                                'borderRadius': '5px',  # Optional: Rounded corners
-                                'overflow': 'auto',  # Ensure content stays inside the border
-                                'boxSizing': 'border-box'  # Include padding in total size calculations
+                                'width': '100%',
+                                'height': '320px',
+                                'border': '1px solid black',
+                                'padding': '0',
+                                'borderRadius': '4px',
+                                'overflow': 'hidden',
+                                'boxSizing': 'border-box'
                             }
                         )
                     ]
@@ -319,7 +329,11 @@ class DrawGanttChart:
                                 ] + [col for col in self.fetch_data().columns if col.startswith("crusher_actual_grade_")]
                             ],
                             data=[],  # Initially empty
-                            style_table={'overflowX': 'auto'},
+                            style_table={
+                                'overflowX': 'auto',
+                                'overflowY': 'auto',
+                                'maxHeight': '360px'
+                            },
                             style_cell={
                                 'textAlign': 'center',
                                 'padding': '5px',
@@ -356,6 +370,7 @@ class DrawGanttChart:
 
         @self.app.callback(
             dash.dependencies.Output("gantt-chart", "figure"),
+            dash.dependencies.Output("gantt-chart", "style"),
             dash.dependencies.Input("gantt-chart", "id")
         )
         def update_gantt_chart(_):
@@ -363,18 +378,26 @@ class DrawGanttChart:
             Generate the Gantt chart figure.
             """
             data = self.fetch_data()
+            base_chart_style = {
+                'width': '100%',
+                'height': '320px',
+                'border': '1px solid black',
+                'padding': '0',
+                'borderRadius': '4px',
+                'overflow': 'hidden',
+                'boxSizing': 'border-box'
+            }
 
             if data.empty:
-                return px.scatter(title="No data available")
+                return px.scatter(title="No data available"), base_chart_style
 
             data = self.prepare_gantt_data(data)
             data['hover_name'] = "Blend ID: " + data['blend_ID'].astype(str)
 
-            # Calculate the number of unique lanes
-            num_lanes = max(data['lane'].nunique(),3)
-
-            # Set the height in pixels based on the number of lanes
-            chart_height = num_lanes * 100
+            num_lanes = max(data['lane'].nunique(), 1)
+            chart_height = min(max(280, 190 + (num_lanes * 55)), 720)
+            chart_style = dict(base_chart_style)
+            chart_style['height'] = f'{chart_height + 18}px'
 
             # Create Gantt chart
             fig = px.timeline(
@@ -406,6 +429,7 @@ class DrawGanttChart:
             )
 
             # Adjust layout
+            lane_labels = data[['lane', 'blend_ID']].drop_duplicates().sort_values('lane')
             fig.update_layout(
                 xaxis_title="",
                 yaxis_title="Blend",
@@ -416,8 +440,8 @@ class DrawGanttChart:
                 ),
                 yaxis=dict(
                     tickmode='array',
-                    tickvals=data['lane'],
-                    ticktext=data['blend_ID']  # Label lanes with blend_ID
+                    tickvals=lane_labels['lane'],
+                    ticktext=lane_labels['blend_ID']  # Label lanes with blend_ID
                 ),
                 showlegend=True,
                 legend=dict(
@@ -431,11 +455,12 @@ class DrawGanttChart:
                 bordercolor="black",
                 borderwidth=1
                 ),
-                width=1750,
-                height=chart_height + 200
+                autosize=True,
+                height=chart_height,
+                margin=dict(l=64, r=260, t=20, b=54)
             )
 
-            return fig
+            return fig, chart_style
 
         @self.app.callback(
             dash.dependencies.Output("property-table", "data"),

@@ -9,9 +9,11 @@ from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlo
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from classes.Optimizer import Optimizer
+from classes.PeriodManager import PeriodManager
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
-from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles
+from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
+from database.SQLiteDatabase import DatabaseManager
 import pandas as pd, sqlite3
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,6 +25,7 @@ class UserInputs(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
 
         self.initialise_all_variables()
+        self.clear_sqlite_session_data()
 
         # Placeholder for OpeningStockpileInventories
         self.opening_stockpile_inventories = OpeningStockpileInventories()
@@ -41,7 +44,7 @@ class UserInputs(QMainWindow):
 
         # Add Stockpile Tab
         self.stockpile_tab = QWidget()
-        self.tabs.addTab(self.stockpile_tab, "Stockpile Inventories")
+        self.stockpile_tab_index = self.tabs.addTab(self.stockpile_tab, "Stockpile Inventories")
         self.stockpile_tab_layout = QVBoxLayout(self.stockpile_tab)
 
         # Stockpile Table
@@ -50,7 +53,7 @@ class UserInputs(QMainWindow):
 
         # Add AMT Stockpile Tab
         self.AMT_stockpile_tab = QWidget()
-        self.tabs.addTab(self.AMT_stockpile_tab, "AMT Stockpiles")
+        self.AMT_stockpile_tab_index = self.tabs.addTab(self.AMT_stockpile_tab, "AMT Stockpiles")
         self.AMT_stockpile_tab_layout = QHBoxLayout(self.AMT_stockpile_tab)
 
         # Stockpile AMT Table
@@ -60,7 +63,7 @@ class UserInputs(QMainWindow):
 
         # Add calendar Tab
         self.main_tab = QWidget()
-        self.tabs.addTab(self.main_tab, "Calendar")
+        self.calendar_tab_index = self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
 
         # Stockpile count inputs
@@ -97,7 +100,7 @@ class UserInputs(QMainWindow):
 
         # Add Decision Point Tab
         self.decision_point_tab = QWidget()
-        self.tabs.addTab(self.decision_point_tab, "Decision Point")
+        self.decision_point_tab_index = self.tabs.addTab(self.decision_point_tab, "Decision Point")
         self.decision_point_tab_layout = QVBoxLayout(self.decision_point_tab)
 
         # Create the table widget for the DataFrame
@@ -132,14 +135,18 @@ class UserInputs(QMainWindow):
 
         self.setup_profiles_tab()
 
+        self.setup_sqlite_reports_tab()
+
+        self.setup_optimised_grade_profile_tab()
+
         # Add Setup Blends tab
         self.blend_config_tab = QWidget()
-        self.tabs.addTab(self.blend_config_tab, "Setup Blends (Manual)")
+        self.blend_config_tab_index = self.tabs.addTab(self.blend_config_tab, "Setup Blends (Manual)")
         self.setup_blends_tab_layout = QVBoxLayout(self.blend_config_tab)
 
         # Add Sequence tab
         self.blend_sequence_tab = QWidget()
-        self.tabs.addTab(self.blend_sequence_tab, "Blend Sequence (Manual Gantt)")
+        self.blend_sequence_tab_index = self.tabs.addTab(self.blend_sequence_tab, "Blend Sequence (Manual Gantt)")
         self.blend_sequence_tab_layout = QVBoxLayout(self.blend_sequence_tab)
 
         # Add the CustomWebEngineView at the top to display the Dash app
@@ -190,6 +197,7 @@ class UserInputs(QMainWindow):
 
         # Workflow controls
         self.load_profiles_first_call = True
+        self.load_optimised_grade_profiles_first_call = True
         self.load_AMT_map_first_call = True
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
@@ -202,18 +210,21 @@ class UserInputs(QMainWindow):
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
         self.start_dash_AMT_map_thread_first_call = True
+        self.start_dash_optimised_grade_profile_first_call = True
 
 
         # Disable tabs initially
-        self.tabs.setTabEnabled(1, False)  # Disable Stockpile tab
-        self.tabs.setTabEnabled(2, False)  # Disable AMT Stockpile tab
-        self.tabs.setTabEnabled(3, False)  # Disable Calendar tab
-        self.tabs.setTabEnabled(4, False)  # Disable Decision tab
-        self.tabs.setTabEnabled(5, False)  # Disable Results tab
-        self.tabs.setTabEnabled(6, False)  # Disable Profiles tab
-        self.tabs.setTabEnabled(7, False)  # Disable Setup Blends tab
-        self.tabs.setTabEnabled(8, False)  # Disable Blend Sequence tab
-        self.tabs.setTabEnabled(9, False)  # Disable Grade Profile tab
+        self.tabs.setTabEnabled(self.stockpile_tab_index, False)
+        self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, False)
+        self.tabs.setTabEnabled(self.calendar_tab_index, False)
+        self.tabs.setTabEnabled(self.decision_point_tab_index, False)
+        self.tabs.setTabEnabled(self.results_tab_index, False)
+        self.tabs.setTabEnabled(self.profiles_tab_index, False)
+        self.tabs.setTabEnabled(self.sqlite_reports_tab_index, False)
+        self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, False)
+        self.tabs.setTabEnabled(self.blend_config_tab_index, False)
+        self.tabs.setTabEnabled(self.blend_sequence_tab_index, False)
+        self.tabs.setTabEnabled(self.grade_profile_tab_index, False)
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -221,7 +232,7 @@ class UserInputs(QMainWindow):
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
-        self.tabs.addTab(self.site_config_tab, "Site Configuration")
+        self.site_config_tab_index = self.tabs.addTab(self.site_config_tab, "Site Configuration")
         layout = QFormLayout(self.site_config_tab)
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
 
@@ -534,8 +545,8 @@ class UserInputs(QMainWindow):
         QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
 
         self.setup_stockpile_table()
-        self.tabs.setTabEnabled(1, True)
-        self.tabs.setCurrentIndex(1)  # Switch to the next tab
+        self.tabs.setTabEnabled(self.stockpile_tab_index, True)
+        self.tabs.setCurrentIndex(self.stockpile_tab_index)  # Switch to the next tab
 
     def handle_site_config_error(self, error_message):
         self.submit_button.setEnabled(True)
@@ -823,11 +834,31 @@ class UserInputs(QMainWindow):
         if self.updated_stockpile_data:
             # Enable the next tab (Calendar Tab)
             self.setup_calendar()
-            self.setup_AMT_stockpile_table()
-            self.tabs.setTabEnabled(2, True)
-            self.tabs.setCurrentIndex(2)  # Switch to AMT tab
+            has_AMT_stockpiles = any(value.get("amt", False) for value in self.updated_stockpile_data.values())
+
+            if has_AMT_stockpiles:
+                self.setup_AMT_stockpile_table()
+                self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
+                self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)  # Switch to AMT tab
+            else:
+                self.tabs.setTabEnabled(self.calendar_tab_index, True)
+                self.activate_manual_setup_tab()
+                self.tabs.setCurrentIndex(self.calendar_tab_index)
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
+
+    def set_default_manual_schedule_periods(self):
+        if self.default_start_datetime and self.default_end_datetime:
+            return
+
+        periods = PeriodManager()
+        periods.calculate_periods(self.start_time_choice or datetime.now())
+        self.set_start_and_end_datetime(periods)
+
+    def activate_manual_setup_tab(self):
+        self.set_default_manual_schedule_periods()
+        self.setup_blends_tab()
+        self.tabs.setTabEnabled(self.blend_config_tab_index, True)
 
     def parse_float_from_table_item(self, item, default=0.0):
         if not item or not item.text().strip():
@@ -1062,8 +1093,9 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
-            self.tabs.setTabEnabled(3, True)
-            self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
+            self.tabs.setTabEnabled(self.calendar_tab_index, True)
+            self.activate_manual_setup_tab()
+            self.tabs.setCurrentIndex(self.calendar_tab_index)  # Switch to Calendar tab
         else:
             QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
     
@@ -1447,8 +1479,8 @@ class UserInputs(QMainWindow):
     def finish_run_program(self, periods):
         self.set_start_and_end_datetime(periods=periods)
         self.update_decision_point_tab_state()
-        self.setup_blends_tab()
-        self.tabs.setTabEnabled(7, True)
+        self.activate_manual_setup_tab()
+        self.refresh_sqlite_reports()
         self.start_dash_optimised_charts_thread()
 
         if self.project_load_continuation_pending:
@@ -1460,14 +1492,20 @@ class UserInputs(QMainWindow):
     def handle_run_program_error(self, error_message):
         self.project_load_continuation_pending = False
         self.show_error_popup(error_message)
-        for tab_index in range(4, self.tabs.count()):
+        for tab_index in [
+            self.decision_point_tab_index,
+            self.results_tab_index,
+            self.profiles_tab_index,
+            self.sqlite_reports_tab_index,
+            self.optimised_grade_profile_tab_index,
+        ]:
             self.tabs.setTabEnabled(tab_index, False)
-        self.tabs.setTabEnabled(3, True)
-        self.tabs.setCurrentIndex(3)
+        self.tabs.setTabEnabled(self.calendar_tab_index, True)
+        self.tabs.setCurrentIndex(self.calendar_tab_index)
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
-        self.tabs.addTab(self.results_tab, "Results (Optimised)")
+        self.results_tab_index = self.tabs.addTab(self.results_tab, "Results (Optimised)")
         self.results_layout = QVBoxLayout(self.results_tab)
 
         # Create a QFrame
@@ -1519,8 +1557,42 @@ class UserInputs(QMainWindow):
         self.load_AMT_map_first_call = False
 
     def load_gantt_chart(self):
+        self.resize_results_chart_area()
         # Load the Dash app into the QWebEngineView
         self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+
+    def resize_results_chart_area(self):
+        desired_height = 520
+
+        conn = None
+        try:
+            conn = sqlite3.connect("blendmaster.db")
+            data = pd.read_sql(
+                """
+                SELECT blend_ID, steady_state_number
+                FROM optimised_blend_report
+                """,
+                conn
+            )
+
+            if not data.empty:
+                blend_count = max(data["blend_ID"].nunique(), 1)
+                row_count = len(data.drop_duplicates())
+                graph_height = min(max(280, 190 + (blend_count * 55)), 720)
+                table_height = min(360, 120 + (min(row_count, 8) * 34))
+                desired_height = graph_height + table_height + 90
+        except Exception:
+            desired_height = 520
+        finally:
+            if conn is not None:
+                conn.close()
+
+        available_height = self.results_tab.height() - self.load_chart_button.sizeHint().height() - 28
+        available_height = max(420, available_height)
+        desired_height = max(420, min(desired_height, available_height))
+
+        self.top_frame.setMinimumHeight(desired_height)
+        self.top_frame.setMaximumHeight(desired_height)
     
     def load_manual_gantt_chart(self):
         # Load the Dash app into the QWebEngineView
@@ -1528,7 +1600,7 @@ class UserInputs(QMainWindow):
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
-        self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
+        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
         self.profiles_layout = QVBoxLayout(self.profiles_tab)
 
         # Create the bottom frame
@@ -1558,6 +1630,133 @@ class UserInputs(QMainWindow):
         # Add the button to the layout at the bottom-left
         self.profiles_layout.addWidget(self.load_profile_chart_button)
 
+    def setup_sqlite_reports_tab(self):
+        self.sqlite_reports_tab = QWidget()
+        self.sqlite_reports_tab_index = self.tabs.addTab(self.sqlite_reports_tab, "SQLite Reports")
+        self.sqlite_reports_layout = QVBoxLayout(self.sqlite_reports_tab)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(QLabel("Report Table:"))
+
+        self.sqlite_report_selector = QComboBox()
+        self.sqlite_report_selector.currentIndexChanged.connect(self.load_selected_sqlite_report)
+        controls_layout.addWidget(self.sqlite_report_selector)
+
+        refresh_button = QPushButton("Refresh Reports")
+        refresh_button.clicked.connect(self.refresh_sqlite_reports)
+        controls_layout.addWidget(refresh_button)
+        controls_layout.addStretch()
+
+        self.sqlite_reports_layout.addLayout(controls_layout)
+
+        self.sqlite_report_status = QLabel("")
+        self.sqlite_reports_layout.addWidget(self.sqlite_report_status)
+
+        self.sqlite_report_table = CustomTableWidget()
+        self.sqlite_report_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sqlite_reports_layout.addWidget(self.sqlite_report_table)
+
+    def get_sqlite_report_tables(self):
+        try:
+            conn = sqlite3.connect("blendmaster.db")
+            query = """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+            """
+            tables = pd.read_sql(query, conn)["name"].tolist()
+            conn.close()
+            return tables
+        except Exception as e:
+            QMessageBox.warning(self, "SQLite Reports", f"Unable to list SQLite tables: {e}")
+            return []
+
+    def refresh_sqlite_reports(self):
+        current_table = self.sqlite_report_selector.currentText()
+        tables = self.get_sqlite_report_tables()
+
+        self.sqlite_report_selector.blockSignals(True)
+        self.sqlite_report_selector.clear()
+        self.sqlite_report_selector.addItems(tables)
+        if current_table in tables:
+            self.sqlite_report_selector.setCurrentText(current_table)
+        self.sqlite_report_selector.blockSignals(False)
+
+        self.load_selected_sqlite_report()
+
+    def load_selected_sqlite_report(self):
+        table_name = self.sqlite_report_selector.currentText()
+        if not table_name:
+            self.sqlite_report_table.clearContents()
+            self.sqlite_report_table.setRowCount(0)
+            self.sqlite_report_table.setColumnCount(0)
+            self.sqlite_report_status.setText("")
+            return
+
+        try:
+            conn = sqlite3.connect("blendmaster.db")
+            row_count = pd.read_sql(f'SELECT COUNT(*) AS row_count FROM "{table_name}"', conn)["row_count"].iloc[0]
+            preview_limit = 10000
+            df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT {preview_limit}', conn)
+            conn.close()
+        except Exception as e:
+            QMessageBox.warning(self, "SQLite Reports", f"Unable to load '{table_name}': {e}")
+            return
+
+        if row_count > len(df):
+            self.sqlite_report_status.setText(
+                f"{table_name}: showing first {len(df):,} of {row_count:,} rows."
+            )
+        else:
+            self.sqlite_report_status.setText(f"{table_name}: {row_count:,} rows.")
+
+        self.populate_dataframe_table(self.sqlite_report_table, df)
+
+    def populate_dataframe_table(self, table_widget, df):
+        table_widget.clearContents()
+        table_widget.setRowCount(len(df))
+        table_widget.setColumnCount(len(df.columns))
+        table_widget.setHorizontalHeaderLabels([str(column) for column in df.columns])
+        table_widget.verticalHeader().setVisible(False)
+
+        header_font = table_widget.horizontalHeader().font()
+        header_font.setBold(True)
+        table_widget.horizontalHeader().setFont(header_font)
+
+        for row_idx, row in enumerate(df.itertuples(index=False)):
+            for col_idx, value in enumerate(row):
+                item = QTableWidgetItem("" if pd.isna(value) else str(value))
+                item.setTextAlignment(Qt.AlignCenter)
+                table_widget.setItem(row_idx, col_idx, item)
+
+        table_widget.resizeColumnsToContents()
+
+    def setup_optimised_grade_profile_tab(self):
+        self.optimised_grade_profile_tab = QWidget()
+        self.optimised_grade_profile_tab_index = self.tabs.addTab(self.optimised_grade_profile_tab, "Grade Profiles (Optimised)")
+        self.optimised_grade_profile_layout = QVBoxLayout(self.optimised_grade_profile_tab)
+
+        self.optimised_grade_profile_frame = QFrame()
+        self.optimised_grade_profile_frame.setFrameShape(QFrame.Box)
+        self.optimised_grade_profile_frame.setLineWidth(1)
+
+        frame_layout = QVBoxLayout(self.optimised_grade_profile_frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.optimised_grade_profile_chart_view = CustomWebEngineView()
+        self.optimised_grade_profile_chart_view.setStyleSheet("border: 1px solid black;")
+        frame_layout.addWidget(self.optimised_grade_profile_chart_view)
+
+        self.optimised_grade_profile_layout.addWidget(self.optimised_grade_profile_frame)
+
+        self.load_optimised_grade_profile_chart_button = QPushButton("Load or Update Chart")
+        self.load_optimised_grade_profile_chart_button.setFixedWidth(200)
+        self.load_optimised_grade_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")
+        self.load_optimised_grade_profile_chart_button.clicked.connect(self.load_optimised_grade_profiles)
+        self.optimised_grade_profile_layout.addWidget(self.load_optimised_grade_profile_chart_button)
+
     def load_profiles(self):
 
         if not self.load_profiles_first_call:
@@ -1581,6 +1780,30 @@ class UserInputs(QMainWindow):
 
         # Load the Dash app into the QWebEngineView
         self.blend_grade_profile_chart_view.setUrl(QUrl("http://localhost:8053"))
+
+    def load_optimised_grade_profiles(self):
+        self.start_or_update_dash_optimised_grade_profile_thread()
+
+        if not self.load_optimised_grade_profiles_first_call:
+            try:
+                requests.post("http://localhost:8055/trigger-refresh", timeout=5)
+            except requests.exceptions.Timeout:
+                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
+            except requests.exceptions.RequestException:
+                pass
+
+        self.optimised_grade_profile_chart_view.setUrl(QUrl("http://localhost:8055"))
+        self.load_optimised_grade_profiles_first_call = False
+
+    def start_or_update_dash_optimised_grade_profile_thread(self):
+        if self.start_dash_optimised_grade_profile_first_call:
+            self.draw_optimised_grade_profile_chart = DrawOptimisedGradeProfiles("blendmaster.db", 8055)
+            self.dash_thread_optimised_grade_profile = threading.Thread(
+                target=self.draw_optimised_grade_profile_chart.run_app,
+                daemon=True
+            )
+            self.dash_thread_optimised_grade_profile.start()
+            self.start_dash_optimised_grade_profile_first_call = False
 
     def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
@@ -1618,20 +1841,24 @@ class UserInputs(QMainWindow):
     def update_decision_point_tab_state(self):
         """Enable or disable the Decision Point tab based on blend_mode."""
         if self.blend_mode_choice == 2:
-            self.tabs.setTabEnabled(4, True)
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setTabEnabled(self.decision_point_tab_index, True)
+            self.tabs.setCurrentIndex(self.decision_point_tab_index)
             self.decision_input.setEnabled(True) # Enable the input
             self.enter_button.setEnabled(True) # Enable the button
-            self.tabs.setTabEnabled(5, True)  # Enable Results (optimised) tab
-            self.tabs.setTabEnabled(6, True)  # Enable profiles tab
+            self.tabs.setTabEnabled(self.results_tab_index, True)
+            self.tabs.setTabEnabled(self.profiles_tab_index, True)
+            self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
+            self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, True)
 
         else:
-            self.tabs.setTabEnabled(4, True)
+            self.tabs.setTabEnabled(self.decision_point_tab_index, True)
             self.decision_input.setEnabled(False) # Disable the input
             self.enter_button.setEnabled(False) # Disable the button
-            self.tabs.setTabEnabled(5, True)  # Enable Results (optimised) tab
-            self.tabs.setTabEnabled(6, True)  # Enable profiles tab
-            self.tabs.setCurrentIndex(5)  # Switch to Results (optimised) tab
+            self.tabs.setTabEnabled(self.results_tab_index, True)
+            self.tabs.setTabEnabled(self.profiles_tab_index, True)
+            self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
+            self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, True)
+            self.tabs.setCurrentIndex(self.results_tab_index)  # Switch to Results (optimised) tab
 
     def handle_decision_input(self):
         """Send input from the Decision Point tab to the CaseModellerBridge."""
@@ -2190,8 +2417,8 @@ class UserInputs(QMainWindow):
                 self.saved_blends_for_schedule.append(blend_data)
 
         self.setup_sequence_tab()
-        self.tabs.setTabEnabled(8, True)
-        self.tabs.setCurrentIndex(8)  
+        self.tabs.setTabEnabled(self.blend_sequence_tab_index, True)
+        self.tabs.setCurrentIndex(self.blend_sequence_tab_index)
         self.save_button.setEnabled(True)
         QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
 
@@ -2204,7 +2431,6 @@ class UserInputs(QMainWindow):
             df = pd.read_sql("SELECT * FROM build_report", conn)
         except sqlite3.OperationalError as e:
             print(f"Warning: {e}")
-            QMessageBox.warning(self, "Database", "'build_report' table not found in database.")
             df = pd.DataFrame()
         finally:
             conn.close()
@@ -2677,7 +2903,7 @@ class UserInputs(QMainWindow):
 
         self.load_manual_gantt_chart()  
 
-        self.tabs.setTabEnabled(9, True)  # Enable Grade Profile tab
+        self.tabs.setTabEnabled(self.grade_profile_tab_index, True)  # Enable Grade Profile tab
 
         QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
 
@@ -2864,7 +3090,7 @@ class UserInputs(QMainWindow):
     def setup_grade_profile_tab(self):
         # Create a tab for Grade Profiles (Manual)
         self.grade_profile_tab = QWidget()
-        self.tabs.addTab(self.grade_profile_tab, "Grade Profiles (Manual)")
+        self.grade_profile_tab_index = self.tabs.addTab(self.grade_profile_tab, "Grade Profiles (Manual)")
 
         # Create the main layout for the tab
         self.grade_profile_layout = QVBoxLayout(self.grade_profile_tab)
@@ -3058,6 +3284,12 @@ class UserInputs(QMainWindow):
         self.progress_dialog = None
         self.background_tasks = []
         self.project_load_continuation_pending = False
+
+    def clear_sqlite_session_data(self):
+        try:
+            DatabaseManager.clear_all_tables()
+        except sqlite3.Error as e:
+            print(f"Warning: failed to clear SQLite session data: {e}")
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):

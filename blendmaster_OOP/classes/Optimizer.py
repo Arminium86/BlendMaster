@@ -115,18 +115,27 @@ class Optimizer:
         source_tonnes = "Null"
 
         for selected_event in selected_events:
-            if (selected_event["actual_tonnes"] == selected_event["opening_balance"] and selected_event["actual_tonnes"] > 0):
-                actual_tonnes = selected_event["actual_tonnes"]  
-                rate = selected_event["equipment_rate_input"]  
+            actual_tonnes = float(selected_event.get("actual_tonnes") or 0)
+            opening_balance = float(selected_event.get("opening_balance") or 0)
+            rate = float(selected_event.get("equipment_rate_input") or 0)
+            balance_tolerance = max(0.01, abs(opening_balance) * 1e-6)
+            depletes_source = (
+                actual_tonnes > 0
+                and opening_balance > 0
+                and rate > 0
+                and opening_balance - actual_tonnes <= balance_tolerance
+            )
 
-                # Calculate time to depletion based on the actual selected tonnes
-                time_to_depletion = float(actual_tonnes / rate)
+            if depletes_source:
+
+                # Calculate time to depletion based on the source opening tonnes.
+                time_to_depletion = float(opening_balance / rate)
 
                 # If a source will deplete sooner than the current steady state duration, then update the steady state duration
                 if time_to_depletion < updated_duration and time_to_depletion > 0.016666667:
                     updated_duration = time_to_depletion
                     source_name = selected_event["source"]
-                    source_tonnes = selected_event["opening_balance"]
+                    source_tonnes = opening_balance
 
                 elif time_to_depletion > updated_duration: 
                     continue
@@ -134,7 +143,7 @@ class Optimizer:
                 else: 
                     updated_duration =  0.016666667 # Min steady state duration is 1 minute (this else block should be reached in rare cases)
                     source_name = selected_event["source"]
-                    source_tonnes = selected_event["opening_balance"]
+                    source_tonnes = opening_balance
 
         for stockpile in stockpile_data:
             if (stockpile.auto_turnover_datetime != None and 

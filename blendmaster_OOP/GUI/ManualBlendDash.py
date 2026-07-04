@@ -1,4 +1,5 @@
 import dash
+import sqlite3
 from dash.dependencies import Input, Output
 import plotly.express as px
 import pandas as pd
@@ -237,11 +238,14 @@ class DrawGradeProfiles:
             sources = [s.strip() for s in row["Sources"].split(",")]  # Strip spaces from sources
             source_ratios = list(map(float, row["Source Ratios"].split(",")))  # Corresponding ratios
             feed_tonnes = row["Feed Tonnes"]
-            max_duration = row["Max Duration (hrs)"]
+            scheduled_duration = float(row["Duration (hrs)"])
             start_datetime = row["Start Datetime"]
 
-            # Compute Blend ID reclaim rate
-            blend_reclaim_rate = float(feed_tonnes) / float(max_duration)
+            if scheduled_duration <= 0:
+                continue
+
+            # Use the scheduled row duration, not the blend's total available duration.
+            blend_reclaim_rate = float(feed_tonnes) / scheduled_duration
 
             # Compute reclaim rate for each source
             source_reclaim_rates = {source: blend_reclaim_rate * ratio for source, ratio in zip(sources, source_ratios)}
@@ -266,7 +270,7 @@ class DrawGradeProfiles:
                 stockpile_hex_groups[footprint].append(hex_row)
 
             current_time = start_datetime
-            remaining_duration = float(row["Duration (hrs)"])
+            remaining_duration = scheduled_duration
 
             while remaining_duration > 0 and source_hex_data:
                 min_duration = float("inf")
@@ -374,7 +378,10 @@ class DrawGradeProfiles:
         # Convert new records to DataFrame
         if new_records:
             new_df = pd.DataFrame(new_records)
-            df = pd.concat([df, new_df], ignore_index=True)
+            if df.empty:
+                df = new_df
+            else:
+                df = pd.concat([df, new_df], ignore_index=True)
 
         # Re-sort the data
         df = df.sort_values(by="Start Datetime").reset_index(drop=True)
@@ -439,5 +446,122 @@ class DrawGradeProfiles:
     
     def run_app(self):
         """Run the Dash app."""
+        self.app.run_server(port=self.port, debug=True, use_reloader=False)
+
+class DrawOptimisedGradeProfiles:
+    def __init__(self, db_path, port):
+        self.db_path = db_path
+        self.port = port
+        self.app = dash.Dash(__name__)
+        self.df = self.fetch_data()
+        self.app.layout = html.Div(id='main-container', children=[
+            dcc.Store(id='df-store', data=self.df.to_dict('records')),
+            html.Div(id='charts-container')
+        ])
+        self.app.callback(
+            Output('charts-container', 'children'),
+            Input('df-store', 'data')
+        )(self.update_charts)
+        self.setup_routes()
+
+    def setup_routes(self):
+        @self.app.server.route("/trigger-refresh", methods=["POST"])
+        def trigger_refresh():
+            self.df = self.fetch_data()
+            self.app.layout.children[0].data = self.df.to_dict('records')
+            return ("", 204)
+
+    def fetch_data(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            data = pd.read_sql("SELECT * FROM optimised_blend_report", conn)
+            conn.close()
+            return data
+        except Exception as e:
+            print(f"Error fetching optimised grade profile data: {e}")
+            return pd.DataFrame()
+
+    def transform_data(self, df, grade_columns):
+        if df.empty:
+            return pd.DataFrame(columns=["time", "grade", "element"])
+
+        required_columns = [
+            "steady_state_number", "start_datetime", "end_datetime",
+            "crusher_actual_grade_fe", "crusher_actual_grade_si",
+            "crusher_actual_grade_al", "crusher_actual_grade_p",
+            "crusher_actual_grade_mn"
+        ]
+        missing_columns = [column for column in required_columns if column not in df.columns]
+        if missing_columns:
+            print(f"Optimised grade profile data missing columns: {missing_columns}")
+            return pd.DataFrame(columns=["time", "grade", "element"])
+
+        df = df.copy()
+        df["start_datetime"] = pd.to_datetime(df["start_datetime"], errors="coerce")
+        df["end_datetime"] = pd.to_datetime(df["end_datetime"], errors="coerce")
+        df = df.dropna(subset=["start_datetime", "end_datetime"])
+        df = df.drop_duplicates(subset=["steady_state_number", "start_datetime", "end_datetime"])
+        df = df.sort_values("start_datetime")
+
+        grade_mapping = {
+            "Grade Fe": "crusher_actual_grade_fe",
+            "Grade Si": "crusher_actual_grade_si",
+            "Grade Al": "crusher_actual_grade_al",
+            "Grade P": "crusher_actual_grade_p",
+            "Grade Mn": "crusher_actual_grade_mn",
+        }
+
+        records = []
+        for _, row in df.iterrows():
+            for grade in grade_columns:
+                value = pd.to_numeric(row[grade_mapping[grade]], errors="coerce")
+                if pd.isna(value):
+                    continue
+                records.append({"time": row["start_datetime"], "grade": value, "element": grade})
+                records.append({"time": row["end_datetime"], "grade": value, "element": grade})
+
+        transformed_df = pd.DataFrame(records)
+        if transformed_df.empty:
+            return pd.DataFrame(columns=["time", "grade", "element"])
+
+        transformed_df["time"] = pd.to_datetime(transformed_df["time"])
+        return transformed_df
+
+    def update_charts(self, data):
+        df = pd.DataFrame(data)
+        if df.empty:
+            return [html.Div("No optimised grade profile data available.")]
+
+        grade_columns = ['Grade Fe', 'Grade Si', 'Grade Al', 'Grade P', 'Grade Mn']
+        colors = {
+            'Grade Fe': 'rgb(77, 148, 204)',
+            'Grade Si': 'rgb(50, 200, 50)',
+            'Grade Al': 'rgb(255, 255, 51)',
+            'Grade P': 'rgb(160, 80, 160)',
+            'Grade Mn': 'rgb(255, 160, 100)',
+        }
+
+        transformed_df = self.transform_data(df, grade_columns)
+        if transformed_df.empty:
+            return [html.Div("No optimised grade profile data available.")]
+
+        charts = []
+        for grade in grade_columns:
+            truncated_title = grade.split()[-1]
+            grade_data = transformed_df[transformed_df['element'] == grade]
+            fig = px.line(
+                grade_data,
+                x='time',
+                y='grade',
+                title=f'{truncated_title} Grade Profile',
+                labels={'time': 'Time', 'grade': grade},
+                color_discrete_sequence=[colors[grade]]
+            )
+            fig.update_traces(mode='lines+markers')
+            charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
+
+        return charts
+
+    def run_app(self):
         self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
