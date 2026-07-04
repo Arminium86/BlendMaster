@@ -45,7 +45,8 @@ class EventPoolGenerator:
                             "max_quantity": stockpile_max_quantity,
                             "reclaim_threshold": stockpile.reclaim_threshold,
                             "state": stockpile_state,
-                            "auto_turnover_datetime": stockpile.auto_turnover_datetime
+                            "auto_turnover_datetime": stockpile.auto_turnover_datetime,
+                            "is_amt": stockpile.is_AMT
                         })
 
         for grade_block in self.grade_blocks:
@@ -183,7 +184,8 @@ class EventPoolGenerator:
                 max_quantity=record.get("max_quantity"),
                 reclaim_threshold=record.get("reclaim_threshold"),
                 state=record.get("state"),
-                auto_turnover_datetime=record.get("auto_turnover_datetime")
+                auto_turnover_datetime=record.get("auto_turnover_datetime"),
+                is_amt=record.get("is_amt", False)
 
             )
             for record in event_data_dicts

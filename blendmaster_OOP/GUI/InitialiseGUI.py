@@ -61,38 +61,13 @@ class UserInputs(QMainWindow):
         self.AMT_stockpile_table.setMinimumWidth(560)
         self.AMT_stockpile_tab_layout.addWidget(self.AMT_stockpile_table, stretch=0)
 
+        # Add Solver Configuration Tab
+        self.setup_solver_configuration_tab()
+
         # Add calendar Tab
         self.main_tab = QWidget()
         self.calendar_tab_index = self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
-
-        # Stockpile count inputs
-        stockpile_limit_layout = QHBoxLayout()
-        self.min_stockpiles_input = QLineEdit()
-        self.min_stockpiles_input.setPlaceholderText("Min Stockpiles")
-        self.min_stockpiles_input.setFixedWidth(100)
-        self.max_stockpiles_input = QLineEdit()
-        self.max_stockpiles_input.setPlaceholderText("Max Stockpiles")
-        self.max_stockpiles_input.setFixedWidth(100)
-        stockpile_limit_layout.addWidget(QLabel("Min Stockpiles:"))
-        stockpile_limit_layout.addWidget(self.min_stockpiles_input)
-        stockpile_limit_layout.addWidget(QLabel("Max Stockpiles:"))
-        stockpile_limit_layout.addWidget(self.max_stockpiles_input)
-        stockpile_limit_layout.addStretch()
-        self.main_tab_layout.addLayout(stockpile_limit_layout)
-
-        stockpile_contribution_layout = QHBoxLayout()
-        self.min_stockpile_contribution_ratio_input = QLineEdit()
-        self.min_stockpile_contribution_ratio_input.setPlaceholderText("0.01 - 1")
-        self.min_stockpile_contribution_ratio_input.setText(str(Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO))
-        self.min_stockpile_contribution_ratio_input.setFixedWidth(100)
-        contribution_ratio_validator = QDoubleValidator(0.01, 1.0, 4, self)
-        contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
-        self.min_stockpile_contribution_ratio_input.setValidator(contribution_ratio_validator)
-        stockpile_contribution_layout.addWidget(QLabel("Min Stockpile Contribution Ratio:"))
-        stockpile_contribution_layout.addWidget(self.min_stockpile_contribution_ratio_input)
-        stockpile_contribution_layout.addStretch()
-        self.main_tab_layout.addLayout(stockpile_contribution_layout)
 
         # Calendar table
         self.main_table = CustomTableWidget()
@@ -216,6 +191,7 @@ class UserInputs(QMainWindow):
         # Disable tabs initially
         self.tabs.setTabEnabled(self.stockpile_tab_index, False)
         self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, False)
+        self.tabs.setTabEnabled(self.solver_config_tab_index, False)
         self.tabs.setTabEnabled(self.calendar_tab_index, False)
         self.tabs.setTabEnabled(self.decision_point_tab_index, False)
         self.tabs.setTabEnabled(self.results_tab_index, False)
@@ -228,6 +204,115 @@ class UserInputs(QMainWindow):
 
         # Initialise main optimisation program
         self.run_program = Run(self)
+
+    def setup_solver_configuration_tab(self):
+        self.solver_config_tab = QWidget()
+        self.solver_config_tab_index = self.tabs.addTab(self.solver_config_tab, "Solver Configuration")
+        self.solver_config_layout = QVBoxLayout(self.solver_config_tab)
+
+        contribution_ratio_validator = QDoubleValidator(0.01, 1.0, 4, self)
+        contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
+        threshold_validator = QDoubleValidator(0.0, 1000.0, 4, self)
+        threshold_validator.setNotation(QDoubleValidator.StandardNotation)
+
+        limits_label = QLabel("Stockpile Count Constraints")
+        limits_label.setStyleSheet("font-weight: bold;")
+        self.solver_config_layout.addWidget(limits_label)
+
+        stockpile_limit_layout = QHBoxLayout()
+        self.min_stockpiles_input = QLineEdit()
+        self.min_stockpiles_input.setPlaceholderText("Min Stockpiles")
+        self.min_stockpiles_input.setFixedWidth(100)
+        self.max_stockpiles_input = QLineEdit()
+        self.max_stockpiles_input.setPlaceholderText("Max Stockpiles")
+        self.max_stockpiles_input.setFixedWidth(100)
+        stockpile_limit_layout.addWidget(QLabel("Min Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.min_stockpiles_input)
+        stockpile_limit_layout.addWidget(QLabel("Max Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.max_stockpiles_input)
+        stockpile_limit_layout.addStretch()
+        self.solver_config_layout.addLayout(stockpile_limit_layout)
+
+        stockpile_contribution_layout = QHBoxLayout()
+        self.min_stockpile_contribution_ratio_input = QLineEdit()
+        self.min_stockpile_contribution_ratio_input.setPlaceholderText("0.01 - 1")
+        self.min_stockpile_contribution_ratio_input.setText(str(Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO))
+        self.min_stockpile_contribution_ratio_input.setFixedWidth(100)
+        self.min_stockpile_contribution_ratio_input.setValidator(contribution_ratio_validator)
+        stockpile_contribution_layout.addWidget(QLabel("Min Stockpile Contribution Ratio:"))
+        stockpile_contribution_layout.addWidget(self.min_stockpile_contribution_ratio_input)
+        stockpile_contribution_layout.addStretch()
+        self.solver_config_layout.addLayout(stockpile_contribution_layout)
+
+        preference_label = QLabel("Tie-Break Preferences")
+        preference_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
+        self.solver_config_layout.addWidget(preference_label)
+
+        self.prefer_fewer_stockpiles_checkbox = QCheckBox("Prefer using fewer stockpiles")
+        self.solver_config_layout.addWidget(self.prefer_fewer_stockpiles_checkbox)
+
+        balance_layout = QHBoxLayout()
+        balance_layout.addWidget(QLabel("Balance Preference:"))
+        self.balance_preference_combo = QComboBox()
+        self.balance_preference_combo.addItems([
+            "No balance preference",
+            "Lower balance first",
+            "Higher balance first"
+        ])
+        self.balance_preference_combo.setFixedWidth(180)
+        balance_layout.addWidget(self.balance_preference_combo)
+        balance_layout.addStretch()
+        self.solver_config_layout.addLayout(balance_layout)
+
+        self.prefer_amt_stockpiles_checkbox = QCheckBox(
+            "Prefer AMT stockpiles before weighted average inventory stockpiles"
+        )
+        self.solver_config_layout.addWidget(self.prefer_amt_stockpiles_checkbox)
+
+        self.prefer_contaminated_stockpiles_checkbox = QCheckBox(
+            "Try blending contaminated stockpiles/chunks first"
+        )
+        self.solver_config_layout.addWidget(self.prefer_contaminated_stockpiles_checkbox)
+
+        contaminant_layout = QHBoxLayout()
+        self.contaminant_si_threshold_input = self.create_solver_threshold_input("5.0", threshold_validator)
+        self.contaminant_al_threshold_input = self.create_solver_threshold_input("3.0", threshold_validator)
+        self.contaminant_p_threshold_input = self.create_solver_threshold_input("0.1", threshold_validator)
+        self.contaminant_mn_threshold_input = self.create_solver_threshold_input("0.1", threshold_validator)
+        for label, widget in [
+            ("Si threshold:", self.contaminant_si_threshold_input),
+            ("Al threshold:", self.contaminant_al_threshold_input),
+            ("P threshold:", self.contaminant_p_threshold_input),
+            ("Mn threshold:", self.contaminant_mn_threshold_input),
+        ]:
+            contaminant_layout.addWidget(QLabel(label))
+            contaminant_layout.addWidget(widget)
+        contaminant_layout.addStretch()
+        self.solver_config_layout.addLayout(contaminant_layout)
+
+        low_fe_layout = QHBoxLayout()
+        self.prefer_low_fe_stockpiles_checkbox = QCheckBox("Try blending low grade stockpiles/chunks first")
+        self.low_fe_threshold_input = self.create_solver_threshold_input("58.0", threshold_validator)
+        low_fe_layout.addWidget(self.prefer_low_fe_stockpiles_checkbox)
+        low_fe_layout.addWidget(QLabel("Fe threshold:"))
+        low_fe_layout.addWidget(self.low_fe_threshold_input)
+        low_fe_layout.addStretch()
+        self.solver_config_layout.addLayout(low_fe_layout)
+
+        submit_layout = QHBoxLayout()
+        self.solver_config_submit_button = QPushButton("Submit")
+        self.solver_config_submit_button.clicked.connect(self.handle_solver_configuration_submit)
+        submit_layout.addWidget(self.solver_config_submit_button)
+        submit_layout.addStretch()
+        self.solver_config_layout.addLayout(submit_layout)
+        self.solver_config_layout.addStretch()
+
+    def create_solver_threshold_input(self, default_value, validator):
+        input_field = QLineEdit()
+        input_field.setText(default_value)
+        input_field.setValidator(validator)
+        input_field.setFixedWidth(70)
+        return input_field
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -844,9 +929,8 @@ class UserInputs(QMainWindow):
                 self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
                 self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)  # Switch to AMT tab
             else:
-                self.tabs.setTabEnabled(self.calendar_tab_index, True)
                 self.activate_manual_setup_tab()
-                self.tabs.setCurrentIndex(self.calendar_tab_index)
+                self.navigate_to_solver_configuration()
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -862,6 +946,21 @@ class UserInputs(QMainWindow):
         self.set_default_manual_schedule_periods()
         self.setup_blends_tab()
         self.tabs.setTabEnabled(self.blend_config_tab_index, True)
+
+    def navigate_to_solver_configuration(self):
+        self.load_solver_config_inputs()
+        self.tabs.setTabEnabled(self.solver_config_tab_index, True)
+        self.tabs.setCurrentIndex(self.solver_config_tab_index)
+
+    def handle_solver_configuration_submit(self):
+        if not self.store_solver_config_inputs():
+            return
+
+        if not getattr(self, "calendar_rows", None):
+            self.setup_calendar()
+
+        self.tabs.setTabEnabled(self.calendar_tab_index, True)
+        self.tabs.setCurrentIndex(self.calendar_tab_index)
 
     def parse_float_from_table_item(self, item, default=0.0):
         if not item or not item.text().strip():
@@ -1096,9 +1195,8 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
-            self.tabs.setTabEnabled(self.calendar_tab_index, True)
             self.activate_manual_setup_tab()
-            self.tabs.setCurrentIndex(self.calendar_tab_index)  # Switch to Calendar tab
+            self.navigate_to_solver_configuration()
         else:
             QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
     
@@ -1246,13 +1344,12 @@ class UserInputs(QMainWindow):
         if self.calendar_inputs:
             if self.calendar_inputs.get("min_stockpiles") is not None:
                 self.min_stockpiles = self.calendar_inputs["min_stockpiles"]
-                self.min_stockpiles_input.setText(str(self.min_stockpiles))
             if self.calendar_inputs.get("max_stockpiles") is not None:
                 self.max_stockpiles = self.calendar_inputs["max_stockpiles"]
-                self.max_stockpiles_input.setText(str(self.max_stockpiles))
             if self.calendar_inputs.get("min_stockpile_contribution_ratio") is not None:
                 self.min_stockpile_contribution_ratio = self.calendar_inputs["min_stockpile_contribution_ratio"]
-                self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
+            self.solver_config = self.calendar_inputs.get("solver_config", self.solver_config)
+            self.load_solver_config_inputs()
 
         if self.is_project_loaded or not self.submit_calendar_first_call:
             
@@ -1378,7 +1475,46 @@ class UserInputs(QMainWindow):
 
         self.store_stockpile_constraint_inputs()
 
-    def store_stockpile_constraint_inputs(self):
+    def load_solver_config_inputs(self):
+        if not hasattr(self, "min_stockpiles_input"):
+            return
+
+        if self.calendar_inputs:
+            self.min_stockpiles = self.calendar_inputs.get("min_stockpiles", self.min_stockpiles)
+            self.max_stockpiles = self.calendar_inputs.get("max_stockpiles", self.max_stockpiles)
+            self.min_stockpile_contribution_ratio = self.calendar_inputs.get(
+                "min_stockpile_contribution_ratio",
+                self.min_stockpile_contribution_ratio
+            )
+            self.solver_config = self.calendar_inputs.get("solver_config", self.solver_config)
+
+        self.min_stockpiles_input.setText("" if self.min_stockpiles is None else str(self.min_stockpiles))
+        self.max_stockpiles_input.setText("" if self.max_stockpiles is None else str(self.max_stockpiles))
+        self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
+
+        solver_config = self.solver_config or {}
+        self.prefer_fewer_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_fewer_stockpiles", False)))
+        balance_preference = solver_config.get("balance_preference", "none")
+        balance_label = {
+            "none": "No balance preference",
+            "lower": "Lower balance first",
+            "higher": "Higher balance first"
+        }.get(balance_preference, "No balance preference")
+        self.balance_preference_combo.setCurrentText(balance_label)
+        self.prefer_amt_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_amt_stockpiles", False)))
+        self.prefer_contaminated_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_contaminated_stockpiles", False)))
+        contaminant_thresholds = solver_config.get("contaminant_thresholds", {})
+        self.contaminant_si_threshold_input.setText(str(contaminant_thresholds.get("si", 5.0)))
+        self.contaminant_al_threshold_input.setText(str(contaminant_thresholds.get("al", 3.0)))
+        self.contaminant_p_threshold_input.setText(str(contaminant_thresholds.get("p", 0.1)))
+        self.contaminant_mn_threshold_input.setText(str(contaminant_thresholds.get("mn", 0.1)))
+        self.prefer_low_fe_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_low_fe_stockpiles", False)))
+        self.low_fe_threshold_input.setText(str(solver_config.get("low_fe_threshold", 58.0)))
+
+    def store_solver_config_inputs(self, show_errors=True):
+        if self.calendar_inputs is None:
+            self.calendar_inputs = {}
+
         min_text = self.min_stockpiles_input.text().strip()
         max_text = self.max_stockpiles_input.text().strip()
         ratio_text = self.min_stockpile_contribution_ratio_input.text().strip()
@@ -1386,38 +1522,94 @@ class UserInputs(QMainWindow):
         try:
             self.min_stockpiles = int(min_text) if min_text else None
         except ValueError:
+            if show_errors:
+                QMessageBox.warning(self, "Invalid Input", "Min Stockpiles must be an integer.")
+                return False
             self.min_stockpiles = None
 
         try:
             self.max_stockpiles = int(max_text) if max_text else None
         except ValueError:
+            if show_errors:
+                QMessageBox.warning(self, "Invalid Input", "Max Stockpiles must be an integer.")
+                return False
             self.max_stockpiles = None
+
+        if (
+            self.min_stockpiles is not None
+            and self.max_stockpiles is not None
+            and self.min_stockpiles > self.max_stockpiles
+        ):
+            if show_errors:
+                QMessageBox.warning(self, "Invalid Input", "Min Stockpiles cannot be greater than Max Stockpiles.")
+            return False
 
         try:
             self.min_stockpile_contribution_ratio = (
                 float(ratio_text) if ratio_text else Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
             )
         except ValueError:
-            QMessageBox.warning(
-                self,
-                "Invalid Input",
-                "Min Stockpile Contribution Ratio must be a number from 0.01 to 1.",
-            )
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Min Stockpile Contribution Ratio must be a number from 0.01 to 1.",
+                )
             return False
 
         if not 0.01 <= self.min_stockpile_contribution_ratio <= 1:
-            QMessageBox.warning(
-                self,
-                "Invalid Input",
-                "Min Stockpile Contribution Ratio must be between 0.01 and 1.",
-            )
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Min Stockpile Contribution Ratio must be between 0.01 and 1.",
+                )
             return False
+
+        def parse_threshold(input_widget, label):
+            try:
+                return float(input_widget.text().strip())
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} must be a number.")
+                return None
+
+        contaminant_thresholds = {
+            "si": parse_threshold(self.contaminant_si_threshold_input, "Si threshold"),
+            "al": parse_threshold(self.contaminant_al_threshold_input, "Al threshold"),
+            "p": parse_threshold(self.contaminant_p_threshold_input, "P threshold"),
+            "mn": parse_threshold(self.contaminant_mn_threshold_input, "Mn threshold"),
+        }
+        low_fe_threshold = parse_threshold(self.low_fe_threshold_input, "Fe threshold")
+
+        if any(value is None for value in contaminant_thresholds.values()) or low_fe_threshold is None:
+            return False
+
+        balance_preference = {
+            "No balance preference": "none",
+            "Lower balance first": "lower",
+            "Higher balance first": "higher"
+        }.get(self.balance_preference_combo.currentText(), "none")
+
+        self.solver_config = {
+            "prefer_fewer_stockpiles": self.prefer_fewer_stockpiles_checkbox.isChecked(),
+            "balance_preference": balance_preference,
+            "prefer_amt_stockpiles": self.prefer_amt_stockpiles_checkbox.isChecked(),
+            "prefer_contaminated_stockpiles": self.prefer_contaminated_stockpiles_checkbox.isChecked(),
+            "contaminant_thresholds": contaminant_thresholds,
+            "prefer_low_fe_stockpiles": self.prefer_low_fe_stockpiles_checkbox.isChecked(),
+            "low_fe_threshold": low_fe_threshold,
+        }
 
         self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
         self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
         self.calendar_inputs["max_stockpiles"] = self.max_stockpiles
         self.calendar_inputs["min_stockpile_contribution_ratio"] = self.min_stockpile_contribution_ratio
+        self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
         return True
+
+    def store_stockpile_constraint_inputs(self):
+        return self.store_solver_config_inputs()
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -1497,7 +1689,8 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument,
             self.min_stockpiles,
             self.max_stockpiles,
-            self.min_stockpile_contribution_ratio
+            self.min_stockpile_contribution_ratio,
+            self.solver_config
         )
 
     def finish_run_program(self, periods):
@@ -3188,6 +3381,8 @@ class UserInputs(QMainWindow):
 
         if hasattr(self, "crusher_rate_input"):
             self.crusher_rate_input_value = self.crusher_rate_input.text()
+
+        self.store_solver_config_inputs(show_errors=False)
         
         try:
             
@@ -3221,7 +3416,8 @@ class UserInputs(QMainWindow):
                 "crusher_rate_input_value": self.crusher_rate_input_value,
                 'hex_sequence_table': self.hex_sequence_table,
                 'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
-                'AMT_chunk_settings': self.AMT_chunk_settings
+                'AMT_chunk_settings': self.AMT_chunk_settings,
+                "solver_config": self.solver_config,
             }
             # Generate a timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -3282,6 +3478,9 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
             self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
             self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+            self.solver_config = loaded_state.get("solver_config", {})
+            if self.calendar_inputs is not None:
+                self.calendar_inputs["solver_config"] = self.solver_config
 
             tab_states = loaded_state.get("tab_states", {})
             for index, enabled in tab_states.items():
@@ -3324,6 +3523,7 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table = []
         self.stockpile_data_AMT_column = {}
         self.AMT_chunk_settings = {}
+        self.solver_config = {}
         self.min_stockpiles = None
         self.max_stockpiles = None
         self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO

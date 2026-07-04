@@ -34,6 +34,8 @@ class Optimizer:
     MIN_SELECTED_STOCKPILE_BLEND_RATIO = 0.01
     SOLUTION_TOLERANCE = 1e-6
     THROUGHPUT_REWARD_PER_TONNE = 1_000_000
+    TIE_BREAK_REWARD_PER_TONNE = 1.0
+    FEWER_STOCKPILE_PENALTY = 10.0
 
     def run_with_dynamic_steady_state(
         self,
@@ -47,6 +49,7 @@ class Optimizer:
         min_stockpiles: Optional[int] = None,
         max_stockpiles: Optional[int] = None,
         min_stockpile_contribution_ratio: Optional[float] = None,
+        solver_config: Optional[dict] = None,
     ):
         """Runs blending optimization and adjusts steady state if needed."""
         
@@ -64,6 +67,7 @@ class Optimizer:
             min_stockpiles,
             max_stockpiles,
             min_stockpile_contribution_ratio,
+            solver_config,
         )
         
         if result['Linprog_result_object'].success: 
@@ -79,6 +83,7 @@ class Optimizer:
                 min_stockpiles,
                 max_stockpiles,
                 min_stockpile_contribution_ratio,
+                solver_config,
             )
 
             if result['Linprog_result_object'].success: 
@@ -97,6 +102,7 @@ class Optimizer:
                     min_stockpiles,
                     max_stockpiles,
                     min_stockpile_contribution_ratio,
+                    solver_config,
                 )
 
                 if result['Linprog_result_object'].success: 
@@ -176,6 +182,7 @@ class Optimizer:
         min_stockpiles: Optional[int] = None,
         max_stockpiles: Optional[int] = None,
         min_stockpile_contribution_ratio: Optional[float] = None,
+        solver_config: Optional[dict] = None,
     ):
         """Core optimisation logic using a mixed integer solver."""
 
@@ -186,15 +193,64 @@ class Optimizer:
             raise ValueError("Min Stockpile Contribution Ratio must be between 0.01 and 1.")
 
         dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
+        solver_config = solver_config or {}
 
         # Step 1: Define bounds (how many tonnes each event contributes)
         bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
+
+        def safe_float(value, default=0.0):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        preference_rewards = [0.0] * len(event_pool)
+        balance_preference = solver_config.get("balance_preference", "none")
+        if balance_preference in ("lower", "higher") and event_pool:
+            balances = [safe_float(event.balance) for event in event_pool]
+            min_balance = min(balances)
+            max_balance = max(balances)
+            balance_range = max_balance - min_balance
+            if balance_range > Optimizer.SOLUTION_TOLERANCE:
+                for i, balance in enumerate(balances):
+                    if balance_preference == "lower":
+                        preference_rewards[i] += (max_balance - balance) / balance_range
+                    else:
+                        preference_rewards[i] += (balance - min_balance) / balance_range
+
+        if solver_config.get("prefer_amt_stockpiles", False):
+            for i, event in enumerate(event_pool):
+                if event.is_stockpile and getattr(event, "is_amt", False):
+                    preference_rewards[i] += 1.0
+
+        if solver_config.get("prefer_contaminated_stockpiles", False):
+            thresholds = solver_config.get("contaminant_thresholds", {})
+            contaminant_grades = {
+                "si": "grade_si",
+                "al": "grade_al",
+                "p": "grade_p",
+                "mn": "grade_mn",
+            }
+            for i, event in enumerate(event_pool):
+                for contaminant, attribute in contaminant_grades.items():
+                    threshold = safe_float(thresholds.get(contaminant))
+                    grade = safe_float(getattr(event, attribute, 0))
+                    if grade > threshold:
+                        preference_rewards[i] += 1.0 + ((grade - threshold) / max(abs(threshold), 1.0))
+
+        if solver_config.get("prefer_low_fe_stockpiles", False):
+            threshold = safe_float(solver_config.get("low_fe_threshold", 58.0), 58.0)
+            for i, event in enumerate(event_pool):
+                grade_fe = safe_float(event.grade_fe)
+                if grade_fe < threshold:
+                    preference_rewards[i] += 1.0 + ((threshold - grade_fe) / max(abs(threshold), 1.0))
         
         # Step 2: Build the cost and constraints based on event pool
         base_costs = []
-        for event in event_pool:
+        for i, event in enumerate(event_pool):
             # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            base_costs.append(dmc + event.cost + event.cash)
+            preference_reward = preference_rewards[i] * Optimizer.TIE_BREAK_REWARD_PER_TONNE
+            base_costs.append(dmc + event.cost + event.cash - preference_reward)
 
         throughput_reward = max(
             Optimizer.THROUGHPUT_REWARD_PER_TONNE,
@@ -370,8 +426,7 @@ class Optimizer:
             for i in range(len(event_pool))
         ]
 
-        # Objective function
-        prob += lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
+        objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
 
         # Inequality constraints
         for row, rhs in zip(A_ub_total, b_ub_total):
@@ -383,10 +438,16 @@ class Optimizer:
                 prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) == rhs
 
         # Binary variables to control the number of stockpiles selected
-        if stockpile_event_indices and (min_stockpiles is not None or max_stockpiles is not None):
+        use_binary_selection = (
+            min_stockpiles is not None
+            or max_stockpiles is not None
+            or solver_config.get("prefer_fewer_stockpiles", False)
+        )
+        if stockpile_event_indices and use_binary_selection:
             y_vars = {}
             total_feed = lpSum(x_vars)
             max_total_feed = period_crusher_target["crusher_rate"] * steady_state_duration
+            enforce_count_contribution = min_stockpiles is not None or max_stockpiles is not None
 
             for stockpile_name, indices in stockpile_event_indices.items():
                 y_var = LpVariable(f"y_{stockpile_name}", cat=LpBinary)
@@ -395,16 +456,22 @@ class Optimizer:
                 stockpile_feed_upper_bound = sum(bounds[i][1] for i in indices)
 
                 prob += stockpile_feed <= stockpile_feed_upper_bound * y_var
-                prob += (
-                    stockpile_feed
-                    >= min_stockpile_contribution_ratio * total_feed
-                    - max_total_feed * (1 - y_var)
-                )
+                if enforce_count_contribution:
+                    prob += (
+                        stockpile_feed
+                        >= min_stockpile_contribution_ratio * total_feed
+                        - max_total_feed * (1 - y_var)
+                    )
 
             if min_stockpiles is not None:
                 prob += lpSum(y_vars.values()) >= min_stockpiles
             if max_stockpiles is not None:
                 prob += lpSum(y_vars.values()) <= max_stockpiles
+            if solver_config.get("prefer_fewer_stockpiles", False):
+                objective += Optimizer.FEWER_STOCKPILE_PENALTY * lpSum(y_vars.values())
+
+        # Objective function
+        prob += objective
 
         # Solve the problem
         prob.solve(PULP_CBC_CMD(msg=False))

@@ -24,7 +24,7 @@ class Run:
         self.manual_case_modeller = None
         self.manual_blend_dash = None
     
-    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None):
+    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None, solver_config=None):
 
         # Install required libraries
         #requirements = Requirements()
@@ -89,6 +89,7 @@ class Run:
             min_stockpiles=min_stockpiles,
             max_stockpiles=max_stockpiles,
             min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
+            solver_config=solver_config,
         )
 
         # Monkey-patch print and input

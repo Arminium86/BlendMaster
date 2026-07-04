@@ -18,6 +18,7 @@ class EventData:
         reclaim_threshold,
         state,
         auto_turnover_datetime,
+        is_amt=False,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -36,6 +37,7 @@ class EventData:
         self._reclaim_threshold = reclaim_threshold
         self._state = state
         self._auto_turnover_datetime = auto_turnover_datetime
+        self._is_amt = is_amt
 
     # Getters
     @property
@@ -106,6 +108,10 @@ class EventData:
     def auto_turnover_datetime(self):
         return self._auto_turnover_datetime
 
+    @property
+    def is_amt(self):
+        return self._is_amt
+
     # Setters
     @stockpile.setter
     def stockpile(self, value):
@@ -174,6 +180,10 @@ class EventData:
     @auto_turnover_datetime.setter
     def auto_turnover_datetime(self, value):
         self._auto_turnover_datetime = value
+
+    @is_amt.setter
+    def is_amt(self, value):
+        self._is_amt = value
     
      # Boolean methods
     @property
@@ -210,4 +220,5 @@ class EventData:
             "reclaim_threshold": self._reclaim_threshold,
             "state": self._state,
             "auto_turnover_datetime": self._auto_turnover_datetime,
+            "is_amt": self._is_amt,
         }
