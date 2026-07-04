@@ -373,6 +373,7 @@ class UserInputs(QMainWindow):
         layout.addRow(button_layout)
 
         self.update_mine_dropdown()
+        self.validate_form()
 
         # Connect input field changes to form validation
         self.hub_input.currentIndexChanged.connect(self.validate_form)
@@ -391,6 +392,7 @@ class UserInputs(QMainWindow):
             and self.blend_mode.currentIndex() != -1
         )
         self.submit_button.setEnabled(all_fields_populated)
+        self.save_button.setEnabled(all_fields_populated)
 
     def show_progress_dialog(self, message):
         if self.progress_dialog:
@@ -541,6 +543,7 @@ class UserInputs(QMainWindow):
 
     def finish_site_config_submit(self, stockpile_data):
         self.submit_button.setEnabled(True)
+        self.save_button.setEnabled(True)
         self.stockpile_data = stockpile_data
         QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
 
@@ -1198,11 +1201,13 @@ class UserInputs(QMainWindow):
 
         # Populate Table
         for row_idx, row in enumerate(self.calendar_rows):
+            row_key = None
             if isinstance(row, tuple):  # Unpack tuples
                 caption, editables, color_group, default_values = row
                 # Process the tuple as needed
             elif isinstance(row, dict):  # Handle dictionaries
                 for key, value in row.items():
+                    row_key = key
                     caption, editables, color_group, default_values = value
                     # Process the dictionary value (tuple) as needed
             
@@ -1215,6 +1220,18 @@ class UserInputs(QMainWindow):
 
             # Editable and Non-Editable Cells with Default Values
             for col_idx, (is_editable, default_value) in enumerate(zip(editables, default_values), start=1):
+                if is_editable and row_key and row_key.endswith("_state"):
+                    state_combo = QComboBox()
+                    state_options = ["Auto", "Build", "Reclaim"]
+                    state_value = str(default_value)
+                    if state_value not in state_options:
+                        state_options.append(state_value)
+                    state_combo.addItems(state_options)
+                    state_combo.setCurrentText(state_value)
+                    state_combo.setStyleSheet("QComboBox { qproperty-alignment: AlignCenter; }")
+                    self.main_table.setCellWidget(row_idx, col_idx, state_combo)
+                    continue
+
                 item = QTableWidgetItem(str(default_value))
                 item.setTextAlignment(Qt.AlignCenter)  # Center align all values
                 if not is_editable:
@@ -1292,7 +1309,16 @@ class UserInputs(QMainWindow):
 
                     QMessageBox.information(self, "BlendMaster", f"{stockpile} added to calendar")
                     
+            self.populate_calendar()
             self.store_calendar_inputs_no_run()
+
+    def get_main_table_cell_text(self, row_idx, col_idx):
+        widget = self.main_table.cellWidget(row_idx, col_idx)
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+
+        item = self.main_table.item(row_idx, col_idx)
+        return item.text().strip() if item and item.text().strip() else None
 
     def store_calendar_inputs_no_run(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -1333,8 +1359,7 @@ class UserInputs(QMainWindow):
             # Retrieve the values for Preplan, Period_1, Period_2, etc.
             row_data = {}
             for col_idx, header in enumerate(headers, start=1):
-                item = self.main_table.item(row_idx, col_idx)
-                value = item.text().strip() if item and item.text().strip() else None  # Get the value
+                value = self.get_main_table_cell_text(row_idx, col_idx)
                 row_data[header] = value
 
             # Store the data in the dictionary
@@ -1433,8 +1458,7 @@ class UserInputs(QMainWindow):
             # Retrieve the values for Preplan, Period_1, Period_2, etc.
             row_data = {}
             for col_idx, header in enumerate(headers, start=1):
-                item = self.main_table.item(row_idx, col_idx)
-                value = item.text().strip() if item and item.text().strip() else None  # Get the value
+                value = self.get_main_table_cell_text(row_idx, col_idx)
                 row_data[header] = value
 
             # Store the data in the dictionary
@@ -3139,9 +3163,31 @@ class UserInputs(QMainWindow):
 
     def save_state(self):
         """Save the application state to a file using pickle."""
-        
-        self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
-        self.crusher_rate_input_value = self.crusher_rate_input.text()
+
+        if hasattr(self, "hub_input"):
+            self.hub_input_choice = self.hub_input.currentText().strip()
+        if hasattr(self, "mine_input"):
+            self.mine_input_choice = self.mine_input.currentText().strip()
+        if hasattr(self, "time_mode"):
+            self.time_mode_choice = self.time_mode.currentIndex() + 1
+        if hasattr(self, "start_time") and self.time_mode_choice == 2:
+            self.start_time_choice = self.start_time.dateTime().toPyDateTime()
+        elif self.start_time_choice is None:
+            self.start_time_choice = datetime.now()
+        if hasattr(self, "expit_mode"):
+            self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+        if hasattr(self, "file_path"):
+            self.file_path_choice = self.file_path.text()
+        if hasattr(self, "blend_mode"):
+            self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+
+        if hasattr(self, "blend_data_from_config_table_inputs"):
+            self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
+        elif self.blend_config_table_inputs is None:
+            self.blend_config_table_inputs = {}
+
+        if hasattr(self, "crusher_rate_input"):
+            self.crusher_rate_input_value = self.crusher_rate_input.text()
         
         try:
             

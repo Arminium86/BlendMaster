@@ -33,6 +33,7 @@ from classes.EventData import EventData
 class Optimizer:
     MIN_SELECTED_STOCKPILE_BLEND_RATIO = 0.01
     SOLUTION_TOLERANCE = 1e-6
+    THROUGHPUT_REWARD_PER_TONNE = 1_000_000
 
     def run_with_dynamic_steady_state(
         self,
@@ -190,10 +191,16 @@ class Optimizer:
         bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
         
         # Step 2: Build the cost and constraints based on event pool
-        c = []  # Movement cash flow for each event
+        base_costs = []
         for event in event_pool:
             # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            c.append(dmc + event.cost + event.cash)
+            base_costs.append(dmc + event.cost + event.cash)
+
+        throughput_reward = max(
+            Optimizer.THROUGHPUT_REWARD_PER_TONNE,
+            (max((abs(cost) for cost in base_costs), default=0) + 1) * 1000,
+        )
+        c = [cost - throughput_reward for cost in base_costs]
 
         # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
