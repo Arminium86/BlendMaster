@@ -196,15 +196,23 @@ class DataLoader:
         for stockpile_name, stockpile_data in self.stockpile_data.items():
             # Check if the stockpile has 'amt' set to True
             if stockpile_data.get('amt'):
-                # Find the corresponding entry in hex_sequence_table with sequence == 1
+                corresponding_hexes = sorted(
+                    (
+                        hex_entry for hex_entry in self.hex_sequence_table
+                        if hex_entry['footprint'] == stockpile_name
+                    ),
+                    key=lambda hex_entry: hex_entry.get('sequence', float('inf'))
+                )
                 corresponding_hex = next(
-                    (hex_entry for hex_entry in self.hex_sequence_table
-                    if hex_entry['footprint'] == stockpile_name and hex_entry['sequence'] == 1),
+                    (
+                        hex_entry for hex_entry in corresponding_hexes
+                        if max(float(hex_entry.get('balance', 0) or 0), 0) > 0
+                    ),
                     None
                 )
                 if corresponding_hex:
                     # Update the balance and grades in stockpile_data
-                    stockpile_data['balance'] = corresponding_hex['balance']
+                    stockpile_data['balance'] = max(float(corresponding_hex.get('balance', 0) or 0), 0)
                     for key in corresponding_hex:
                         if key.startswith('grade_'):
                             stockpile_data[key] = corresponding_hex[key]

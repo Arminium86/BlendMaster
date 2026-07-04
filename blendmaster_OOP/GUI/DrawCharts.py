@@ -14,6 +14,7 @@ import base64
 import io
 import re
 from collections import defaultdict
+from math import sqrt
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -573,11 +574,17 @@ class DrawGanttChart:
         conn.close()
 
 class DrawAMTStockpile:
-    def __init__(self, db_path, port, hex_sequence_table):
+    def __init__(self, db_path, port, hex_sequence_table, chunk_settings=None):
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-        self.selected_points = hex_sequence_table
+        self.selected_points = hex_sequence_table or []
+        self.chunk_settings = chunk_settings or {}
+        self.direction_clicks = {}
+        self.reclaim_directions = {}
+        self.cut_directions = {}
+        self.dig_paths = {}
+        self.status_message = "Select a footprint, digitize reclaim and cut directions, then generate chunks."
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
         self.unique_footprints = self.data['footprint'].unique()
@@ -599,10 +606,17 @@ class DrawAMTStockpile:
             self.clean_up_hex_sequence_table()
             self.update_sequence_counter()
             self.init_layout()
+            return ("", 204)
 
     def clean_up_hex_sequence_table(self):
         """Removes all string entries from self.selected_points."""
         self.selected_points = [entry for entry in self.selected_points if not isinstance(entry, str)]
+        for entry in self.selected_points:
+            if isinstance(entry, dict) and isinstance(entry.get("member_hexes"), list):
+                entry["member_hexes"] = ",".join(str(hex_id) for hex_id in entry["member_hexes"])
+
+    def update_chunk_settings(self, chunk_settings):
+        self.chunk_settings = chunk_settings or {}
 
     def update_sequence_counter(self):
         """
@@ -622,6 +636,304 @@ class DrawAMTStockpile:
         self.sequence_counter = sequence_map
 
         self.sequence_counter = {key: value + 1 for key, value in self.sequence_counter.items()}            
+
+    def to_float(self, value, default=0.0):
+        try:
+            if value in (None, ""):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def positive_tonnes(self, value):
+        return max(self.to_float(value), 0.0)
+
+    def get_chunk_setting(self, footprint, key, default=0.0):
+        settings = self.chunk_settings.get(footprint, {})
+        return self.to_float(settings.get(key), default)
+
+    def get_chunk_size(self, footprint):
+        reclaim_rate = self.get_chunk_setting(footprint, "average_reclaim_rate")
+        reclaim_hours = self.get_chunk_setting(footprint, "chunk_reclaim_hours")
+        return reclaim_rate * reclaim_hours
+
+    def remove_footprint_chunks(self, footprint, table_data=None):
+        self.selected_points = [
+            entry for entry in self.selected_points
+            if not (isinstance(entry, dict) and entry.get("footprint") == footprint)
+        ]
+
+        if table_data is None:
+            return None
+
+        return [
+            entry for entry in table_data
+            if not (isinstance(entry, dict) and entry.get("footprint") == footprint)
+        ]
+
+    def build_chunk_row(self, footprint, sequence, chunk_rows, chunk_size):
+        total_tonnes = sum(row["_positive_balance"] for row in chunk_rows)
+        member_hexes = [row["hex"] for row in chunk_rows if row.get("hex") is not None]
+        chunk_id = f"{footprint}_CHUNK_{sequence:03d}"
+        weighted_grades = {}
+
+        for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
+            if total_tonnes > 0:
+                weighted_grades[grade] = (
+                    sum(row[grade] * row["_positive_balance"] for row in chunk_rows) / total_tonnes
+                )
+            else:
+                weighted_grades[grade] = 0
+
+        return {
+            "footprint": footprint,
+            "sequence": sequence,
+            "hex": chunk_id,
+            "balance": round(total_tonnes, 3),
+            **{grade: round(value, 4) for grade, value in weighted_grades.items()},
+            "hex_count": len(member_hexes),
+            "chunk_size": round(chunk_size, 3),
+            "average_reclaim_rate": self.get_chunk_setting(footprint, "average_reclaim_rate"),
+            "chunk_reclaim_hours": self.get_chunk_setting(footprint, "chunk_reclaim_hours"),
+            "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes)
+        }
+
+    def direction_vector(self, start_point, end_point):
+        dx = end_point[0] - start_point[0]
+        dy = end_point[1] - start_point[1]
+        direction_length = sqrt(dx * dx + dy * dy)
+        if direction_length == 0:
+            return None
+        return dx / direction_length, dy / direction_length
+
+    def assign_cut_indices(self, filtered_data):
+        ordered = filtered_data.sort_values("_reclaim_axis").copy()
+        values = ordered["_reclaim_axis"].to_numpy()
+
+        if len(values) <= 1:
+            ordered["_cut_index"] = 0
+            return ordered
+
+        gaps = np.diff(values)
+        positive_gaps = gaps[gaps > 1e-12]
+        if len(positive_gaps) == 0:
+            ordered["_cut_index"] = 0
+            return ordered
+
+        sorted_gaps = np.sort(positive_gaps)
+        threshold = np.percentile(positive_gaps, 75) * 1.5
+        if len(sorted_gaps) > 1:
+            ratios = sorted_gaps[1:] / np.where(sorted_gaps[:-1] == 0, np.nan, sorted_gaps[:-1])
+            ratios = np.nan_to_num(ratios, nan=0.0, posinf=0.0)
+            max_ratio_idx = int(np.argmax(ratios))
+            if ratios[max_ratio_idx] >= 2:
+                threshold = (sorted_gaps[max_ratio_idx] + sorted_gaps[max_ratio_idx + 1]) / 2
+
+        cut_indices = [0]
+        current_index = 0
+        for gap in gaps:
+            if gap > threshold:
+                current_index += 1
+            cut_indices.append(current_index)
+
+        ordered["_cut_index"] = cut_indices
+        return ordered
+
+    def order_hexes_by_dig_path(self, filtered_data):
+        ordered = self.assign_cut_indices(filtered_data)
+        path_rows = []
+
+        for cut_index, group in ordered.groupby("_cut_index", sort=True):
+            ascending = int(cut_index) % 2 == 0
+            group = group.sort_values(["_cut_axis", "hex"], ascending=[ascending, True])
+            path_rows.extend(group.to_dict("records"))
+
+        return path_rows
+
+    def build_chunks_for_footprint(self, footprint, reclaim_start_point, reclaim_end_point, cut_start_point, cut_end_point):
+        chunk_size = self.get_chunk_size(footprint)
+        if chunk_size <= 0:
+            return [], "Enter positive Average Reclaim Rate and Chunk Reclaim Hours for this stockpile."
+
+        reclaim_vector = self.direction_vector(reclaim_start_point, reclaim_end_point)
+        cut_vector = self.direction_vector(cut_start_point, cut_end_point)
+        if not reclaim_vector:
+            return [], "Digitize two different points to define the reclaim direction."
+        if not cut_vector:
+            return [], "Digitize two different points to define the cut direction."
+
+        matrix = np.array([
+            [reclaim_vector[0], cut_vector[0]],
+            [reclaim_vector[1], cut_vector[1]]
+        ])
+        if abs(np.linalg.det(matrix)) < 1e-6:
+            return [], "Reclaim direction and cut direction are too close to parallel."
+
+        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        if filtered_data.empty:
+            return [], "No AMT hexagons were found for this footprint."
+
+        numeric_columns = [
+            "lat", "long", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"
+        ]
+        for column in numeric_columns:
+            filtered_data[column] = pd.to_numeric(filtered_data[column], errors="coerce")
+
+        filtered_data = filtered_data.dropna(subset=["lat", "long"])
+        if filtered_data.empty:
+            return [], "No AMT hexagons have valid coordinates for this footprint."
+
+        for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
+            filtered_data[grade] = filtered_data[grade].fillna(0)
+
+        filtered_data["_positive_balance"] = filtered_data["balance"].apply(self.positive_tonnes)
+        coordinates = filtered_data[["long", "lat"]].to_numpy() - np.array(reclaim_start_point)
+        basis_coordinates = np.linalg.solve(matrix, coordinates.T).T
+        filtered_data["_reclaim_axis"] = basis_coordinates[:, 0]
+        filtered_data["_cut_axis"] = basis_coordinates[:, 1]
+        path_rows = self.order_hexes_by_dig_path(filtered_data)
+        self.dig_paths[footprint] = [
+            (row["long"], row["lat"], row["hex"]) for row in path_rows
+        ]
+
+        if filtered_data["_positive_balance"].sum() <= 0:
+            return [], "All hexagons in this footprint have zero or negative balance."
+
+        chunks = []
+        current_rows = []
+        current_tonnes = 0.0
+        pending_zero_rows = []
+
+        def finalise_current():
+            nonlocal current_rows, current_tonnes
+            if current_tonnes > 0:
+                chunks.append(list(current_rows))
+            elif current_rows and chunks:
+                chunks[-1].extend(current_rows)
+            current_rows = []
+            current_tonnes = 0.0
+
+        for row_dict in path_rows:
+            tonnes = row_dict["_positive_balance"]
+
+            if tonnes <= 0:
+                if current_rows:
+                    current_rows.append(row_dict)
+                else:
+                    pending_zero_rows.append(row_dict)
+                continue
+
+            if not current_rows:
+                current_rows = pending_zero_rows + [row_dict]
+                pending_zero_rows = []
+                current_tonnes = tonnes
+                continue
+
+            before_gap = abs(chunk_size - current_tonnes)
+            after_gap = abs(chunk_size - (current_tonnes + tonnes))
+
+            if current_tonnes >= chunk_size or before_gap <= after_gap:
+                finalise_current()
+                current_rows = pending_zero_rows + [row_dict]
+                pending_zero_rows = []
+                current_tonnes = tonnes
+            else:
+                current_rows.append(row_dict)
+                current_tonnes += tonnes
+
+        if pending_zero_rows:
+            if current_rows:
+                current_rows.extend(pending_zero_rows)
+            elif chunks:
+                chunks[-1].extend(pending_zero_rows)
+
+        finalise_current()
+
+        chunk_rows = [
+            self.build_chunk_row(footprint, sequence, rows, chunk_size)
+            for sequence, rows in enumerate(chunks, start=1)
+        ]
+        message = (
+            f"Generated {len(chunk_rows)} chunks for {footprint}. "
+            f"Target chunk size: {chunk_size:,.0f} tonnes."
+        )
+        return chunk_rows, message
+
+    def generate_chunks_from_directions(self, footprint, table_data):
+        reclaim_direction = self.reclaim_directions.get(footprint)
+        cut_direction = self.cut_directions.get(footprint)
+
+        if not reclaim_direction or not cut_direction:
+            missing = []
+            if not reclaim_direction:
+                missing.append("reclaim direction")
+            if not cut_direction:
+                missing.append("cut direction")
+            return table_data, f"Digitize the {' and '.join(missing)} for {footprint} before generating chunks."
+
+        chunk_rows, status_message = self.build_chunks_for_footprint(
+            footprint,
+            reclaim_direction["start"],
+            reclaim_direction["end"],
+            cut_direction["start"],
+            cut_direction["end"]
+        )
+        if chunk_rows:
+            table_data = self.remove_footprint_chunks(footprint, table_data)
+            self.selected_points.extend(chunk_rows)
+            table_data.extend(chunk_rows)
+            self.update_sequence_counter()
+
+        return table_data, status_message
+
+    def member_hexes_from_entry(self, entry):
+        member_hexes = entry.get("member_hexes")
+        if isinstance(member_hexes, str):
+            return [hex_id.strip() for hex_id in member_hexes.split(",") if hex_id.strip()]
+        if isinstance(member_hexes, list):
+            return member_hexes
+        return []
+
+    def dig_path_from_selected_points(self, footprint):
+        selected_chunks = [
+            entry for entry in self.selected_points
+            if isinstance(entry, dict) and entry.get("footprint") == footprint
+        ]
+        selected_chunks = sorted(selected_chunks, key=lambda entry: entry.get("sequence", float("inf")))
+
+        path_hexes = []
+        for entry in selected_chunks:
+            path_hexes.extend(self.member_hexes_from_entry(entry))
+
+        if not path_hexes:
+            return []
+
+        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        coordinate_lookup = {
+            row["hex"]: (row["long"], row["lat"], row["hex"])
+            for _, row in filtered_data.iterrows()
+        }
+        return [
+            coordinate_lookup[hex_id]
+            for hex_id in path_hexes
+            if hex_id in coordinate_lookup
+        ]
+
+    def chunk_lookup_for_footprint(self, footprint):
+        chunk_lookup = {}
+        for entry in self.selected_points:
+            if not isinstance(entry, dict) or entry.get("footprint") != footprint:
+                continue
+
+            member_hexes = self.member_hexes_from_entry(entry)
+
+            if member_hexes:
+                for hex_id in member_hexes:
+                    chunk_lookup[hex_id] = entry.get("sequence")
+            elif entry.get("hex"):
+                chunk_lookup[entry.get("hex")] = entry.get("sequence")
+
+        return chunk_lookup
     
     def fetch_data(self):
         try:
@@ -637,7 +949,7 @@ class DrawAMTStockpile:
     def init_layout(self):
         self.app.layout = dbc.Container([
 
-            html.H5("AMT Stockpile Depletion Sequence"),
+            html.H5("AMT Stockpile Chunks"),
 
             # Dropdown for footprint selection
             dbc.Row([
@@ -656,6 +968,19 @@ class DrawAMTStockpile:
                     )
                 ], 
                 width=6),
+                dbc.Col([
+                    html.Div([
+                        dbc.Button("Digitize Reclaim Direction", id="digitize-direction-button", color="info", size="sm", style={"marginRight": "8px"}),
+                        dbc.Button("Digitize Cut Direction", id="digitize-cut-direction-button", color="info", size="sm", style={"marginRight": "8px"}),
+                        dbc.Button("Generate Chunks", id="generate-chunks-button", color="success", size="sm", style={"marginRight": "8px"}),
+                        dbc.Button("Clear Footprint Chunks", id="clear-footprint-button", color="warning", size="sm"),
+                    ], style={"marginBottom": "8px"}),
+                    html.Div(
+                        id="chunk-status",
+                        children=self.status_message,
+                        style={"fontSize": "12px", "fontWeight": "bold", "color": "darkblue"}
+                    )
+                ], width=6),
             ]),
 
             # Hex Size Control (Slider)
@@ -696,30 +1021,18 @@ class DrawAMTStockpile:
 
                 # Table (25% width)
                 dbc.Col([
-                    html.H5("Sequence Table", style={
-                            "textAlign": "center",
-                            "fontSize": "18px",
-                            "fontWeight": "bold",
-                            "marginBottom": "10px"
-                        }),
                     dash_table.DataTable(
                         id="selected-table",
                         columns=[{"name": col, "id": col} for col in
                                 ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
-                                'grade_mn']],
+                                'grade_mn', 'hex_count', 'chunk_size']],
                         data=self.selected_points or [],
-                        row_deletable=True,
+                        row_deletable=False,
                         editable=False,
-                        style_table={'overflowX': 'auto'},
+                        style_table={'overflowX': 'auto', 'maxHeight': '600px', 'overflowY': 'auto'},
                         style_cell={'textAlign': 'center', 'fontFamily': 'Segoe UI', 'fontSize': '10.5px'},
                         style_header={'fontWeight': 'bold', 'fontSize': '12px', 'fontFamily': 'Segoe UI', 'textAlign': 'center'}
-                    ),
-
-                    # Buttons Below the Table
-                    html.Div([
-                        dbc.Button("Reset Table", id="reset-button", color="danger", size="sm", style={"margin": "10px"}),
-                        dbc.Button("Store Table", id="store-button", color="primary", size="sm", style={"margin": "10px"}),
-                    ], style={"textAlign": "center", "marginTop": "10px"})
+                    )
                 ], width=3),
             ]),
 
@@ -733,72 +1046,93 @@ class DrawAMTStockpile:
 
         @self.app.callback(
             [Output("selected-table", "data"),
-            Output("scatter-plot", "figure")], 
+            Output("scatter-plot", "figure"),
+            Output("chunk-status", "children")],
             [Input("scatter-plot", "clickData"),
             Input("footprint-dropdown", "value"),
-            Input("reset-button", "n_clicks"),
             Input("hex-size-slider", "value"),  # Hex size slider input
-            Input("upload-dxf", "contents")],   # Handle DXF file upload
+            Input("upload-dxf", "contents"),   # Handle DXF file upload
+            Input("digitize-direction-button", "n_clicks"),
+            Input("digitize-cut-direction-button", "n_clicks"),
+            Input("generate-chunks-button", "n_clicks"),
+            Input("clear-footprint-button", "n_clicks")],
             [State("selected-table", "data"),
             State("scatter-plot", "figure"),
             State("scatter-plot", "relayoutData")]
         )
-        def update_table_and_plot(click_data, selected_footprint, reset_clicks, hex_size, dxf_contents, 
+        def update_table_and_plot(click_data, selected_footprint, hex_size, dxf_contents,
+                                digitize_clicks, digitize_cut_clicks, generate_clicks, clear_clicks,
                                 table_data, current_fig, relayout_data):
             triggered = dash.callback_context.triggered_id
-
-            # Reset table and scatter plot
-            if triggered == "reset-button":
-                self.selected_points = []
-                self.sequence_counter = {key: 1 for key, value in self.sequence_counter.items()}
-                return [], self.generate_scatter_plot(selected_footprint, None, current_fig, hex_size)  # Pass hex_size
+            status_message = self.status_message
 
             if not selected_footprint:
-                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size)
+                status_message = "Select a footprint to digitize reclaim and cut directions."
+                self.status_message = status_message
+                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
 
             table_data = table_data or []
 
-            # Handle point selection/unselection
+            if triggered == "digitize-direction-button":
+                self.direction_clicks[selected_footprint] = {"mode": "reclaim", "points": []}
+                status_message = f"Click two hexagons on {selected_footprint} to define the reclaim direction."
+
+            if triggered == "digitize-cut-direction-button":
+                self.direction_clicks[selected_footprint] = {"mode": "cut", "points": []}
+                status_message = f"Click two hexagons on {selected_footprint} to define the cut direction."
+
+            if triggered == "clear-footprint-button":
+                table_data = self.remove_footprint_chunks(selected_footprint, table_data)
+                self.direction_clicks.pop(selected_footprint, None)
+                self.dig_paths.pop(selected_footprint, None)
+                self.update_sequence_counter()
+                status_message = f"Cleared chunks for {selected_footprint}."
+
+            if triggered == "generate-chunks-button":
+                table_data, status_message = self.generate_chunks_from_directions(selected_footprint, table_data)
+
+            # Handle direction digitizing from map clicks.
             if triggered == "scatter-plot" and click_data:
                 clicked_point = click_data["points"][0]
 
                 if "customdata" in clicked_point:
-
-                    clicked_hex = clicked_point["customdata"][0]  # Use customdata[0] for hex value
-
-                    if clicked_hex in self.selected_points:
-                        # Unselect point
-                        self.selected_points.remove(clicked_hex)
-                        table_data = [row for row in table_data if row["hex"] != clicked_hex]
-                        table_data = self.resequence_table_data(table_data)
-                    
-                    elif any(clicked_hex in d.values() for d in self.selected_points if isinstance(d, dict)):
-                        self.selected_points = [d for d in self.selected_points if not (isinstance(d, dict) and clicked_hex in d.values())]
-                        table_data = [row for row in table_data if row["hex"] != clicked_hex]
-                        table_data = self.resequence_table_data(table_data)
-
+                    capture = self.direction_clicks.get(selected_footprint)
+                    if not capture:
+                        status_message = "Press Digitize Reclaim Direction or Digitize Cut Direction before clicking the map."
                     else:
-                        # Select point
-                        self.selected_points.append(clicked_hex)
-                        sequence = self.sequence_counter.get(selected_footprint, 1)
-                        new_row = {
-                            "footprint": selected_footprint,
-                            "sequence": sequence,
-                            "hex": clicked_hex,
-                            "balance": clicked_point["customdata"][1],
-                            "grade_fe": clicked_point["customdata"][2],
-                            "grade_si": clicked_point["customdata"][3],
-                            "grade_al": clicked_point["customdata"][4],
-                            "grade_p": clicked_point["customdata"][5],
-                            "grade_mn": clicked_point["customdata"][6]
-                        }
-                        table_data.append(new_row)
-                        self.sequence_counter[selected_footprint] = sequence + 1
-                        table_data = self.resequence_table_data(table_data)
+                        capture["points"].append(
+                            (clicked_point["x"], clicked_point["y"])
+                        )
+                        point_count = len(capture["points"])
+                        mode = capture["mode"]
+                        mode_label = "reclaim" if mode == "reclaim" else "cut"
+
+                        if point_count == 1:
+                            status_message = f"First {mode_label} direction point captured. Click the second point."
+                        elif point_count >= 2:
+                            start_point, end_point = capture["points"][:2]
+                            target = self.reclaim_directions if mode == "reclaim" else self.cut_directions
+                            target[selected_footprint] = {
+                                "start": start_point,
+                                "end": end_point
+                            }
+                            self.direction_clicks.pop(selected_footprint, None)
+                            if self.reclaim_directions.get(selected_footprint) and self.cut_directions.get(selected_footprint):
+                                table_data, status_message = self.generate_chunks_from_directions(selected_footprint, table_data)
+                            else:
+                                status_message = f"{mode_label.capitalize()} direction captured. Digitize the other direction."
 
             # Handle DXF or ARCHD file upload and overlay lines
             if triggered == "upload-dxf" and dxf_contents:
                 try:
+                    if not current_fig:
+                        current_fig = self.generate_scatter_plot(
+                            selected_footprint,
+                            relayout_data,
+                            current_fig,
+                            hex_size
+                        ).to_dict()
+
                     # Decode base64 file
                     content_type, content_string = dxf_contents.split(',')
                     decoded = base64.b64decode(content_string)
@@ -875,27 +1209,24 @@ class DrawAMTStockpile:
 
                 except Exception as e:
                     print(f"Error processing file: {e}")
+                    status_message = f"Error processing overlay: {e}"
 
-            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size)
-
-        @self.app.callback(
-            Output("store-button", "n_clicks"),
-            Input("store-button", "n_clicks"),
-            State("selected-table", "data")
-        )
-        def store_table(n_clicks, table_data):
-            if n_clicks:
-                self.selected_points = table_data
-                
-            return n_clicks
+            self.status_message = status_message
+            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
 
     def generate_scatter_plot(self, selected_footprint, relayout_data, existing_fig, hex_size=15):
 
         # If existing_fig has traces, copy them to fig
         if existing_fig and existing_fig["data"]:
             fig = go.Figure()  # Start with an empty figure
-            for trace in existing_fig["data"]:  
-                if trace["mode"] == "lines+markers": 
+            for trace in existing_fig["data"]:
+                if isinstance(trace, dict):
+                    trace_name = trace.get("name", "")
+                    trace_mode = trace.get("mode", "")
+                else:
+                    trace_name = getattr(trace, "name", "")
+                    trace_mode = getattr(trace, "mode", "")
+                if "lines" in trace_mode and trace_name in ["Line", "DXF Line"]:
                     fig.add_trace(trace)
         else:
             fig = go.Figure()  # Create a new figure if no previous traces exist
@@ -936,39 +1267,30 @@ class DrawAMTStockpile:
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
 
-        colors = filtered_data.apply(
-            lambda row: "black" if (
-                row["hex"] in self.selected_points or  # Case: direct string match
-                any(row["hex"] in d.values() for d in self.selected_points if isinstance(d, dict))  # Case: inside dict values
-            ) else
-            "red" if row["hex_updated"] == "True" and row["balance"] <= 0 else
-            "purple" if row["hex_updated"] == "True" else
-            "green" if row["hex_updated"] == "False" else
-            "blue",
-            axis=1
-        )
-        
-        # Add traces for each color group
-        for color, group in filtered_data.groupby(colors):
+        chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
+        filtered_data["chunk_sequence"] = filtered_data["hex"].map(chunk_lookup)
+        chunk_palette = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+        ]
+
+        chunked_data = filtered_data[filtered_data["chunk_sequence"].notna()]
+        for chunk_sequence, group in chunked_data.groupby("chunk_sequence"):
+            color = chunk_palette[(int(chunk_sequence) - 1) % len(chunk_palette)]
             fig.add_trace(go.Scatter(
                 x=group["long"],
                 y=group["lat"],
                 mode="markers",
                 marker=dict(size=hex_size, symbol="hexagon", color=color),
-                name={
-                    "green": "Not Started",
-                    "red": "Negative Balance",
-                    "purple": "Started",
-                    "black": "Selected",
-                    "blue": "Other"
-                }.get(color, "Other"),
+                name=f"Chunk {int(chunk_sequence)}",
                 customdata=group[[
-                    "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip", 
-                    "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip", 
-                    "lat_tooltip", "long_tooltip"
+                    "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
+                    "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
+                    "lat_tooltip", "long_tooltip", "chunk_sequence"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
+                    "Chunk: %{customdata[9]}<br>" +
                     "Latitude: %{customdata[7]:.2f}<br>" +
                     "Longitude: %{customdata[8]:.2f}<br>" +
                     "Balance: %{customdata[1]}t<br>" +
@@ -980,29 +1302,105 @@ class DrawAMTStockpile:
                 )
             ))
 
-            fig.update_layout(
-                title={
-                    "text": f"Stockpile AMT Map: {selected_footprint}",
-                    "font": {
-                        "size": 20,  # Title font size
-                        "family": "Arial, sans-serif",  # Font family
-                        "color": "darkblue"  # Font color
-                    },
-                    "x": 0.5,  # Centers the title
-                },
-                xaxis=dict(
-                    title="Longitude",
-                    titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
-                    tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
-                ),
-                yaxis=dict(
-                    title="Latitude",
-                    titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
-                    tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
-                ),
-                xaxis_scaleanchor="y",
-                yaxis_scaleanchor="x"
+        remaining_data = filtered_data[filtered_data["chunk_sequence"].isna()]
+        if not remaining_data.empty:
+            colors = remaining_data.apply(
+                lambda row:
+                "red" if row["hex_updated"] == "True" and row["balance"] <= 0 else
+                "purple" if row["hex_updated"] == "True" else
+                "green" if row["hex_updated"] == "False" else
+                "blue",
+                axis=1
             )
+
+            # Add traces for each color group
+            for color, group in remaining_data.groupby(colors):
+                fig.add_trace(go.Scatter(
+                    x=group["long"],
+                    y=group["lat"],
+                    mode="markers",
+                    marker=dict(size=hex_size, symbol="hexagon", color=color),
+                    name={
+                        "green": "Not Started",
+                        "red": "Negative Balance",
+                        "purple": "Started",
+                        "blue": "Other"
+                    }.get(color, "Other"),
+                    customdata=group[[
+                        "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
+                        "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
+                        "lat_tooltip", "long_tooltip"
+                    ]],
+                    hovertemplate=(
+                        "Hex: %{customdata[0]}<br>" +
+                        "Latitude: %{customdata[7]:.2f}<br>" +
+                        "Longitude: %{customdata[8]:.2f}<br>" +
+                        "Balance: %{customdata[1]}t<br>" +
+                        "Fe Grade: %{customdata[2]:.2f}%<br>" +
+                        "Si Grade: %{customdata[3]:.2f}%<br>" +
+                        "Al Grade: %{customdata[4]:.2f}%<br>" +
+                        "P Grade: %{customdata[5]:.2f}%<br>" +
+                        "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
+                    )
+                ))
+
+        direction = self.reclaim_directions.get(selected_footprint)
+        if direction:
+            fig.add_trace(go.Scatter(
+                x=[direction["start"][0], direction["end"][0]],
+                y=[direction["start"][1], direction["end"][1]],
+                mode="lines+markers",
+                marker=dict(size=8, color="black"),
+                line=dict(width=3, color="black", dash="dash"),
+                name="Reclaim Direction"
+            ))
+
+        cut_direction = self.cut_directions.get(selected_footprint)
+        if cut_direction:
+            fig.add_trace(go.Scatter(
+                x=[cut_direction["start"][0], cut_direction["end"][0]],
+                y=[cut_direction["start"][1], cut_direction["end"][1]],
+                mode="lines+markers",
+                marker=dict(size=8, color="#0b5cad"),
+                line=dict(width=3, color="#0b5cad", dash="dot"),
+                name="Cut Direction"
+            ))
+
+        dig_path = self.dig_paths.get(selected_footprint) or self.dig_path_from_selected_points(selected_footprint)
+        if dig_path:
+            fig.add_trace(go.Scatter(
+                x=[point[0] for point in dig_path],
+                y=[point[1] for point in dig_path],
+                mode="lines+markers",
+                marker=dict(size=4, color="#111111"),
+                line=dict(width=2, color="#111111"),
+                name="Dig Path",
+                hoverinfo="skip"
+            ))
+
+        fig.update_layout(
+            title={
+                "text": f"Stockpile AMT Map: {selected_footprint}",
+                "font": {
+                    "size": 20,  # Title font size
+                    "family": "Arial, sans-serif",  # Font family
+                    "color": "darkblue"  # Font color
+                },
+                "x": 0.5,  # Centers the title
+            },
+            xaxis=dict(
+                title="Longitude",
+                titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
+                tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+            ),
+            yaxis=dict(
+                title="Latitude",
+                titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
+                tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+            ),
+            xaxis_scaleanchor="y",
+            yaxis_scaleanchor="x"
+        )
 
         # Preserve zoom state if relayout data is provided
         if relayout_data and "xaxis.range" in relayout_data and "yaxis.range" in relayout_data:
@@ -1036,4 +1434,5 @@ class DrawAMTStockpile:
         self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
     def return_hex_sequence(self):
+        self.clean_up_hex_sequence_table()
         return self.selected_points

@@ -247,7 +247,11 @@ class DrawGradeProfiles:
             source_reclaim_rates = {source: blend_reclaim_rate * ratio for source, ratio in zip(sources, source_ratios)}
 
             # Filter relevant hexes from hex_sequence_table
-            source_hex_data = [hex_row for hex_row in hex_sequence_table if hex_row["footprint"].strip() in sources]
+            source_hex_data = [
+                hex_row for hex_row in hex_sequence_table
+                if hex_row["footprint"].strip() in sources
+                and max(float(hex_row.get("balance", 0) or 0), 0) > 0
+            ]
             if not source_hex_data:
                 continue  # Skip if no matching hexes found
 
@@ -274,15 +278,19 @@ class DrawGradeProfiles:
                         continue
                     
                     hex_row = hex_list[0]  # Get first hex in sequence for this stockpile
-                    hex_balance = hex_row["balance"]
+                    hex_balance = max(float(hex_row.get("balance", 0) or 0), 0)
                     source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
 
-                    if source_reclaim_rate == 0:
+                    if source_reclaim_rate == 0 or hex_balance <= 0:
                         continue
 
                     hex_duration = hex_balance / source_reclaim_rate
                     hex_entries.append((hex_row, hex_duration, footprint))
-                    min_duration = min(hex_duration for _, hex_duration, _ in hex_entries)
+
+                if not hex_entries:
+                    break
+
+                min_duration = min(hex_duration for _, hex_duration, _ in hex_entries)
 
                 # Ensure we do not exceed the total remaining duration
                 min_duration = min(min_duration, remaining_duration)
@@ -296,7 +304,7 @@ class DrawGradeProfiles:
                 total_weight = 0
 
                 for hex_row, hex_duration, footprint in hex_entries:
-                    hex_balance = hex_row["balance"]
+                    hex_balance = max(float(hex_row.get("balance", 0) or 0), 0)
                     hex_grades = {grade: hex_row[grade] for grade in grade_columns}
 
                     # Determine feed tonnes for this segment
@@ -354,9 +362,11 @@ class DrawGradeProfiles:
                         source_reclaim_rate = source_reclaim_rates.get(footprint, 0)
                         depletion_amount = source_reclaim_rate * min_duration  # Calculate depletion for this stockpile
                         
-                        if hex_list[0]["balance"] > depletion_amount:
+                        current_balance = max(float(hex_list[0].get("balance", 0) or 0), 0)
+
+                        if current_balance > depletion_amount:
                             # If hex is NOT fully depleted, update its balance
-                            hex_list[0]["balance"] -= depletion_amount
+                            hex_list[0]["balance"] = current_balance - depletion_amount
                         else:
                             # If fully depleted, remove the hex from the list
                             hex_list.pop(0)

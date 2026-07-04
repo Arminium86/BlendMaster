@@ -126,54 +126,39 @@ class BalanceTracker:
         # Sort the filtered hexes by the 'sequence' column
         sorted_hexes = sorted(filtered_hexes, key=lambda x: x.get('sequence', float('inf')))
 
-        # Iterate through the sorted hexes to handle depletion
-        for idx, current_hex in enumerate(sorted_hexes):
-            current_balance = current_hex.get('balance', 0)
-            
-            if current_balance > 0:
-                # Deplete the current hex
-                current_hex['balance'] -= reclaimed_tonnes
-                self.total_AMT_stockpile_balances[name] -= reclaimed_tonnes
-                
-                # If the current hex is not fully depleted
-                if current_hex['balance'] > 0:
-                    self.balance_copy[name] = current_hex['balance']
-                    # Update grades with the current hex
-                    for key, value in current_hex.items():
-                        if key.startswith('grade_'):
-                            if hasattr(self, key) and isinstance(getattr(self, key), dict):
-                                getattr(self, key)[name] = value  # Update the dictionary instead of overwriting
-                            else:
-                                print(f"Warning: {key} is not a dictionary, skipping update")
-                else:
-                    # Find the next hex with a positive balance
-                    next_hex = next(
-                        (hex_entry for hex_entry in sorted_hexes[idx + 1:] if hex_entry.get('balance', 0) > 0),
-                        None
-                    )
-                    # Update with the balance and grades of the next hex (if available)
-                    if next_hex:
-                        self.balance_copy[name] = next_hex['balance']
-                        # Update grades with the next hex
-                        for key, value in next_hex.items():
-                            if key.startswith('grade_'):
-                                if hasattr(self, key) and isinstance(getattr(self, key), dict):
-                                    getattr(self, key)[name] = value  # Correctly update dictionary
-                                else:
-                                    print(f"Warning: {key} is not a dictionary, skipping update")
-                    else:
-                        self.balance_copy[name] = 0  # No further hexes with positive balance
-                
-                return  # Exit after processing the reclaimed tonnes
-            
-            else:
+        reclaimed_tonnes = max(float(reclaimed_tonnes or 0), 0)
+        if reclaimed_tonnes <= 0:
+            return
+
+        for current_hex in sorted_hexes:
+            current_balance = max(float(current_hex.get('balance', 0) or 0), 0)
+            current_hex['balance'] = current_balance
+
+            if current_balance <= 0:
                 continue
-        
-        # Sum up all balances in the dictionary
-        total_balance_sum = sum(self.total_AMT_stockpile_balances.values())
-        
-        # If all hexes are depleted, set the stockpile balance to 0
-        if total_balance_sum == 0:
+
+            depleted_tonnes = min(current_balance, reclaimed_tonnes)
+            current_hex['balance'] = current_balance - depleted_tonnes
+            self.total_AMT_stockpile_balances[name] = max(
+                self.total_AMT_stockpile_balances.get(name, 0) - depleted_tonnes,
+                0
+            )
+            break
+
+        next_hex = next(
+            (hex_entry for hex_entry in sorted_hexes if max(float(hex_entry.get('balance', 0) or 0), 0) > 0),
+            None
+        )
+
+        if next_hex:
+            self.balance_copy[name] = max(float(next_hex.get('balance', 0) or 0), 0)
+            for key, value in next_hex.items():
+                if key.startswith('grade_'):
+                    if hasattr(self, key) and isinstance(getattr(self, key), dict):
+                        getattr(self, key)[name] = value
+                    else:
+                        print(f"Warning: {key} is not a dictionary, skipping update")
+        else:
             self.balance_copy[name] = 0
 
     def return_total_AMT_stockpile_balances(self):
@@ -189,6 +174,6 @@ class BalanceTracker:
                 hex_entry for hex_entry in self.hex_sequence_table
                 if hex_entry.get('footprint') == footprint
             ]
-            total_balance = sum(hex_entry.get('balance', 0) for hex_entry in filtered_hexes)
+            total_balance = sum(max(float(hex_entry.get('balance', 0) or 0), 0) for hex_entry in filtered_hexes)
             self.total_AMT_stockpile_balances[footprint] = total_balance
 

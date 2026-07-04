@@ -55,7 +55,8 @@ class UserInputs(QMainWindow):
 
         # Stockpile AMT Table
         self.AMT_stockpile_table = CustomTableWidget()
-        self.AMT_stockpile_tab_layout.addWidget(self.AMT_stockpile_table)
+        self.AMT_stockpile_table.setMinimumWidth(560)
+        self.AMT_stockpile_tab_layout.addWidget(self.AMT_stockpile_table, stretch=0)
 
         # Add calendar Tab
         self.main_tab = QWidget()
@@ -197,6 +198,7 @@ class UserInputs(QMainWindow):
         self.setup_calendar_first_call = True
         self.stockpile_data_use_column = {}
         self.stockpile_data_AMT_column = {}
+        self.AMT_chunk_settings = {}
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
         self.start_dash_AMT_map_thread_first_call = True
@@ -687,12 +689,46 @@ class UserInputs(QMainWindow):
             
             # Don't add the button if returning from the calendar
             if self.submit_calendar_first_call:
+                select_all_use_button = QPushButton("Select All Stockpiles")
+                select_all_use_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(0, True))
+
+                clear_use_button = QPushButton("Clear All Stockpiles")
+                clear_use_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(0, False))
+
+                select_all_AMT_button = QPushButton("Select All Stockpiles as AMT")
+                select_all_AMT_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(1, True))
+
+                clear_AMT_button = QPushButton("Clear All Stockpiles as AMT")
+                clear_AMT_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(1, False))
+
+                button_layout.addWidget(select_all_use_button)
+                button_layout.addWidget(clear_use_button)
+                button_layout.addWidget(select_all_AMT_button)
+                button_layout.addWidget(clear_AMT_button)
                 button_layout.addWidget(submit_button)  
                 button_layout.addStretch()  # Push the button to the left
 
             self.stockpile_tab_layout.addLayout(button_layout)
             
             self.setup_stockpile_table_first_call = False
+
+    def set_all_stockpile_checkboxes(self, column, checked):
+        """Set all checkbox widgets in a Stockpile Inventories checkbox column."""
+        state_by_column = {
+            0: self.stockpile_data_use_column,
+            1: self.stockpile_data_AMT_column
+        }
+
+        for row in range(self.stockpile_table.rowCount()):
+            checkbox_widget = self.stockpile_table.cellWidget(row, column)
+            stockpile_item = self.stockpile_table.item(row, 2)
+
+            if not checkbox_widget or not stockpile_item:
+                continue
+
+            checkbox = checkbox_widget.layout().itemAt(0).widget()
+            checkbox.setChecked(checked)
+            state_by_column[column][stockpile_item.text()] = checked
 
     def handle_cell_change(self, row, column):
         """Handle live formatting for the Reclaim Threshold column."""
@@ -793,12 +829,102 @@ class UserInputs(QMainWindow):
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
+    def parse_float_from_table_item(self, item, default=0.0):
+        if not item or not item.text().strip():
+            return default
+        try:
+            return float(item.text().strip())
+        except ValueError:
+            return default
+
+    def get_AMT_chunk_setting(self, stockpile_name):
+        return self.AMT_chunk_settings.get(stockpile_name, {
+            "average_reclaim_rate": 1000.0,
+            "chunk_reclaim_hours": 1.0,
+            "chunk_size": 1000.0
+        })
+
+    def calculate_AMT_chunk_size(self, average_reclaim_rate, chunk_reclaim_hours):
+        return max(float(average_reclaim_rate), 0.0) * max(float(chunk_reclaim_hours), 0.0)
+
+    def handle_AMT_chunk_cell_change(self, row, column):
+        if column not in (1, 2):
+            return
+
+        stockpile_item = self.AMT_stockpile_table.item(row, 0)
+        if not stockpile_item:
+            return
+
+        average_reclaim_rate = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 1))
+        chunk_reclaim_hours = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 2))
+        chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
+
+        self.AMT_stockpile_table.blockSignals(True)
+        chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+        chunk_size_item.setFlags(Qt.ItemIsEnabled)
+        chunk_size_item.setTextAlignment(Qt.AlignCenter)
+        self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
+        self.AMT_stockpile_table.blockSignals(False)
+
+        stockpile_name = stockpile_item.text()
+        self.AMT_chunk_settings[stockpile_name] = {
+            "average_reclaim_rate": average_reclaim_rate,
+            "chunk_reclaim_hours": chunk_reclaim_hours,
+            "chunk_size": chunk_size
+        }
+
+        if hasattr(self, "draw_AMT_map"):
+            self.draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
+
+    def store_AMT_chunk_settings(self):
+        settings = {}
+        for row in range(self.AMT_stockpile_table.rowCount()):
+            stockpile_item = self.AMT_stockpile_table.item(row, 0)
+            if not stockpile_item:
+                continue
+
+            stockpile_name = stockpile_item.text()
+            average_reclaim_rate = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 1), 1000.0)
+            chunk_reclaim_hours = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 2), 1.0)
+            chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
+
+            if average_reclaim_rate <= 0 or chunk_reclaim_hours <= 0:
+                QMessageBox.warning(
+                    self,
+                    "BlendMaster",
+                    f"Average Reclaim Rate and Chunk Reclaim Hours must be positive for {stockpile_name}."
+                )
+                return False
+
+            settings[stockpile_name] = {
+                "average_reclaim_rate": average_reclaim_rate,
+                "chunk_reclaim_hours": chunk_reclaim_hours,
+                "chunk_size": chunk_size
+            }
+
+            self.AMT_stockpile_table.blockSignals(True)
+            chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+            chunk_size_item.setFlags(Qt.ItemIsEnabled)
+            chunk_size_item.setTextAlignment(Qt.AlignCenter)
+            self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
+            self.AMT_stockpile_table.blockSignals(False)
+
+        self.AMT_chunk_settings = settings
+
+        if hasattr(self, "draw_AMT_map"):
+            self.draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
+
+        return True
+
     def setup_AMT_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
         
         # Define Headers (Add "Use" Column)
         headers = [
-            "AMT Stockpiles"
+            "AMT Stockpiles",
+            "Average Reclaim Rate (t/h)",
+            "Chunk Reclaim Hours",
+            "Chunk Size (WMT)"
         ]
         self.AMT_stockpile_table.setColumnCount(len(headers))
         self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
@@ -850,10 +976,33 @@ class UserInputs(QMainWindow):
                 stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
                 self.AMT_stockpile_table.setItem(row_idx, 0, stockpile_item)
 
+                chunk_setting = self.get_AMT_chunk_setting(stockpile_name)
+                average_reclaim_rate = chunk_setting.get("average_reclaim_rate", 1000.0)
+                chunk_reclaim_hours = chunk_setting.get("chunk_reclaim_hours", 1.0)
+                chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
+
+                average_rate_item = QTableWidgetItem(f"{average_reclaim_rate:.0f}")
+                average_rate_item.setTextAlignment(Qt.AlignCenter)
+                self.AMT_stockpile_table.setItem(row_idx, 1, average_rate_item)
+
+                chunk_hours_item = QTableWidgetItem(f"{chunk_reclaim_hours:g}")
+                chunk_hours_item.setTextAlignment(Qt.AlignCenter)
+                self.AMT_stockpile_table.setItem(row_idx, 2, chunk_hours_item)
+
+                chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+                chunk_size_item.setFlags(Qt.ItemIsEnabled)
+                chunk_size_item.setTextAlignment(Qt.AlignCenter)
+                self.AMT_stockpile_table.setItem(row_idx, 3, chunk_size_item)
+
         # Resize Columns
         self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.store_AMT_chunk_settings()
 
         if self.setup_AMT_stockpile_table_first_call:
+            self.AMT_stockpile_table.cellChanged.connect(self.handle_AMT_chunk_cell_change)
 
             # AMT map view inside a QFrame
             self.AMT_map_view = CustomWebEngineView()
@@ -904,6 +1053,8 @@ class UserInputs(QMainWindow):
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
 
     def store_hex_sequence_table(self):
+        if not self.store_AMT_chunk_settings():
+            return
 
         self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
 
@@ -914,7 +1065,7 @@ class UserInputs(QMainWindow):
             self.tabs.setTabEnabled(3, True)
             self.tabs.setCurrentIndex(3)  # Switch to Calendar tab
         else:
-            QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease go back and store the Sequence Table (press the blue button).")
+            QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
     
     def populate_total_AMT_stockpile_balances(self):
         # Extract unique footprints from the hex sequence table
@@ -926,7 +1077,7 @@ class UserInputs(QMainWindow):
                 hex_entry for hex_entry in self.hex_sequence_table
                 if hex_entry.get('footprint') == footprint
             ]
-            total_balance = sum(hex_entry.get('balance', 0) for hex_entry in filtered_hexes)
+            total_balance = sum(max(float(hex_entry.get('balance', 0) or 0), 0) for hex_entry in filtered_hexes)
             self.total_AMT_stockpile_balances[footprint] = total_balance
         
     def setup_calendar(self):
@@ -1347,6 +1498,8 @@ class UserInputs(QMainWindow):
         self.results_layout.addWidget(self.load_chart_button)
 
     def load_AMT_map(self):
+        if not self.store_AMT_chunk_settings():
+            return
 
         if not self.load_AMT_map_first_call:
     
@@ -1449,7 +1602,12 @@ class UserInputs(QMainWindow):
 
         if self.start_dash_AMT_map_thread_first_call:
 
-            self.draw_AMT_map = DrawAMTStockpile(db_path, port=8054, hex_sequence_table=self.hex_sequence_table)
+            self.draw_AMT_map = DrawAMTStockpile(
+                db_path,
+                port=8054,
+                hex_sequence_table=self.hex_sequence_table,
+                chunk_settings=copy.deepcopy(self.AMT_chunk_settings)
+            )
 
             # Use a thread to run the Dash app server
             self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
@@ -2790,7 +2948,8 @@ class UserInputs(QMainWindow):
                 "blend_config_table_inputs":  self.blend_config_table_inputs,
                 "crusher_rate_input_value": self.crusher_rate_input_value,
                 'hex_sequence_table': self.hex_sequence_table,
-                'stockpile_data_AMT_column': self.stockpile_data_AMT_column
+                'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
+                'AMT_chunk_settings': self.AMT_chunk_settings
             }
             # Generate a timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -2850,6 +3009,7 @@ class UserInputs(QMainWindow):
             self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
             self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
             self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
+            self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
 
             tab_states = loaded_state.get("tab_states", {})
             for index, enabled in tab_states.items():
@@ -2891,6 +3051,7 @@ class UserInputs(QMainWindow):
         self.crusher_rate_input_value = None
         self.hex_sequence_table = []
         self.stockpile_data_AMT_column = {}
+        self.AMT_chunk_settings = {}
         self.min_stockpiles = None
         self.max_stockpiles = None
         self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
