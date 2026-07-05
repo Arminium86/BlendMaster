@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator
@@ -15,6 +15,7 @@ from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
 from database.SQLiteDatabase import DatabaseManager
 import pandas as pd, sqlite3
+from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 class UserInputs(QMainWindow):
@@ -78,8 +79,15 @@ class UserInputs(QMainWindow):
         self.decision_point_tab_index = self.tabs.addTab(self.decision_point_tab, "Decision Point")
         self.decision_point_tab_layout = QVBoxLayout(self.decision_point_tab)
 
+        self.decision_status_label = QLabel("Run the optimiser to review feasible blend options.")
+        self.decision_status_label.setStyleSheet("font-weight: bold;")
+        self.decision_point_tab_layout.addWidget(self.decision_status_label)
+
         # Create the table widget for the DataFrame
         self.decision_table = CustomTableWidget()
+        self.decision_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.decision_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.decision_table.cellDoubleClicked.connect(self.select_decision_blend_from_row)
         self.decision_point_tab_layout.addWidget(self.decision_table)  # Add table at the top
 
         # Text output area
@@ -100,6 +108,13 @@ class UserInputs(QMainWindow):
         self.enter_button.setFixedWidth(200)
         self.enter_button.clicked.connect(self.handle_decision_input)
         input_layout.addWidget(self.enter_button, alignment=Qt.AlignLeft)
+
+        self.decision_select_button = QPushButton("Select Highlighted Blend")
+        self.decision_select_button.setFixedWidth(220)
+        self.decision_select_button.clicked.connect(self.select_decision_blend_from_selected_row)
+        self.decision_select_button.setEnabled(False)
+        input_layout.addWidget(self.decision_select_button, alignment=Qt.AlignLeft)
+
         input_layout.setAlignment(Qt.AlignLeft)
         self.enter_button.setEnabled(False)
 
@@ -488,8 +503,7 @@ class UserInputs(QMainWindow):
         self.progress_dialog.setCancelButton(None)
         self.progress_dialog.setModal(False)
         self.progress_dialog.setWindowModality(Qt.NonModal)
-        self.progress_dialog.resize(320, self.progress_dialog.height())
-        self.progress_dialog.setFixedWidth(320)
+        self.resize_progress_dialog_for_message(message)
         self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
         self.progress_dialog.show()
 
@@ -497,6 +511,19 @@ class UserInputs(QMainWindow):
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
+
+    def update_progress_message(self, message):
+        if self.progress_dialog:
+            message = str(message)
+            self.progress_dialog.setLabelText(message)
+            self.resize_progress_dialog_for_message(message)
+
+    def resize_progress_dialog_for_message(self, message):
+        if not self.progress_dialog:
+            return
+        text_width = self.progress_dialog.fontMetrics().horizontalAdvance(str(message))
+        dialog_width = min(max(text_width + 110, 360), 900)
+        self.progress_dialog.setFixedWidth(dialog_width)
 
     def run_background_task(self, message, work_fn, on_success, on_error=None):
         self.show_progress_dialog(message)
@@ -929,6 +956,8 @@ class UserInputs(QMainWindow):
                 self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
                 self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)  # Switch to AMT tab
             else:
+                self.hex_sequence_table = []
+                self.hex_sequence_table_argument = []
                 self.activate_manual_setup_tab()
                 self.navigate_to_solver_configuration()
         else:
@@ -1615,6 +1644,7 @@ class UserInputs(QMainWindow):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
 
         self.submit_calendar_first_call = False
+        self.clear_decision_point_output()
         
         self.calendar_inputs = {}
 
@@ -1678,6 +1708,18 @@ class UserInputs(QMainWindow):
             self.handle_run_program_error,
         )
 
+    def clear_decision_point_output(self):
+        if hasattr(self, "decision_output"):
+            self.decision_output.clear()
+        if hasattr(self, "decision_table"):
+            self.decision_table.clearContents()
+            self.decision_table.setRowCount(0)
+            self.decision_table.setColumnCount(0)
+        if hasattr(self, "decision_status_label"):
+            self.decision_status_label.setText("Optimising blends...")
+        self.valid_decision_blend_options = []
+        self.decision_blend_option_column = None
+
     def execute_run_program(self):
         return self.run_program.execute(
             self.start_time_choice,
@@ -1686,7 +1728,7 @@ class UserInputs(QMainWindow):
             self.blend_mode_choice,
             self.updated_stockpile_data,
             self.calendar_inputs,
-            self.hex_sequence_table_argument,
+            getattr(self, "hex_sequence_table_argument", []),
             self.min_stockpiles,
             self.max_stockpiles,
             self.min_stockpile_contribution_ratio,
@@ -1931,6 +1973,29 @@ class UserInputs(QMainWindow):
 
         self.populate_dataframe_table(self.sqlite_report_table, df)
 
+    def format_table_display_value(self, value):
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+
+        if isinstance(value, bool):
+            return str(value)
+
+        if isinstance(value, Real) and not isinstance(value, Integral):
+            return f"{float(value):.2f}"
+
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            if stripped_value and ("." in stripped_value or "e" in stripped_value.lower()):
+                try:
+                    return f"{float(stripped_value):.2f}"
+                except ValueError:
+                    pass
+
+        return str(value)
+
     def populate_dataframe_table(self, table_widget, df):
         table_widget.clearContents()
         table_widget.setRowCount(len(df))
@@ -1944,7 +2009,7 @@ class UserInputs(QMainWindow):
 
         for row_idx, row in enumerate(df.itertuples(index=False)):
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem("" if pd.isna(value) else str(value))
+                item = QTableWidgetItem(self.format_table_display_value(value))
                 item.setTextAlignment(Qt.AlignCenter)
                 table_widget.setItem(row_idx, col_idx, item)
 
@@ -2062,6 +2127,7 @@ class UserInputs(QMainWindow):
             self.tabs.setCurrentIndex(self.decision_point_tab_index)
             self.decision_input.setEnabled(True) # Enable the input
             self.enter_button.setEnabled(True) # Enable the button
+            self.decision_select_button.setEnabled(True)
             self.tabs.setTabEnabled(self.results_tab_index, True)
             self.tabs.setTabEnabled(self.profiles_tab_index, True)
             self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
@@ -2071,6 +2137,7 @@ class UserInputs(QMainWindow):
             self.tabs.setTabEnabled(self.decision_point_tab_index, True)
             self.decision_input.setEnabled(False) # Disable the input
             self.enter_button.setEnabled(False) # Disable the button
+            self.decision_select_button.setEnabled(False)
             self.tabs.setTabEnabled(self.results_tab_index, True)
             self.tabs.setTabEnabled(self.profiles_tab_index, True)
             self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
@@ -2084,20 +2151,46 @@ class UserInputs(QMainWindow):
         # Validate the input
         try:
             user_input_int = int(user_input)  # Check if input is an integer
-            max_blend_option = self.max_blend_option  # Max blend_ID from the DataFrame
-            if 1 <= user_input_int <= max_blend_option:
+            valid_options = getattr(self, "valid_decision_blend_options", [])
+            if user_input_int in valid_options:
                 # Input is valid, send it to CaseModellerBridge
+                self.decision_status_label.setText(f"Selected Blend Option {user_input_int}.")
+                self.display_decision_output(f"Selected Blend Option {user_input_int}.")
                 self.run_program.case_bridge.send_input(user_input)
                 self.decision_input.clear()
             else:
-                raise ValueError(f"Input must be between 1 and {max_blend_option}")
+                option_text = ", ".join(str(option) for option in valid_options) or "none"
+                raise ValueError(f"Input must be one of: {option_text}")
         except ValueError as e:
             # Display an error message in the decision_output text area
             self.display_decision_output(f"Invalid input: {e}")
 
+    def select_decision_blend_from_selected_row(self):
+        self.select_decision_blend_from_row(self.decision_table.currentRow(), self.decision_table.currentColumn())
+
+    def select_decision_blend_from_row(self, row, column):
+        if self.blend_mode_choice != 2 or not self.decision_input.isEnabled():
+            return
+        if row < 0:
+            self.display_decision_output("Select a candidate row first.")
+            return
+        blend_option_column = getattr(self, "decision_blend_option_column", None)
+        if blend_option_column is None:
+            self.display_decision_output("No blend options are available yet.")
+            return
+        item = self.decision_table.item(row, blend_option_column)
+        if item is None:
+            self.display_decision_output("Selected row does not contain a blend option.")
+            return
+        self.decision_input.setText(item.text())
+        self.handle_decision_input()
+
     def display_decision_output(self, message):
         """Display messages from CaseModeller in the Decision Point tab."""
         self.decision_output.append(message)
+        plain_message = str(message).strip()
+        if plain_message.startswith("Choose") or "Manual mode" in plain_message or "Auto select mode" in plain_message:
+            self.decision_status_label.setText(plain_message)
 
     def display_decision_dataframe(self, df):
         """Display a DataFrame in a QTableWidget with custom styles."""
@@ -2111,8 +2204,22 @@ class UserInputs(QMainWindow):
         self.decision_table.setColumnCount(len(df.columns))
         self.decision_table.setHorizontalHeaderLabels(df.columns)
         
-        # Store number of rows for data validation in handle_decision_input
-        self.max_blend_option = df['blend_option'].max()
+        self.decision_blend_option_column = (
+            list(df.columns).index("blend_option") if "blend_option" in df.columns else None
+        )
+        if "blend_option" in df.columns:
+            numeric_options = pd.to_numeric(df["blend_option"], errors="coerce").dropna()
+            self.valid_decision_blend_options = sorted(set(numeric_options.astype(int).tolist()))
+            self.max_blend_option = max(self.valid_decision_blend_options) if self.valid_decision_blend_options else 0
+        else:
+            self.valid_decision_blend_options = []
+            self.max_blend_option = 0
+
+        if self.valid_decision_blend_options:
+            self.decision_status_label.setText(
+                f"{len(self.valid_decision_blend_options)} feasible blend option(s). "
+                "Select a row or type a Blend Option."
+            )
 
         # Set font for the table
         font = QFont("Segoe UI", 10)  # Set font name and size
@@ -2128,17 +2235,30 @@ class UserInputs(QMainWindow):
 
         # Populate the table with DataFrame content
         for row_idx, row in enumerate(df.itertuples(index=False)):
+            blend_option_value = None
+            if self.decision_blend_option_column is not None:
+                blend_option_value = row[self.decision_blend_option_column]
+            row_color = QColor(238, 246, 255) if row_idx % 2 == 0 else QColor(255, 255, 255)
+            try:
+                if blend_option_value is not None and int(blend_option_value) % 2 == 0:
+                    row_color = QColor(245, 245, 245)
+            except (TypeError, ValueError):
+                pass
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem(str(value))
+                item = QTableWidgetItem(self.format_table_display_value(value))
                 item.setTextAlignment(Qt.AlignCenter)  # Center-align cell content
+                item.setBackground(row_color)
                 self.decision_table.setItem(row_idx, col_idx, item)
 
         # Resize columns to fit content 
         self.decision_table.resizeColumnsToContents()
     
-    def show_error_popup(self, error_message):
+    def show_error_popup(self, error_message, title=None):
         """Display an error message in a popup."""
-        QMessageBox.critical(self, "Error", error_message)
+        if isinstance(error_message, dict):
+            title = error_message.get("title", title)
+            error_message = error_message.get("message", "")
+        QMessageBox.critical(self, title or "Error", str(error_message))
     
     def setup_blends_tab(self):
         
@@ -3476,6 +3596,7 @@ class UserInputs(QMainWindow):
             self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
             self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
             self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
+            self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
             self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
             self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
             self.solver_config = loaded_state.get("solver_config", {})
@@ -3493,7 +3614,8 @@ class UserInputs(QMainWindow):
         
         self.handle_site_config_submit()
         self.store_stockpile_table()
-        self.store_hex_sequence_table()
+        if any((self.stockpile_data_AMT_column or {}).values()):
+            self.store_hex_sequence_table()
         self.project_load_continuation_pending = True
         self.store_calendar_inputs()
         
@@ -3521,6 +3643,7 @@ class UserInputs(QMainWindow):
         self.blend_config_table_inputs = None
         self.crusher_rate_input_value = None
         self.hex_sequence_table = []
+        self.hex_sequence_table_argument = []
         self.stockpile_data_AMT_column = {}
         self.AMT_chunk_settings = {}
         self.solver_config = {}
@@ -3580,7 +3703,7 @@ class CustomWebEngineView(QWebEngineView):
 
 class BackgroundWorker(QObject):
     finished = pyqtSignal(object)
-    failed = pyqtSignal(str)
+    failed = pyqtSignal(object)
 
     def __init__(self, work_fn):
         super().__init__()
@@ -3590,8 +3713,17 @@ class BackgroundWorker(QObject):
     def run(self):
         try:
             self.finished.emit(self.work_fn())
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+        except Exception as exc:
+            if hasattr(exc, "user_message"):
+                self.failed.emit({
+                    "title": getattr(exc, "title", "Infeasible Run"),
+                    "message": exc.user_message,
+                })
+            else:
+                self.failed.emit({
+                    "title": "Error",
+                    "message": traceback.format_exc(),
+                })
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

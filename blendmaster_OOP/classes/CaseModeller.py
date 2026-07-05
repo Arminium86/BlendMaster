@@ -11,8 +11,11 @@ from classes.PeriodManager import PeriodManager
 import pandas as pd
 from datetime import timedelta
 from typing import List, Optional
+from types import SimpleNamespace
 
 class CaseModeller:
+    MAX_DECISION_BLEND_OPTIONS = 12
+
     def __init__(
         self,
         stockpiles: List[StockpileData],
@@ -56,6 +59,7 @@ class CaseModeller:
         self.max_stockpiles = max_stockpiles
         self.min_stockpile_contribution_ratio = min_stockpile_contribution_ratio
         self.solver_config = solver_config or {}
+        self.optimization_diagnostics = []
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -73,15 +77,53 @@ class CaseModeller:
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
-        events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
+        events = self.event_pool.get_events(self.period_tracker, pd.DataFrame(), self.current_time, self.balance_tracker)
         
         # This method will be ultimately redundant as stockpile balances are updated in the is_stockpile_ready method of EventPoolGenerator and the same can be done for grade blocks (at which point this method is no longer required)
         self.event_pool.update_event_balances(events, self.balance_tracker)
         
         period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)
+        candidate_source_sets = []
+        candidate_source_signatures = set()
 
-        while events:
-            events_len = len(events)
+        if not events:
+            result = {
+                "Linprog_result_object": SimpleNamespace(
+                    success=False,
+                    status="No sources available",
+                    status_code=None,
+                ),
+                "steady_state_duration": self.calculate_initial_steady_state_duration(),
+                "diagnostics": Optimizer.build_diagnostics(
+                    events,
+                    period_crusher_target,
+                    self.calculate_initial_steady_state_duration(),
+                    self.periods,
+                    self.period_tracker,
+                    self.min_stockpiles,
+                    self.max_stockpiles,
+                    self.min_stockpile_contribution_ratio,
+                    [],
+                    "No sources available",
+                    0,
+                ),
+            }
+            self.register_optimization_diagnostic(result, events, "No sources available.")
+            store_blend_option = self.blend_option
+            self.blend_option = "No blend found"
+            self.record_results(result)
+            self.blend_option = store_blend_option
+
+        if events:
+            steady_state_end = self.current_time + timedelta(hours=self.calculate_initial_steady_state_duration())
+            print(
+                f"Solving steady state {self.steady_state_tracker} ({self.period_tracker}) "
+                f"from {self.current_time:%Y-%m-%d %H:%M} to {steady_state_end:%Y-%m-%d %H:%M}. "
+                f"{len(events)} source/equipment option(s) are available."
+            )
+
+        while events and len(candidate_source_sets) < self.MAX_DECISION_BLEND_OPTIONS:
+            print(f"Searching feasible blend option {self.blend_option}...")
             # Run optimization with dynamic steady states
             result = self.optimizer.run_with_dynamic_steady_state(
                 events,
@@ -95,48 +137,58 @@ class CaseModeller:
                 self.max_stockpiles,
                 self.min_stockpile_contribution_ratio,
                 self.solver_config,
+                candidate_source_sets,
             )
 
             if not result['Linprog_result_object'].success:
-                store_blend_option = self.blend_option
-                self.blend_option = "No blend found"
-                self.record_results(result)
-                self.blend_option = store_blend_option
-                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
-                updated_events_len = len(events)
-                if updated_events_len == events_len: break
-                else: self.blend_option += 1
-                continue
-        
-            elif result['Linprog_result_object'].success:
-                if result['crusher_actual_tonnes'] > 0:
-                    self.record_results(result)
-                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
-                    self.event_pool.update_event_balances(events, self.balance_tracker)
-                    updated_events_len = len(events)
-                    if updated_events_len == events_len: break
-                    else: self.blend_option += 1
-                    continue
-                else:
+                if not candidate_source_sets:
+                    self.register_optimization_diagnostic(result, events, "No feasible blend found.")
                     store_blend_option = self.blend_option
-                    self.blend_option = "No blend"
+                    self.blend_option = "No blend found"
                     self.record_results(result)
                     self.blend_option = store_blend_option
-                    events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
-                    updated_events_len = len(events)
-                    if updated_events_len == events_len: break
-                    else: self.blend_option += 1
+                else:
+                    print(f"No further feasible blend options found after {len(candidate_source_sets)} option(s).")
+                break
+        
+            elif result['Linprog_result_object'].success:
+                if result['crusher_actual_tonnes'] > Optimizer.SOLUTION_TOLERANCE:
+                    active_sources = self.active_sources_from_result(result)
+                    active_source_signature = frozenset(active_sources)
+                    if not active_sources or active_source_signature in candidate_source_signatures:
+                        print("No further distinct blend options found.")
+                        break
+
+                    self.record_results(result)
+                    candidate_source_sets.append(set(active_sources))
+                    candidate_source_signatures.add(active_source_signature)
+                    print(
+                        f"Found blend option {self.blend_option} using "
+                        f"{', '.join(active_sources)}."
+                    )
+                    self.blend_option += 1
                     continue
+                else:
+                    if not candidate_source_sets:
+                        self.register_optimization_diagnostic(result, events, "Solver returned zero crusher feed.")
+                        store_blend_option = self.blend_option
+                        self.blend_option = "No blend"
+                        self.record_results(result)
+                        self.blend_option = store_blend_option
+                    else:
+                        print(f"No further positive-feed blend options found after {len(candidate_source_sets)} option(s).")
+                    break
             else:
-                store_blend_option = self.blend_option
-                self.blend_option = "Rare case"
-                self.record_results(result)
-                self.blend_option = store_blend_option
-                events = self.event_pool.get_events(self.period_tracker, self.decision_point_results, self.current_time, self.balance_tracker)
-                updated_events_len = len(events)
-                if updated_events_len == events_len: break
-                else: self.blend_option += 1
-                continue
+                if not candidate_source_sets:
+                    self.register_optimization_diagnostic(result, events, "Rare optimisation case.")
+                    store_blend_option = self.blend_option
+                    self.blend_option = "Rare case"
+                    self.record_results(result)
+                    self.blend_option = store_blend_option
+                break
+
+        if events and len(candidate_source_sets) >= self.MAX_DECISION_BLEND_OPTIONS:
+            print(f"Stopped after {self.MAX_DECISION_BLEND_OPTIONS} feasible blend options.")
 
         # Check if there is any decision point results
         if "source_actual_tonnes" in self.decision_point_results:
@@ -190,6 +242,8 @@ class CaseModeller:
             except ValueError:
                 print("Invalid input. Please enter a number.")
                 return
+
+            self.publish_decision_options()
             
             if self.steady_state_tracker != 0:
 
@@ -217,7 +271,6 @@ class CaseModeller:
             elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
                 
                 if not list(current_filtered_sources) == list(previous_filtered_sources):
-                    print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
                     print("Blend fully depleted.")
                     self.user_blend_choice = input("Choose new blend: ")
                     self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
@@ -232,7 +285,6 @@ class CaseModeller:
                     pass
             
             elif self.user_interaction_mode == 2 and self.steady_state_tracker == 0:
-                print(self.decision_point_results_to_display[["steady_state_number", "blend_option", "source", "source_blend_ratio"]])
                 self.user_blend_choice = input("Choose blend: ")
                 # Cast user choice to appropriate type
                 try:
@@ -306,6 +358,68 @@ class CaseModeller:
             self.decision_point_results = pd.DataFrame()
             self.blend_option = 1
     
+    def publish_decision_options(self):
+        display_columns = [
+            "steady_state_number",
+            "blend_option",
+            "solver_score",
+            "source",
+            "source_blend_ratio",
+            "source_actual_tonnes",
+            "crusher_rate_output",
+            "crusher_actual_grade_fe",
+            "crusher_actual_grade_si",
+            "crusher_actual_grade_al",
+            "crusher_actual_grade_p",
+            "crusher_actual_grade_mn",
+        ]
+        available_columns = [
+            column for column in display_columns
+            if column in self.decision_point_results_to_display.columns
+        ]
+        if available_columns:
+            print(self.decision_point_results_to_display[available_columns])
+
+        blend_options = sorted(
+            self.decision_point_results_to_display["blend_option"].dropna().unique()
+        )
+        option_count = len(blend_options)
+        if self.user_interaction_mode == 1:
+            print(f"Auto select mode: Blend option 1 will be selected from {option_count} feasible option(s). Higher solver score is better.")
+        elif self.user_interaction_mode == 2:
+            print("Manual mode: choose a blend option from the table. Higher solver score is better.")
+
+    def active_sources_from_result(self, result):
+        """Return source names with positive tonnes in an optimisation result."""
+        active_sources = []
+        for transaction in result.get("transactions", []):
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+            except (TypeError, ValueError):
+                actual_tonnes = 0
+            if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
+                active_sources.append(transaction.get("source"))
+        return sorted(source for source in set(active_sources) if source)
+
+    def register_optimization_diagnostic(self, result, events, message):
+        diagnostics = dict(result.get("diagnostics") or {})
+        steady_state_duration = diagnostics.get(
+            "steady_state_duration",
+            result.get("steady_state_duration", self.calculate_initial_steady_state_duration()),
+        )
+        diagnostics.update(
+            {
+                "message": message,
+                "steady_state_number": self.steady_state_tracker,
+                "period": self.period_tracker,
+                "start_datetime": self.current_time,
+                "end_datetime": self.current_time + timedelta(hours=float(steady_state_duration or 0)),
+                "blend_option": self.blend_option,
+                "event_count": len(events),
+            }
+        )
+        self.optimization_diagnostics.append(diagnostics)
+
     def advance_time(self):
         """Advance current time and update period if needed."""
         steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
@@ -327,6 +441,7 @@ class CaseModeller:
                     "steady_state_number": self.steady_state_tracker,
                     "blend_option": "No blend selected",
                     "blend_ID": "No blend selected",
+                    "solver_score": result.get("solver_score", ""),
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": "",
@@ -370,6 +485,7 @@ class CaseModeller:
                     "steady_state_number": self.steady_state_tracker,
                     "blend_option": self.blend_option,
                     "blend_ID": self.blend_ID,
+                    "solver_score": result.get("solver_score", ""),
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "source": transaction["source"],

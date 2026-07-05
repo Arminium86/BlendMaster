@@ -10,6 +10,18 @@ from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
 from pandas import DataFrame
 
+class BlendMasterRunError(Exception):
+    def __init__(self, message, title="BlendMaster"):
+        super().__init__(message)
+        self.user_message = message
+        self.title = title
+
+
+class InfeasibleRunError(BlendMasterRunError):
+    def __init__(self, message):
+        super().__init__(message, title="Infeasible Run")
+
+
 class Run:
     
     def __init__(self, gui):
@@ -18,6 +30,8 @@ class Run:
 
         # Connect bridge signals to the GUI
         self.case_bridge.output_signal.connect(gui.display_decision_output)
+        if hasattr(gui, "update_progress_message"):
+            self.case_bridge.output_signal.connect(gui.update_progress_message)
         self.case_bridge.dataframe_signal.connect(gui.display_decision_dataframe)
         self.case_bridge.input_request_signal.connect(gui.display_decision_output)
         self.case_modeller = None
@@ -112,6 +126,7 @@ class Run:
         if run_exception is not None:
             raise run_exception
 
+        self._validate_optimization_results()
         self._validate_stockpile_count_constraints(
             min_stockpiles,
             max_stockpiles,
@@ -131,6 +146,50 @@ class Run:
 
         return min_stockpile_contribution_ratio
 
+    def _validate_optimization_results(self):
+        results = getattr(self.case_modeller, "results", None)
+        diagnostics = self._first_optimization_diagnostic()
+        if results is None or results.empty:
+            raise InfeasibleRunError(
+                self._format_infeasible_run_message(
+                    "No feasible blend was produced.",
+                    diagnostics,
+                )
+            )
+
+        results = results.copy()
+        results["source_actual_tonnes"] = pd.to_numeric(
+            results.get("source_actual_tonnes"), errors="coerce"
+        ).fillna(0)
+        results["crusher_actual_tonnes"] = pd.to_numeric(
+            results.get("crusher_actual_tonnes"), errors="coerce"
+        ).fillna(0)
+
+        failed_blend_labels = {"no blend selected", "no blend found", "no blend", "rare case"}
+        if "blend_option" in results:
+            failed_rows = results[
+                results["blend_option"].astype(str).str.lower().isin(failed_blend_labels)
+            ]
+            if not failed_rows.empty:
+                failed_row = failed_rows.iloc[0]
+                steady_state = failed_row.get("steady_state_number", "unknown")
+                diagnostics = self._first_optimization_diagnostic(steady_state) or diagnostics
+                raise InfeasibleRunError(
+                    self._format_infeasible_run_message(
+                        f"Steady state {steady_state} did not produce a feasible blend.",
+                        diagnostics,
+                    )
+                )
+
+        valid_feed = results[results["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE]
+        if valid_feed.empty:
+            raise InfeasibleRunError(
+                self._format_infeasible_run_message(
+                    "The run completed without selecting any positive crusher feed.",
+                    diagnostics,
+                )
+            )
+
     def _validate_stockpile_count_constraints(self, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None):
         if min_stockpiles is None and max_stockpiles is None:
             return
@@ -141,11 +200,12 @@ class Run:
 
         results = getattr(self.case_modeller, "results", None)
         if results is None or results.empty:
-            raise ValueError(self._stockpile_constraint_message(
+            raise InfeasibleRunError(self._stockpile_constraint_message(
                 min_stockpiles,
                 max_stockpiles,
                 min_stockpile_contribution_ratio,
                 "No feasible blend was produced.",
+                self._first_optimization_diagnostic(),
             ))
 
         results = results.copy()
@@ -166,20 +226,22 @@ class Run:
                 .any()
             )
             if has_failed_blend:
-                raise ValueError(self._stockpile_constraint_message(
+                raise InfeasibleRunError(self._stockpile_constraint_message(
                     min_stockpiles,
                     max_stockpiles,
                     min_stockpile_contribution_ratio,
                     "At least one steady state has no feasible blend.",
+                    self._first_optimization_diagnostic(),
                 ))
 
         valid_feed = results[results["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE]
         if valid_feed.empty:
-            raise ValueError(self._stockpile_constraint_message(
+            raise InfeasibleRunError(self._stockpile_constraint_message(
                 min_stockpiles,
                 max_stockpiles,
                 min_stockpile_contribution_ratio,
                 "No crusher feed was selected.",
+                self._first_optimization_diagnostic(),
             ))
 
         ratio_tolerance = Optimizer.SOLUTION_TOLERANCE
@@ -195,40 +257,95 @@ class Run:
             )
 
             if min_stockpiles is not None and active_stockpile_count < min_stockpiles:
-                raise ValueError(self._stockpile_constraint_message(
+                raise InfeasibleRunError(self._stockpile_constraint_message(
                     min_stockpiles,
                     max_stockpiles,
                     min_stockpile_contribution_ratio,
                     f"Steady state {steady_state}, blend {blend_id} only has {active_stockpile_count} stockpile(s) contributing at least {self._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)}.",
+                    self._first_optimization_diagnostic(steady_state),
                 ))
 
             if max_stockpiles is not None and active_stockpile_count > max_stockpiles:
-                raise ValueError(self._stockpile_constraint_message(
+                raise InfeasibleRunError(self._stockpile_constraint_message(
                     min_stockpiles,
                     max_stockpiles,
                     min_stockpile_contribution_ratio,
                     f"Steady state {steady_state}, blend {blend_id} has {active_stockpile_count} stockpile(s) contributing at least {self._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)}.",
+                    self._first_optimization_diagnostic(steady_state),
                 ))
 
     @staticmethod
     def _format_stockpile_contribution_ratio(min_stockpile_contribution_ratio):
         return f"{min_stockpile_contribution_ratio:g} ({min_stockpile_contribution_ratio * 100:g}%)"
 
-    @staticmethod
-    def _stockpile_constraint_message(min_stockpiles, max_stockpiles, min_stockpile_contribution_ratio, detail):
+    def _stockpile_constraint_message(self, min_stockpiles, max_stockpiles, min_stockpile_contribution_ratio, detail, diagnostics=None):
         constraints = []
         if min_stockpiles is not None:
             constraints.append(f"minimum {min_stockpiles}")
         if max_stockpiles is not None:
             constraints.append(f"maximum {max_stockpiles}")
         constraint_text = ", ".join(constraints)
-        return (
-            f"{detail}\n\n"
+        stockpile_message = (
             f"BlendMaster could not satisfy the stockpile-count constraints ({constraint_text}) "
             f"with each selected stockpile contributing at least "
             f"{Run._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)} of crusher feed. "
-            "Please go back to the Calendar tab, update the stockpile limits or other blend constraints, and rerun."
+            "Review Solver Configuration and the Calendar inputs, then rerun."
         )
+        return self._format_infeasible_run_message(detail, diagnostics, stockpile_message)
+
+    def _first_optimization_diagnostic(self, steady_state=None):
+        diagnostics = getattr(self.case_modeller, "optimization_diagnostics", []) or []
+        if steady_state is not None:
+            for diagnostic in diagnostics:
+                if str(diagnostic.get("steady_state_number")) == str(steady_state):
+                    return diagnostic
+        return diagnostics[0] if diagnostics else None
+
+    @staticmethod
+    def _format_datetime(value):
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d %H:%M")
+        return str(value) if value not in (None, "") else "unknown"
+
+    @staticmethod
+    def _format_infeasible_run_message(detail, diagnostics=None, extra_detail=None):
+        lines = [detail]
+
+        if diagnostics:
+            lines.extend([
+                "",
+                "Where:",
+                f"- Steady state: {diagnostics.get('steady_state_number', 'unknown')}",
+                f"- Period: {diagnostics.get('period', 'unknown')}",
+                f"- Time window: {Run._format_datetime(diagnostics.get('start_datetime'))} to {Run._format_datetime(diagnostics.get('end_datetime'))}",
+                f"- Solver status: {diagnostics.get('solver_status', 'unknown')}",
+                f"- Available sources: {diagnostics.get('available_source_count', 0)} total, {diagnostics.get('positive_source_count', 0)} with positive reclaimable tonnes",
+                f"- Crusher target tonnes in window: {float(diagnostics.get('target_tonnes') or 0):,.1f}",
+                f"- Selected crusher tonnes: {float(diagnostics.get('selected_tonnes') or 0):,.1f}",
+            ])
+
+            likely_causes = diagnostics.get("likely_causes") or []
+            if likely_causes:
+                lines.extend(["", "Useful checks:"])
+                lines.extend(f"- {cause}" for cause in likely_causes[:6])
+
+            grade_ranges = diagnostics.get("grade_ranges") or {}
+            if grade_ranges:
+                lines.extend(["", "Grade target vs available range:"])
+                for grade_name, values in grade_ranges.items():
+                    lines.append(
+                        f"- {grade_name}: target {values['target_min']:g} to {values['target_max']:g}; "
+                        f"available {values['available_min']:g} to {values['available_max']:g}"
+                    )
+
+        if extra_detail:
+            lines.extend(["", extra_detail])
+
+        lines.extend([
+            "",
+            "Suggested next checks: Solver Configuration, Calendar grade targets, stockpile State, Max Quantity, balances and reclaim rates.",
+        ])
+        return "\n".join(lines)
         
 class CaseModellerBridge(QObject):
     output_signal = pyqtSignal(str)

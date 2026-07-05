@@ -25,6 +25,7 @@ from pulp import (
     LpVariable,
     PULP_CBC_CMD,
     lpSum,
+    value,
 )
 
 from classes.StockpileData import StockpileData
@@ -36,6 +37,7 @@ class Optimizer:
     THROUGHPUT_REWARD_PER_TONNE = 1_000_000
     TIE_BREAK_REWARD_PER_TONNE = 1.0
     FEWER_STOCKPILE_PENALTY = 10.0
+    SOURCE_SELECTION_EPSILON_PENALTY = 0.001
 
     def run_with_dynamic_steady_state(
         self,
@@ -50,6 +52,7 @@ class Optimizer:
         max_stockpiles: Optional[int] = None,
         min_stockpile_contribution_ratio: Optional[float] = None,
         solver_config: Optional[dict] = None,
+        excluded_source_sets: Optional[List[set]] = None,
     ):
         """Runs blending optimization and adjusts steady state if needed."""
         
@@ -68,6 +71,7 @@ class Optimizer:
             max_stockpiles,
             min_stockpile_contribution_ratio,
             solver_config,
+            excluded_source_sets,
         )
         
         if result['Linprog_result_object'].success: 
@@ -84,6 +88,7 @@ class Optimizer:
                 max_stockpiles,
                 min_stockpile_contribution_ratio,
                 solver_config,
+                excluded_source_sets,
             )
 
             if result['Linprog_result_object'].success: 
@@ -103,6 +108,7 @@ class Optimizer:
                     max_stockpiles,
                     min_stockpile_contribution_ratio,
                     solver_config,
+                    excluded_source_sets,
                 )
 
                 if result['Linprog_result_object'].success: 
@@ -183,6 +189,7 @@ class Optimizer:
         max_stockpiles: Optional[int] = None,
         min_stockpile_contribution_ratio: Optional[float] = None,
         solver_config: Optional[dict] = None,
+        excluded_source_sets: Optional[List[set]] = None,
     ):
         """Core optimisation logic using a mixed integer solver."""
 
@@ -194,6 +201,9 @@ class Optimizer:
 
         dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
         solver_config = solver_config or {}
+        excluded_source_sets = [
+            set(source_set) for source_set in (excluded_source_sets or []) if source_set
+        ]
 
         # Step 1: Define bounds (how many tonnes each event contributes)
         bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
@@ -306,11 +316,14 @@ class Optimizer:
         A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
         b_ub = [period_crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * steady state duration
 
-        # Generate a list of indicies for each unique stockpile
+        # Generate a list of indices for each unique stockpile/source.
         stockpile_event_indices = {}
         stockpile_indices = []
+        source_event_indices = {}
 
         for i, event in enumerate(event_pool):
+            source_name = event.stockpile if event.is_stockpile else event.grade_block
+            source_event_indices.setdefault(source_name, []).append(i)
             stockpile_name = event.stockpile
             if event.is_stockpile:
                 stockpile_event_indices.setdefault(stockpile_name, []).append(i)
@@ -437,38 +450,59 @@ class Optimizer:
             for row, rhs in zip(A_eq, b_eq):
                 prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) == rhs
 
-        # Binary variables to control the number of stockpiles selected
+        # Binary variables to control selected sources. Stockpile count
+        # constraints still only count stockpiles, while candidate no-good cuts
+        # apply to every source type.
         use_binary_selection = (
             min_stockpiles is not None
             or max_stockpiles is not None
             or solver_config.get("prefer_fewer_stockpiles", False)
+            or bool(excluded_source_sets)
         )
-        if stockpile_event_indices and use_binary_selection:
+        if source_event_indices and use_binary_selection:
             y_vars = {}
             total_feed = lpSum(x_vars)
             max_total_feed = period_crusher_target["crusher_rate"] * steady_state_duration
             enforce_count_contribution = min_stockpiles is not None or max_stockpiles is not None
 
-            for stockpile_name, indices in stockpile_event_indices.items():
-                y_var = LpVariable(f"y_{stockpile_name}", cat=LpBinary)
-                y_vars[stockpile_name] = y_var
-                stockpile_feed = lpSum(x_vars[i] for i in indices)
-                stockpile_feed_upper_bound = sum(bounds[i][1] for i in indices)
+            for source_name, indices in source_event_indices.items():
+                y_var = LpVariable(f"y_{source_name}", cat=LpBinary)
+                y_vars[source_name] = y_var
+                source_feed = lpSum(x_vars[i] for i in indices)
+                source_feed_upper_bound = sum(bounds[i][1] for i in indices)
 
-                prob += stockpile_feed <= stockpile_feed_upper_bound * y_var
+                prob += source_feed <= source_feed_upper_bound * y_var
+
+            for stockpile_name, indices in stockpile_event_indices.items():
+                stockpile_feed = lpSum(x_vars[i] for i in indices)
                 if enforce_count_contribution:
                     prob += (
                         stockpile_feed
                         >= min_stockpile_contribution_ratio * total_feed
-                        - max_total_feed * (1 - y_var)
+                        - max_total_feed * (1 - y_vars[stockpile_name])
                     )
 
             if min_stockpiles is not None:
-                prob += lpSum(y_vars.values()) >= min_stockpiles
+                prob += lpSum(y_vars[name] for name in stockpile_event_indices) >= min_stockpiles
             if max_stockpiles is not None:
-                prob += lpSum(y_vars.values()) <= max_stockpiles
+                prob += lpSum(y_vars[name] for name in stockpile_event_indices) <= max_stockpiles
+            if excluded_source_sets:
+                all_source_names = set(source_event_indices)
+                for source_set in excluded_source_sets:
+                    known_sources = source_set & all_source_names
+                    outside_sources = all_source_names - known_sources
+                    if not known_sources:
+                        continue
+                    prob += (
+                        lpSum(1 - y_vars[source_name] for source_name in known_sources)
+                        + lpSum(y_vars[source_name] for source_name in outside_sources)
+                        >= 1
+                    )
+                objective += Optimizer.SOURCE_SELECTION_EPSILON_PENALTY * lpSum(y_vars.values())
             if solver_config.get("prefer_fewer_stockpiles", False):
-                objective += Optimizer.FEWER_STOCKPILE_PENALTY * lpSum(y_vars.values())
+                objective += Optimizer.FEWER_STOCKPILE_PENALTY * lpSum(
+                    y_vars[name] for name in stockpile_event_indices
+                )
 
         # Objective function
         prob += objective
@@ -476,12 +510,38 @@ class Optimizer:
         # Solve the problem
         prob.solve(PULP_CBC_CMD(msg=False))
 
-        success = LpStatus[prob.status] == "Optimal"
+        solver_status = LpStatus[prob.status]
+        success = solver_status == "Optimal"
         solution_values = [
             0.0 if abs(var.value() or 0.0) < Optimizer.SOLUTION_TOLERANCE else var.value()
             for var in x_vars
         ]
-        result = SimpleNamespace(success=success, x=solution_values)
+        result = SimpleNamespace(
+            success=success,
+            x=solution_values,
+            status=solver_status,
+            status_code=prob.status,
+        )
+        objective_value = value(prob.objective)
+        selected_tonnes = sum(solution_values)
+        solver_score = (
+            (-objective_value / selected_tonnes)
+            if objective_value is not None and selected_tonnes > Optimizer.SOLUTION_TOLERANCE
+            else ""
+        )
+        diagnostics = Optimizer.build_diagnostics(
+            event_pool,
+            period_crusher_target,
+            steady_state_duration,
+            periods,
+            period_tracker,
+            min_stockpiles,
+            max_stockpiles,
+            min_stockpile_contribution_ratio,
+            bounds,
+            solver_status,
+            selected_tonnes,
+        )
 
         if result.success:
 
@@ -559,10 +619,149 @@ class Optimizer:
                 if steady_state_duration != 0
                 else 0,
                 "crusher_actual_tonnes": sum(result.x),
+                "solver_score": solver_score,
+                "solver_objective_value": objective_value,
+                "diagnostics": diagnostics,
             }
 
         else:
             return {
                 "Linprog_result_object": result,
                 "steady_state_duration": steady_state_duration,
+                "solver_score": solver_score,
+                "solver_objective_value": objective_value,
+                "diagnostics": diagnostics,
             }
+
+    @staticmethod
+    def build_diagnostics(
+        event_pool,
+        period_crusher_target,
+        steady_state_duration,
+        periods,
+        period_tracker,
+        min_stockpiles,
+        max_stockpiles,
+        min_stockpile_contribution_ratio,
+        bounds,
+        solver_status,
+        selected_tonnes,
+    ):
+        def safe_float(value, default=0.0):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        source_summaries = []
+        for event, bound in zip(event_pool, bounds):
+            source_name = event.stockpile if event.is_stockpile else event.grade_block
+            available_tonnes = max(0.0, safe_float(bound[1]))
+            source_summaries.append(
+                {
+                    "source": source_name,
+                    "type": event.type,
+                    "balance": safe_float(event.balance),
+                    "rate": safe_float(event.rate),
+                    "max_quantity": safe_float(event.max_quantity),
+                    "available_tonnes": available_tonnes,
+                    "grade_fe": safe_float(event.grade_fe),
+                    "grade_si": safe_float(event.grade_si),
+                    "grade_al": safe_float(event.grade_al),
+                    "grade_p": safe_float(event.grade_p),
+                    "grade_mn": safe_float(event.grade_mn),
+                }
+            )
+
+        positive_sources = [
+            source for source in source_summaries
+            if source["available_tonnes"] > Optimizer.SOLUTION_TOLERANCE
+        ]
+        positive_stockpiles = [
+            source for source in positive_sources if source["type"] == "stockpile"
+        ]
+
+        grade_ranges = {}
+        likely_causes = []
+        grade_names = {
+            "fe": "Fe",
+            "si": "Si",
+            "al": "Al",
+            "p": "P",
+            "mn": "Mn",
+        }
+        for grade_key, label in grade_names.items():
+            values = [source[f"grade_{grade_key}"] for source in positive_sources]
+            if not values:
+                continue
+            available_min = min(values)
+            available_max = max(values)
+            target_min = safe_float(period_crusher_target.get(f"target_{grade_key}_min"))
+            target_max = safe_float(period_crusher_target.get(f"target_{grade_key}_max"))
+            grade_ranges[label] = {
+                "available_min": available_min,
+                "available_max": available_max,
+                "target_min": target_min,
+                "target_max": target_max,
+            }
+            if target_min > available_max + Optimizer.SOLUTION_TOLERANCE:
+                likely_causes.append(
+                    f"{label} minimum {target_min:g} is above the available {label} range "
+                    f"({available_min:g} to {available_max:g})."
+                )
+            if target_max < available_min - Optimizer.SOLUTION_TOLERANCE:
+                likely_causes.append(
+                    f"{label} maximum {target_max:g} is below the available {label} range "
+                    f"({available_min:g} to {available_max:g})."
+                )
+
+        crusher_rate = safe_float(period_crusher_target.get("crusher_rate"))
+        if not event_pool:
+            likely_causes.append("No sources were available in the event pool.")
+        if crusher_rate <= Optimizer.SOLUTION_TOLERANCE:
+            likely_causes.append("Crusher rate is zero or negative for this period.")
+        if not positive_sources:
+            likely_causes.append(
+                "No available source has positive reclaimable tonnes after balance, rate and state checks."
+            )
+        if min_stockpiles is not None and len(positive_stockpiles) < min_stockpiles:
+            likely_causes.append(
+                f"Only {len(positive_stockpiles)} stockpile(s) have positive capacity, "
+                f"but Solver Configuration requires at least {min_stockpiles}."
+            )
+        if min_stockpiles is not None and max_stockpiles is not None and min_stockpiles > max_stockpiles:
+            likely_causes.append(
+                f"Minimum stockpiles ({min_stockpiles}) is greater than maximum stockpiles ({max_stockpiles})."
+            )
+        if (
+            min_stockpiles is not None
+            and min_stockpile_contribution_ratio is not None
+            and min_stockpiles * min_stockpile_contribution_ratio > 1 + Optimizer.SOLUTION_TOLERANCE
+        ):
+            likely_causes.append(
+                f"The minimum stockpile count and contribution ratio require more than 100% "
+                f"of crusher feed ({min_stockpiles} x {min_stockpile_contribution_ratio:g})."
+            )
+        if not likely_causes and selected_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+            likely_causes.append(
+                "The solver returned zero crusher feed. Check stockpile State, Max Quantity, "
+                "reclaim rates, balances and grade targets for this period."
+            )
+
+        return {
+            "solver_status": solver_status,
+            "steady_state_duration": steady_state_duration,
+            "crusher_rate": crusher_rate,
+            "target_tonnes": crusher_rate * steady_state_duration,
+            "selected_tonnes": selected_tonnes,
+            "available_source_count": len(source_summaries),
+            "positive_source_count": len(positive_sources),
+            "positive_stockpile_count": len(positive_stockpiles),
+            "source_summaries": source_summaries,
+            "grade_ranges": grade_ranges,
+            "likely_causes": likely_causes,
+            "min_stockpiles": min_stockpiles,
+            "max_stockpiles": max_stockpiles,
+            "min_stockpile_contribution_ratio": min_stockpile_contribution_ratio,
+            "period_duration": periods.get_periods().get(f"{period_tracker}_duration"),
+        }
