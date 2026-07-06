@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QPixmap
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
@@ -233,6 +233,7 @@ class UserInputs(QMainWindow):
         contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
         threshold_validator = QDoubleValidator(0.0, 1000.0, 4, self)
         threshold_validator.setNotation(QDoubleValidator.StandardNotation)
+        positive_integer_validator = QIntValidator(1, 1000, self)
 
         limits_label = QLabel("Blend Settings")
         limits_label.setStyleSheet("font-weight: bold;")
@@ -274,6 +275,20 @@ class UserInputs(QMainWindow):
         min_feed_duration_layout.addStretch()
         self.solver_config_layout.addLayout(min_feed_duration_layout)
 
+        blend_option_timeout_layout = QHBoxLayout()
+        self.blend_option_timeout_input = self.create_solver_threshold_input("30.0", threshold_validator)
+        blend_option_timeout_layout.addWidget(QLabel("Blend Option Timeout:"))
+        blend_option_timeout_layout.addWidget(self.blend_option_timeout_input)
+        blend_option_timeout_layout.addWidget(QLabel("sec (0 = off)"))
+        self.max_blend_options_input = QLineEdit()
+        self.max_blend_options_input.setText("12")
+        self.max_blend_options_input.setValidator(positive_integer_validator)
+        self.max_blend_options_input.setFixedWidth(70)
+        blend_option_timeout_layout.addWidget(QLabel("Max Blend Options per Steady State:"))
+        blend_option_timeout_layout.addWidget(self.max_blend_options_input)
+        blend_option_timeout_layout.addStretch()
+        self.solver_config_layout.addLayout(blend_option_timeout_layout)
+
         feasibility_layout = QHBoxLayout()
         feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
         self.stockpile_feasibility_combo = QComboBox()
@@ -312,7 +327,9 @@ class UserInputs(QMainWindow):
 
         grade_block_pair_duration_layout = QHBoxLayout()
         self.min_grade_block_pair_duration_input = self.create_solver_threshold_input("0.0", threshold_validator)
-        grade_block_pair_duration_layout.addWidget(QLabel("Min Grade Block Pair Duration:"))
+        grade_block_pair_duration_layout.addWidget(
+            QLabel("Min Grade Block Pair Duration (only applies to longer steady state durations):")
+        )
         grade_block_pair_duration_layout.addWidget(self.min_grade_block_pair_duration_input)
         grade_block_pair_duration_layout.addWidget(QLabel("hrs"))
         grade_block_pair_duration_layout.addStretch()
@@ -410,8 +427,45 @@ class UserInputs(QMainWindow):
             self.grade_block_lock_checkbox.setEnabled(direct_tip_enabled)
 
     def is_direct_tip_enabled(self):
-        solver_config = self.solver_config or {}
+        solver_config = self.normalized_solver_config()
         return bool(solver_config.get("direct_tip_enabled", True))
+
+    def normalized_solver_config(self, solver_config=None):
+        defaults = {
+            "stockpile_feasibility_mode": "stockpile_must_be_feasible",
+            "min_feed_duration_hours": None,
+            "direct_tip_enabled": True,
+            "direct_tip_cash_incentive": 10.0,
+            "stay_on_same_blend_incentive": 0.0,
+            "blend_option_timeout_seconds": 30.0,
+            "max_blend_options_per_steady_state": 12,
+            "min_grade_block_pair_duration_hours": 0.0,
+            "stay_on_same_grade_block_pair_incentive": 0.0,
+            "grade_block_lock_enabled": False,
+            "prefer_fewer_stockpiles": False,
+            "balance_preference": "none",
+            "prefer_amt_stockpiles": False,
+            "prefer_contaminated_stockpiles": False,
+            "contaminant_thresholds": {
+                "si": 5.0,
+                "al": 3.0,
+                "p": 0.1,
+                "mn": 0.1,
+            },
+            "prefer_low_fe_stockpiles": False,
+            "low_fe_threshold": 58.0,
+        }
+        incoming = solver_config if solver_config is not None else self.solver_config
+        if not incoming:
+            return defaults
+
+        merged = copy.deepcopy(defaults)
+        incoming = copy.deepcopy(incoming)
+        contaminant_thresholds = incoming.pop("contaminant_thresholds", None)
+        merged.update(incoming)
+        if isinstance(contaminant_thresholds, dict):
+            merged["contaminant_thresholds"].update(contaminant_thresholds)
+        return merged
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -662,20 +716,42 @@ class UserInputs(QMainWindow):
         self.submit_button.setEnabled(all_fields_populated)
         self.save_button.setEnabled(all_fields_populated)
 
-    def show_progress_dialog(self, message):
+    def show_progress_dialog(self, message, cancel_callback=None):
         if self.progress_dialog:
             self.progress_dialog.close()
 
-        self.progress_dialog = QProgressDialog(message, None, 0, 0, self)
+        self.current_cancel_callback = cancel_callback
+        cancel_text = "Abort" if cancel_callback else None
+        self.progress_dialog = QProgressDialog(message, cancel_text, 0, 0, self)
         self.progress_dialog.setWindowTitle("BlendMaster")
-        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.setAutoReset(False)
+        if cancel_callback:
+            self.progress_dialog.canceled.connect(self.cancel_current_background_task)
+        else:
+            self.progress_dialog.setCancelButton(None)
         self.progress_dialog.setModal(False)
         self.progress_dialog.setWindowModality(Qt.NonModal)
         self.resize_progress_dialog_for_message(message)
         self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
         self.progress_dialog.show()
 
+    def cancel_current_background_task(self):
+        cancel_callback = getattr(self, "current_cancel_callback", None)
+        if cancel_callback is None:
+            return
+        try:
+            cancel_callback()
+        except Exception:
+            self.show_error_popup(traceback.format_exc())
+            return
+        if self.progress_dialog:
+            self.progress_dialog.setLabelText("Abort requested. Finishing the current solver step...")
+            self.progress_dialog.setCancelButton(None)
+            self.resize_progress_dialog_for_message("Abort requested. Finishing the current solver step...")
+
     def close_progress_dialog(self):
+        self.current_cancel_callback = None
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
@@ -693,8 +769,8 @@ class UserInputs(QMainWindow):
         dialog_width = min(max(text_width + 110, 360), 900)
         self.progress_dialog.setFixedWidth(dialog_width)
 
-    def run_background_task(self, message, work_fn, on_success, on_error=None):
-        self.show_progress_dialog(message)
+    def run_background_task(self, message, work_fn, on_success, on_error=None, cancel_callback=None):
+        self.show_progress_dialog(message, cancel_callback)
 
         thread = QThread(self)
         worker = BackgroundWorker(work_fn)
@@ -1550,7 +1626,9 @@ class UserInputs(QMainWindow):
                 self.max_stockpiles = self.calendar_inputs["max_stockpiles"]
             if self.calendar_inputs.get("min_stockpile_contribution_ratio") is not None:
                 self.min_stockpile_contribution_ratio = self.calendar_inputs["min_stockpile_contribution_ratio"]
-            self.solver_config = self.calendar_inputs.get("solver_config", self.solver_config)
+            self.solver_config = self.normalized_solver_config(
+                self.calendar_inputs.get("solver_config", self.solver_config)
+            )
             self.load_solver_config_inputs()
 
         if self.is_project_loaded or not self.submit_calendar_first_call:
@@ -1715,13 +1793,16 @@ class UserInputs(QMainWindow):
                 "min_stockpile_contribution_ratio",
                 self.min_stockpile_contribution_ratio
             )
-            self.solver_config = self.calendar_inputs.get("solver_config", self.solver_config)
+            self.solver_config = self.normalized_solver_config(
+                self.calendar_inputs.get("solver_config", self.solver_config)
+            )
 
         self.min_stockpiles_input.setText("" if self.min_stockpiles is None else str(self.min_stockpiles))
         self.max_stockpiles_input.setText("" if self.max_stockpiles is None else str(self.max_stockpiles))
         self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
 
-        solver_config = self.solver_config or {}
+        solver_config = self.normalized_solver_config()
+        self.solver_config = copy.deepcopy(solver_config)
         feasibility_label = {
             "stockpile_must_be_feasible": "Stockpile blend must be feasible",
             "stockpile_can_rely_on_grade_blocks": "Stockpile blend can rely on grade blocks"
@@ -1737,6 +1818,8 @@ class UserInputs(QMainWindow):
         self.direct_tip_enabled_checkbox.setChecked(bool(solver_config.get("direct_tip_enabled", True)))
         self.direct_tip_cash_incentive_input.setText(str(solver_config.get("direct_tip_cash_incentive", 10.0)))
         self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
+        self.blend_option_timeout_input.setText(str(solver_config.get("blend_option_timeout_seconds", 30.0)))
+        self.max_blend_options_input.setText(str(solver_config.get("max_blend_options_per_steady_state", 12)))
         self.min_grade_block_pair_duration_input.setText(str(solver_config.get("min_grade_block_pair_duration_hours", 0.0)))
         self.stay_on_same_grade_block_pair_incentive_input.setText(str(solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0)))
         self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
@@ -1823,6 +1906,22 @@ class UserInputs(QMainWindow):
                     QMessageBox.warning(self, "Invalid Input", f"{label} must be a number.")
                 return None
 
+        def parse_non_negative_input(input_widget, label, default=0.0):
+            text = input_widget.text().strip()
+            if not text:
+                return default
+            try:
+                value = float(text)
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} must be a number.")
+                return None
+            if value < 0:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} cannot be negative.")
+                return None
+            return value
+
         def parse_optional_non_negative(text, label):
             if not text:
                 return None
@@ -1838,6 +1937,22 @@ class UserInputs(QMainWindow):
                 return None
             return value
 
+        def parse_positive_int_input(input_widget, label, default):
+            text = input_widget.text().strip()
+            if not text:
+                return default
+            try:
+                value = int(text)
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} must be a whole number.")
+                return None
+            if value < 1:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} must be at least 1.")
+                return None
+            return value
+
         contaminant_thresholds = {
             "si": parse_threshold(self.contaminant_si_threshold_input, "Si threshold"),
             "al": parse_threshold(self.contaminant_al_threshold_input, "Al threshold"),
@@ -1845,21 +1960,35 @@ class UserInputs(QMainWindow):
             "mn": parse_threshold(self.contaminant_mn_threshold_input, "Mn threshold"),
         }
         low_fe_threshold = parse_threshold(self.low_fe_threshold_input, "Fe threshold")
-        direct_tip_cash_incentive = parse_threshold(
+        direct_tip_cash_incentive = parse_non_negative_input(
             self.direct_tip_cash_incentive_input,
-            "Direct Tip Cash Incentive",
+            "Direct Tip Incentive",
+            10.0,
         )
-        stay_on_same_blend_incentive = parse_threshold(
+        stay_on_same_blend_incentive = parse_non_negative_input(
             self.stay_on_same_blend_incentive_input,
             "Stay on Same Blend Incentive",
+            0.0,
         )
-        min_grade_block_pair_duration_hours = parse_threshold(
+        blend_option_timeout_seconds = parse_non_negative_input(
+            self.blend_option_timeout_input,
+            "Blend Option Timeout",
+            30.0,
+        )
+        max_blend_options_per_steady_state = parse_positive_int_input(
+            self.max_blend_options_input,
+            "Max Blend Options per Steady State",
+            12,
+        )
+        min_grade_block_pair_duration_hours = parse_non_negative_input(
             self.min_grade_block_pair_duration_input,
-            "Min Grade Block Pair Duration",
+            "Min Grade Block Pair Duration (only applies to longer steady state durations)",
+            0.0,
         )
-        stay_on_same_grade_block_pair_incentive = parse_threshold(
+        stay_on_same_grade_block_pair_incentive = parse_non_negative_input(
             self.stay_on_same_grade_block_pair_incentive_input,
             "Stay With Same Grade Block Pair Incentive",
+            0.0,
         )
         min_feed_duration_hours = parse_optional_non_negative(
             min_feed_duration_text,
@@ -1871,6 +2000,8 @@ class UserInputs(QMainWindow):
             or low_fe_threshold is None
             or direct_tip_cash_incentive is None
             or stay_on_same_blend_incentive is None
+            or blend_option_timeout_seconds is None
+            or max_blend_options_per_steady_state is None
             or min_grade_block_pair_duration_hours is None
             or stay_on_same_grade_block_pair_incentive is None
             or (min_feed_duration_text and min_feed_duration_hours is None)
@@ -1893,6 +2024,8 @@ class UserInputs(QMainWindow):
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
             "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
+            "blend_option_timeout_seconds": blend_option_timeout_seconds,
+            "max_blend_options_per_steady_state": max_blend_options_per_steady_state,
             "min_grade_block_pair_duration_hours": min_grade_block_pair_duration_hours,
             "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
             "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
@@ -1904,6 +2037,7 @@ class UserInputs(QMainWindow):
             "prefer_low_fe_stockpiles": self.prefer_low_fe_stockpiles_checkbox.isChecked(),
             "low_fe_threshold": low_fe_threshold,
         }
+        self.solver_config = self.normalized_solver_config(self.solver_config)
 
         self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
         self.calendar_inputs["min_stockpiles"] = self.min_stockpiles
@@ -1974,6 +2108,10 @@ class UserInputs(QMainWindow):
 
         if not self.store_stockpile_constraint_inputs():
             return
+        self.solver_config = self.normalized_solver_config(
+            self.calendar_inputs.get("solver_config", self.solver_config)
+        )
+        self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
 
         self.update_decision_point_tab_state()
         self.run_background_task(
@@ -1981,6 +2119,7 @@ class UserInputs(QMainWindow):
             self.execute_run_program,
             self.finish_run_program,
             self.handle_run_program_error,
+            cancel_callback=self.run_program.request_abort,
         )
 
     def clear_decision_point_output(self):
@@ -2000,6 +2139,13 @@ class UserInputs(QMainWindow):
         self.decision_current_steady_state = None
 
     def execute_run_program(self):
+        active_solver_config = self.normalized_solver_config(
+            (self.calendar_inputs or {}).get("solver_config", self.solver_config)
+        )
+        self.solver_config = copy.deepcopy(active_solver_config)
+        if self.calendar_inputs is not None:
+            self.calendar_inputs["solver_config"] = copy.deepcopy(active_solver_config)
+
         return self.run_program.execute(
             self.start_time_choice,
             self.expit_mode_choice,
@@ -2011,7 +2157,7 @@ class UserInputs(QMainWindow):
             self.min_stockpiles,
             self.max_stockpiles,
             self.min_stockpile_contribution_ratio,
-            self.solver_config
+            active_solver_config
         )
 
     def finish_run_program(self, periods):
@@ -2612,7 +2758,7 @@ class UserInputs(QMainWindow):
         if isinstance(error_message, dict):
             title = error_message.get("title", title)
             error_message = error_message.get("message", "")
-        if (title or "").lower() == "infeasible run":
+        if (title or "").lower() in {"infeasible run", "run aborted"}:
             QMessageBox.information(self, title, str(error_message))
             return
         QMessageBox.critical(self, title or "Error", str(error_message))
@@ -4044,9 +4190,11 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
             self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
             self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
-            self.solver_config = loaded_state.get("solver_config", {})
+            self.solver_config = self.normalized_solver_config(
+                loaded_state.get("solver_config", {})
+            )
             if self.calendar_inputs is not None:
-                self.calendar_inputs["solver_config"] = self.solver_config
+                self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
 
             tab_states = loaded_state.get("tab_states", {})
             for index, enabled in tab_states.items():
@@ -4096,6 +4244,7 @@ class UserInputs(QMainWindow):
         self.max_stockpiles = None
         self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
         self.progress_dialog = None
+        self.current_cancel_callback = None
         self.background_tasks = []
         self.project_load_continuation_pending = False
 

@@ -37,8 +37,18 @@ class Run:
         self.case_modeller = None
         self.manual_case_modeller = None
         self.manual_blend_dash = None
+        self.abort_requested = False
+
+    def request_abort(self):
+        self.abort_requested = True
+        if self.case_modeller is not None and hasattr(self.case_modeller, "request_abort"):
+            self.case_modeller.request_abort()
+
+    def is_abort_requested(self):
+        return bool(self.abort_requested)
     
     def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None, solver_config=None):
+        self.abort_requested = False
 
         # Install required libraries
         #requirements = Requirements()
@@ -106,6 +116,7 @@ class Run:
             max_stockpiles=max_stockpiles,
             min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
             solver_config=solver_config,
+            abort_callback=self.is_abort_requested,
         )
 
         # Monkey-patch print and input

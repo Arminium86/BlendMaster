@@ -10,8 +10,14 @@ from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
 from datetime import timedelta
-from typing import List, Optional
+from typing import Callable, List, Optional
 from types import SimpleNamespace
+
+class SolverRunAborted(Exception):
+    def __init__(self, message="Optimisation run aborted by user."):
+        super().__init__(message)
+        self.user_message = message
+        self.title = "Run Aborted"
 
 class CaseModeller:
     MAX_DECISION_BLEND_OPTIONS = 12
@@ -30,6 +36,7 @@ class CaseModeller:
         max_stockpiles: Optional[int] = None,
         min_stockpile_contribution_ratio: Optional[float] = None,
         solver_config: Optional[dict] = None,
+        abort_callback: Optional[Callable[[], bool]] = None,
     ):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
@@ -63,23 +70,47 @@ class CaseModeller:
         self.previous_selected_stockpile_source_ids = set()
         self.previous_selected_grade_block_pairs = {}
         self.grade_block_pair_locks = {}
+        self.abort_callback = abort_callback or (lambda: False)
+        self.abort_requested = False
+
+    def request_abort(self):
+        self.abort_requested = True
+
+    def check_abort_requested(self):
+        if self.abort_requested or self.abort_callback():
+            raise SolverRunAborted()
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
+        print(
+            "Active solver configuration: "
+            f"Min Grade Block Pair Duration = "
+            f"{float(self.solver_config.get('min_grade_block_pair_duration_hours') or 0):.2f} hrs; "
+            f"Min Stockpile Feed Duration = "
+            f"{float(self.solver_config.get('min_feed_duration_hours') or 0):.2f} hrs; "
+            f"Blend Option Timeout = "
+            f"{float(self.solver_config.get('blend_option_timeout_seconds') or 0):.0f} sec; "
+            f"Max Blend Options per Steady State = "
+            f"{self.configured_max_decision_blend_options()}."
+        )
         try:
             while self.current_time < self.periods.get_periods()["period_2_end"]:
+                self.check_abort_requested()
                 # Run optimization and only advance time if successful
                 self.run_optimization_step()
                 self.steady_state_tracker += 1
+                self.check_abort_requested()
         finally:
-            # Save stockpile build report to database
-            self.save_build_report()
+            if not (self.abort_requested or self.abort_callback()):
+                # Save stockpile build report to database
+                self.save_build_report()
 
-            # Save blend results to database
-            self.save_optimised_blend_report()
+                # Save blend results to database
+                self.save_optimised_blend_report()
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
+        self.check_abort_requested()
         initial_steady_state_duration = self.calculate_initial_steady_state_duration()
         steady_state_end = self.current_time + timedelta(hours=initial_steady_state_duration)
         events = self.event_pool.get_events(
@@ -98,6 +129,8 @@ class CaseModeller:
         excluded_source_sets = []
         candidate_source_signatures = set()
         required_min_feed_duration = self.configured_min_feed_duration_hours()
+        blend_option_timeout_seconds = self.configured_blend_option_timeout_seconds()
+        max_decision_blend_options = self.configured_max_decision_blend_options()
         step_solver_config = self.solver_config_for_current_step()
 
         if not events:
@@ -135,7 +168,8 @@ class CaseModeller:
                 f"{len(events)} source/equipment option(s) are available."
             )
 
-        while events and len(candidate_source_sets) < self.MAX_DECISION_BLEND_OPTIONS:
+        while events and len(candidate_source_sets) < max_decision_blend_options:
+            self.check_abort_requested()
             print(f"Searching feasible blend option {self.blend_option}...")
             # Run optimization with dynamic steady states
             result = self.optimizer.run_with_dynamic_steady_state(
@@ -152,8 +186,10 @@ class CaseModeller:
                 step_solver_config,
                 excluded_source_sets,
             )
+            self.check_abort_requested()
 
             if not result['Linprog_result_object'].success:
+                solver_status = getattr(result.get("Linprog_result_object"), "status", "")
                 if not candidate_source_sets:
                     self.register_optimization_diagnostic(result, events, "No feasible blend found.")
                     store_blend_option = self.blend_option
@@ -161,7 +197,17 @@ class CaseModeller:
                     self.record_results(result)
                     self.blend_option = store_blend_option
                 else:
-                    print(f"No further feasible blend options found after {len(candidate_source_sets)} option(s).")
+                    if (
+                        blend_option_timeout_seconds is not None
+                        and str(solver_status) in {"Not Solved", "Undefined"}
+                    ):
+                        print(
+                            f"Stopped searching additional blend options after "
+                            f"{blend_option_timeout_seconds:g} seconds for blend option {self.blend_option}. "
+                            f"{len(candidate_source_sets)} feasible option(s) already found; moving on."
+                        )
+                    else:
+                        print(f"No further feasible blend options found after {len(candidate_source_sets)} option(s).")
                 break
         
             elif result['Linprog_result_object'].success:
@@ -238,8 +284,8 @@ class CaseModeller:
                     self.blend_option = store_blend_option
                 break
 
-        if events and len(candidate_source_sets) >= self.MAX_DECISION_BLEND_OPTIONS:
-            print(f"Stopped after {self.MAX_DECISION_BLEND_OPTIONS} feasible blend options.")
+        if events and len(candidate_source_sets) >= max_decision_blend_options:
+            print(f"Stopped after {max_decision_blend_options} feasible blend options.")
 
         # Check if there is any decision point results
         if "source_actual_tonnes" in self.decision_point_results:
@@ -459,6 +505,23 @@ class CaseModeller:
             return None
         return value if value > Optimizer.SOLUTION_TOLERANCE else None
 
+    def configured_blend_option_timeout_seconds(self):
+        try:
+            value = float(self.solver_config.get("blend_option_timeout_seconds") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > Optimizer.SOLUTION_TOLERANCE else None
+
+    def configured_max_decision_blend_options(self):
+        try:
+            value = int(self.solver_config.get(
+                "max_blend_options_per_steady_state",
+                self.MAX_DECISION_BLEND_OPTIONS,
+            ) or self.MAX_DECISION_BLEND_OPTIONS)
+        except (TypeError, ValueError):
+            value = self.MAX_DECISION_BLEND_OPTIONS
+        return max(1, value)
+
     def solver_config_for_current_step(self):
         solver_config = dict(self.solver_config or {})
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
@@ -491,8 +554,10 @@ class CaseModeller:
         except (TypeError, ValueError):
             result_duration = 0.0
 
-        tonnes_by_source = {}
-        payload_count_by_source = {}
+        if result_duration + Optimizer.SOLUTION_TOLERANCE < required_duration:
+            return []
+
+        source_details = {}
         for transaction in result.get("transactions", []):
             if transaction.get("source_type") != "grade_block":
                 continue
@@ -506,16 +571,54 @@ class CaseModeller:
             source = str(transaction.get("source") or transaction.get("source_id") or "")
             if not source:
                 continue
-            tonnes_by_source[source] = tonnes_by_source.get(source, 0.0) + actual_tonnes
-            payload_count_by_source[source] = payload_count_by_source.get(source, 0) + 1
+            details = source_details.setdefault(
+                source,
+                {
+                    "actual_tonnes": 0.0,
+                    "payload_tonnes": 0.0,
+                    "payload_count": 0,
+                    "delivered_datetimes": [],
+                },
+            )
+            details["actual_tonnes"] += actual_tonnes
+            try:
+                opening_balance = float(transaction.get("opening_balance") or 0)
+            except (TypeError, ValueError):
+                opening_balance = 0
+            details["payload_tonnes"] += max(opening_balance, 0.0)
+            details["payload_count"] += 1
+            delivered_datetime = pd.to_datetime(
+                transaction.get("estimated_delivery_datetime"),
+                errors="coerce",
+            )
+            if not pd.isna(delivered_datetime):
+                details["delivered_datetimes"].append(delivered_datetime.to_pydatetime())
 
         issues = []
-        for source, actual_tonnes in tonnes_by_source.items():
-            if result_duration + Optimizer.SOLUTION_TOLERANCE < required_duration:
+        steady_state_start = getattr(self, "current_time", None)
+        for source, details in source_details.items():
+            if steady_state_start is None:
+                source_duration = result_duration
+            else:
+                source_duration = Optimizer.calculate_grouped_payload_depletion_duration(
+                    details["delivered_datetimes"],
+                    steady_state_start,
+                )
+
+            if source_duration is None:
                 issues.append(
-                    f"{source} grouped {actual_tonnes:.1f} t from "
-                    f"{payload_count_by_source.get(source, 0)} payload row(s) over "
-                    f"{result_duration:.2f} hrs; minimum is {required_duration:.2f} hrs"
+                    f"{source} has no valid payload delivery timestamp while paired in a "
+                    f"{result_duration:.2f} hr steady state; minimum is {required_duration:.2f} hrs"
+                )
+                continue
+
+            if source_duration + Optimizer.SOLUTION_TOLERANCE < required_duration:
+                issues.append(
+                    f"{source} delivery window is {source_duration:.2f} hrs from "
+                    f"{details['payload_count']} payload row(s) "
+                    f"({details['payload_tonnes']:.1f} t payload tonnes available, "
+                    f"{details['actual_tonnes']:.1f} t selected) in a "
+                    f"{result_duration:.2f} hr steady state; minimum is {required_duration:.2f} hrs"
                 )
         return issues
 
@@ -659,7 +762,7 @@ class CaseModeller:
         }
 
     def active_source_ids_from_result(self, result):
-        """Return internal source ids with positive tonnes in an optimisation result."""
+        """Return source labels used for distinct-option exclusion."""
         active_source_ids = []
         for transaction in result.get("transactions", []):
             try:
@@ -667,7 +770,10 @@ class CaseModeller:
             except (TypeError, ValueError):
                 actual_tonnes = 0
             if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
-                active_source_ids.append(transaction.get("source_id") or transaction.get("source"))
+                if transaction.get("source_type") == "grade_block":
+                    active_source_ids.append(transaction.get("source") or transaction.get("source_id"))
+                else:
+                    active_source_ids.append(transaction.get("source_id") or transaction.get("source"))
         return sorted(source for source in set(active_source_ids) if source)
 
     def active_source_names_from_result(self, result):

@@ -41,6 +41,12 @@ class Optimizer:
     FEWER_STOCKPILE_PENALTY = 10.0
     SOURCE_SELECTION_EPSILON_PENALTY = 0.001
 
+    @staticmethod
+    def selection_source_name(event):
+        """Return the source label used for blend-option no-good cuts."""
+        source_name = event.stockpile if event.is_stockpile else (event.source_name or event.grade_block)
+        return str(source_name) if source_name is not None else ""
+
     def run_with_dynamic_steady_state(
         self,
         event_pool: List[EventData],
@@ -315,6 +321,14 @@ class Optimizer:
 
         dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
         solver_config = solver_config or {}
+        try:
+            blend_option_timeout_seconds = float(
+                solver_config.get("blend_option_timeout_seconds", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            blend_option_timeout_seconds = 0.0
+        if blend_option_timeout_seconds <= Optimizer.SOLUTION_TOLERANCE:
+            blend_option_timeout_seconds = None
         direct_tip_enabled = bool(solver_config.get("direct_tip_enabled", True))
         direct_tip_cash_incentive = 0.0
         if direct_tip_enabled:
@@ -508,7 +522,7 @@ class Optimizer:
         source_event_indices = {}
 
         for i, event in enumerate(event_pool):
-            source_name = event.stockpile if event.is_stockpile else event.grade_block
+            source_name = Optimizer.selection_source_name(event)
             source_event_indices.setdefault(source_name, []).append(i)
             stockpile_name = event.stockpile
             if event.is_stockpile:
@@ -688,8 +702,8 @@ class Optimizer:
             max_total_feed = period_crusher_target["crusher_rate"] * steady_state_duration
             enforce_count_contribution = min_stockpiles is not None or max_stockpiles is not None
 
-            for source_name, indices in source_event_indices.items():
-                y_var = LpVariable(f"y_{source_name}", cat=LpBinary)
+            for source_index, (source_name, indices) in enumerate(source_event_indices.items()):
+                y_var = LpVariable(f"y_source_{source_index}", cat=LpBinary)
                 y_vars[source_name] = y_var
                 source_feed = lpSum(x_vars[i] for i in indices)
                 source_feed_upper_bound = sum(bounds[i][1] for i in indices)
@@ -731,7 +745,7 @@ class Optimizer:
         prob += objective
 
         # Solve the problem
-        prob.solve(PULP_CBC_CMD(msg=False))
+        prob.solve(PULP_CBC_CMD(msg=False, timeLimit=blend_option_timeout_seconds))
 
         solver_status = LpStatus[prob.status]
         success = solver_status == "Optimal"
@@ -979,6 +993,14 @@ class Optimizer:
         crusher_rate = safe_float(period_crusher_target.get("crusher_rate"))
         direct_feed_ratio_min = safe_float(period_crusher_target.get("direct_feed_ratio_min"), 0.0)
         direct_feed_ratio_max = safe_float(period_crusher_target.get("direct_feed_ratio_max"), 1.0)
+        blend_option_timeout_seconds = safe_float(
+            solver_config.get("blend_option_timeout_seconds"),
+            0.0,
+        )
+        if blend_option_timeout_seconds > Optimizer.SOLUTION_TOLERANCE and solver_status in {"Not Solved", "Undefined"}:
+            likely_causes.append(
+                f"Blend option search reached the configured {blend_option_timeout_seconds:g} second solver timeout."
+            )
         if not event_pool:
             likely_causes.append("No sources were available in the event pool.")
         if crusher_rate <= Optimizer.SOLUTION_TOLERANCE:
@@ -1041,6 +1063,8 @@ class Optimizer:
             "direct_tip_enabled": solver_config.get("direct_tip_enabled", True),
             "direct_tip_cash_incentive": solver_config.get("direct_tip_cash_incentive", 10.0),
             "stay_on_same_blend_incentive": solver_config.get("stay_on_same_blend_incentive", 0.0),
+            "blend_option_timeout_seconds": solver_config.get("blend_option_timeout_seconds", 0.0),
+            "max_blend_options_per_steady_state": solver_config.get("max_blend_options_per_steady_state", 12),
             "min_grade_block_pair_duration_hours": solver_config.get("min_grade_block_pair_duration_hours", 0.0),
             "stay_on_same_grade_block_pair_incentive": solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0),
             "grade_block_lock_enabled": solver_config.get("grade_block_lock_enabled", False),
