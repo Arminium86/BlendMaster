@@ -268,7 +268,7 @@ class UserInputs(QMainWindow):
         self.min_feed_duration_input.setPlaceholderText("Optional")
         self.min_feed_duration_input.setFixedWidth(100)
         self.min_feed_duration_input.setValidator(threshold_validator)
-        min_feed_duration_layout.addWidget(QLabel("Min Feed Duration:"))
+        min_feed_duration_layout.addWidget(QLabel("Min Stockpile Feed Duration:"))
         min_feed_duration_layout.addWidget(self.min_feed_duration_input)
         min_feed_duration_layout.addWidget(QLabel("hrs"))
         min_feed_duration_layout.addStretch()
@@ -305,6 +305,29 @@ class UserInputs(QMainWindow):
         same_blend_layout.addWidget(QLabel("$/t"))
         same_blend_layout.addStretch()
         self.solver_config_layout.addLayout(same_blend_layout)
+
+        direct_tip_commitment_label = QLabel("Direct Tip Commitment")
+        direct_tip_commitment_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
+        self.solver_config_layout.addWidget(direct_tip_commitment_label)
+
+        grade_block_pair_duration_layout = QHBoxLayout()
+        self.min_grade_block_pair_duration_input = self.create_solver_threshold_input("0.0", threshold_validator)
+        grade_block_pair_duration_layout.addWidget(QLabel("Min Grade Block Pair Duration:"))
+        grade_block_pair_duration_layout.addWidget(self.min_grade_block_pair_duration_input)
+        grade_block_pair_duration_layout.addWidget(QLabel("hrs"))
+        grade_block_pair_duration_layout.addStretch()
+        self.solver_config_layout.addLayout(grade_block_pair_duration_layout)
+
+        same_grade_block_pair_layout = QHBoxLayout()
+        self.stay_on_same_grade_block_pair_incentive_input = self.create_solver_threshold_input("0.0", threshold_validator)
+        same_grade_block_pair_layout.addWidget(QLabel("Stay With Same Grade Block Pair Incentive:"))
+        same_grade_block_pair_layout.addWidget(self.stay_on_same_grade_block_pair_incentive_input)
+        same_grade_block_pair_layout.addWidget(QLabel("$/t"))
+        same_grade_block_pair_layout.addStretch()
+        self.solver_config_layout.addLayout(same_grade_block_pair_layout)
+
+        self.grade_block_lock_checkbox = QCheckBox("Lock grade block to selected stockpile mix")
+        self.solver_config_layout.addWidget(self.grade_block_lock_checkbox)
 
         preference_label = QLabel("Tie-Break Preferences")
         preference_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
@@ -379,6 +402,12 @@ class UserInputs(QMainWindow):
     def update_direct_tip_input_state(self, checked=None):
         direct_tip_enabled = self.direct_tip_enabled_checkbox.isChecked()
         self.direct_tip_cash_incentive_input.setEnabled(direct_tip_enabled)
+        if hasattr(self, "min_grade_block_pair_duration_input"):
+            self.min_grade_block_pair_duration_input.setEnabled(direct_tip_enabled)
+        if hasattr(self, "stay_on_same_grade_block_pair_incentive_input"):
+            self.stay_on_same_grade_block_pair_incentive_input.setEnabled(direct_tip_enabled)
+        if hasattr(self, "grade_block_lock_checkbox"):
+            self.grade_block_lock_checkbox.setEnabled(direct_tip_enabled)
 
     def is_direct_tip_enabled(self):
         solver_config = self.solver_config or {}
@@ -1708,6 +1737,9 @@ class UserInputs(QMainWindow):
         self.direct_tip_enabled_checkbox.setChecked(bool(solver_config.get("direct_tip_enabled", True)))
         self.direct_tip_cash_incentive_input.setText(str(solver_config.get("direct_tip_cash_incentive", 10.0)))
         self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
+        self.min_grade_block_pair_duration_input.setText(str(solver_config.get("min_grade_block_pair_duration_hours", 0.0)))
+        self.stay_on_same_grade_block_pair_incentive_input.setText(str(solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0)))
+        self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
         self.update_direct_tip_input_state()
         self.prefer_fewer_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_fewer_stockpiles", False)))
         balance_preference = solver_config.get("balance_preference", "none")
@@ -1821,9 +1853,17 @@ class UserInputs(QMainWindow):
             self.stay_on_same_blend_incentive_input,
             "Stay on Same Blend Incentive",
         )
+        min_grade_block_pair_duration_hours = parse_threshold(
+            self.min_grade_block_pair_duration_input,
+            "Min Grade Block Pair Duration",
+        )
+        stay_on_same_grade_block_pair_incentive = parse_threshold(
+            self.stay_on_same_grade_block_pair_incentive_input,
+            "Stay With Same Grade Block Pair Incentive",
+        )
         min_feed_duration_hours = parse_optional_non_negative(
             min_feed_duration_text,
-            "Min Feed Duration",
+            "Min Stockpile Feed Duration",
         )
 
         if (
@@ -1831,6 +1871,8 @@ class UserInputs(QMainWindow):
             or low_fe_threshold is None
             or direct_tip_cash_incentive is None
             or stay_on_same_blend_incentive is None
+            or min_grade_block_pair_duration_hours is None
+            or stay_on_same_grade_block_pair_incentive is None
             or (min_feed_duration_text and min_feed_duration_hours is None)
         ):
             return False
@@ -1851,6 +1893,9 @@ class UserInputs(QMainWindow):
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
             "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
+            "min_grade_block_pair_duration_hours": min_grade_block_pair_duration_hours,
+            "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
+            "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
             "prefer_fewer_stockpiles": self.prefer_fewer_stockpiles_checkbox.isChecked(),
             "balance_preference": balance_preference,
             "prefer_amt_stockpiles": self.prefer_amt_stockpiles_checkbox.isChecked(),
@@ -2559,6 +2604,8 @@ class UserInputs(QMainWindow):
 
         # Resize columns to fit content 
         self.decision_table.resizeColumnsToContents()
+        self.decision_table.scrollToBottom()
+        QTimer.singleShot(0, self.decision_table.scrollToBottom)
     
     def show_error_popup(self, error_message, title=None):
         """Display an error message in a popup."""

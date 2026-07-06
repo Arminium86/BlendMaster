@@ -215,18 +215,13 @@ class Optimizer:
                         "opening_balance": 0.0,
                         "actual_tonnes": 0.0,
                         "rate": 0.0,
-                        "payloads": [],
+                        "delivered_datetimes": [],
                     },
                 )
                 group["opening_balance"] += opening_balance
                 group["actual_tonnes"] += actual_tonnes
                 group["rate"] = max(group["rate"], rate)
-                group["payloads"].append(
-                    {
-                        "delivered_datetime": delivered_datetime.to_pydatetime(),
-                        "tonnes": opening_balance,
-                    }
-                )
+                group["delivered_datetimes"].append(delivered_datetime.to_pydatetime())
                 continue
 
             apply_depletion_boundary(
@@ -238,8 +233,7 @@ class Optimizer:
 
         for grade_block_source, group in grade_block_groups.items():
             depletion_duration = Optimizer.calculate_grouped_payload_depletion_duration(
-                group["payloads"],
-                group["rate"],
+                group["delivered_datetimes"],
                 start_of_steady_state_datetime,
             )
             if depletion_duration is None:
@@ -272,67 +266,29 @@ class Optimizer:
         else: return updated_duration_auto_turnover, "Null", "Null"
 
     @staticmethod
-    def calculate_grouped_payload_depletion_duration(payloads, rate, start_of_steady_state_datetime):
-        """Return hours until a selected grade-block payload group is depleted.
+    def calculate_grouped_payload_depletion_duration(delivered_datetimes, start_of_steady_state_datetime):
+        """Return hours until a selected grade-block payload group is exhausted.
 
-        Payloads in a group can arrive at different times, so this simulates
-        consuming only tonnes that have physically arrived.
+        Grade-block payloads are grouped by source for the selected blend. The
+        boundary is the latest selected payload delivery time, plus a tiny
+        buffer so the app's [start, end) window includes a payload delivered
+        exactly at the boundary. This is not crusher residence time.
         """
-        if rate <= Optimizer.SOLUTION_TOLERANCE or not payloads:
+        valid_datetimes = [
+            delivered_datetime
+            for delivered_datetime in delivered_datetimes
+            if delivered_datetime is not None
+        ]
+        if not valid_datetimes:
             return None
 
-        delivery_events = []
-        for payload in payloads:
-            delivered_datetime = payload.get("delivered_datetime")
-            tonnes = float(payload.get("tonnes") or 0)
-            if delivered_datetime is None or tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                continue
-            hours_until_delivery = (
-                delivered_datetime - start_of_steady_state_datetime
-            ).total_seconds() / 3600
-            delivery_events.append((max(hours_until_delivery, 0), tonnes))
-
-        if not delivery_events:
-            return None
-
-        delivery_events.sort(key=lambda item: item[0])
-        current_time = delivery_events[0][0]
-        available_tonnes = 0.0
-        payload_index = 0
-
-        while payload_index < len(delivery_events) or available_tonnes > Optimizer.SOLUTION_TOLERANCE:
-            if available_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                if payload_index >= len(delivery_events):
-                    break
-                current_time = max(current_time, delivery_events[payload_index][0])
-
-            while (
-                payload_index < len(delivery_events)
-                and delivery_events[payload_index][0] <= current_time + Optimizer.SOLUTION_TOLERANCE
-            ):
-                available_tonnes += delivery_events[payload_index][1]
-                payload_index += 1
-
-            if available_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                continue
-
-            if payload_index >= len(delivery_events):
-                current_time += available_tonnes / rate
-                available_tonnes = 0.0
-                break
-
-            next_delivery_time = delivery_events[payload_index][0]
-            hours_to_next_delivery = max(next_delivery_time - current_time, 0)
-            tonnes_until_next_delivery = rate * hours_to_next_delivery
-
-            if available_tonnes > tonnes_until_next_delivery + Optimizer.SOLUTION_TOLERANCE:
-                available_tonnes -= tonnes_until_next_delivery
-                current_time = next_delivery_time
-            else:
-                current_time += available_tonnes / rate
-                available_tonnes = 0.0
-
-        return current_time
+        latest_delivery_datetime = max(valid_datetimes) + timedelta(seconds=1)
+        return max(
+            (
+                latest_delivery_datetime - start_of_steady_state_datetime
+            ).total_seconds() / 3600,
+            0,
+        )
     
     @staticmethod
     def run_blending_optimization(
@@ -378,6 +334,23 @@ class Optimizer:
         previous_blend_stockpile_source_ids = {
             str(source_id)
             for source_id in solver_config.get("previous_blend_stockpile_source_ids", [])
+        }
+        try:
+            stay_on_same_grade_block_pair_incentive = float(
+                solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            stay_on_same_grade_block_pair_incentive = 0.0
+        previous_grade_block_pairs = solver_config.get("previous_grade_block_pairs", {}) or {}
+        previous_grade_block_pair_sources = {
+            str(source)
+            for source, stockpiles in previous_grade_block_pairs.items()
+            if stockpiles
+        }
+        previous_grade_block_pair_stockpile_source_ids = {
+            str(source_id)
+            for stockpiles in previous_grade_block_pairs.values()
+            for source_id in (stockpiles or [])
         }
 
         excluded_source_sets = [
@@ -445,8 +418,20 @@ class Optimizer:
                 if event.is_stockpile and str(event.stockpile) in previous_blend_stockpile_source_ids
                 else 0
             )
+            grade_block_pair_reward = 0
+            if stay_on_same_grade_block_pair_incentive:
+                if (
+                    event.is_grade_block
+                    and str(event.source_name or event.grade_block) in previous_grade_block_pair_sources
+                ):
+                    grade_block_pair_reward = stay_on_same_grade_block_pair_incentive
+                elif (
+                    event.is_stockpile
+                    and str(event.stockpile) in previous_grade_block_pair_stockpile_source_ids
+                ):
+                    grade_block_pair_reward = stay_on_same_grade_block_pair_incentive
             base_costs.append(
-                dmc + event.cost + event.cash - preference_reward - direct_tip_reward - continuity_reward
+                dmc + event.cost + event.cash - preference_reward - direct_tip_reward - continuity_reward - grade_block_pair_reward
             )
 
         throughput_reward = max(
@@ -1056,6 +1041,9 @@ class Optimizer:
             "direct_tip_enabled": solver_config.get("direct_tip_enabled", True),
             "direct_tip_cash_incentive": solver_config.get("direct_tip_cash_incentive", 10.0),
             "stay_on_same_blend_incentive": solver_config.get("stay_on_same_blend_incentive", 0.0),
+            "min_grade_block_pair_duration_hours": solver_config.get("min_grade_block_pair_duration_hours", 0.0),
+            "stay_on_same_grade_block_pair_incentive": solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0),
+            "grade_block_lock_enabled": solver_config.get("grade_block_lock_enabled", False),
             "stockpile_feasibility_mode": solver_config.get("stockpile_feasibility_mode", "stockpile_must_be_feasible"),
             "period_duration": periods.get_periods().get(f"{period_tracker}_duration"),
         }

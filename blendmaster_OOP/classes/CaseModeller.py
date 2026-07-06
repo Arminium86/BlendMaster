@@ -61,6 +61,8 @@ class CaseModeller:
         self.solver_config = solver_config or {}
         self.optimization_diagnostics = []
         self.previous_selected_stockpile_source_ids = set()
+        self.previous_selected_grade_block_pairs = {}
+        self.grade_block_pair_locks = {}
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -169,6 +171,26 @@ class CaseModeller:
                     if not active_source_ids or active_source_signature in candidate_source_signatures:
                         print("No further distinct blend options found.")
                         break
+
+                    lock_violations = self.grade_block_pair_lock_violations_from_result(result)
+                    if lock_violations:
+                        excluded_source_sets.append(set(active_source_ids))
+                        candidate_source_signatures.add(active_source_signature)
+                        print(
+                            f"Rejected blend option {self.blend_option} because grade block lock "
+                            f"would be breached: {'; '.join(lock_violations)}."
+                        )
+                        continue
+
+                    grade_block_duration_issues = self.grade_block_pair_duration_issues_from_result(result)
+                    if grade_block_duration_issues:
+                        excluded_source_sets.append(set(active_source_ids))
+                        candidate_source_signatures.add(active_source_signature)
+                        print(
+                            f"Rejected blend option {self.blend_option} because grade block pair "
+                            f"duration is too short: {'; '.join(grade_block_duration_issues)}."
+                        )
+                        continue
 
                     potential_feed_duration = self.candidate_potential_feed_duration(result)
                     if (
@@ -338,6 +360,7 @@ class CaseModeller:
             self.previous_selected_stockpile_source_ids = self.stockpile_source_ids_from_dataframe(
                 filtered_decision_point_results_to_user_choice
             )
+            self.update_grade_block_pair_memory(filtered_decision_point_results_to_user_choice)
 
             # Prepare for next cycle
             
@@ -368,6 +391,7 @@ class CaseModeller:
             self.previous_selected_stockpile_source_ids = self.stockpile_source_ids_from_dataframe(
                 self.decision_point_results
             )
+            self.update_grade_block_pair_memory(self.decision_point_results)
 
             # Prepare for next cycle (no results)
             
@@ -440,7 +464,87 @@ class CaseModeller:
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
             self.previous_selected_stockpile_source_ids
         )
+        solver_config["previous_grade_block_pairs"] = {
+            source: list(stockpiles)
+            for source, stockpiles in self.previous_selected_grade_block_pairs.items()
+        }
+        solver_config["grade_block_pair_locks"] = {
+            source: list(stockpiles)
+            for source, stockpiles in self.grade_block_pair_locks.items()
+        }
         return solver_config
+
+    def configured_min_grade_block_pair_duration_hours(self):
+        try:
+            value = float(self.solver_config.get("min_grade_block_pair_duration_hours") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > Optimizer.SOLUTION_TOLERANCE else None
+
+    def grade_block_pair_duration_issues_from_result(self, result):
+        required_duration = self.configured_min_grade_block_pair_duration_hours()
+        if required_duration is None:
+            return []
+
+        try:
+            result_duration = float(result.get("steady_state_duration") or 0)
+        except (TypeError, ValueError):
+            result_duration = 0.0
+
+        tonnes_by_source = {}
+        payload_count_by_source = {}
+        for transaction in result.get("transactions", []):
+            if transaction.get("source_type") != "grade_block":
+                continue
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+            except (TypeError, ValueError):
+                actual_tonnes = 0
+            if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+
+            source = str(transaction.get("source") or transaction.get("source_id") or "")
+            if not source:
+                continue
+            tonnes_by_source[source] = tonnes_by_source.get(source, 0.0) + actual_tonnes
+            payload_count_by_source[source] = payload_count_by_source.get(source, 0) + 1
+
+        issues = []
+        for source, actual_tonnes in tonnes_by_source.items():
+            if result_duration + Optimizer.SOLUTION_TOLERANCE < required_duration:
+                issues.append(
+                    f"{source} grouped {actual_tonnes:.1f} t from "
+                    f"{payload_count_by_source.get(source, 0)} payload row(s) over "
+                    f"{result_duration:.2f} hrs; minimum is {required_duration:.2f} hrs"
+                )
+        return issues
+
+    def grade_block_pair_lock_violations_from_result(self, result):
+        if not self.solver_config.get("grade_block_lock_enabled", False):
+            return []
+
+        stockpile_ids = self.stockpile_source_ids_from_transactions(result.get("transactions", []))
+        grade_block_sources = self.grade_block_sources_from_transactions(result.get("transactions", []))
+        violations = []
+        for source in grade_block_sources:
+            locked_stockpiles = self.grade_block_pair_locks.get(source)
+            if not locked_stockpiles:
+                continue
+            if tuple(sorted(stockpile_ids)) != tuple(locked_stockpiles):
+                violations.append(
+                    f"{source} is locked to {', '.join(locked_stockpiles)} "
+                    f"but candidate uses {', '.join(sorted(stockpile_ids)) or 'no stockpile'}"
+                )
+        return violations
+
+    def update_grade_block_pair_memory(self, data):
+        pairs = self.grade_block_pair_signatures_from_dataframe(data)
+        self.previous_selected_grade_block_pairs = pairs
+        if not self.solver_config.get("grade_block_lock_enabled", False):
+            return
+        for source, stockpiles in pairs.items():
+            if stockpiles and source not in self.grade_block_pair_locks:
+                self.grade_block_pair_locks[source] = tuple(stockpiles)
 
     def required_min_feed_duration(self, available_window_duration):
         configured_duration = self.configured_min_feed_duration_hours()
@@ -495,6 +599,64 @@ class CaseModeller:
         if source_column not in data.columns:
             return set()
         return set(str(value) for value in data[source_column].dropna() if str(value))
+
+    def stockpile_source_ids_from_transactions(self, transactions):
+        stockpile_ids = set()
+        for transaction in transactions or []:
+            if transaction.get("source_type") != "stockpile":
+                continue
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+            except (TypeError, ValueError):
+                actual_tonnes = 0
+            if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+            source_id = transaction.get("source_id") or transaction.get("source")
+            if source_id:
+                stockpile_ids.add(str(source_id))
+        return stockpile_ids
+
+    def grade_block_sources_from_transactions(self, transactions):
+        grade_block_sources = set()
+        for transaction in transactions or []:
+            if transaction.get("source_type") != "grade_block":
+                continue
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+            except (TypeError, ValueError):
+                actual_tonnes = 0
+            if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+            source = transaction.get("source") or transaction.get("source_id")
+            if source:
+                grade_block_sources.add(str(source))
+        return grade_block_sources
+
+    def grade_block_pair_signatures_from_dataframe(self, data):
+        if data is None or data.empty or "source_actual_tonnes" not in data.columns:
+            return {}
+
+        data = data.copy()
+        data["source_actual_tonnes"] = pd.to_numeric(
+            data["source_actual_tonnes"], errors="coerce"
+        ).fillna(0)
+        data = data[data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE]
+        if data.empty or "source_type" not in data.columns:
+            return {}
+
+        stockpile_ids = self.stockpile_source_ids_from_dataframe(data)
+        if not stockpile_ids:
+            return {}
+
+        grade_block_data = data[data["source_type"] == "grade_block"]
+        if grade_block_data.empty or "source" not in grade_block_data.columns:
+            return {}
+
+        return {
+            str(source): tuple(sorted(stockpile_ids))
+            for source in grade_block_data["source"].dropna().unique()
+            if str(source)
+        }
 
     def active_source_ids_from_result(self, result):
         """Return internal source ids with positive tonnes in an optimisation result."""
