@@ -160,10 +160,11 @@ class Optimizer:
         source_tonnes = "Null"
         minimum_duration = 0.016666667
 
-        for selected_event in selected_events:
-            actual_tonnes = float(selected_event.get("actual_tonnes") or 0)
-            opening_balance = float(selected_event.get("opening_balance") or 0)
-            rate = float(selected_event.get("equipment_rate_input") or 0)
+        grade_block_groups = {}
+
+        def apply_depletion_boundary(source, opening_balance, actual_tonnes, rate, depletion_duration=None):
+            nonlocal updated_duration, source_name, source_tonnes
+
             balance_tolerance = max(0.01, abs(opening_balance) * 1e-6)
             depletes_source = (
                 actual_tonnes > 0
@@ -171,36 +172,86 @@ class Optimizer:
                 and rate > 0
                 and opening_balance - actual_tonnes <= balance_tolerance
             )
+            if not depletes_source:
+                return
 
-            if depletes_source:
+            time_to_depletion = (
+                float(depletion_duration)
+                if depletion_duration is not None
+                else float(opening_balance / rate)
+            )
+            effective_duration = max(time_to_depletion, minimum_duration)
 
-                # Calculate time to depletion based on the source opening tonnes.
-                time_to_depletion = float(opening_balance / rate)
-                if selected_event.get("source_type") == "grade_block":
-                    delivered_datetime = pd.to_datetime(
-                        selected_event.get("estimated_delivery_datetime"),
-                        errors="coerce",
-                    )
-                    if pd.isna(delivered_datetime):
-                        continue
-                    hours_until_delivery = (
-                        delivered_datetime.to_pydatetime() - start_of_steady_state_datetime
-                    ).total_seconds() / 3600
-                    time_to_depletion += max(hours_until_delivery, 0)
+            # If a source will deplete sooner than the current steady state duration, then update the steady state duration
+            if effective_duration < updated_duration - Optimizer.SOLUTION_TOLERANCE:
+                updated_duration = effective_duration
+                source_name = source
+                source_tonnes = opening_balance
 
-                effective_duration = max(time_to_depletion, minimum_duration)
+        for selected_event in selected_events:
+            actual_tonnes = float(selected_event.get("actual_tonnes") or 0)
+            opening_balance = float(selected_event.get("opening_balance") or 0)
+            rate = float(selected_event.get("equipment_rate_input") or 0)
 
-                # If a source will deplete sooner than the current steady state duration, then update the steady state duration
-                if effective_duration < updated_duration - Optimizer.SOLUTION_TOLERANCE:
-                    updated_duration = effective_duration
-                    source_name = selected_event.get("source_id", selected_event["source"])
-                    source_tonnes = opening_balance
-
-                elif effective_duration > updated_duration + Optimizer.SOLUTION_TOLERANCE: 
+            if selected_event.get("source_type") == "grade_block":
+                if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
                     continue
 
-                else: 
+                delivered_datetime = pd.to_datetime(
+                    selected_event.get("estimated_delivery_datetime"),
+                    errors="coerce",
+                )
+                if pd.isna(delivered_datetime):
                     continue
+
+                grade_block_source = (
+                    selected_event.get("source")
+                    or selected_event.get("source_id")
+                    or "Unknown grade block"
+                )
+                group = grade_block_groups.setdefault(
+                    grade_block_source,
+                    {
+                        "opening_balance": 0.0,
+                        "actual_tonnes": 0.0,
+                        "rate": 0.0,
+                        "payloads": [],
+                    },
+                )
+                group["opening_balance"] += opening_balance
+                group["actual_tonnes"] += actual_tonnes
+                group["rate"] = max(group["rate"], rate)
+                group["payloads"].append(
+                    {
+                        "delivered_datetime": delivered_datetime.to_pydatetime(),
+                        "tonnes": opening_balance,
+                    }
+                )
+                continue
+
+            apply_depletion_boundary(
+                selected_event.get("source_id", selected_event["source"]),
+                opening_balance,
+                actual_tonnes,
+                rate,
+            )
+
+        for grade_block_source, group in grade_block_groups.items():
+            depletion_duration = Optimizer.calculate_grouped_payload_depletion_duration(
+                group["payloads"],
+                group["rate"],
+                start_of_steady_state_datetime,
+            )
+            if depletion_duration is None:
+                continue
+
+            apply_depletion_boundary(
+                grade_block_source,
+                group["opening_balance"],
+                group["actual_tonnes"],
+                group["rate"],
+                depletion_duration,
+            )
 
         for stockpile in stockpile_data:
             if (stockpile.auto_turnover_datetime != None and 
@@ -219,6 +270,69 @@ class Optimizer:
         if updated_duration <= updated_duration_auto_turnover:
             return updated_duration, source_name, source_tonnes
         else: return updated_duration_auto_turnover, "Null", "Null"
+
+    @staticmethod
+    def calculate_grouped_payload_depletion_duration(payloads, rate, start_of_steady_state_datetime):
+        """Return hours until a selected grade-block payload group is depleted.
+
+        Payloads in a group can arrive at different times, so this simulates
+        consuming only tonnes that have physically arrived.
+        """
+        if rate <= Optimizer.SOLUTION_TOLERANCE or not payloads:
+            return None
+
+        delivery_events = []
+        for payload in payloads:
+            delivered_datetime = payload.get("delivered_datetime")
+            tonnes = float(payload.get("tonnes") or 0)
+            if delivered_datetime is None or tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+            hours_until_delivery = (
+                delivered_datetime - start_of_steady_state_datetime
+            ).total_seconds() / 3600
+            delivery_events.append((max(hours_until_delivery, 0), tonnes))
+
+        if not delivery_events:
+            return None
+
+        delivery_events.sort(key=lambda item: item[0])
+        current_time = delivery_events[0][0]
+        available_tonnes = 0.0
+        payload_index = 0
+
+        while payload_index < len(delivery_events) or available_tonnes > Optimizer.SOLUTION_TOLERANCE:
+            if available_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                if payload_index >= len(delivery_events):
+                    break
+                current_time = max(current_time, delivery_events[payload_index][0])
+
+            while (
+                payload_index < len(delivery_events)
+                and delivery_events[payload_index][0] <= current_time + Optimizer.SOLUTION_TOLERANCE
+            ):
+                available_tonnes += delivery_events[payload_index][1]
+                payload_index += 1
+
+            if available_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+
+            if payload_index >= len(delivery_events):
+                current_time += available_tonnes / rate
+                available_tonnes = 0.0
+                break
+
+            next_delivery_time = delivery_events[payload_index][0]
+            hours_to_next_delivery = max(next_delivery_time - current_time, 0)
+            tonnes_until_next_delivery = rate * hours_to_next_delivery
+
+            if available_tonnes > tonnes_until_next_delivery + Optimizer.SOLUTION_TOLERANCE:
+                available_tonnes -= tonnes_until_next_delivery
+                current_time = next_delivery_time
+            else:
+                current_time += available_tonnes / rate
+                available_tonnes = 0.0
+
+        return current_time
     
     @staticmethod
     def run_blending_optimization(
@@ -345,7 +459,20 @@ class Optimizer:
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
         # constraint fail the optimization
         if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
-            indices = [i for i, event in enumerate(event_pool) if ((event.is_stockpile and event.stockpile == steady_state_controller_source) or (event.is_grade_block and event.grade_block == steady_state_controller_source))]
+            indices = [
+                i
+                for i, event in enumerate(event_pool)
+                if (
+                    (event.is_stockpile and event.stockpile == steady_state_controller_source)
+                    or (
+                        event.is_grade_block
+                        and (
+                            event.grade_block == steady_state_controller_source
+                            or event.source_name == steady_state_controller_source
+                        )
+                    )
+                )
+            ]
             A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
             b_eq = [steady_state_controller_tonnes] * len(A_eq)
 
