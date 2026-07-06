@@ -44,7 +44,10 @@ class DatabaseManager:
             blend_ID TEXT,
             steady_state_duration INTEGER,
             period INTEGER,
+            actual_direct_tip_ratio REAL,
             source TEXT,
+            source_id TEXT,
+            source_type TEXT,
             source_blend_ratio REAL,
             source_opening_balance REAL,
             source_actual_tonnes REAL,
@@ -78,6 +81,15 @@ class DatabaseManager:
         )
         ''')
 
+        cursor.execute("PRAGMA table_info(optimised_blend_report)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "source_id" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_id TEXT")
+        if "source_type" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_type TEXT")
+        if "actual_direct_tip_ratio" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN actual_direct_tip_ratio REAL")
+
         cursor.execute('DELETE FROM optimised_blend_report')
 
         if results.empty:
@@ -86,15 +98,64 @@ class DatabaseManager:
             print(f"Optimised blend report saved to database {database_name}")
             return
 
+        if "source_id" not in results.columns:
+            results["source_id"] = results["source"]
+        if "source_type" not in results.columns:
+            results["source_type"] = ""
+        if "actual_direct_tip_ratio" not in results.columns:
+            results["actual_direct_tip_ratio"] = 0
+
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['end_datetime'] = pd.to_datetime(results['end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
         # Insert each row from the DataFrame into the database
         for _, row in results.iterrows():
             cursor.execute('''
-            INSERT INTO optimised_blend_report VALUES (
+            INSERT INTO optimised_blend_report (
+                start_datetime,
+                end_datetime,
+                steady_state_number,
+                blend_option,
+                blend_ID,
+                steady_state_duration,
+                period,
+                actual_direct_tip_ratio,
+                source,
+                source_id,
+                source_type,
+                source_blend_ratio,
+                source_opening_balance,
+                source_actual_tonnes,
+                source_closing_balance,
+                source_grade_fe,
+                source_grade_si,
+                source_grade_al,
+                source_grade_p,
+                source_grade_mn,
+                equipment,
+                equipment_rate_input,
+                equipment_rate_output,
+                crusher_actual_tonnes,
+                crusher_rate_input,
+                crusher_rate_output,
+                crusher_actual_grade_fe,
+                crusher_actual_grade_si,
+                crusher_actual_grade_al,
+                crusher_actual_grade_p,
+                crusher_actual_grade_mn,
+                crusher_grade_target_min_fe,
+                crusher_grade_target_max_fe,
+                crusher_grade_target_min_si,
+                crusher_grade_target_max_si,
+                crusher_grade_target_min_al,
+                crusher_grade_target_max_al,
+                crusher_grade_target_min_p,
+                crusher_grade_target_max_p,
+                crusher_grade_target_min_mn,
+                crusher_grade_target_max_mn
+            ) VALUES (
                 :start_datetime, :end_datetime, :steady_state_number, :blend_option, :blend_ID,
-                :steady_state_duration, :period, :source, :source_blend_ratio, :source_opening_balance,
+                :steady_state_duration, :period, :actual_direct_tip_ratio, :source, :source_id, :source_type, :source_blend_ratio, :source_opening_balance,
                 :source_actual_tonnes, :source_closing_balance, :source_grade_fe, :source_grade_si,
                 :source_grade_al, :source_grade_p, :source_grade_mn, :equipment, :equipment_rate_input,
                 :equipment_rate_output, :crusher_actual_tonnes, :crusher_rate_input, :crusher_rate_output,
@@ -199,11 +260,22 @@ class DatabaseManager:
             source_grade_mn REAL,
             source_grade_p REAL,
             destination TEXT,
-            delivered_datetime TEXT
+            delivered_datetime TEXT,
+            direct_tip_id TEXT
         )
         ''')
 
+        cursor.execute("PRAGMA table_info(expit_payload_transactions)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "direct_tip_id" not in existing_columns:
+            cursor.execute("ALTER TABLE expit_payload_transactions ADD COLUMN direct_tip_id TEXT")
+
         cursor.execute('DELETE FROM expit_payload_transactions')
+
+        if "direct_tip_id" not in results.columns:
+            results["direct_tip_id"] = [
+                f"GB_{index + 1:06d}" for index in range(len(results))
+            ]
 
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -211,7 +283,20 @@ class DatabaseManager:
         # Insert each row from the DataFrame into the database
         for _, row in results.iterrows():
             cursor.execute('''
-            INSERT INTO expit_payload_transactions VALUES (
+            INSERT INTO expit_payload_transactions (
+                agent,
+                source,
+                start_datetime,
+                payload,
+                source_grade_fe,
+                source_grade_si,
+                source_grade_al,
+                source_grade_mn,
+                source_grade_p,
+                destination,
+                delivered_datetime,
+                direct_tip_id
+            ) VALUES (
                 :agent, 
                 :source, 
                 :start_datetime, 
@@ -222,7 +307,8 @@ class DatabaseManager:
                 :source_grade_mn, 
                 :source_grade_p, 
                 :destination, 
-                :delivered_datetime
+                :delivered_datetime,
+                :direct_tip_id
             )
             ''', row.to_dict())
 

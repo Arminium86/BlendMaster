@@ -13,7 +13,7 @@ class EventPoolGenerator:
         self.equipment = equipment
 
 
-    def generate_initial_event_pool(self, period, current_time, balance_tracker):
+    def generate_initial_event_pool(self, period, current_time, steady_state_end_time, balance_tracker):
         """Generate potential events based on available stockpiles, grade blocks, and equipment."""
         events = []
 
@@ -46,13 +46,24 @@ class EventPoolGenerator:
                             "reclaim_threshold": stockpile.reclaim_threshold,
                             "state": stockpile_state,
                             "auto_turnover_datetime": stockpile.auto_turnover_datetime,
-                            "is_amt": stockpile.is_AMT
+                            "is_amt": stockpile.is_AMT,
+                            "source_name": stockpile.name
                         })
 
         for grade_block in self.grade_blocks:
+            delivered_datetime = grade_block.delivered_datetime
+            if (
+                delivered_datetime is None
+                or pd.isna(delivered_datetime)
+                or not (current_time <= delivered_datetime < steady_state_end_time)
+            ):
+                continue
+
             grade_block_cost = grade_block.to_dict().get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
             grade_block_cash = -grade_block.to_dict().get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
             grade_block_max_quantity = grade_block.to_dict().get(f"max_quantity_{period}", 0)
+            if grade_block_max_quantity <= 0:
+                continue
             for equipment in self.equipment:
                 if equipment.name in grade_block.to_dict().get("equipment", []) and "EX" in equipment.name:
                     equipment_priority = equipment.to_dict().get(f"priority_{period}", 0)
@@ -71,7 +82,9 @@ class EventPoolGenerator:
                         "grade_p": grade_block.grade_p,
                         "grade_mn": grade_block.grade_mn,
                         "balance": grade_block.balance,
-                        "max_quantity": grade_block_max_quantity
+                        "max_quantity": grade_block_max_quantity,
+                        "source_name": grade_block.source or grade_block.name,
+                        "delivered_datetime": delivered_datetime
                     })
 
         return events
@@ -121,9 +134,9 @@ class EventPoolGenerator:
 
         return events 
 
-    def get_events(self, period, decision_point_results, current_time, balance_tracker):
+    def get_events(self, period, decision_point_results, current_time, steady_state_end_time, balance_tracker):
         """Retrieve generated blend event pool for the current period."""
-        initial_event_pool = self.generate_initial_event_pool(period, current_time, balance_tracker)
+        initial_event_pool = self.generate_initial_event_pool(period, current_time, steady_state_end_time, balance_tracker)
         initial_event_pool_objects = self.create_event_data_objects(initial_event_pool)
         final_event_pool = self.update_pool_participants(decision_point_results, initial_event_pool_objects)
        
@@ -135,7 +148,7 @@ class EventPoolGenerator:
             if event.is_stockpile:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p  = balance_tracker.get_balance(event.stockpile)
             elif event.is_grade_block:
-                event.balance = balance_tracker.get_balance(event.grade_block)
+                event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p = balance_tracker.get_balance(event.grade_block)
     
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
@@ -185,7 +198,9 @@ class EventPoolGenerator:
                 reclaim_threshold=record.get("reclaim_threshold"),
                 state=record.get("state"),
                 auto_turnover_datetime=record.get("auto_turnover_datetime"),
-                is_amt=record.get("is_amt", False)
+                is_amt=record.get("is_amt", False),
+                source_name=record.get("source_name"),
+                delivered_datetime=record.get("delivered_datetime")
 
             )
             for record in event_data_dicts

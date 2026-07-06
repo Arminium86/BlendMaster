@@ -17,7 +17,12 @@ class GradeBlockData:
         grade_si,
         grade_al,
         grade_p,
-        grade_mn
+        grade_mn,
+        delivered_datetime=None,
+        destination=None,
+        agent=None,
+        start_datetime=None,
+        source=None,
     ):
         self._name = name
         self._balance = balance
@@ -36,6 +41,11 @@ class GradeBlockData:
         self._grade_al = grade_al
         self._grade_p = grade_p
         self._grade_mn = grade_mn
+        self._delivered_datetime = delivered_datetime
+        self._destination = destination
+        self._agent = agent
+        self._start_datetime = start_datetime
+        self._source = source
     
     # Getters
     @property
@@ -105,6 +115,26 @@ class GradeBlockData:
     @property
     def grade_p(self):
         return self._grade_p
+
+    @property
+    def delivered_datetime(self):
+        return self._delivered_datetime
+
+    @property
+    def destination(self):
+        return self._destination
+
+    @property
+    def agent(self):
+        return self._agent
+
+    @property
+    def start_datetime(self):
+        return self._start_datetime
+
+    @property
+    def source(self):
+        return self._source
     
 
     # Setters
@@ -175,6 +205,26 @@ class GradeBlockData:
     @grade_mn.setter
     def grade_mn(self, value):
         self._grade_mn = value
+
+    @delivered_datetime.setter
+    def delivered_datetime(self, value):
+        self._delivered_datetime = value
+
+    @destination.setter
+    def destination(self, value):
+        self._destination = value
+
+    @agent.setter
+    def agent(self, value):
+        self._agent = value
+
+    @start_datetime.setter
+    def start_datetime(self, value):
+        self._start_datetime = value
+
+    @source.setter
+    def source(self, value):
+        self._source = value
  
     # Method to retrieve the original dictionary
     def to_dict(self):
@@ -195,5 +245,10 @@ class GradeBlockData:
             "grade_si": self._grade_si,
             "grade_al": self._grade_al,
             "grade_p": self._grade_p,
-            "grade_mn": self._grade_mn
+            "grade_mn": self._grade_mn,
+            "delivered_datetime": self._delivered_datetime,
+            "destination": self._destination,
+            "agent": self._agent,
+            "start_datetime": self._start_datetime,
+            "source": self._source
         }

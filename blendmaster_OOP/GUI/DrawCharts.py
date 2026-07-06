@@ -175,6 +175,21 @@ class DrawGanttChart:
         """
         self.db_path = db_path
         self.port = port
+        self.stockpile_pastel_palette = [
+            "#A8D5BA",  # pale green
+            "#F6C28B",  # pale orange
+            "#F7E7A3",  # pale yellow
+            "#D9C28F",  # ochre
+            "#A7C7E7",  # pale blue
+            "#BFD8D2",  # mint
+            "#CDB4DB",  # lavender
+            "#F4BFBF",  # soft coral
+            "#BDE0FE",  # light sky blue
+            "#C9E4CA",  # sage
+            "#F2D0A4",  # apricot
+            "#E2D4B7",  # sand
+        ]
+        random.shuffle(self.stockpile_pastel_palette)
         self.app = dash.Dash(__name__)
         self.setup_layout()
 
@@ -198,9 +213,69 @@ class DrawGanttChart:
         """
         Prepare data for Gantt chart visualization.
         """
+        required_columns = {
+            "start_datetime",
+            "end_datetime",
+            "blend_ID",
+            "steady_state_number",
+            "source",
+            "source_blend_ratio",
+        }
+        if data.empty or not required_columns.issubset(data.columns):
+            return pd.DataFrame()
+
+        if "actual_direct_tip_ratio" not in data.columns:
+            data["actual_direct_tip_ratio"] = 0
+        if "source_type" not in data.columns:
+            data["source_type"] = "stockpile"
+
         # Ensure datetime columns are in the correct format
         data['start_datetime'] = pd.to_datetime(data['start_datetime'], errors='coerce')
         data['end_datetime'] = pd.to_datetime(data['end_datetime'], errors='coerce')
+        if "steady_state_duration" not in data.columns:
+            data["steady_state_duration"] = (
+                data["end_datetime"] - data["start_datetime"]
+            ).dt.total_seconds() / 3600
+        data["source_blend_ratio_numeric"] = pd.to_numeric(
+            data["source_blend_ratio"], errors="coerce"
+        ).fillna(0)
+
+        def build_stockpile_signature(group):
+            stockpile_rows = group[
+                (group["source_type"] == "stockpile")
+                & (group["source_blend_ratio_numeric"] > 0)
+            ].copy()
+            if stockpile_rows.empty:
+                return "No stockpile component"
+
+            stockpile_sources = sorted(
+                str(source)
+                for source in stockpile_rows["source"].dropna().unique()
+                if str(source).strip()
+            )
+            return " | ".join(stockpile_sources) if stockpile_sources else "No stockpile component"
+
+        def format_stockpile_component(signature):
+            if signature == "No stockpile component":
+                return signature
+            return "; ".join(signature.split(" | "))
+
+        stockpile_signatures = (
+            data.groupby(["blend_ID", "steady_state_number"], dropna=False)
+            .apply(build_stockpile_signature)
+            .reset_index(name="stockpile_component_signature")
+        )
+        unique_signatures = sorted(stockpile_signatures["stockpile_component_signature"].unique())
+        stockpile_mix_map = {
+            signature: f"Stockpile Mix {index + 1}"
+            for index, signature in enumerate(unique_signatures)
+        }
+        stockpile_signatures["stockpile_component"] = stockpile_signatures[
+            "stockpile_component_signature"
+        ].map(stockpile_mix_map)
+        stockpile_signatures["stockpile_component_details"] = stockpile_signatures[
+            "stockpile_component_signature"
+        ].apply(format_stockpile_component)
 
         # Aggregate sources and source_blend_ratios by blend_ID and steady_state_number
         aggregated = data.groupby(["blend_ID", "steady_state_number"]).agg({
@@ -210,10 +285,22 @@ class DrawGanttChart:
         
         # Merge back with original data
         data = pd.merge(data, aggregated, on=["blend_ID", "steady_state_number"], suffixes=("", "_agg"))
+        data = pd.merge(data, stockpile_signatures, on=["blend_ID", "steady_state_number"], how="left")
     
+        def format_ratio_list(values):
+            if not isinstance(values, list):
+                return ""
+            formatted_values = []
+            for value in values:
+                try:
+                    formatted_values.append(f"{float(value):.2f}")
+                except (TypeError, ValueError):
+                    formatted_values.append(str(value))
+            return ", ".join(formatted_values)
+
         # Convert lists to comma-separated strings for DataTable compatibility
         data['source_agg'] = data['source_agg'].apply(lambda x: ", ".join(map(str, x)) if isinstance(x, list) else "")
-        data['source_blend_ratio_agg'] = data['source_blend_ratio_agg'].apply(lambda x: ", ".join(map(str, x)) if isinstance(x, list) else "")
+        data['source_blend_ratio_agg'] = data['source_blend_ratio_agg'].apply(format_ratio_list)
 
         # Add a new column for lanes (to cascade top to bottom)
         lane_map = {blend_id: idx + 1 for idx, blend_id in enumerate(sorted(data['blend_ID'].unique(), reverse=True))}
@@ -222,8 +309,11 @@ class DrawGanttChart:
         # Create a tooltip column with formatted sources and ratios
         data['Details'] = data.apply(
             lambda row: f"<br>Steady State: {row['steady_state_number']}<br>"
+                        f"Duration: {float(row['steady_state_duration']):.2f} hrs<br>"
                         f"Blend Option: {row['blend_option']}<br>"
                         f"Period: {row['period']}<br>"
+                        f"Stockpile Component: {row['stockpile_component']}<br>"
+                        f"{row['stockpile_component_details']}<br>"
                         f"Sources and Ratios:<br>" +
                         "".join(
                             f" - {source} @ {float(ratio) * 100:.2f}%<br>"  # Format ratio as percent
@@ -232,6 +322,7 @@ class DrawGanttChart:
                                 (row['source_blend_ratio_agg'].split(", ") if isinstance(row['source_blend_ratio_agg'], str) else [])
                             )
                         ) +
+                        f"Actual Direct Tip Ratio: {float(row['actual_direct_tip_ratio']):.2f}<br>"
                         f"Crusher Rate Output: {float(row['crusher_rate_output']):.1f}<br>"  # Format to 1 decimal point
                         f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):.1f}<br>"  # Format to 1 decimal point
                         f"Crusher Actual Grade Fe: {float(row['crusher_actual_grade_fe']):.2f}%<br>"  # Format as percent
@@ -269,8 +360,11 @@ class DrawGanttChart:
             "blend_ID": "Blend ID",
             "lane": "Lane",
             "steady_state_number": "Steady State",
+            "steady_state_duration": "Duration (hrs)",
+            "stockpile_component": "Stockpile Mix",
             "source_agg": "Sources",
             "source_blend_ratio_agg": "Blend Ratios",
+            "actual_direct_tip_ratio": "Actual Direct Tip Ratio",
             "crusher_actual_tonnes": "Crusher Tonnes",
             "crusher_rate_output": "Crusher Rate",
             "crusher_actual_grade_fe": "Grade Fe (%)",
@@ -324,7 +418,8 @@ class DrawGanttChart:
                                 {"name": column_aliases.get(col, col), "id": col}  
                                 for col in [
                                     "start_datetime", "end_datetime", "blend_ID", "lane", "steady_state_number",
-                                    "source_agg", "source_blend_ratio_agg", "crusher_actual_tonnes",
+                                    "steady_state_duration", "stockpile_component", "source_agg",
+                                    "source_blend_ratio_agg", "actual_direct_tip_ratio", "crusher_actual_tonnes",
                                     "crusher_rate_output"
                                 ] + [col for col in self.fetch_data().columns if col.startswith("crusher_actual_grade_")]
                             ],
@@ -341,14 +436,34 @@ class DrawGanttChart:
                                 'overflow': 'hidden',
                                 'textOverflow': 'ellipsis',
                                 'maxWidth': '150px',
+                                'height': 'auto',
+                                'lineHeight': '1.2',
                                 'fontFamily': 'Segoe UI',  # Set font for table cells
                                 'fontSize': '14px'         # Set font size for table cells
                             },
                             style_cell_conditional=[
                                 {'if': {'column_id': 'start_datetime'}, 'textAlign': 'center'},
                                 {'if': {'column_id': 'end_datetime'}, 'textAlign': 'center'},
-                                {'if': {'column_id': 'source_agg'}, 'textAlign': 'center'},
-                                {'if': {'column_id': 'source_blend_ratio_agg'}, 'textAlign': 'center'}
+                                {
+                                    'if': {'column_id': 'source_agg'},
+                                    'textAlign': 'left',
+                                    'minWidth': '420px',
+                                    'width': '520px',
+                                    'maxWidth': '760px',
+                                    'whiteSpace': 'normal',
+                                    'overflow': 'visible',
+                                    'textOverflow': 'clip',
+                                },
+                                {
+                                    'if': {'column_id': 'source_blend_ratio_agg'},
+                                    'textAlign': 'center',
+                                    'minWidth': '160px',
+                                    'width': '180px',
+                                    'maxWidth': '220px',
+                                    'whiteSpace': 'normal',
+                                    'overflow': 'visible',
+                                    'textOverflow': 'clip',
+                                }
                             ],
                             style_header={
                                 'fontWeight': 'bold',
@@ -392,20 +507,40 @@ class DrawGanttChart:
                 return px.scatter(title="No data available"), base_chart_style
 
             data = self.prepare_gantt_data(data)
+            if data.empty:
+                return px.scatter(title="No data available"), base_chart_style
             data['hover_name'] = "Blend ID: " + data['blend_ID'].astype(str)
 
-            num_lanes = max(data['lane'].nunique(), 1)
+            chart_data = data.drop_duplicates(
+                subset=["blend_ID", "steady_state_number", "start_datetime", "end_datetime", "lane", "Legend"]
+            ).copy()
+
+            stockpile_palette = getattr(self, "stockpile_pastel_palette", [
+                "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7", "#BFD8D2"
+            ])
+            component_color_map = {}
+            legend_color_map = {}
+            for _, row in chart_data.drop_duplicates("Legend").iterrows():
+                component_signature = row.get("stockpile_component_signature", row.get("Legend", ""))
+                if component_signature not in component_color_map:
+                    component_color_map[component_signature] = stockpile_palette[
+                        len(component_color_map) % len(stockpile_palette)
+                    ]
+                legend_color_map[row["Legend"]] = component_color_map[component_signature]
+
+            num_lanes = max(chart_data['lane'].nunique(), 1)
             chart_height = min(max(280, 190 + (num_lanes * 55)), 720)
             chart_style = dict(base_chart_style)
             chart_style['height'] = f'{chart_height + 18}px'
 
             # Create Gantt chart
             fig = px.timeline(
-                data,
+                chart_data,
                 x_start="start_datetime",
                 x_end="end_datetime",
                 y="lane",  # Cascading lanes (top to bottom)
-                color="Legend",  # Different color for each blend_ID
+                color="Legend",
+                color_discrete_map=legend_color_map,
                 hover_name="hover_name",
                 hover_data={
                 'blend_ID': False,
@@ -413,7 +548,9 @@ class DrawGanttChart:
                 'end_datetime': True,    # Hide end_datetime
                 'lane': False,            # Hide lane
                 'Details': True,          # Only display the tooltip explicitly
-                'Legend' : False
+                'Legend' : False,
+                'stockpile_component': False,
+                'stockpile_component_details': False
                 },
                 title=""
             )
@@ -429,7 +566,7 @@ class DrawGanttChart:
             )
 
             # Adjust layout
-            lane_labels = data[['lane', 'blend_ID']].drop_duplicates().sort_values('lane')
+            lane_labels = chart_data[['lane', 'blend_ID']].drop_duplicates().sort_values('lane')
             fig.update_layout(
                 xaxis_title="",
                 yaxis_title="Blend",
@@ -471,17 +608,24 @@ class DrawGanttChart:
             Update the property table based on Gantt chart selection.
             """
             data = self.fetch_data()
+            if data.empty:
+                return []
             data = self.prepare_gantt_data(data)
+            if data.empty:
+                return []
             
             # Select only the property table columns
             data = data[[
                 "start_datetime", "end_datetime", "blend_ID", "lane", "steady_state_number",
-                "source_agg", "source_blend_ratio_agg", "crusher_actual_tonnes",
+                "steady_state_duration", "stockpile_component", "source_agg",
+                "source_blend_ratio_agg", "actual_direct_tip_ratio", "crusher_actual_tonnes",
                 "crusher_rate_output", "crusher_actual_grade_fe", "crusher_actual_grade_si",
                 "crusher_actual_grade_al", "crusher_actual_grade_p", "crusher_actual_grade_mn",
             ]]
             
             # Apply rounding to specific numeric columns
+            data["steady_state_duration"] = data["steady_state_duration"].round(2)
+            data["actual_direct_tip_ratio"] = data["actual_direct_tip_ratio"].round(2)
             data["crusher_actual_tonnes"] = data["crusher_actual_tonnes"].round(1)  # Round to 1 decimal point
             data["crusher_rate_output"] = data["crusher_rate_output"].round(1)  # Round to 1 decimal point
             data["crusher_actual_grade_fe"] = data["crusher_actual_grade_fe"].round(2)  # Round to 2 decimal points
@@ -507,6 +651,8 @@ class DrawGanttChart:
         self.app.run_server(debug=True, port=self.port, use_reloader=False)
     
     def debug_blend_ID(self, data):
+        if data.empty or not {"steady_state_number", "source"}.issubset(data.columns):
+            return
 
         # Sort data to process sequentially
         data.sort_values(['steady_state_number', 'source'], inplace=True)
@@ -554,7 +700,10 @@ class DrawGanttChart:
             blend_ID TEXT,
             steady_state_duration INTEGER,
             period INTEGER,
+            actual_direct_tip_ratio REAL,
             source TEXT,
+            source_id TEXT,
+            source_type TEXT,
             source_blend_ratio REAL,
             source_opening_balance REAL,
             source_actual_tonnes REAL,
@@ -587,6 +736,15 @@ class DrawGanttChart:
             crusher_grade_target_max_mn REAL
         )
         ''')
+
+        cursor.execute("PRAGMA table_info(optimised_blend_report)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "source_id" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_id TEXT")
+        if "source_type" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_type TEXT")
+        if "actual_direct_tip_ratio" not in existing_columns:
+            cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN actual_direct_tip_ratio REAL")
 
         # Clear existing data in the table
         cursor.execute('DELETE FROM optimised_blend_report')

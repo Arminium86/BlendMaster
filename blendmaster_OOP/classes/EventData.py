@@ -19,6 +19,8 @@ class EventData:
         state,
         auto_turnover_datetime,
         is_amt=False,
+        source_name=None,
+        delivered_datetime=None,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -38,6 +40,8 @@ class EventData:
         self._state = state
         self._auto_turnover_datetime = auto_turnover_datetime
         self._is_amt = is_amt
+        self._source_name = source_name
+        self._delivered_datetime = delivered_datetime
 
     # Getters
     @property
@@ -112,6 +116,14 @@ class EventData:
     def is_amt(self):
         return self._is_amt
 
+    @property
+    def source_name(self):
+        return self._source_name
+
+    @property
+    def delivered_datetime(self):
+        return self._delivered_datetime
+
     # Setters
     @stockpile.setter
     def stockpile(self, value):
@@ -184,6 +196,14 @@ class EventData:
     @is_amt.setter
     def is_amt(self, value):
         self._is_amt = value
+
+    @source_name.setter
+    def source_name(self, value):
+        self._source_name = value
+
+    @delivered_datetime.setter
+    def delivered_datetime(self, value):
+        self._delivered_datetime = value
     
      # Boolean methods
     @property
@@ -221,4 +241,6 @@ class EventData:
             "state": self._state,
             "auto_turnover_datetime": self._auto_turnover_datetime,
             "is_amt": self._is_amt,
+            "source_name": self._source_name,
+            "delivered_datetime": self._delivered_datetime,
         }

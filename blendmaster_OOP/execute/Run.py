@@ -52,6 +52,7 @@ class Run:
         if file_path:
             expit_data_handler = ExpitDataHandler(file_path)
             expit_payload_transactions = expit_data_handler.process_transactions()
+            expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
         else:
             expit_payload_transactions = DataFrame()
 
@@ -69,6 +70,7 @@ class Run:
         if user_interaction_mode == 2 and file_path:
 
             expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, start_time)
+            expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
             #expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
             expit_payload_transactions_copy = expit_payload_transactions.copy()
             database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
@@ -82,9 +84,9 @@ class Run:
             print("No APS schedule imported.")
 
         # Load input data (this is combined user input and opening inventories)
-        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table)
+        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table, periods)
 
-        stockpile_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 
         min_stockpile_contribution_ratio = self._normalize_stockpile_contribution_ratio(
             min_stockpile_contribution_ratio
@@ -93,7 +95,7 @@ class Run:
         # Initialise and run CaseModeller
         self.case_modeller = CaseModeller(
             stockpiles=stockpile_data_objects,
-            grade_blocks=[],  # Placeholder
+            grade_blocks=grade_block_data_objects,
             equipment=equipment_data_objects,
             crusher_targets=crusher_target_data,
             expit_payload_transactions=expit_payload_transactions,
@@ -134,6 +136,17 @@ class Run:
         )
 
         return periods
+
+    @staticmethod
+    def _ensure_direct_tip_ids(expit_payload_transactions):
+        if expit_payload_transactions is None or expit_payload_transactions.empty:
+            return expit_payload_transactions
+        expit_payload_transactions = expit_payload_transactions.copy()
+        if "direct_tip_id" not in expit_payload_transactions.columns:
+            expit_payload_transactions["direct_tip_id"] = [
+                f"GB_{index + 1:06d}" for index in range(len(expit_payload_transactions))
+            ]
+        return expit_payload_transactions
 
     @staticmethod
     def _normalize_stockpile_contribution_ratio(min_stockpile_contribution_ratio=None):
@@ -245,6 +258,10 @@ class Run:
             ))
 
         ratio_tolerance = Optimizer.SOLUTION_TOLERANCE
+        grade_block_names = {
+            grade_block.name
+            for grade_block in getattr(self.case_modeller, "grade_blocks", [])
+        }
         for (steady_state, blend_id), blend_rows in valid_feed.groupby(
             ["steady_state_number", "blend_ID"], dropna=False
         ):
@@ -252,8 +269,14 @@ class Run:
                 blend_rows["source_actual_tonnes"]
                 / blend_rows["crusher_actual_tonnes"].replace(0, pd.NA)
             ).fillna(0)
+            source_identifier = (
+                blend_rows["source_id"] if "source_id" in blend_rows.columns else blend_rows["source"]
+            )
+            stockpile_source_ratios = source_ratios[
+                ~source_identifier.isin(grade_block_names)
+            ]
             active_stockpile_count = int(
-                (source_ratios >= min_stockpile_contribution_ratio - ratio_tolerance).sum()
+                (stockpile_source_ratios >= min_stockpile_contribution_ratio - ratio_tolerance).sum()
             )
 
             if min_stockpiles is not None and active_stockpile_count < min_stockpiles:
@@ -320,8 +343,11 @@ class Run:
                 f"- Time window: {Run._format_datetime(diagnostics.get('start_datetime'))} to {Run._format_datetime(diagnostics.get('end_datetime'))}",
                 f"- Solver status: {diagnostics.get('solver_status', 'unknown')}",
                 f"- Available sources: {diagnostics.get('available_source_count', 0)} total, {diagnostics.get('positive_source_count', 0)} with positive reclaimable tonnes",
+                f"- Positive stockpiles / grade blocks: {diagnostics.get('positive_stockpile_count', 0)} / {diagnostics.get('positive_grade_block_count', 0)}",
                 f"- Crusher target tonnes in window: {float(diagnostics.get('target_tonnes') or 0):,.1f}",
                 f"- Selected crusher tonnes: {float(diagnostics.get('selected_tonnes') or 0):,.1f}",
+                f"- Direct tip: {'enabled' if diagnostics.get('direct_tip_enabled', True) else 'disabled'}",
+                f"- Direct tip ratio target: {float(diagnostics.get('direct_feed_ratio_min') or 0):g} to {float(diagnostics.get('direct_feed_ratio_max') if diagnostics.get('direct_feed_ratio_max') is not None else 1):g}",
             ])
 
             likely_causes = diagnostics.get("likely_causes") or []

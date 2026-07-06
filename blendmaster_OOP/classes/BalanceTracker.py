@@ -8,6 +8,7 @@ from pandas import DataFrame
 class BalanceTracker:
     def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], period_tracker, hex_sequence_table):
         self.state = {item.name: item.to_dict().get(f"state_{period_tracker}", 0) for item in stockpiles}
+        self.grade_block_names = {item.name for item in grade_blocks}
         self.balance = {item.name: item.balance for item in stockpiles + grade_blocks}
         self.grade_fe = {item.name: item.grade_fe for item in stockpiles + grade_blocks}
         self.grade_si = {item.name: item.grade_si for item in stockpiles + grade_blocks}
@@ -17,25 +18,33 @@ class BalanceTracker:
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
         self.balance_copy = self.balance.copy()
         self.build_report = [] # Store transactions that meet the condition
+        self.direct_tipped_tonnes_by_payload = {}
         self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
         self.total_AMT_stockpile_balances = {}
         self.populate_total_AMT_stockpile_balances()
         
     def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
         """Update balance and grades after each optimisation step."""
+        self.register_direct_tipped_tonnes(filtered_decision_point_results_to_user_choice)
         
         # Loop through user choice of decision point results and deplete balances
         for _, transaction in filtered_decision_point_results_to_user_choice.iterrows():
-            name = transaction["source"]
+            name = transaction.get("source_id", transaction["source"])
+            if name not in self.balance_copy:
+                continue
+
+            reclaimed_tonnes = float(transaction["source_actual_tonnes"] or 0)
+            if reclaimed_tonnes <= 0:
+                continue
 
             # Check if the stockpile is marked as 'amt'
             if self.is_amt.get(name, False):
 
-                self.process_hex_sequence(name, transaction["source_actual_tonnes"])
+                self.process_hex_sequence(name, reclaimed_tonnes)
             
             if not self.is_amt.get(name, False) and self.balance_copy[name] != 0:
 
-                self.balance_copy[name] -= transaction["source_actual_tonnes"]
+                self.balance_copy[name] = max(self.balance_copy[name] - reclaimed_tonnes, 0)
        
         if not expit_payload_transactions.empty:
 
@@ -46,13 +55,24 @@ class BalanceTracker:
             for _, transaction in expit_payload_transactions.iterrows():
                 name = transaction["destination"].replace("Stockpiles/", "")
                 delivered_datetime = transaction["delivered_datetime"]
-                payload = transaction["payload"]
+                payload = float(transaction["payload"] or 0)
                 agent = transaction["agent"]
                 source = transaction["source"]
                 mining_start_datetime = transaction["start_datetime"]
+                direct_tip_id = transaction.get("direct_tip_id", None)
 
                 # Check if the transaction is within the time range
                 if steady_state_start_time <= delivered_datetime < steady_state_end_time:
+                    if direct_tip_id in self.direct_tipped_tonnes_by_payload:
+                        direct_tipped_payload = min(payload, self.direct_tipped_tonnes_by_payload[direct_tip_id])
+                        self.direct_tipped_tonnes_by_payload[direct_tip_id] -= direct_tipped_payload
+                        payload -= direct_tipped_payload
+                        if self.direct_tipped_tonnes_by_payload[direct_tip_id] <= 0:
+                            del self.direct_tipped_tonnes_by_payload[direct_tip_id]
+
+                    if payload <= 0:
+                        continue
+
                     if (name in self.state) and ((self.state[name] == "Build") or (self.state[name] == "Auto")):
                         # Perform weighted averaging for each grade
                         current_balance = self.balance_copy[name]
@@ -111,6 +131,36 @@ class BalanceTracker:
     def get_build_transactions(self):
         """Retrieve the list of build transactions."""
         return pd.DataFrame(self.build_report)
+
+    def register_direct_tipped_tonnes(self, filtered_decision_point_results_to_user_choice: DataFrame):
+        for payload_id, tonnes in self.get_direct_tipped_tonnes(filtered_decision_point_results_to_user_choice).items():
+            self.direct_tipped_tonnes_by_payload[payload_id] = (
+                self.direct_tipped_tonnes_by_payload.get(payload_id, 0) + tonnes
+            )
+
+    def get_direct_tipped_tonnes(self, filtered_decision_point_results_to_user_choice: DataFrame):
+        """Return selected direct-tip tonnes by grade-block payload id."""
+        if (
+            filtered_decision_point_results_to_user_choice is None
+            or filtered_decision_point_results_to_user_choice.empty
+            or "source" not in filtered_decision_point_results_to_user_choice.columns
+            or "source_actual_tonnes" not in filtered_decision_point_results_to_user_choice.columns
+        ):
+            return {}
+
+        direct_tip_results = filtered_decision_point_results_to_user_choice.copy()
+        direct_tip_results["source_actual_tonnes"] = pd.to_numeric(
+            direct_tip_results["source_actual_tonnes"], errors="coerce"
+        ).fillna(0)
+        source_identifier_column = "source_id" if "source_id" in direct_tip_results.columns else "source"
+        direct_tip_results = direct_tip_results[
+            direct_tip_results[source_identifier_column].isin(self.grade_block_names)
+            & (direct_tip_results["source_actual_tonnes"] > 0)
+        ]
+        if direct_tip_results.empty:
+            return {}
+
+        return direct_tip_results.groupby(source_identifier_column)["source_actual_tonnes"].sum().to_dict()
     
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""

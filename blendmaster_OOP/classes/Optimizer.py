@@ -17,6 +17,8 @@ from datetime import timedelta
 from typing import List, Optional
 from types import SimpleNamespace
 
+import pandas as pd
+
 from pulp import (
     LpBinary,
     LpMinimize,
@@ -58,9 +60,12 @@ class Optimizer:
         
         steady_state_controller_source = None
         steady_state_controller_tonnes = None
+        filtered_event_pool = self.filter_events_by_steady_state_window(
+            event_pool, current_time, steady_state_duration
+        )
 
         result = self.run_blending_optimization(
-            event_pool,
+            filtered_event_pool,
             period_crusher_target,
             steady_state_duration,
             steady_state_controller_source,
@@ -76,8 +81,11 @@ class Optimizer:
         
         if result['Linprog_result_object'].success: 
             steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data, period_tracker)
+            filtered_event_pool = self.filter_events_by_steady_state_window(
+                event_pool, current_time, steady_state_duration
+            )
             result = self.run_blending_optimization(
-                event_pool,
+                filtered_event_pool,
                 period_crusher_target,
                 steady_state_duration,
                 steady_state_controller_source,
@@ -96,8 +104,11 @@ class Optimizer:
             
             elif not result['Linprog_result_object'].success: 
                 steady_state_controller_source, steady_state_controller_tonnes = None, None
+                filtered_event_pool = self.filter_events_by_steady_state_window(
+                    event_pool, current_time, steady_state_duration
+                )
                 result = self.run_blending_optimization(
-                    event_pool,
+                    filtered_event_pool,
                     period_crusher_target,
                     steady_state_duration,
                     steady_state_controller_source,
@@ -119,6 +130,27 @@ class Optimizer:
         else: return result
 
     @staticmethod
+    def filter_events_by_steady_state_window(event_pool, current_time, steady_state_duration):
+        steady_state_end_time = current_time + timedelta(hours=steady_state_duration)
+        filtered_events = []
+        for event in event_pool:
+            if not event.is_grade_block:
+                filtered_events.append(event)
+                continue
+
+            delivered_datetime = getattr(event, "delivered_datetime", None)
+            if delivered_datetime is None:
+                continue
+            try:
+                is_available = current_time <= delivered_datetime < steady_state_end_time
+            except TypeError:
+                is_available = False
+            if is_available:
+                filtered_events.append(event)
+
+        return filtered_events
+
+    @staticmethod
     def update_steady_state_duration(selected_events, steady_state_duration, start_of_steady_state_datetime, stockpile_data: List[StockpileData], period_tracker):
         """Update steady state duration if any source is depleted early."""
         end_of_steady_state_datetime = start_of_steady_state_datetime + timedelta(hours=steady_state_duration)
@@ -126,6 +158,7 @@ class Optimizer:
         updated_duration_auto_turnover = steady_state_duration
         source_name = "Null"
         source_tonnes = "Null"
+        minimum_duration = 0.016666667
 
         for selected_event in selected_events:
             actual_tonnes = float(selected_event.get("actual_tonnes") or 0)
@@ -143,20 +176,31 @@ class Optimizer:
 
                 # Calculate time to depletion based on the source opening tonnes.
                 time_to_depletion = float(opening_balance / rate)
+                if selected_event.get("source_type") == "grade_block":
+                    delivered_datetime = pd.to_datetime(
+                        selected_event.get("estimated_delivery_datetime"),
+                        errors="coerce",
+                    )
+                    if pd.isna(delivered_datetime):
+                        continue
+                    hours_until_delivery = (
+                        delivered_datetime.to_pydatetime() - start_of_steady_state_datetime
+                    ).total_seconds() / 3600
+                    time_to_depletion += max(hours_until_delivery, 0)
+
+                effective_duration = max(time_to_depletion, minimum_duration)
 
                 # If a source will deplete sooner than the current steady state duration, then update the steady state duration
-                if time_to_depletion < updated_duration and time_to_depletion > 0.016666667:
-                    updated_duration = time_to_depletion
-                    source_name = selected_event["source"]
+                if effective_duration < updated_duration - Optimizer.SOLUTION_TOLERANCE:
+                    updated_duration = effective_duration
+                    source_name = selected_event.get("source_id", selected_event["source"])
                     source_tonnes = opening_balance
 
-                elif time_to_depletion > updated_duration: 
+                elif effective_duration > updated_duration + Optimizer.SOLUTION_TOLERANCE: 
                     continue
 
                 else: 
-                    updated_duration =  0.016666667 # Min steady state duration is 1 minute (this else block should be reached in rare cases)
-                    source_name = selected_event["source"]
-                    source_tonnes = opening_balance
+                    continue
 
         for stockpile in stockpile_data:
             if (stockpile.auto_turnover_datetime != None and 
@@ -201,6 +245,27 @@ class Optimizer:
 
         dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
         solver_config = solver_config or {}
+        direct_tip_enabled = bool(solver_config.get("direct_tip_enabled", True))
+        direct_tip_cash_incentive = 0.0
+        if direct_tip_enabled:
+            try:
+                direct_tip_cash_incentive = float(solver_config.get("direct_tip_cash_incentive", 10.0))
+            except (TypeError, ValueError):
+                direct_tip_cash_incentive = 10.0
+        else:
+            event_pool = [event for event in event_pool if not event.is_grade_block]
+
+        try:
+            stay_on_same_blend_incentive = float(
+                solver_config.get("stay_on_same_blend_incentive", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            stay_on_same_blend_incentive = 0.0
+        previous_blend_stockpile_source_ids = {
+            str(source_id)
+            for source_id in solver_config.get("previous_blend_stockpile_source_ids", [])
+        }
+
         excluded_source_sets = [
             set(source_set) for source_set in (excluded_source_sets or []) if source_set
         ]
@@ -260,7 +325,15 @@ class Optimizer:
         for i, event in enumerate(event_pool):
             # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
             preference_reward = preference_rewards[i] * Optimizer.TIE_BREAK_REWARD_PER_TONNE
-            base_costs.append(dmc + event.cost + event.cash - preference_reward)
+            direct_tip_reward = direct_tip_cash_incentive if event.is_grade_block else 0
+            continuity_reward = (
+                stay_on_same_blend_incentive
+                if event.is_stockpile and str(event.stockpile) in previous_blend_stockpile_source_ids
+                else 0
+            )
+            base_costs.append(
+                dmc + event.cost + event.cash - preference_reward - direct_tip_reward - continuity_reward
+            )
 
         throughput_reward = max(
             Optimizer.THROUGHPUT_REWARD_PER_TONNE,
@@ -319,6 +392,7 @@ class Optimizer:
         # Generate a list of indices for each unique stockpile/source.
         stockpile_event_indices = {}
         stockpile_indices = []
+        grade_block_indices = []
         source_event_indices = {}
 
         for i, event in enumerate(event_pool):
@@ -328,6 +402,37 @@ class Optimizer:
             if event.is_stockpile:
                 stockpile_event_indices.setdefault(stockpile_name, []).append(i)
                 stockpile_indices.append(i)
+            elif event.is_grade_block:
+                grade_block_indices.append(i)
+
+        # Optional stockpile-only grade feasibility. In the default mode,
+        # grade blocks can improve the final crusher blend but cannot rescue
+        # a stockpile blend that is infeasible on its own.
+        A_ub_stockpile_grade_feasibility = []
+        b_ub_stockpile_grade_feasibility = []
+        stockpile_feasibility_mode = solver_config.get(
+            "stockpile_feasibility_mode", "stockpile_must_be_feasible"
+        )
+        if stockpile_feasibility_mode == "stockpile_must_be_feasible" and stockpile_indices:
+            grade_constraint_specs = [
+                ("grade_fe", "target_fe_min", "target_fe_max"),
+                ("grade_si", "target_si_min", "target_si_max"),
+                ("grade_al", "target_al_min", "target_al_max"),
+                ("grade_p", "target_p_min", "target_p_max"),
+                ("grade_mn", "target_mn_min", "target_mn_max"),
+            ]
+            for grade_attribute, min_key, max_key in grade_constraint_specs:
+                min_row = [0] * len(event_pool)
+                max_row = [0] * len(event_pool)
+                for event_index in stockpile_indices:
+                    min_row[event_index] = (
+                        period_crusher_target[min_key] - getattr(event_pool[event_index], grade_attribute)
+                    )
+                    max_row[event_index] = (
+                        getattr(event_pool[event_index], grade_attribute) - period_crusher_target[max_key]
+                    )
+                A_ub_stockpile_grade_feasibility.extend([min_row, max_row])
+                b_ub_stockpile_grade_feasibility.extend([0, 0])
 
         # Step 4: Add a constraint for grade block to stockpile feed ratio
         # Maximum ratio of grade block to stockpile feed (use second value below. 0 means no constraint. 10 means max 0.1 grade block / stockpile feed)
@@ -351,7 +456,11 @@ class Optimizer:
 
         # Minimum ratio of grade block to stockpile feed (use first value below. 0 means no constraint. 0.1 means min 0.1 grade block / stockpile feed)
         direct_feed_ratio_min = period_crusher_target["direct_feed_ratio_min"]
-        if direct_feed_ratio_min <= 0 or direct_feed_ratio_min > 1:
+        if not grade_block_indices:
+            A_ub_min_feed_ratio = [[0 for _ in range(len(event_pool))]]
+            b_ub_min_feed_ratio = [0]
+
+        elif direct_feed_ratio_min <= 0 or direct_feed_ratio_min > 1:
             
             A_ub_min_feed_ratio = [[0 if i in stockpile_indices else -1 for i in range(len(event_pool))]] 
             b_ub_min_feed_ratio = [0] 
@@ -413,6 +522,7 @@ class Optimizer:
             + A_ub_max_crusher_grade_p
             + A_ub_min_crusher_grade_mn
             + A_ub_max_crusher_grade_mn
+            + A_ub_stockpile_grade_feasibility
             + A_ub_max_quantity
         )
 
@@ -430,6 +540,7 @@ class Optimizer:
             + b_ub_max_crusher_grade_p
             + b_ub_min_crusher_grade_mn
             + b_ub_max_crusher_grade_mn
+            + b_ub_stockpile_grade_feasibility
             + b_ub_max_quantity
         )
 
@@ -541,6 +652,7 @@ class Optimizer:
             bounds,
             solver_status,
             selected_tonnes,
+            solver_config,
         )
 
         if result.success:
@@ -548,10 +660,15 @@ class Optimizer:
             transactions = []
             for i, event in enumerate(event_pool):
                 if result.x[i] >= 0:
+                    source_id = event.stockpile if event.is_stockpile else event.grade_block
+                    source_name = event.source_name or source_id
                     transactions.append(
                         {
-                            "source": event.to_dict().get(
-                                "stockpile", event.to_dict().get("grade_block")
+                            "source": source_name,
+                            "source_id": source_id,
+                            "source_type": event.type,
+                            "estimated_delivery_datetime": (
+                                event.delivered_datetime if event.is_grade_block else ""
                             ),
                             "opening_balance": event.balance,
                             "actual_tonnes": result.x[i],
@@ -646,7 +763,10 @@ class Optimizer:
         bounds,
         solver_status,
         selected_tonnes,
+        solver_config=None,
     ):
+        solver_config = solver_config or {}
+
         def safe_float(value, default=0.0):
             try:
                 return float(value)
@@ -680,8 +800,12 @@ class Optimizer:
         positive_stockpiles = [
             source for source in positive_sources if source["type"] == "stockpile"
         ]
+        positive_grade_blocks = [
+            source for source in positive_sources if source["type"] == "grade_block"
+        ]
 
         grade_ranges = {}
+        stockpile_grade_ranges = {}
         likely_causes = []
         grade_names = {
             "fe": "Fe",
@@ -715,7 +839,34 @@ class Optimizer:
                     f"({available_min:g} to {available_max:g})."
                 )
 
+            stockpile_values = [source[f"grade_{grade_key}"] for source in positive_stockpiles]
+            if stockpile_values:
+                stockpile_available_min = min(stockpile_values)
+                stockpile_available_max = max(stockpile_values)
+                stockpile_grade_ranges[label] = {
+                    "available_min": stockpile_available_min,
+                    "available_max": stockpile_available_max,
+                    "target_min": target_min,
+                    "target_max": target_max,
+                }
+                if (
+                    solver_config.get("stockpile_feasibility_mode", "stockpile_must_be_feasible")
+                    == "stockpile_must_be_feasible"
+                ):
+                    if target_min > stockpile_available_max + Optimizer.SOLUTION_TOLERANCE:
+                        likely_causes.append(
+                            f"Stockpile-only {label} minimum {target_min:g} is above the available "
+                            f"stockpile {label} range ({stockpile_available_min:g} to {stockpile_available_max:g})."
+                        )
+                    if target_max < stockpile_available_min - Optimizer.SOLUTION_TOLERANCE:
+                        likely_causes.append(
+                            f"Stockpile-only {label} maximum {target_max:g} is below the available "
+                            f"stockpile {label} range ({stockpile_available_min:g} to {stockpile_available_max:g})."
+                        )
+
         crusher_rate = safe_float(period_crusher_target.get("crusher_rate"))
+        direct_feed_ratio_min = safe_float(period_crusher_target.get("direct_feed_ratio_min"), 0.0)
+        direct_feed_ratio_max = safe_float(period_crusher_target.get("direct_feed_ratio_max"), 1.0)
         if not event_pool:
             likely_causes.append("No sources were available in the event pool.")
         if crusher_rate <= Optimizer.SOLUTION_TOLERANCE:
@@ -728,6 +879,14 @@ class Optimizer:
             likely_causes.append(
                 f"Only {len(positive_stockpiles)} stockpile(s) have positive capacity, "
                 f"but Solver Configuration requires at least {min_stockpiles}."
+            )
+        if direct_feed_ratio_min > direct_feed_ratio_max + Optimizer.SOLUTION_TOLERANCE:
+            likely_causes.append(
+                f"Direct tip ratio minimum ({direct_feed_ratio_min:g}) is greater than maximum ({direct_feed_ratio_max:g})."
+            )
+        if direct_feed_ratio_max < 1 and positive_grade_blocks and not positive_stockpiles:
+            likely_causes.append(
+                f"Direct tip ratio maximum is {direct_feed_ratio_max:g}, but no stockpile has positive capacity to pair with direct tip."
             )
         if min_stockpiles is not None and max_stockpiles is not None and min_stockpiles > max_stockpiles:
             likely_causes.append(
@@ -757,11 +916,19 @@ class Optimizer:
             "available_source_count": len(source_summaries),
             "positive_source_count": len(positive_sources),
             "positive_stockpile_count": len(positive_stockpiles),
+            "positive_grade_block_count": len(positive_grade_blocks),
             "source_summaries": source_summaries,
             "grade_ranges": grade_ranges,
+            "stockpile_grade_ranges": stockpile_grade_ranges,
             "likely_causes": likely_causes,
             "min_stockpiles": min_stockpiles,
             "max_stockpiles": max_stockpiles,
             "min_stockpile_contribution_ratio": min_stockpile_contribution_ratio,
+            "direct_feed_ratio_min": direct_feed_ratio_min,
+            "direct_feed_ratio_max": direct_feed_ratio_max,
+            "direct_tip_enabled": solver_config.get("direct_tip_enabled", True),
+            "direct_tip_cash_incentive": solver_config.get("direct_tip_cash_incentive", 10.0),
+            "stay_on_same_blend_incentive": solver_config.get("stay_on_same_blend_incentive", 0.0),
+            "stockpile_feasibility_mode": solver_config.get("stockpile_feasibility_mode", "stockpile_must_be_feasible"),
             "period_duration": periods.get_periods().get(f"{period_tracker}_duration"),
         }

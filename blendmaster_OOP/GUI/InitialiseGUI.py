@@ -1,11 +1,11 @@
 import sys, threading, requests, os, pickle, copy, traceback
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator
-from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QPixmap
+from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from classes.Optimizer import Optimizer
@@ -201,6 +201,10 @@ class UserInputs(QMainWindow):
         self.is_project_loaded = False
         self.start_dash_AMT_map_thread_first_call = True
         self.start_dash_optimised_grade_profile_first_call = True
+        self.manual_gantt_poll_timer = QTimer(self)
+        self.manual_gantt_poll_timer.setInterval(500)
+        self.manual_gantt_poll_timer.timeout.connect(self.poll_manual_gantt_updates)
+        self.manual_gantt_poll_timer.start()
 
 
         # Disable tabs initially
@@ -230,7 +234,7 @@ class UserInputs(QMainWindow):
         threshold_validator = QDoubleValidator(0.0, 1000.0, 4, self)
         threshold_validator.setNotation(QDoubleValidator.StandardNotation)
 
-        limits_label = QLabel("Stockpile Count Constraints")
+        limits_label = QLabel("Blend Settings")
         limits_label.setStyleSheet("font-weight: bold;")
         self.solver_config_layout.addWidget(limits_label)
 
@@ -258,6 +262,49 @@ class UserInputs(QMainWindow):
         stockpile_contribution_layout.addWidget(self.min_stockpile_contribution_ratio_input)
         stockpile_contribution_layout.addStretch()
         self.solver_config_layout.addLayout(stockpile_contribution_layout)
+
+        min_feed_duration_layout = QHBoxLayout()
+        self.min_feed_duration_input = QLineEdit()
+        self.min_feed_duration_input.setPlaceholderText("Optional")
+        self.min_feed_duration_input.setFixedWidth(100)
+        self.min_feed_duration_input.setValidator(threshold_validator)
+        min_feed_duration_layout.addWidget(QLabel("Min Feed Duration:"))
+        min_feed_duration_layout.addWidget(self.min_feed_duration_input)
+        min_feed_duration_layout.addWidget(QLabel("hrs"))
+        min_feed_duration_layout.addStretch()
+        self.solver_config_layout.addLayout(min_feed_duration_layout)
+
+        feasibility_layout = QHBoxLayout()
+        feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
+        self.stockpile_feasibility_combo = QComboBox()
+        self.stockpile_feasibility_combo.addItems([
+            "Stockpile blend must be feasible",
+            "Stockpile blend can rely on grade blocks"
+        ])
+        self.stockpile_feasibility_combo.setFixedWidth(260)
+        feasibility_layout.addWidget(self.stockpile_feasibility_combo)
+        feasibility_layout.addStretch()
+        self.solver_config_layout.addLayout(feasibility_layout)
+
+        direct_tip_layout = QHBoxLayout()
+        self.direct_tip_enabled_checkbox = QCheckBox("Enable Direct Tip")
+        self.direct_tip_enabled_checkbox.setChecked(True)
+        self.direct_tip_enabled_checkbox.toggled.connect(self.update_direct_tip_input_state)
+        self.direct_tip_cash_incentive_input = self.create_solver_threshold_input("10.0", threshold_validator)
+        direct_tip_layout.addWidget(self.direct_tip_enabled_checkbox)
+        direct_tip_layout.addWidget(QLabel("Direct Tip Incentive:"))
+        direct_tip_layout.addWidget(self.direct_tip_cash_incentive_input)
+        direct_tip_layout.addWidget(QLabel("$/t"))
+        direct_tip_layout.addStretch()
+        self.solver_config_layout.addLayout(direct_tip_layout)
+
+        same_blend_layout = QHBoxLayout()
+        self.stay_on_same_blend_incentive_input = self.create_solver_threshold_input("0.0", threshold_validator)
+        same_blend_layout.addWidget(QLabel("Stay on Same Blend Incentive:"))
+        same_blend_layout.addWidget(self.stay_on_same_blend_incentive_input)
+        same_blend_layout.addWidget(QLabel("$/t"))
+        same_blend_layout.addStretch()
+        self.solver_config_layout.addLayout(same_blend_layout)
 
         preference_label = QLabel("Tie-Break Preferences")
         preference_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
@@ -329,11 +376,18 @@ class UserInputs(QMainWindow):
         input_field.setFixedWidth(70)
         return input_field
 
+    def update_direct_tip_input_state(self, checked=None):
+        direct_tip_enabled = self.direct_tip_enabled_checkbox.isChecked()
+        self.direct_tip_cash_incentive_input.setEnabled(direct_tip_enabled)
+
+    def is_direct_tip_enabled(self):
+        solver_config = self.solver_config or {}
+        return bool(solver_config.get("direct_tip_enabled", True))
+
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
         self.site_config_tab_index = self.tabs.addTab(self.site_config_tab, "Site Configuration")
-        layout = QFormLayout(self.site_config_tab)
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
 
         # Get base directory (handles running as a script OR an EXE)
@@ -347,17 +401,102 @@ class UserInputs(QMainWindow):
             base_dir = base_dir.split("GUI")[0]  # Get the part before "GUI"
 
         # Construct path to the background image
-        background_path = os.path.join(base_dir, "resources", "background.png").replace("\\", "/")
+        background_path = os.path.join(base_dir, "resources", "background.PNG").replace("\\", "/")
 
 
         self.site_config_tab.setStyleSheet(f"""
             #siteConfigTab {{
-                background-image: url('{background_path}');
-                background-repeat: no-repeat;
-                background-position: center;
-                background-attachment: fixed;
+                background-color: #ffffff;
+            }}
+            #siteConfigCard {{
+                background-color: rgba(255, 255, 255, 242);
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+            }}
+            #siteConfigLogoPanel {{
+                background-color: #ffffff;
+                border: 0;
+            }}
+            #siteConfigTitle {{
+                color: #1f2933;
+                font-size: 22px;
+                font-weight: 700;
+                padding-bottom: 2px;
+            }}
+            #siteConfigSubtitle {{
+                color: #607080;
+                font-size: 12px;
+                padding-bottom: 14px;
+            }}
+            #siteConfigTab QLabel {{
+                background: transparent;
+            }}
+            #siteConfigTab QLineEdit,
+            #siteConfigTab QComboBox,
+            #siteConfigTab QDateTimeEdit {{
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 4px 6px;
+                min-height: 20px;
+            }}
+            #siteConfigTab QLineEdit:disabled,
+            #siteConfigTab QComboBox:disabled,
+            #siteConfigTab QDateTimeEdit:disabled {{
+                color: #7b8794;
+                background-color: #f5f7fa;
+            }}
+            #siteConfigTab QPushButton {{
+                background-color: #ffffff;
+                border: 1px solid #b8c4d2;
+                border-radius: 4px;
+                padding: 5px 12px;
+            }}
+            #siteConfigTab QPushButton:hover {{
+                background-color: #eef7f0;
+                border-color: #98d4a6;
+            }}
+            #siteConfigTab QPushButton:pressed {{
+                background-color: #dff1e3;
             }}
         """)
+
+        outer_layout = QHBoxLayout(self.site_config_tab)
+        outer_layout.setContentsMargins(20, 18, 20, 20)
+        outer_layout.setSpacing(28)
+
+        form_card = QFrame()
+        form_card.setObjectName("siteConfigCard")
+        form_card.setMinimumWidth(500)
+        form_card.setMaximumWidth(640)
+        form_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        layout = QFormLayout(form_card)
+        layout.setContentsMargins(18, 16, 18, 18)
+        layout.setHorizontalSpacing(16)
+        layout.setVerticalSpacing(10)
+        layout.setLabelAlignment(Qt.AlignLeft)
+        layout.setFormAlignment(Qt.AlignTop)
+
+        title_label = QLabel("BlendMaster")
+        title_label.setObjectName("siteConfigTitle")
+        subtitle_label = QLabel("Site configuration and run setup")
+        subtitle_label.setObjectName("siteConfigSubtitle")
+        layout.addRow(title_label)
+        layout.addRow(subtitle_label)
+
+        logo_panel = QFrame()
+        logo_panel.setObjectName("siteConfigLogoPanel")
+        logo_layout = QVBoxLayout(logo_panel)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(0)
+        self.site_config_logo = ScaledPixmapLabel(background_path)
+        self.site_config_logo.setAlignment(Qt.AlignCenter)
+        self.site_config_logo.setMinimumSize(520, 420)
+        self.site_config_logo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        logo_layout.addWidget(self.site_config_logo)
+
+        outer_layout.addWidget(form_card, 0, Qt.AlignTop)
+        outer_layout.addWidget(logo_panel, 1)
 
         # Dropdown lists for Hub and Mine
         self.hub_input = QComboBox()
@@ -985,8 +1124,7 @@ class UserInputs(QMainWindow):
         if not self.store_solver_config_inputs():
             return
 
-        if not getattr(self, "calendar_rows", None):
-            self.setup_calendar()
+        self.setup_calendar()
 
         self.tabs.setTabEnabled(self.calendar_tab_index, True)
         self.tabs.setCurrentIndex(self.calendar_tab_index)
@@ -1249,6 +1387,9 @@ class UserInputs(QMainWindow):
         self.calendar_rows = []
 
         # Static Rows with default values of 0
+        direct_tip_enabled = self.is_direct_tip_enabled()
+        direct_tip_editables = [direct_tip_enabled, direct_tip_enabled, direct_tip_enabled]
+        direct_tip_max_defaults = ["1", "1", "1"] if direct_tip_enabled else ["0", "0", "0"]
 
         self.calendar_rows.extend([
             ("Reclaim Equipment", [False, False, False], "green", ["", "", ""]),
@@ -1256,6 +1397,9 @@ class UserInputs(QMainWindow):
 
             ("Crusher", [False, False, False], "blue", ["", "", ""]),
             {"crusher_rate": ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"])},
+            ("  Direct Tip Ratio", [False, False, False], "blue", ["", "", ""]),
+            {"crusher_direct_tip_ratio_min": ("    Min", direct_tip_editables, "blue", ["0", "0", "0"])},
+            {"crusher_direct_tip_ratio_max": ("    Max", direct_tip_editables, "blue", direct_tip_max_defaults)},
 
             ("  Target", [False, False, False], "blue", ["", "", ""]),
             ("    Fe", [False, False, False], "blue", ["", "", ""]),
@@ -1381,23 +1525,50 @@ class UserInputs(QMainWindow):
             self.load_solver_config_inputs()
 
         if self.is_project_loaded or not self.submit_calendar_first_call:
+            def calendar_values(key, defaults, fallback_key=None):
+                saved_values = self.calendar_inputs.get(key, {}) if self.calendar_inputs else {}
+                if not saved_values and fallback_key:
+                    saved_values = self.calendar_inputs.get(fallback_key, {}) if self.calendar_inputs else {}
+                return [
+                    saved_values.get(header, defaults.get(header))
+                    for header in self.calendar_headers[1:]
+                ]
             
-            self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", list(self.calendar_inputs["reclaim_equipment_max_reclaim_rate"].values()))
-            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", list(self.calendar_inputs["crusher_rate"].values()))
-            self.calendar_rows[6]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_min"].values()))
-            self.calendar_rows[7]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_fe_max"].values()))
-            self.calendar_rows[9]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_min"].values()))
-            self.calendar_rows[10]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_si_max"].values()))
-            self.calendar_rows[12]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_min"].values()))
-            self.calendar_rows[13]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_al_max"].values()))
-            self.calendar_rows[15]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_min"].values()))
-            self.calendar_rows[16]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_p_max"].values()))
-            self.calendar_rows[18]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_min"].values()))
-            self.calendar_rows[19]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", list(self.calendar_inputs["crusher_target_mn_max"].values()))
+            zero_defaults = {"Preplan": 0, "Period_1": 0, "Period_2": 0}
+            one_defaults = {"Preplan": 1, "Period_1": 1, "Period_2": 1}
+            hundred_defaults = {"Preplan": 100, "Period_1": 100, "Period_2": 100}
+            thousand_defaults = {"Preplan": 1000, "Period_1": 1000, "Period_2": 1000}
+            direct_tip_enabled = self.is_direct_tip_enabled()
+            direct_tip_editables = [direct_tip_enabled, direct_tip_enabled, direct_tip_enabled]
+            direct_tip_min_values = (
+                calendar_values("crusher_direct_tip_ratio_min", zero_defaults, "crusher_direct_feed_ratio_min")
+                if direct_tip_enabled
+                else [0, 0, 0]
+            )
+            direct_tip_max_values = (
+                calendar_values("crusher_direct_tip_ratio_max", one_defaults, "crusher_direct_feed_ratio_max")
+                if direct_tip_enabled
+                else [0, 0, 0]
+            )
+
+            self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", calendar_values("reclaim_equipment_max_reclaim_rate", thousand_defaults))
+            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", calendar_values("crusher_rate", thousand_defaults))
+            self.calendar_rows[5]["crusher_direct_tip_ratio_min"] = ("    Min", direct_tip_editables, "blue", direct_tip_min_values)
+            self.calendar_rows[6]["crusher_direct_tip_ratio_max"] = ("    Max", direct_tip_editables, "blue", direct_tip_max_values)
+            self.calendar_rows[9]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_fe_min", zero_defaults))
+            self.calendar_rows[10]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_fe_max", hundred_defaults))
+            self.calendar_rows[12]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_si_min", zero_defaults))
+            self.calendar_rows[13]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_si_max", hundred_defaults))
+            self.calendar_rows[15]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_al_min", zero_defaults))
+            self.calendar_rows[16]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_al_max", hundred_defaults))
+            self.calendar_rows[18]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_p_min", zero_defaults))
+            self.calendar_rows[19]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_p_max", hundred_defaults))
+            self.calendar_rows[21]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_mn_min", zero_defaults))
+            self.calendar_rows[22]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
 
             
-            start_index = 21
-            calendar_index = start_index  # Start populating calendar_rows at index 21
+            start_index = 24
+            calendar_index = start_index  # Start populating calendar_rows after the static crusher rows
 
             for stockpile in self.updated_stockpile_data_keys:
                 # Populate the rows using calendar_index
@@ -1522,6 +1693,22 @@ class UserInputs(QMainWindow):
         self.min_stockpile_contribution_ratio_input.setText(str(self.min_stockpile_contribution_ratio))
 
         solver_config = self.solver_config or {}
+        feasibility_label = {
+            "stockpile_must_be_feasible": "Stockpile blend must be feasible",
+            "stockpile_can_rely_on_grade_blocks": "Stockpile blend can rely on grade blocks"
+        }.get(
+            solver_config.get("stockpile_feasibility_mode", "stockpile_must_be_feasible"),
+            "Stockpile blend must be feasible"
+        )
+        self.stockpile_feasibility_combo.setCurrentText(feasibility_label)
+        min_feed_duration = solver_config.get("min_feed_duration_hours")
+        self.min_feed_duration_input.setText(
+            "" if min_feed_duration in (None, "") else str(min_feed_duration)
+        )
+        self.direct_tip_enabled_checkbox.setChecked(bool(solver_config.get("direct_tip_enabled", True)))
+        self.direct_tip_cash_incentive_input.setText(str(solver_config.get("direct_tip_cash_incentive", 10.0)))
+        self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
+        self.update_direct_tip_input_state()
         self.prefer_fewer_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_fewer_stockpiles", False)))
         balance_preference = solver_config.get("balance_preference", "none")
         balance_label = {
@@ -1547,6 +1734,7 @@ class UserInputs(QMainWindow):
         min_text = self.min_stockpiles_input.text().strip()
         max_text = self.max_stockpiles_input.text().strip()
         ratio_text = self.min_stockpile_contribution_ratio_input.text().strip()
+        min_feed_duration_text = self.min_feed_duration_input.text().strip()
 
         try:
             self.min_stockpiles = int(min_text) if min_text else None
@@ -1603,6 +1791,21 @@ class UserInputs(QMainWindow):
                     QMessageBox.warning(self, "Invalid Input", f"{label} must be a number.")
                 return None
 
+        def parse_optional_non_negative(text, label):
+            if not text:
+                return None
+            try:
+                value = float(text)
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} must be a number.")
+                return None
+            if value < 0:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} cannot be negative.")
+                return None
+            return value
+
         contaminant_thresholds = {
             "si": parse_threshold(self.contaminant_si_threshold_input, "Si threshold"),
             "al": parse_threshold(self.contaminant_al_threshold_input, "Al threshold"),
@@ -1610,8 +1813,26 @@ class UserInputs(QMainWindow):
             "mn": parse_threshold(self.contaminant_mn_threshold_input, "Mn threshold"),
         }
         low_fe_threshold = parse_threshold(self.low_fe_threshold_input, "Fe threshold")
+        direct_tip_cash_incentive = parse_threshold(
+            self.direct_tip_cash_incentive_input,
+            "Direct Tip Cash Incentive",
+        )
+        stay_on_same_blend_incentive = parse_threshold(
+            self.stay_on_same_blend_incentive_input,
+            "Stay on Same Blend Incentive",
+        )
+        min_feed_duration_hours = parse_optional_non_negative(
+            min_feed_duration_text,
+            "Min Feed Duration",
+        )
 
-        if any(value is None for value in contaminant_thresholds.values()) or low_fe_threshold is None:
+        if (
+            any(value is None for value in contaminant_thresholds.values())
+            or low_fe_threshold is None
+            or direct_tip_cash_incentive is None
+            or stay_on_same_blend_incentive is None
+            or (min_feed_duration_text and min_feed_duration_hours is None)
+        ):
             return False
 
         balance_preference = {
@@ -1619,8 +1840,17 @@ class UserInputs(QMainWindow):
             "Lower balance first": "lower",
             "Higher balance first": "higher"
         }.get(self.balance_preference_combo.currentText(), "none")
+        stockpile_feasibility_mode = {
+            "Stockpile blend must be feasible": "stockpile_must_be_feasible",
+            "Stockpile blend can rely on grade blocks": "stockpile_can_rely_on_grade_blocks"
+        }.get(self.stockpile_feasibility_combo.currentText(), "stockpile_must_be_feasible")
 
         self.solver_config = {
+            "stockpile_feasibility_mode": stockpile_feasibility_mode,
+            "min_feed_duration_hours": min_feed_duration_hours,
+            "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
+            "direct_tip_cash_incentive": direct_tip_cash_incentive,
+            "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
             "prefer_fewer_stockpiles": self.prefer_fewer_stockpiles_checkbox.isChecked(),
             "balance_preference": balance_preference,
             "prefer_amt_stockpiles": self.prefer_amt_stockpiles_checkbox.isChecked(),
@@ -1719,6 +1949,10 @@ class UserInputs(QMainWindow):
             self.decision_status_label.setText("Optimising blends...")
         self.valid_decision_blend_options = []
         self.decision_blend_option_column = None
+        self.decision_run_dataframe = pd.DataFrame()
+        self.current_decision_dataframe = pd.DataFrame()
+        self.decision_display_dataframe = pd.DataFrame()
+        self.decision_current_steady_state = None
 
     def execute_run_program(self):
         return self.run_program.execute(
@@ -1983,11 +2217,18 @@ class UserInputs(QMainWindow):
         if isinstance(value, bool):
             return str(value)
 
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+
         if isinstance(value, Real) and not isinstance(value, Integral):
             return f"{float(value):.2f}"
 
         if isinstance(value, str):
             stripped_value = value.strip()
+            if len(stripped_value) >= 10 and stripped_value[4:5] == "-" and stripped_value[7:8] == "-":
+                parsed_datetime = pd.to_datetime(stripped_value, errors="coerce")
+                if not pd.isna(parsed_datetime):
+                    return parsed_datetime.strftime("%Y-%m-%d %H:%M:%S")
             if stripped_value and ("." in stripped_value or "e" in stripped_value.lower()):
                 try:
                     return f"{float(stripped_value):.2f}"
@@ -2174,6 +2415,18 @@ class UserInputs(QMainWindow):
         if row < 0:
             self.display_decision_output("Select a candidate row first.")
             return
+        display_df = getattr(self, "decision_display_dataframe", pd.DataFrame())
+        current_steady_state = getattr(self, "decision_current_steady_state", None)
+        if (
+            current_steady_state is not None
+            and not display_df.empty
+            and "steady_state_number" in display_df.columns
+            and row < len(display_df)
+        ):
+            selected_steady_state = display_df.iloc[row]["steady_state_number"]
+            if str(selected_steady_state) != str(current_steady_state):
+                self.display_decision_output("Select a blend row from the current steady state.")
+                return
         blend_option_column = getattr(self, "decision_blend_option_column", None)
         if blend_option_column is None:
             self.display_decision_output("No blend options are available yet.")
@@ -2194,21 +2447,63 @@ class UserInputs(QMainWindow):
 
     def display_decision_dataframe(self, df):
         """Display a DataFrame in a QTableWidget with custom styles."""
+        if df is None:
+            return
+
+        current_df = df.copy()
+        self.current_decision_dataframe = current_df
+        if not hasattr(self, "decision_run_dataframe") or self.decision_run_dataframe is None:
+            self.decision_run_dataframe = pd.DataFrame()
+
+        self.decision_run_dataframe = pd.concat(
+            [self.decision_run_dataframe, current_df],
+            ignore_index=True,
+            sort=False,
+        )
+        display_df = self.decision_run_dataframe.copy()
+        self.decision_display_dataframe = display_df
+
         # Clear the table instead of removing/recreating it
         self.decision_table.clearContents()
         self.decision_table.setRowCount(0)
         self.decision_table.setColumnCount(0)
 
         # Populate the table with new data
-        self.decision_table.setRowCount(len(df))
-        self.decision_table.setColumnCount(len(df.columns))
-        self.decision_table.setHorizontalHeaderLabels(df.columns)
+        self.decision_table.setRowCount(len(display_df))
+        self.decision_table.setColumnCount(len(display_df.columns))
+        decision_column_aliases = {
+            "steady_state_number": "Steady State",
+            "start_datetime": "Steady State Start",
+            "end_datetime": "Steady State End",
+            "steady_state_duration": "Duration (hrs)",
+            "blend_option": "Blend Option",
+            "solver_score": "Solver Score",
+            "source": "Source",
+            "estimated_delivery_datetime": "Estimated Payload Delivery Time",
+            "source_blend_ratio": "Blend Ratio",
+            "source_actual_tonnes": "Source Tonnes",
+            "crusher_rate_output": "Crusher Rate",
+            "crusher_actual_grade_fe": "Grade Fe (%)",
+            "crusher_actual_grade_si": "Grade Si (%)",
+            "crusher_actual_grade_al": "Grade Al (%)",
+            "crusher_actual_grade_p": "Grade P (%)",
+            "crusher_actual_grade_mn": "Grade Mn (%)",
+        }
+        self.decision_table.setHorizontalHeaderLabels([
+            decision_column_aliases.get(column, str(column))
+            for column in display_df.columns
+        ])
         
         self.decision_blend_option_column = (
-            list(df.columns).index("blend_option") if "blend_option" in df.columns else None
+            list(display_df.columns).index("blend_option") if "blend_option" in display_df.columns else None
         )
-        if "blend_option" in df.columns:
-            numeric_options = pd.to_numeric(df["blend_option"], errors="coerce").dropna()
+        if "steady_state_number" in current_df.columns and not current_df.empty:
+            self.decision_current_steady_state = current_df["steady_state_number"].iloc[-1]
+        else:
+            self.decision_current_steady_state = None
+
+        if "blend_option" in current_df.columns:
+            numeric_options = pd.to_numeric(current_df["blend_option"], errors="coerce").dropna()
             self.valid_decision_blend_options = sorted(set(numeric_options.astype(int).tolist()))
             self.max_blend_option = max(self.valid_decision_blend_options) if self.valid_decision_blend_options else 0
         else:
@@ -2216,8 +2511,13 @@ class UserInputs(QMainWindow):
             self.max_blend_option = 0
 
         if self.valid_decision_blend_options:
+            steady_state_text = (
+                f"Steady state {self.decision_current_steady_state}: "
+                if self.decision_current_steady_state is not None
+                else ""
+            )
             self.decision_status_label.setText(
-                f"{len(self.valid_decision_blend_options)} feasible blend option(s). "
+                f"{steady_state_text}{len(self.valid_decision_blend_options)} feasible blend option(s). "
                 "Select a row or type a Blend Option."
             )
 
@@ -2234,14 +2534,21 @@ class UserInputs(QMainWindow):
         self.decision_table.horizontalHeader().setStretchLastSection(False)  # Optional: Stretch the last column
 
         # Populate the table with DataFrame content
-        for row_idx, row in enumerate(df.itertuples(index=False)):
+        for row_idx, row in enumerate(display_df.itertuples(index=False)):
             blend_option_value = None
             if self.decision_blend_option_column is not None:
                 blend_option_value = row[self.decision_blend_option_column]
             row_color = QColor(238, 246, 255) if row_idx % 2 == 0 else QColor(255, 255, 255)
+            if (
+                self.decision_current_steady_state is not None
+                and "steady_state_number" in display_df.columns
+            ):
+                row_steady_state = display_df.iloc[row_idx]["steady_state_number"]
+                if str(row_steady_state) != str(self.decision_current_steady_state):
+                    row_color = QColor(245, 245, 245)
             try:
                 if blend_option_value is not None and int(blend_option_value) % 2 == 0:
-                    row_color = QColor(245, 245, 245)
+                    row_color = QColor(230, 242, 255) if str(display_df.iloc[row_idx].get("steady_state_number", "")) == str(self.decision_current_steady_state) else QColor(238, 238, 238)
             except (TypeError, ValueError):
                 pass
             for col_idx, value in enumerate(row):
@@ -2258,6 +2565,9 @@ class UserInputs(QMainWindow):
         if isinstance(error_message, dict):
             title = error_message.get("title", title)
             error_message = error_message.get("message", "")
+        if (title or "").lower() == "infeasible run":
+            QMessageBox.information(self, title, str(error_message))
+            return
         QMessageBox.critical(self, title or "Error", str(error_message))
     
     def setup_blends_tab(self):
@@ -2795,6 +3105,11 @@ class UserInputs(QMainWindow):
     
     def setup_sequence_tab(self):
        
+        if self.saved_blends_for_schedule is None:
+            self.saved_blends_for_schedule = []
+        if not isinstance(getattr(self, "stored_blend_sequence_table_for_gantt", []), list):
+            self.stored_blend_sequence_table_for_gantt = []
+
         default_duration = str((self.default_end_datetime - self.default_start_datetime).total_seconds() / 3600)
         self.stored_blend_sequence_table_for_gantt_default = [
         {"Blend ID": "1", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
@@ -2814,6 +3129,12 @@ class UserInputs(QMainWindow):
 
         # Populate data from saved_blends_for_schedule into blend_results_table_view
         self.blend_results_table_view.setRowCount(len(self.saved_blends_for_schedule))  # Set row count
+        if not self.saved_blends_for_schedule:
+            self.blend_results_table_view.clearContents()
+            self.blend_results_table_view.setColumnCount(0)
+            self.setup_blend_sequence_table()
+            return
+
         self.blend_results_table_view.setColumnCount(len(self.saved_blends_for_schedule[0].keys()))  # Set column count
 
         # Set column headers from the dictionary keys
@@ -3196,6 +3517,85 @@ class UserInputs(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Invalid Duration", f"Error updating row {row}: {e}")
 
+    def collect_blend_sequence_table_rows(self):
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
+        rows = []
+        for row in range(self.blend_sequence_table.rowCount()):
+            row_data = {}
+            for col, header in enumerate(headers):
+                item = self.blend_sequence_table.cellWidget(row, col) or self.blend_sequence_table.item(row, col)
+                if isinstance(item, QTableWidgetItem):
+                    row_data[header] = item.text() if item else None
+                elif isinstance(item, QComboBox):
+                    row_data[header] = item.currentText() if item else None
+                elif isinstance(item, QDateTimeEdit):
+                    row_data[header] = item.dateTime().toString("yyyy-MM-dd HH:mm") if item else None
+                else:
+                    row_data[header] = None
+            rows.append(row_data)
+        return rows
+
+    def poll_manual_gantt_updates(self):
+        manual_gantt = getattr(self, "draw_manual_gantt_chart", None)
+        if manual_gantt is None or not hasattr(manual_gantt, "consume_pending_table_update"):
+            return
+
+        updated_rows = manual_gantt.consume_pending_table_update()
+        if updated_rows:
+            self.apply_manual_gantt_rows_to_table(updated_rows)
+
+    def apply_manual_gantt_rows_to_table(self, updated_rows):
+        if not updated_rows or not hasattr(self, "blend_sequence_table"):
+            return
+
+        headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
+        start_col = headers.index("Start Datetime")
+        duration_col = headers.index("Duration (hrs)")
+        end_col = headers.index("End Datetime")
+        blend_col = headers.index("Blend ID")
+        origin_col = headers.index("Origin")
+
+        self.blend_sequence_table.blockSignals(True)
+        try:
+            for row_index, row_data in enumerate(updated_rows[:self.blend_sequence_table.rowCount()]):
+                blend_widget = self.blend_sequence_table.cellWidget(row_index, blend_col)
+                if isinstance(blend_widget, QComboBox) and row_data.get("Blend ID") is not None:
+                    blend_widget.setCurrentText(str(row_data.get("Blend ID")))
+
+                origin_item = self.blend_sequence_table.item(row_index, origin_col)
+                if origin_item is None:
+                    origin_item = QTableWidgetItem()
+                    self.blend_sequence_table.setItem(row_index, origin_col, origin_item)
+                origin_item.setText(str(row_data.get("Origin", "")))
+                origin_item.setTextAlignment(Qt.AlignCenter)
+
+                start_value = str(row_data.get("Start Datetime", ""))
+                start_widget = self.blend_sequence_table.cellWidget(row_index, start_col)
+                if isinstance(start_widget, QDateTimeEdit) and start_value:
+                    parsed_start = QDateTime.fromString(start_value, "yyyy-MM-dd HH:mm")
+                    if parsed_start.isValid():
+                        start_widget.setDateTime(parsed_start)
+
+                duration_item = self.blend_sequence_table.item(row_index, duration_col)
+                if duration_item is None:
+                    duration_item = QTableWidgetItem()
+                    self.blend_sequence_table.setItem(row_index, duration_col, duration_item)
+                duration_item.setText(str(row_data.get("Duration (hrs)", "")))
+                duration_item.setTextAlignment(Qt.AlignCenter)
+
+                end_item = self.blend_sequence_table.item(row_index, end_col)
+                if end_item is None:
+                    end_item = QTableWidgetItem()
+                    self.blend_sequence_table.setItem(row_index, end_col, end_item)
+                end_item.setText(str(row_data.get("End Datetime", "")))
+                end_item.setTextAlignment(Qt.AlignCenter)
+        finally:
+            self.blend_sequence_table.blockSignals(False)
+
+        self.update_early_start_conditional_format()
+        self.update_remaining_hrs()
+        self.stored_blend_sequence_table_for_gantt = self.collect_blend_sequence_table_rows()
+
     def submit_blend_sequence_table_to_gantt(self):
                 
         headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
@@ -3224,17 +3624,7 @@ class UserInputs(QMainWindow):
                     return
 
         # If all rows are valid, store data
-        for row in range(self.blend_sequence_table.rowCount()):
-            row_data = {}
-            for col, header in enumerate(headers):
-                item = self.blend_sequence_table.cellWidget(row, col) or self.blend_sequence_table.item(row, col)
-                if isinstance(item, QTableWidgetItem):
-                    row_data[header] = item.text() if item else None
-                elif isinstance(item, QComboBox):
-                    row_data[header] = item.currentText() if item else None
-                elif isinstance(item, QDateTimeEdit):
-                    row_data[header] = item.dateTime().toString("yyyy-MM-dd HH:mm") if item else None
-            self.stored_blend_sequence_table_for_gantt.append(row_data)
+        self.stored_blend_sequence_table_for_gantt = self.collect_blend_sequence_table_rows()
         
         self.start_or_update_dash_manual_chart_thread()
 
@@ -3321,13 +3711,17 @@ class UserInputs(QMainWindow):
             early_start_item.setTextAlignment(Qt.AlignCenter)
 
     def populate_blend_sequence_table_if_project_is_loaded(self):
+        stored_sequence = getattr(self, "stored_blend_sequence_table_for_gantt", None)
+        if not isinstance(stored_sequence, list) or not stored_sequence:
+            self.stored_blend_sequence_table_for_gantt = []
+            return
 
         # Ensure the table has enough rows to match the stored data
-        while self.blend_sequence_table.rowCount() < len(self.stored_blend_sequence_table_for_gantt):
+        while self.blend_sequence_table.rowCount() < len(stored_sequence):
             self.add_blank_row()  # Use the method to insert rows with the correct format
 
         # Iterate through the stored data and update the table
-        for row_index, row_data in enumerate(self.stored_blend_sequence_table_for_gantt):
+        for row_index, row_data in enumerate(stored_sequence):
             # Update "Blend ID" (QComboBox)
             blend_id = row_data.get("Blend ID")
             combo_box = self.blend_sequence_table.cellWidget(row_index, 0)
@@ -3585,12 +3979,16 @@ class UserInputs(QMainWindow):
             self.mine_input_choice = loaded_state.get("mine_input_choice", None)
             self.hub_input_choice = loaded_state.get("hub_input_choice", None)
             self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
-            self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule", None)
+            self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule") or []
             self.start_time_choice = loaded_state.get("start_time_choice", None)
             self.stockpile_data = loaded_state.get("stockpile_data", None)
             self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", None)
-            self.stored_blend_sequence_table_for_gantt = loaded_state.get("stored_blend_sequence_table_for_gantt", None)
-            self.stored_blend_sequence_table_for_gantt_default = loaded_state.get("stored_blend_sequence_table_for_gantt_default", None)
+            self.stored_blend_sequence_table_for_gantt = (
+                loaded_state.get("stored_blend_sequence_table_for_gantt") or []
+            )
+            self.stored_blend_sequence_table_for_gantt_default = (
+                loaded_state.get("stored_blend_sequence_table_for_gantt_default") or []
+            )
             self.time_mode_choice = loaded_state.get("time_mode_choice", None)
             self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
             self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
@@ -3700,6 +4098,26 @@ class CustomWebEngineView(QWebEngineView):
         else:
             # Cancel the download if no path is chosen
             download_item.cancel()
+
+class ScaledPixmapLabel(QLabel):
+    def __init__(self, image_path):
+        super().__init__()
+        self.original_pixmap = QPixmap(image_path)
+        self.setMinimumSize(1, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_scaled_pixmap()
+
+    def update_scaled_pixmap(self):
+        if self.original_pixmap.isNull():
+            return
+        scaled_pixmap = self.original_pixmap.scaled(
+            self.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.setPixmap(scaled_pixmap)
 
 class BackgroundWorker(QObject):
     finished = pyqtSignal(object)

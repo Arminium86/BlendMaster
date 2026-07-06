@@ -6,7 +6,8 @@ import pandas as pd
 import random
 import requests
 from dash import dcc, html, Input, Output, dash_table, Dash
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+import threading
 
 class ManualBlendDash:
     def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port, crusher_rate):
@@ -16,164 +17,681 @@ class ManualBlendDash:
         self.crusher_rate = crusher_rate
         self.app = dash.Dash(__name__)
         self.colors = [
-            'rgb(77, 148, 204)', 'rgb(50, 200, 50)', 'rgb(255, 255, 51)',
-            'rgb(160, 80, 160)', 'rgb(255, 160, 100)'
+            "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7",
+            "#BFD8D2", "#CDB4DB", "#F4BFBF", "#BDE0FE", "#C9E4CA"
         ]
+        random.shuffle(self.colors)
         self.color_mapping = {}
+        self.data_lock = threading.Lock()
+        self.pending_table_update = None
+        self.data_revision = 0
+        self.grade_profile_data = pd.DataFrame()
+        self.prepare_grade_profile_data(self.stored_blend_sequence_table_for_gantt)
         self.create_layout()
+        self.setup_routes()
 
     def create_layout(self):
         """
         Create the layout for the Dash app.
         """
         self.app.layout = html.Div([
-            html.H1("Gantt Chart"),
-            dcc.Graph(id="gantt-chart"),
-            dcc.Store(id="chart-data", data=self.stored_blend_sequence_table_for_gantt)  # Store for dynamic updates
-        ])
+            html.Iframe(
+                src="/manual-timeline",
+                style={
+                    "width": "100%",
+                    "height": "92vh",
+                    "border": "0",
+                    "display": "block"
+                }
+            )
+        ], style={"margin": "0", "padding": "0"})
 
-    def create_gantt_chart(self, chart_data):
-        """
-        Create the Gantt chart using Plotly Express.
-        """
+    def prepare_grade_profile_data(self, chart_data):
         df = pd.DataFrame(chart_data)
+        if df.empty:
+            self.grade_profile_data = pd.DataFrame()
+            return self.grade_profile_data
 
-        def assign_color_and_border(row):
-            """
-            Assign unique colors for User Defined Blend IDs
-            and make non-User Defined fully transparent.
-            """
-            if row['Origin'] == 'User Defined':
-                if row['Blend ID'] not in self.color_mapping:
-                    # Assign a unique random color for each Blend ID
-                    available_colors = set(self.colors) - set(self.color_mapping.values())
-                    if available_colors:
-                        self.color_mapping[row['Blend ID']] = random.choice(list(available_colors))
-                    else:
-                        self.color_mapping[row['Blend ID']] = random.choice(self.colors)  # Fallback if all colors are used
-                return self.color_mapping[row['Blend ID']], "black"  # Visible color and black border
-            else:
-                return "rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"  # Fully transparent for non-User Defined
+        for column in ["Blend ID", "Origin", "Start Datetime", "End Datetime", "Duration (hrs)"]:
+            if column not in df.columns:
+                df[column] = ""
 
-        # Apply the color and border assignment
-        df[['Color', 'Border Color']] = df.apply(
-            lambda row: pd.Series(assign_color_and_border(row)), axis=1
-        )
-
-        # Convert datetime strings to datetime objects
-        df['Start Datetime'] = pd.to_datetime(df['Start Datetime'])
-        df['End Datetime'] = pd.to_datetime(df['End Datetime'])
+        df["Start Datetime"] = pd.to_datetime(df["Start Datetime"], errors="coerce")
+        df["End Datetime"] = pd.to_datetime(df["End Datetime"], errors="coerce")
+        df["Duration (hrs)"] = pd.to_numeric(df["Duration (hrs)"], errors="coerce").fillna(0)
 
         # Merge manual_gantt_legend_and_tooltip for tooltips
-        tooltip_df = pd.DataFrame(self.manual_gantt_legend_and_tooltip)
-        df = pd.merge(df, tooltip_df, on="Blend ID", how="left")
+        tooltip_df = pd.DataFrame(self.manual_gantt_legend_and_tooltip or [])
+        if not tooltip_df.empty and "Blend ID" in tooltip_df.columns:
+            df = pd.merge(df, tooltip_df, on="Blend ID", how="left")
 
         # Calculate the new column 'Feed Tonnes'
-        df['Feed Tonnes'] = df['Duration (hrs)'].astype(float) * self.crusher_rate
-
-        df['Blend ID Name'] = "Blend ID: " + df["Blend ID"]
-
-        # Combine hover data into a categorical column for the legend
-        df['Details'] = df.apply(
-            lambda row: (
-                "<br>Blend ID: " + str(row['Blend ID']) +
-                "<br>Grade Fe: " + (str(row['Grade Fe']) if row['Grade Fe'] == "AMT" else f"{row['Grade Fe']}%") +
-                "<br>Grade Si: " + (str(row['Grade Si']) if row['Grade Si'] == "AMT" else f"{row['Grade Si']}%") +
-                "<br>Grade Al: " + (str(row['Grade Al']) if row['Grade Al'] == "AMT" else f"{row['Grade Al']}%") +
-                "<br>Grade P: " + (str(row['Grade P']) if row['Grade P'] == "AMT" else f"{row['Grade P']}%") +
-                "<br>Grade Mn: " + (str(row['Grade Mn']) if row['Grade Mn'] == "AMT" else f"{row['Grade Mn']}%") +
-                "<br>Feed Tonnes: " + f"{row['Feed Tonnes']:.0f}" +
-                "<br>Duration (hrs): " + f"{float(row['Duration (hrs)']):.1f}<br>" +
-                (
-                    "<br>Sources:" + 
-                    "<br>" + 
-                    "<br>".join(
-                        f"{source} @ {ratio}%" 
-                        for source, ratio in zip(row['Sources'].split(','), row['Source Ratios'].split(','))
-                    ) 
-                    if row['Sources'] and row['Source Ratios'] else ""
-                ) +
-                "<br>"  # Add a blank line at the end
-            ) if row['Origin'] == 'User Defined' else "",
-            axis=1
-        )
-
-
-        # Create the Gantt chart
-        fig = px.timeline(
-            df,
-            x_start="Start Datetime",
-            x_end="End Datetime",
-            y="Blend ID",
-            color="Details",
-            hover_name="Blend ID Name",
-            hover_data={
-                "Blend ID": False,
-                "Start Datetime": True,
-                "End Datetime": True,
-                "Details": True
-                },  # Only show Hover Info for hover
-            color_discrete_map={row['Details']: row['Color'] for _, row in df.iterrows()}
-        )
-
-        # Reverse the Y-axis order
-        fig.update_yaxes(autorange="reversed")
-
-        # Customize the bars
-        for trace in fig.data:
-            hover_info = trace.name
-            row = df[df['Details'] == hover_info]
-            if row.empty or row['Origin'].iloc[0] != 'User Defined':
-                trace.marker.opacity = 0  # Fully transparent for non-User Defined
-                trace.marker.line.width = 0  # No border
-            else:
-                trace.marker.line.color = row['Border Color'].iloc[0]  # Add border color
-                trace.marker.line.width = 2  # Border width
-
-        # Customize the legend appearance
-        fig.update_layout(
-            legend_title="Blend Details",
-            legend=dict(
-                orientation="v",
-                x=1.05,
-                y=1,
-                bgcolor="rgba(255, 255, 255, 0.8)",
-                bordercolor="black",
-                borderwidth=2
-            )
-        )
+        crusher_rate = float(self.crusher_rate or 0)
+        df["Feed Tonnes"] = df["Duration (hrs)"] * crusher_rate
 
         self.grade_profile_data = df
+        return self.grade_profile_data
 
-        return fig
+    def setup_routes(self):
+        @self.app.server.route("/manual-timeline")
+        def manual_timeline():
+            return self.build_timeline_html()
+
+        @self.app.server.route("/manual-gantt-data")
+        def manual_gantt_data():
+            return jsonify(self.build_chart_payload())
+
+        @self.app.server.route("/manual-gantt-update", methods=["POST"])
+        def manual_gantt_update():
+            payload = request.get_json(silent=True) or {}
+            rows = payload.get("rows", [])
+            cleaned_rows = []
+            for row in rows:
+                cleaned_rows.append({
+                    key: value
+                    for key, value in row.items()
+                    if not str(key).startswith("_")
+                })
+
+            with self.data_lock:
+                self.stored_blend_sequence_table_for_gantt = cleaned_rows
+                self.pending_table_update = [row.copy() for row in cleaned_rows]
+                self.data_revision += 1
+                self.prepare_grade_profile_data(self.stored_blend_sequence_table_for_gantt)
+
+            return jsonify({"status": "ok", "revision": self.data_revision})
+
+    def build_chart_payload(self):
+        with self.data_lock:
+            rows = [row.copy() for row in (self.stored_blend_sequence_table_for_gantt or [])]
+            legend = [row.copy() for row in (self.manual_gantt_legend_and_tooltip or [])]
+            revision = self.data_revision
+
+        for index, row in enumerate(rows):
+            row["_row_index"] = index
+
+        return {
+            "rows": rows,
+            "legend": legend,
+            "crusher_rate": self.crusher_rate,
+            "colors": self.colors,
+            "revision": revision,
+        }
+
+    def consume_pending_table_update(self):
+        with self.data_lock:
+            if self.pending_table_update is None:
+                return None
+            update = [row.copy() for row in self.pending_table_update]
+            self.pending_table_update = None
+            return update
+
+    def build_timeline_html(self):
+        return """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: Segoe UI, Arial, sans-serif;
+    color: #1f2933;
+    background: #ffffff;
+}
+.page {
+    box-sizing: border-box;
+    height: 100vh;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+}
+.toolbar select {
+    height: 28px;
+    border: 1px solid #b8c0cc;
+    border-radius: 4px;
+    background: white;
+}
+#status {
+    color: #52606d;
+}
+.timeline-shell {
+    flex: 1;
+    min-height: 260px;
+    display: flex;
+    gap: 12px;
+    overflow: hidden;
+}
+.timeline-main {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid #20242a;
+    border-radius: 4px;
+    overflow: auto;
+    background: #edf3fb;
+}
+.axis-row, .lane {
+    display: flex;
+    min-width: 980px;
+}
+.axis-label, .lane-label {
+    position: sticky;
+    left: 0;
+    z-index: 3;
+    width: 128px;
+    flex: 0 0 128px;
+    box-sizing: border-box;
+    padding: 8px 8px;
+    background: #ffffff;
+    border-right: 1px solid rgba(31, 41, 55, 0.2);
+    font-size: 12px;
+    font-weight: 600;
+}
+.axis-track, .lane-track {
+    position: relative;
+    min-width: 920px;
+    flex: 1 0 auto;
+}
+.axis-row {
+    height: 48px;
+    border-bottom: 1px solid rgba(31, 41, 55, 0.22);
+}
+.axis-track {
+    background: #edf3fb;
+}
+.tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.95);
+}
+.tick-label {
+    position: absolute;
+    top: 7px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-size: 11px;
+    color: #344054;
+}
+.lane {
+    height: 54px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.9);
+}
+.lane:nth-child(even) .lane-track {
+    background: rgba(255, 255, 255, 0.22);
+}
+.lane-track {
+    background-image: linear-gradient(to right, rgba(255,255,255,0.9) 1px, transparent 1px);
+    background-size: 120px 100%;
+}
+.bar {
+    position: absolute;
+    top: 10px;
+    height: 34px;
+    box-sizing: border-box;
+    border: 1px solid rgba(17, 24, 39, 0.78);
+    border-radius: 4px;
+    cursor: grab;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1f2933;
+    user-select: none;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.18);
+}
+.bar:active {
+    cursor: grabbing;
+}
+.bar.default {
+    color: #1f2933;
+    border-style: dashed;
+    opacity: 1;
+}
+.handle {
+    position: absolute;
+    top: 0;
+    width: 9px;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.45);
+    cursor: ew-resize;
+}
+.handle.left {
+    left: 0;
+    border-right: 1px solid rgba(17, 24, 39, 0.25);
+}
+.handle.right {
+    right: 0;
+    border-left: 1px solid rgba(17, 24, 39, 0.25);
+}
+.legend {
+    width: 330px;
+    flex: 0 0 330px;
+    border: 1px solid #20242a;
+    border-radius: 4px;
+    overflow: auto;
+    padding: 10px;
+    font-size: 12px;
+    background: #ffffff;
+}
+.legend-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.legend-item {
+    display: grid;
+    grid-template-columns: 14px 1fr;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.swatch {
+    width: 12px;
+    height: 12px;
+    border: 1px solid rgba(17, 24, 39, 0.7);
+    margin-top: 2px;
+}
+.legend-heading {
+    font-weight: 700;
+    margin-bottom: 3px;
+}
+.muted {
+    color: #667085;
+}
+.empty {
+    padding: 28px;
+    color: #52606d;
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="toolbar">
+    <strong>Manual Gantt</strong>
+    <label for="snap-select">Snap</label>
+    <select id="snap-select">
+      <option value="5">5 min</option>
+      <option value="15" selected>15 min</option>
+      <option value="30">30 min</option>
+      <option value="60">60 min</option>
+    </select>
+    <span class="muted">Drag bars to move. Drag either edge to resize.</span>
+    <span id="status"></span>
+  </div>
+  <div class="timeline-shell">
+    <div id="timeline-main" class="timeline-main"></div>
+    <div id="legend" class="legend"></div>
+  </div>
+</div>
+<script>
+const state = {
+    rows: [],
+    legendRows: [],
+    colors: [],
+    colorByBlend: {},
+    snapMinutes: 15,
+    timelineStart: 0,
+    timelineEnd: 0,
+    trackWidth: 920,
+    pxPerMs: 1,
+    drag: null
+};
+
+function parseDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    const normalised = String(value).trim().replace(" ", "T");
+    const date = new Date(normalised);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function pad(value) {
+    return String(value).padStart(2, "0");
+}
+
+function formatDate(date) {
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) +
+        " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+}
+
+function formatTick(date) {
+    return pad(date.getHours()) + ":" + pad(date.getMinutes()) + "<br>" +
+        date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
+}
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, function(match) {
+        return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"}[match];
+    });
+}
+
+function snapMs(ms) {
+    const snap = state.snapMinutes * 60 * 1000;
+    return Math.round(ms / snap) * snap;
+}
+
+function rowStart(row) {
+    return parseDate(row["Start Datetime"]);
+}
+
+function rowEnd(row) {
+    return parseDate(row["End Datetime"]);
+}
+
+function setStatus(text) {
+    document.getElementById("status").textContent = text || "";
+}
+
+function colorForBlend(blendId) {
+    const key = String(blendId ?? "");
+    if (!state.colorByBlend[key]) {
+        const index = Object.keys(state.colorByBlend).length;
+        state.colorByBlend[key] = state.colors[index % state.colors.length] || "#A8D5BA";
+    }
+    return state.colorByBlend[key];
+}
+
+function computeTimelineBounds() {
+    const validStarts = state.rows.map(rowStart).filter(Boolean).map(d => d.getTime());
+    const validEnds = state.rows.map(rowEnd).filter(Boolean).map(d => d.getTime());
+    if (!validStarts.length || !validEnds.length) {
+        const now = new Date();
+        state.timelineStart = now.getTime();
+        state.timelineEnd = now.getTime() + 24 * 60 * 60 * 1000;
+        return;
+    }
+    const start = Math.min(...validStarts);
+    const end = Math.max(...validEnds);
+    const span = Math.max(end - start, 60 * 60 * 1000);
+    state.timelineStart = start - span * 0.04;
+    state.timelineEnd = end + span * 0.04;
+}
+
+function updateScale() {
+    const main = document.getElementById("timeline-main");
+    const availableWidth = Math.max((main.clientWidth || 1100) - 150, 920);
+    state.trackWidth = Math.max(availableWidth, state.rows.length * 130, 920);
+    state.pxPerMs = state.trackWidth / Math.max(state.timelineEnd - state.timelineStart, 1);
+}
+
+function leftFor(ms) {
+    return (ms - state.timelineStart) * state.pxPerMs;
+}
+
+function widthFor(startMs, endMs) {
+    return Math.max((endMs - startMs) * state.pxPerMs, 3);
+}
+
+function buildLegendDetails(row) {
+    const grade = name => {
+        const value = row[name];
+        if (value === undefined || value === null || value === "") return "";
+        return "<div>" + name + ": " + escapeHtml(value) + (value === "AMT" ? "" : "%") + "</div>";
+    };
+    let html = "<div class='legend-heading'>Blend ID: " + escapeHtml(row["Blend ID"]) + "</div>";
+    html += grade("Grade Fe") + grade("Grade Si") + grade("Grade Al") + grade("Grade P") + grade("Grade Mn");
+    if (row["Sources"] && row["Source Ratios"]) {
+        const sources = String(row["Sources"]).split(",");
+        const ratios = String(row["Source Ratios"]).split(",");
+        html += "<div style='margin-top:5px;'>Sources and Ratios:</div>";
+        sources.forEach((source, index) => {
+            html += "<div>- " + escapeHtml(source.trim()) + " @ " + escapeHtml((ratios[index] || "").trim()) + "%</div>";
+        });
+    }
+    return html;
+}
+
+function renderLegend() {
+    const legend = document.getElementById("legend");
+    const legendByBlend = {};
+    state.legendRows.forEach(row => {
+        legendByBlend[String(row["Blend ID"])] = row;
+    });
+    const shown = new Set();
+    let html = "<div class='legend-title'>Blend Details</div>";
+    state.rows.forEach(row => {
+        const blendId = String(row["Blend ID"] ?? "");
+        if (shown.has(blendId)) return;
+        shown.add(blendId);
+        const detailRow = legendByBlend[blendId] || row;
+        html += "<div class='legend-item'><div class='swatch' style='background:" + colorForBlend(blendId) + "'></div><div>" +
+            buildLegendDetails(detailRow) + "</div></div>";
+    });
+    legend.innerHTML = html;
+}
+
+function renderAxis(track) {
+    track.innerHTML = "";
+    const tickCount = 6;
+    for (let i = 0; i <= tickCount; i++) {
+        const ratio = i / tickCount;
+        const tickMs = state.timelineStart + (state.timelineEnd - state.timelineStart) * ratio;
+        const left = leftFor(tickMs);
+        const tick = document.createElement("div");
+        tick.className = "tick";
+        tick.style.left = left + "px";
+        const label = document.createElement("div");
+        label.className = "tick-label";
+        label.style.left = left + "px";
+        label.innerHTML = formatTick(new Date(tickMs));
+        track.appendChild(tick);
+        track.appendChild(label);
+    }
+}
+
+function updateRowFromTimes(rowIndex, startMs, endMs) {
+    const minDuration = 5 * 60 * 1000;
+    if (endMs - startMs < minDuration) {
+        endMs = startMs + minDuration;
+    }
+    const row = state.rows[rowIndex];
+    row["Start Datetime"] = formatDate(new Date(startMs));
+    row["End Datetime"] = formatDate(new Date(endMs));
+    row["Duration (hrs)"] = ((endMs - startMs) / 3600000).toFixed(2);
+}
+
+function positionBar(bar, row) {
+    const start = rowStart(row);
+    const end = rowEnd(row);
+    if (!start || !end) return;
+    bar.style.left = leftFor(start.getTime()) + "px";
+    bar.style.width = widthFor(start.getTime(), end.getTime()) + "px";
+    const duration = Number(row["Duration (hrs)"] || 0);
+    bar.querySelector(".bar-label").textContent = "Blend " + row["Blend ID"] + " - " + duration.toFixed(2) + " hrs";
+    bar.title = "Start: " + row["Start Datetime"] + "\\nEnd: " + row["End Datetime"] + "\\nDuration: " + row["Duration (hrs)"] + " hrs";
+}
+
+function beginDrag(event, rowIndex, mode) {
+    event.preventDefault();
+    event.stopPropagation();
+    const row = state.rows[rowIndex];
+    const start = rowStart(row);
+    const end = rowEnd(row);
+    if (!start || !end) return;
+    state.drag = {
+        rowIndex,
+        mode,
+        startX: event.clientX,
+        originalStart: start.getTime(),
+        originalEnd: end.getTime()
+    };
+    document.addEventListener("mousemove", onDragMove);
+    document.addEventListener("mouseup", endDrag);
+}
+
+function onDragMove(event) {
+    if (!state.drag) return;
+    const deltaMs = (event.clientX - state.drag.startX) / state.pxPerMs;
+    let newStart = state.drag.originalStart;
+    let newEnd = state.drag.originalEnd;
+    if (state.drag.mode === "move") {
+        const snappedDelta = snapMs(deltaMs);
+        newStart = state.drag.originalStart + snappedDelta;
+        newEnd = state.drag.originalEnd + snappedDelta;
+    } else if (state.drag.mode === "left") {
+        newStart = snapMs(state.drag.originalStart + deltaMs);
+        newStart = Math.min(newStart, state.drag.originalEnd - 5 * 60 * 1000);
+    } else if (state.drag.mode === "right") {
+        newEnd = snapMs(state.drag.originalEnd + deltaMs);
+        newEnd = Math.max(newEnd, state.drag.originalStart + 5 * 60 * 1000);
+    }
+    updateRowFromTimes(state.drag.rowIndex, newStart, newEnd);
+    const bar = document.querySelector(".bar[data-row-index='" + state.drag.rowIndex + "']");
+    if (bar) positionBar(bar, state.rows[state.drag.rowIndex]);
+    setStatus("Editing Blend " + state.rows[state.drag.rowIndex]["Blend ID"]);
+}
+
+async function endDrag() {
+    if (!state.drag) return;
+    document.removeEventListener("mousemove", onDragMove);
+    document.removeEventListener("mouseup", endDrag);
+    state.drag = null;
+    computeTimelineBounds();
+    updateScale();
+    render();
+    await postUpdate();
+}
+
+async function postUpdate() {
+    setStatus("Saving chart edits...");
+    try {
+        const rows = state.rows.map(row => {
+            const clean = {};
+            Object.keys(row).forEach(key => {
+                if (!key.startsWith("_")) clean[key] = row[key];
+            });
+            return clean;
+        });
+        const response = await fetch("/manual-gantt-update", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({rows})
+        });
+        if (!response.ok) throw new Error("Update failed");
+        setStatus("Chart edits saved to table");
+        setTimeout(() => setStatus(""), 1800);
+    } catch (error) {
+        setStatus("Could not save chart edit");
+        console.error(error);
+    }
+}
+
+function render() {
+    const main = document.getElementById("timeline-main");
+    if (!state.rows.length) {
+        main.innerHTML = "<div class='empty'>No blend sequence rows available.</div>";
+        renderLegend();
+        return;
+    }
+    computeTimelineBounds();
+    updateScale();
+    main.innerHTML = "";
+
+    const axisRow = document.createElement("div");
+    axisRow.className = "axis-row";
+    const axisLabel = document.createElement("div");
+    axisLabel.className = "axis-label";
+    axisLabel.textContent = "Time";
+    const axisTrack = document.createElement("div");
+    axisTrack.className = "axis-track";
+    axisTrack.style.minWidth = state.trackWidth + "px";
+    renderAxis(axisTrack);
+    axisRow.appendChild(axisLabel);
+    axisRow.appendChild(axisTrack);
+    main.appendChild(axisRow);
+
+    state.rows.forEach((row, rowIndex) => {
+        const lane = document.createElement("div");
+        lane.className = "lane";
+        const label = document.createElement("div");
+        label.className = "lane-label";
+        label.innerHTML = "Blend " + escapeHtml(row["Blend ID"]) + "<br><span class='muted'>" + escapeHtml(row["Origin"] || "") + "</span>";
+        const track = document.createElement("div");
+        track.className = "lane-track";
+        track.style.minWidth = state.trackWidth + "px";
+
+        const bar = document.createElement("div");
+        bar.className = "bar" + (row["Origin"] === "User Defined" ? "" : " default");
+        bar.dataset.rowIndex = rowIndex;
+        bar.style.background = colorForBlend(row["Blend ID"]);
+        const leftHandle = document.createElement("div");
+        leftHandle.className = "handle left";
+        const rightHandle = document.createElement("div");
+        rightHandle.className = "handle right";
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "bar-label";
+        bar.appendChild(leftHandle);
+        bar.appendChild(labelSpan);
+        bar.appendChild(rightHandle);
+        bar.addEventListener("mousedown", event => beginDrag(event, rowIndex, "move"));
+        leftHandle.addEventListener("mousedown", event => beginDrag(event, rowIndex, "left"));
+        rightHandle.addEventListener("mousedown", event => beginDrag(event, rowIndex, "right"));
+        positionBar(bar, row);
+
+        track.appendChild(bar);
+        lane.appendChild(label);
+        lane.appendChild(track);
+        main.appendChild(lane);
+    });
+    renderLegend();
+}
+
+async function loadData() {
+    try {
+        const response = await fetch("/manual-gantt-data?ts=" + Date.now());
+        const payload = await response.json();
+        state.rows = payload.rows || [];
+        state.legendRows = payload.legend || [];
+        state.colors = payload.colors || [];
+        state.colorByBlend = {};
+        render();
+    } catch (error) {
+        document.getElementById("timeline-main").innerHTML = "<div class='empty'>Could not load manual Gantt data.</div>";
+        console.error(error);
+    }
+}
+
+document.getElementById("snap-select").addEventListener("change", event => {
+    state.snapMinutes = Number(event.target.value || 15);
+});
+window.addEventListener("resize", render);
+loadData();
+setInterval(async () => {
+    if (!state.drag) {
+        await loadData();
+    }
+}, 2500);
+</script>
+</body>
+</html>
+"""
 
     def run_app(self):
         """
         Run the Dash app.
         """
-        @self.app.callback(
-            Output("gantt-chart", "figure"),
-            Input("chart-data", "data")
-        )
-        def update_gantt_chart(chart_data):
-            """
-            Callback to update the Gantt chart when chart-data changes.
-            """
-            if chart_data:
-                return self.create_gantt_chart(chart_data)
-            return dash.no_update
-
         self.app.run_server(port=self.port, debug=True, use_reloader=False)
 
     def update_data(self, new_data, manual_gantt_legend_and_tooltip):
         """
         Update the stored blend sequence data programmatically.
         """
-        self.stored_blend_sequence_table_for_gantt = new_data
-        self.manual_gantt_legend_and_tooltip = manual_gantt_legend_and_tooltip
-        
-        # Update the `dcc.Store` component with the new data
-        self.app.layout.children[-1].data = new_data  # Update the data directly
+        with self.data_lock:
+            self.stored_blend_sequence_table_for_gantt = new_data
+            self.manual_gantt_legend_and_tooltip = manual_gantt_legend_and_tooltip
+            self.data_revision += 1
+            self.prepare_grade_profile_data(self.stored_blend_sequence_table_for_gantt)
     
     def return_grade_profile_data(self):
         return self.grade_profile_data
@@ -223,6 +741,9 @@ class DrawGradeProfiles:
 
         # Sort by Start Time
         df["Start Datetime"] = pd.to_datetime(df["Start Datetime"], errors="coerce")
+        df["End Datetime"] = pd.to_datetime(df["End Datetime"], errors="coerce")
+        df = df.dropna(subset=["Start Datetime", "End Datetime"])
+        df = df.dropna(subset=grade_columns, how="all")
         df = df.sort_values(by='Start Datetime').reset_index(drop=True)
 
         # Identify records that need modification (any grade column has "AMT")
@@ -390,10 +911,16 @@ class DrawGradeProfiles:
         records = []
         for _, row in df.iterrows():
             for grade in grade_columns:
+                value = row[grade]
+                if pd.isna(value):
+                    continue
                 records.append({"time": row["Start Datetime"], "grade": row[grade], "element": grade})
                 records.append({"time": row["End Datetime"], "grade": row[grade], "element": grade})
 
         transformed_df = pd.DataFrame(records)
+        if transformed_df.empty:
+            return pd.DataFrame(columns=["time", "grade", "element"])
+
         transformed_df["time"] = pd.to_datetime(transformed_df["time"])
 
         return transformed_df
@@ -402,14 +929,18 @@ class DrawGradeProfiles:
     def update_charts(self, data):
         """Generate separate charts for each grade dynamically."""
         df = pd.DataFrame(data)
-        
-        # Filter for 'User Defined' Origin
-        df = df[df['Origin'] == 'User Defined']
-        if df.empty:
-            return [html.Div("No data available for 'User Defined' Origin.")]
-        
+
         # Columns for grades
         grade_columns = ['Grade Fe', 'Grade Si', 'Grade Al', 'Grade P', 'Grade Mn']
+        missing_grade_columns = [column for column in grade_columns if column not in df.columns]
+        if df.empty or missing_grade_columns:
+            return [html.Div("No manual blend grade data available.")]
+
+        grade_data_presence = df[grade_columns].replace("", pd.NA).notna().any(axis=1)
+        df = df[grade_data_presence].copy()
+        if df.empty:
+            return [html.Div("No manual blend grade data available.")]
+
         colors = {
             'Grade Fe': 'rgb(77, 148, 204)',
             'Grade Si': 'rgb(50, 200, 50)',
@@ -420,6 +951,8 @@ class DrawGradeProfiles:
         
         # Transform the data
         transformed_df = self.transform_data(df, grade_columns, self.hex_sequence_table, self.updated_stockpile_data)
+        if transformed_df.empty:
+            return [html.Div("No manual blend grade data available.")]
         
         # Create separate charts for each grade
         charts = []

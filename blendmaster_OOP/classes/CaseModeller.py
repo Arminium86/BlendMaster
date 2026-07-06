@@ -60,6 +60,7 @@ class CaseModeller:
         self.min_stockpile_contribution_ratio = min_stockpile_contribution_ratio
         self.solver_config = solver_config or {}
         self.optimization_diagnostics = []
+        self.previous_selected_stockpile_source_ids = set()
 
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
@@ -77,14 +78,25 @@ class CaseModeller:
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
-        events = self.event_pool.get_events(self.period_tracker, pd.DataFrame(), self.current_time, self.balance_tracker)
+        initial_steady_state_duration = self.calculate_initial_steady_state_duration()
+        steady_state_end = self.current_time + timedelta(hours=initial_steady_state_duration)
+        events = self.event_pool.get_events(
+            self.period_tracker,
+            pd.DataFrame(),
+            self.current_time,
+            steady_state_end,
+            self.balance_tracker,
+        )
         
         # This method will be ultimately redundant as stockpile balances are updated in the is_stockpile_ready method of EventPoolGenerator and the same can be done for grade blocks (at which point this method is no longer required)
         self.event_pool.update_event_balances(events, self.balance_tracker)
         
         period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)
         candidate_source_sets = []
+        excluded_source_sets = []
         candidate_source_signatures = set()
+        required_min_feed_duration = self.configured_min_feed_duration_hours()
+        step_solver_config = self.solver_config_for_current_step()
 
         if not events:
             result = {
@@ -93,11 +105,11 @@ class CaseModeller:
                     status="No sources available",
                     status_code=None,
                 ),
-                "steady_state_duration": self.calculate_initial_steady_state_duration(),
+                "steady_state_duration": initial_steady_state_duration,
                 "diagnostics": Optimizer.build_diagnostics(
                     events,
                     period_crusher_target,
-                    self.calculate_initial_steady_state_duration(),
+                    initial_steady_state_duration,
                     self.periods,
                     self.period_tracker,
                     self.min_stockpiles,
@@ -115,7 +127,6 @@ class CaseModeller:
             self.blend_option = store_blend_option
 
         if events:
-            steady_state_end = self.current_time + timedelta(hours=self.calculate_initial_steady_state_duration())
             print(
                 f"Solving steady state {self.steady_state_tracker} ({self.period_tracker}) "
                 f"from {self.current_time:%Y-%m-%d %H:%M} to {steady_state_end:%Y-%m-%d %H:%M}. "
@@ -128,7 +139,7 @@ class CaseModeller:
             result = self.optimizer.run_with_dynamic_steady_state(
                 events,
                 period_crusher_target,
-                self.calculate_initial_steady_state_duration(),
+                initial_steady_state_duration,
                 self.periods,
                 self.period_tracker,
                 self.current_time,
@@ -136,8 +147,8 @@ class CaseModeller:
                 self.min_stockpiles,
                 self.max_stockpiles,
                 self.min_stockpile_contribution_ratio,
-                self.solver_config,
-                candidate_source_sets,
+                step_solver_config,
+                excluded_source_sets,
             )
 
             if not result['Linprog_result_object'].success:
@@ -153,18 +164,36 @@ class CaseModeller:
         
             elif result['Linprog_result_object'].success:
                 if result['crusher_actual_tonnes'] > Optimizer.SOLUTION_TOLERANCE:
-                    active_sources = self.active_sources_from_result(result)
-                    active_source_signature = frozenset(active_sources)
-                    if not active_sources or active_source_signature in candidate_source_signatures:
+                    active_source_ids = self.active_source_ids_from_result(result)
+                    active_source_signature = frozenset(active_source_ids)
+                    if not active_source_ids or active_source_signature in candidate_source_signatures:
                         print("No further distinct blend options found.")
                         break
 
+                    potential_feed_duration = self.candidate_potential_feed_duration(result)
+                    if (
+                        required_min_feed_duration is not None
+                        and potential_feed_duration + Optimizer.SOLUTION_TOLERANCE < required_min_feed_duration
+                    ):
+                        excluded_source_sets.append(set(active_source_ids))
+                        candidate_source_signatures.add(active_source_signature)
+                        active_source_names = self.active_source_names_from_result(result)
+                        print(
+                            f"Rejected blend option {self.blend_option} using "
+                            f"{', '.join(active_source_names)} because its stockpile blend can "
+                            f"potentially feed for {potential_feed_duration:.2f} hours; minimum feed duration is "
+                            f"{required_min_feed_duration:.2f} hours."
+                        )
+                        continue
+
                     self.record_results(result)
-                    candidate_source_sets.append(set(active_sources))
+                    candidate_source_sets.append(set(active_source_ids))
+                    excluded_source_sets.append(set(active_source_ids))
                     candidate_source_signatures.add(active_source_signature)
+                    active_source_names = self.active_source_names_from_result(result)
                     print(
                         f"Found blend option {self.blend_option} using "
-                        f"{', '.join(active_sources)}."
+                        f"{', '.join(active_source_names)}."
                     )
                     self.blend_option += 1
                     continue
@@ -306,6 +335,9 @@ class CaseModeller:
                 ]
             
             self.append_results(filtered_decision_point_results_to_user_choice)
+            self.previous_selected_stockpile_source_ids = self.stockpile_source_ids_from_dataframe(
+                filtered_decision_point_results_to_user_choice
+            )
 
             # Prepare for next cycle
             
@@ -333,6 +365,9 @@ class CaseModeller:
         
         else:
             self.append_results(self.decision_point_results)
+            self.previous_selected_stockpile_source_ids = self.stockpile_source_ids_from_dataframe(
+                self.decision_point_results
+            )
 
             # Prepare for next cycle (no results)
             
@@ -361,9 +396,13 @@ class CaseModeller:
     def publish_decision_options(self):
         display_columns = [
             "steady_state_number",
+            "start_datetime",
+            "end_datetime",
+            "steady_state_duration",
             "blend_option",
             "solver_score",
             "source",
+            "estimated_delivery_datetime",
             "source_blend_ratio",
             "source_actual_tonnes",
             "crusher_rate_output",
@@ -378,7 +417,7 @@ class CaseModeller:
             if column in self.decision_point_results_to_display.columns
         ]
         if available_columns:
-            print(self.decision_point_results_to_display[available_columns])
+            print(self.group_decision_results_for_display(self.decision_point_results_to_display)[available_columns])
 
         blend_options = sorted(
             self.decision_point_results_to_display["blend_option"].dropna().unique()
@@ -389,8 +428,88 @@ class CaseModeller:
         elif self.user_interaction_mode == 2:
             print("Manual mode: choose a blend option from the table. Higher solver score is better.")
 
-    def active_sources_from_result(self, result):
-        """Return source names with positive tonnes in an optimisation result."""
+    def configured_min_feed_duration_hours(self):
+        try:
+            value = float(self.solver_config.get("min_feed_duration_hours") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > Optimizer.SOLUTION_TOLERANCE else None
+
+    def solver_config_for_current_step(self):
+        solver_config = dict(self.solver_config or {})
+        solver_config["previous_blend_stockpile_source_ids"] = sorted(
+            self.previous_selected_stockpile_source_ids
+        )
+        return solver_config
+
+    def required_min_feed_duration(self, available_window_duration):
+        configured_duration = self.configured_min_feed_duration_hours()
+        if configured_duration is None:
+            return None
+        try:
+            available_window_duration = float(available_window_duration)
+        except (TypeError, ValueError):
+            return configured_duration
+        if available_window_duration <= Optimizer.SOLUTION_TOLERANCE:
+            return configured_duration
+        return min(configured_duration, available_window_duration)
+
+    def candidate_potential_feed_duration(self, result):
+        """Estimate how long the selected stockpile blend could keep feeding from current balances."""
+        stockpile_durations = []
+        result_duration = float(result.get("steady_state_duration") or 0)
+        for transaction in result.get("transactions", []):
+            if transaction.get("source_type") != "stockpile":
+                continue
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+                opening_balance = float(transaction.get("opening_balance") or 0)
+                equipment_rate_output = float(transaction.get("equipment_rate_output") or 0)
+            except (TypeError, ValueError):
+                continue
+            if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                continue
+            if equipment_rate_output <= Optimizer.SOLUTION_TOLERANCE and result_duration > Optimizer.SOLUTION_TOLERANCE:
+                equipment_rate_output = actual_tonnes / result_duration
+            if opening_balance <= Optimizer.SOLUTION_TOLERANCE or equipment_rate_output <= Optimizer.SOLUTION_TOLERANCE:
+                return 0
+            stockpile_durations.append(opening_balance / equipment_rate_output)
+
+        if stockpile_durations:
+            return min(stockpile_durations)
+        return result_duration
+
+    def stockpile_source_ids_from_dataframe(self, data):
+        if data is None or data.empty or "source_actual_tonnes" not in data.columns:
+            return set()
+
+        data = data.copy()
+        data["source_actual_tonnes"] = pd.to_numeric(
+            data["source_actual_tonnes"], errors="coerce"
+        ).fillna(0)
+        data = data[data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE]
+        if "source_type" in data.columns:
+            data = data[data["source_type"] == "stockpile"]
+
+        source_column = "source_id" if "source_id" in data.columns else "source"
+        if source_column not in data.columns:
+            return set()
+        return set(str(value) for value in data[source_column].dropna() if str(value))
+
+    def active_source_ids_from_result(self, result):
+        """Return internal source ids with positive tonnes in an optimisation result."""
+        active_source_ids = []
+        for transaction in result.get("transactions", []):
+            try:
+                actual_tonnes = float(transaction.get("actual_tonnes") or 0)
+            except (TypeError, ValueError):
+                actual_tonnes = 0
+            if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
+                active_source_ids.append(transaction.get("source_id") or transaction.get("source"))
+        return sorted(source for source in set(active_source_ids) if source)
+
+    def active_source_names_from_result(self, result):
+        """Return display source names with positive tonnes in an optimisation result."""
         active_sources = []
         for transaction in result.get("transactions", []):
             try:
@@ -398,8 +517,114 @@ class CaseModeller:
             except (TypeError, ValueError):
                 actual_tonnes = 0
             if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
-                active_sources.append(transaction.get("source"))
+                active_sources.append(transaction.get("source") or transaction.get("source_id"))
         return sorted(source for source in set(active_sources) if source)
+
+    def group_decision_results_for_display(self, data: pd.DataFrame):
+        return self.group_grade_block_rows(data)
+
+    def group_grade_block_rows(self, data: pd.DataFrame):
+        """Group selected grade-block payload rows by readable grade-block source."""
+        if data is None or data.empty or "source_type" not in data.columns or "source" not in data.columns:
+            return data
+
+        data = data.copy()
+        grade_block_rows = data[data["source_type"] == "grade_block"].copy()
+        other_rows = data[data["source_type"] != "grade_block"].copy()
+        if grade_block_rows.empty:
+            return data
+
+        for column in [
+            "source_actual_tonnes",
+            "crusher_actual_tonnes",
+            "source_opening_balance",
+            "source_closing_balance",
+            "equipment_rate_output",
+            "crusher_rate_output",
+            "source_blend_ratio",
+        ]:
+            if column in grade_block_rows.columns:
+                grade_block_rows[column] = pd.to_numeric(grade_block_rows[column], errors="coerce").fillna(0)
+
+        group_keys = [
+            column for column in [
+                "start_datetime",
+                "end_datetime",
+                "steady_state_number",
+                "blend_option",
+                "blend_ID",
+                "solver_score",
+                "steady_state_duration",
+                "period",
+                "source",
+                "source_type",
+                "equipment",
+            ]
+            if column in grade_block_rows.columns
+        ]
+
+        grouped_records = []
+        for _, group in grade_block_rows.groupby(group_keys, dropna=False, sort=False):
+            record = group.iloc[0].copy()
+            actual_tonnes = group["source_actual_tonnes"].sum()
+            crusher_actual_tonnes = group["crusher_actual_tonnes"].iloc[0] if "crusher_actual_tonnes" in group else 0
+            record["source_actual_tonnes"] = actual_tonnes
+            if "source_blend_ratio" in group:
+                record["source_blend_ratio"] = (
+                    actual_tonnes / crusher_actual_tonnes
+                    if crusher_actual_tonnes not in (0, None)
+                    else group["source_blend_ratio"].sum()
+                )
+            if "source_opening_balance" in group:
+                record["source_opening_balance"] = group["source_opening_balance"].sum()
+            if "source_closing_balance" in group:
+                record["source_closing_balance"] = group["source_closing_balance"].sum()
+            if "equipment_rate_output" in group:
+                record["equipment_rate_output"] = group["equipment_rate_output"].sum()
+            if "source_id" in group:
+                record["source_id"] = ", ".join(str(value) for value in group["source_id"].dropna().unique())
+            if "estimated_delivery_datetime" in group:
+                delivered_datetimes = pd.to_datetime(
+                    group["estimated_delivery_datetime"],
+                    errors="coerce",
+                ).dropna().drop_duplicates().sort_values()
+                if len(delivered_datetimes) == 1:
+                    record["estimated_delivery_datetime"] = delivered_datetimes.iloc[0].strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                elif len(delivered_datetimes) > 1:
+                    record["estimated_delivery_datetime"] = (
+                        f"from {delivered_datetimes.iloc[0]:%Y-%m-%d %H:%M:%S} "
+                        f"to {delivered_datetimes.iloc[-1]:%Y-%m-%d %H:%M:%S}"
+                    )
+                else:
+                    record["estimated_delivery_datetime"] = ""
+
+            for grade_column in [
+                "source_grade_fe",
+                "source_grade_si",
+                "source_grade_al",
+                "source_grade_p",
+                "source_grade_mn",
+            ]:
+                if grade_column in group:
+                    grades = pd.to_numeric(group[grade_column], errors="coerce")
+                    if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
+                        record[grade_column] = (
+                            grades * group["source_actual_tonnes"]
+                        ).sum() / actual_tonnes
+
+            grouped_records.append(record)
+
+        grouped_rows = pd.DataFrame(grouped_records)
+        grouped_data = pd.concat([other_rows, grouped_rows], ignore_index=True)
+        sort_columns = [
+            column for column in ["steady_state_number", "blend_option", "source_type", "source"]
+            if column in grouped_data.columns
+        ]
+        if sort_columns:
+            grouped_data = grouped_data.sort_values(sort_columns, kind="stable").reset_index(drop=True)
+        return grouped_data
 
     def register_optimization_diagnostic(self, result, events, message):
         diagnostics = dict(result.get("diagnostics") or {})
@@ -444,7 +669,11 @@ class CaseModeller:
                     "solver_score": result.get("solver_score", ""),
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
+                    "actual_direct_tip_ratio": 0,
                     "source": "",
+                    "source_id": "",
+                    "source_type": "",
+                    "estimated_delivery_datetime": "",
                     "source_blend_ratio": "No tonnes selected",
                     "source_opening_balance": "",
                     "source_actual_tonnes": "No tonnes selected",
@@ -478,6 +707,17 @@ class CaseModeller:
                 }
             ]
         else:
+            crusher_actual_tonnes = float(result.get("crusher_actual_tonnes") or 0)
+            direct_tip_tonnes = sum(
+                float(transaction.get("actual_tonnes") or 0)
+                for transaction in result["transactions"]
+                if transaction.get("source_type") == "grade_block"
+            )
+            actual_direct_tip_ratio = (
+                direct_tip_tonnes / crusher_actual_tonnes
+                if crusher_actual_tonnes > Optimizer.SOLUTION_TOLERANCE
+                else 0
+            )
             report_data = [
                 {
                     "start_datetime": self.current_time,
@@ -488,11 +728,15 @@ class CaseModeller:
                     "solver_score": result.get("solver_score", ""),
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
+                    "actual_direct_tip_ratio": actual_direct_tip_ratio,
                     "source": transaction["source"],
+                    "source_id": transaction.get("source_id", transaction["source"]),
+                    "source_type": transaction.get("source_type", ""),
+                    "estimated_delivery_datetime": transaction.get("estimated_delivery_datetime", ""),
                     "source_blend_ratio": round(transaction["equipment_rate_output"] / result["crusher_rate_output"], 2) if result["crusher_rate_output"] != 0 else 0,
-                    "source_opening_balance": self.total_AMT_stockpile_balances[transaction["source"]] if transaction["source"] in self.total_AMT_stockpile_balances else transaction["opening_balance"],
+                    "source_opening_balance": self.total_AMT_stockpile_balances[transaction["source_id"]] if transaction.get("source_id") in self.total_AMT_stockpile_balances else transaction["opening_balance"],
                     "source_actual_tonnes": transaction["actual_tonnes"],
-                    "source_closing_balance": (self.total_AMT_stockpile_balances[transaction["source"]] if transaction["source"] in self.total_AMT_stockpile_balances else transaction["opening_balance"]) - transaction["actual_tonnes"],
+                    "source_closing_balance": (self.total_AMT_stockpile_balances[transaction["source_id"]] if transaction.get("source_id") in self.total_AMT_stockpile_balances else transaction["opening_balance"]) - transaction["actual_tonnes"],
                     "source_grade_fe": transaction["grade_fe"],
                     "source_grade_si": transaction["grade_si"],
                     "source_grade_al": transaction["grade_al"],
@@ -558,7 +802,8 @@ class CaseModeller:
         #self.results.to_excel(filename, index=False)
         #print(f"All results written to {filename}")
 
-        self.database_manager.write_optimised_blend_report_to_database(self.results, self.periods)
+        report_results = self.group_grade_block_rows(self.results)
+        self.database_manager.write_optimised_blend_report_to_database(report_results, self.periods)
 
     def save_build_report(self):
         """Save stockpile build report to an Excel file."""
