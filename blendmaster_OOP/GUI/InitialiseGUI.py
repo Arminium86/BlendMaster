@@ -2823,6 +2823,9 @@ class UserInputs(QMainWindow):
 
             self.setup_blends_tab_first_call = False
 
+        if hasattr(self, "blend_config_table"):
+            self.refresh_blend_config_projected_columns()
+
         # Populate weights and Blend IDs if project is loaded
         self.populate_blend_config_weights_and_ids()
 
@@ -2916,13 +2919,8 @@ class UserInputs(QMainWindow):
             projected_balance_item.setTextAlignment(Qt.AlignCenter)
             last_payload_item.setTextAlignment(Qt.AlignCenter)
 
-            # Check if the stockpile is in the build report
-            if not build_report_df.empty and "stockpile" in build_report_df.columns:
-                stockpile_records = build_report_df[build_report_df["stockpile"] == stockpile_name]
-            else:
-                stockpile_records = pd.DataFrame()
-            if not stockpile_records.empty:
-                latest_record = stockpile_records.sort_values("delivered_datetime", ascending=False).iloc[0]
+            latest_record = self.latest_build_record_for_stockpile(build_report_df, stockpile_name)
+            if latest_record is not None:
                 projected_balance_item.setText(str(latest_record["closing_balance"]))
                 last_payload_item.setText(str(latest_record["delivered_datetime"]))
 
@@ -2968,6 +2966,84 @@ class UserInputs(QMainWindow):
 
 
         # Resize headers to fit content
+        self.blend_config_table.resizeColumnsToContents()
+
+    def latest_build_record_for_stockpile(self, build_report_df, stockpile_name):
+        if (
+            build_report_df is None
+            or build_report_df.empty
+            or "stockpile" not in build_report_df.columns
+        ):
+            return None
+
+        stockpile_records = build_report_df[
+            build_report_df["stockpile"].astype(str) == str(stockpile_name)
+        ].copy()
+        if stockpile_records.empty:
+            return None
+
+        stockpile_records["_delivered_datetime_sort"] = pd.to_datetime(
+            stockpile_records["delivered_datetime"],
+            errors="coerce",
+        )
+        stockpile_records = stockpile_records.sort_values(
+            ["_delivered_datetime_sort", "delivered_datetime"],
+            ascending=False,
+            na_position="last",
+        )
+        return stockpile_records.iloc[0]
+
+    def refresh_blend_config_projected_columns(self):
+        if not hasattr(self, "blend_config_table"):
+            return
+
+        build_report_df = self.fetch_build_report()
+        was_blocked = self.blend_config_table.blockSignals(True)
+        try:
+            for row_idx in range(self.blend_config_table.rowCount()):
+                stockpile_item = self.blend_config_table.item(row_idx, 0)
+                if stockpile_item is None:
+                    continue
+
+                latest_record = self.latest_build_record_for_stockpile(
+                    build_report_df,
+                    stockpile_item.text(),
+                )
+                projected_text = ""
+                delivered_text = ""
+                if latest_record is not None:
+                    try:
+                        projected_text = f"{float(latest_record['closing_balance']):.0f}"
+                    except (TypeError, ValueError):
+                        projected_text = str(latest_record["closing_balance"])
+                    delivered_text = str(latest_record["delivered_datetime"])
+
+                projected_item = self.blend_config_table.item(row_idx, 2)
+                if projected_item is None:
+                    projected_item = QTableWidgetItem("")
+                    projected_item.setFlags(Qt.ItemIsEnabled)
+                    projected_item.setTextAlignment(Qt.AlignCenter)
+                    self.blend_config_table.setItem(row_idx, 2, projected_item)
+                projected_item.setText(projected_text)
+
+                last_payload_item = self.blend_config_table.item(row_idx, 3)
+                if last_payload_item is None:
+                    last_payload_item = QTableWidgetItem("")
+                    last_payload_item.setFlags(Qt.ItemIsEnabled)
+                    last_payload_item.setTextAlignment(Qt.AlignCenter)
+                    self.blend_config_table.setItem(row_idx, 3, last_payload_item)
+                last_payload_item.setText(delivered_text)
+
+                checkbox_widget = self.blend_config_table.cellWidget(row_idx, 4)
+                if checkbox_widget:
+                    checkbox = checkbox_widget.findChild(QCheckBox)
+                    if checkbox:
+                        checkbox.setEnabled(bool(projected_text))
+                        if not projected_text:
+                            checkbox.setChecked(False)
+        finally:
+            self.blend_config_table.blockSignals(was_blocked)
+
         self.blend_config_table.resizeColumnsToContents()
 
     def on_blend_data_change(self):
@@ -3782,6 +3858,8 @@ class UserInputs(QMainWindow):
                     self.blend_sequence_table.setItem(row_index, end_col, end_item)
                 end_item.setText(str(row_data.get("End Datetime", "")))
                 end_item.setTextAlignment(Qt.AlignCenter)
+
+                self.update_blend_id(row_index)
         finally:
             self.blend_sequence_table.blockSignals(False)
 

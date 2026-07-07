@@ -911,11 +911,11 @@ class DrawGradeProfiles:
         records = []
         for _, row in df.iterrows():
             for grade in grade_columns:
-                value = row[grade]
+                value = pd.to_numeric(row[grade], errors="coerce")
                 if pd.isna(value):
                     continue
-                records.append({"time": row["Start Datetime"], "grade": row[grade], "element": grade})
-                records.append({"time": row["End Datetime"], "grade": row[grade], "element": grade})
+                records.append({"time": row["Start Datetime"], "grade": value, "element": grade})
+                records.append({"time": row["End Datetime"], "grade": value, "element": grade})
 
         transformed_df = pd.DataFrame(records)
         if transformed_df.empty:
@@ -968,8 +968,9 @@ class DrawGradeProfiles:
                 color_discrete_sequence=[colors[grade]]
             )
             fig.update_traces(mode='lines+markers')
+            fig.update_yaxes(type="linear", autorange=True)
             charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
-        
+
         return charts
 
     def update_data(self, new_data):
@@ -1091,6 +1092,7 @@ class DrawOptimisedGradeProfiles:
                 color_discrete_sequence=[colors[grade]]
             )
             fig.update_traces(mode='lines+markers')
+            fig.update_yaxes(type="linear", autorange=True)
             charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
 
         return charts
