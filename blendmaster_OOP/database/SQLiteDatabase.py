@@ -424,6 +424,19 @@ class DatabaseManager:
 
 class StockpileProfileReport:
     @staticmethod
+    def read_table_or_empty(conn, table_name, columns):
+        try:
+            data = pd.read_sql(f'SELECT * FROM {table_name}', conn)
+        except (sqlite3.Error, pd.errors.DatabaseError) as error:
+            print(f"Warning: could not read {table_name}: {error}")
+            data = pd.DataFrame(columns=columns)
+
+        for column in columns:
+            if column not in data.columns:
+                data[column] = pd.NA
+        return data
+
+    @staticmethod
     def write_optimised_stockpile_profile_report_to_database(periods: PeriodManager):
         
         start_datetime = periods.get_periods()["preplan_start"]
@@ -434,11 +447,37 @@ class StockpileProfileReport:
         conn = sqlite3.connect(database_name)
 
         try:
-            # Load data from the two reports
-            build_report = pd.read_sql('SELECT * FROM build_report', conn)
-            optimised_stockpile_depletion_report = pd.read_sql('SELECT * FROM optimised_stockpile_depletion_report', conn)
-            opening_stockpile_inventories = pd.read_sql('SELECT * FROM opening_stockpile_inventories', conn)
-            optimised_blend_report = pd.read_sql('SELECT * FROM optimised_blend_report', conn)
+            build_report = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "build_report",
+                [
+                    "steady_state_number", "agent", "delivered_datetime", "stockpile",
+                    "closing_balance", "grade_fe", "grade_si", "grade_al", "grade_p",
+                    "grade_mn", "source"
+                ],
+            )
+            optimised_stockpile_depletion_report = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "optimised_stockpile_depletion_report",
+                [
+                    "start_datetime", "steady_state_number", "period", "source",
+                    "source_opening_balance", "source_grade_fe", "source_grade_si",
+                    "source_grade_al", "source_grade_p", "source_grade_mn"
+                ],
+            )
+            opening_stockpile_inventories = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "opening_stockpile_inventories",
+                [
+                    "name", "balance", "grade_fe", "grade_si", "grade_al",
+                    "grade_p", "grade_mn"
+                ],
+            )
+            optimised_blend_report = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "optimised_blend_report",
+                ["start_datetime", "end_datetime", "steady_state_number"],
+            )
 
             # Prepare data from build_report (table 1)
             build_report_prepared = build_report.rename(columns={
@@ -520,8 +559,15 @@ class StockpileProfileReport:
             # Filter each DataFrame in the list to exclude rows where 'stockpile' is null
             extended_report = [df[df['stockpile'].notna()] for df in extended_report]
 
-            # Concatenate the list of DataFrames into a single DataFrame
-            extended_combined_report = pd.concat(extended_report, ignore_index=True)
+            profile_columns = [
+                "time", "steady_state_number", "agent", "stockpile", "balance",
+                "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
+                "source_or_destination"
+            ]
+            if extended_report:
+                extended_combined_report = pd.concat(extended_report, ignore_index=True)
+            else:
+                extended_combined_report = pd.DataFrame(columns=profile_columns)
 
             # Reset steady_state_number based on optimised_blend_report
             optimised_blend_report['start_datetime'] = pd.to_datetime(optimised_blend_report['start_datetime'])

@@ -757,6 +757,11 @@ class DrawGanttChart:
         conn.close()
 
 class DrawAMTStockpile:
+    AMT_COLUMNS = [
+        "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
+        "lat", "long", "northing", "easting", "last_update", "hex_updated"
+    ]
+
     def __init__(self, db_path, port, hex_sequence_table, chunk_settings=None):
         self.db_path = db_path
         self.port = port
@@ -770,7 +775,7 @@ class DrawAMTStockpile:
         self.status_message = "Select a footprint, digitize reclaim and cut directions, then generate chunks."
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
-        self.unique_footprints = self.data['footprint'].unique()
+        self.unique_footprints = self.get_unique_footprints()
         self.refresh_call = False
         self.clean_up_hex_sequence_table()
         self.sequence_counter = {}
@@ -783,7 +788,7 @@ class DrawAMTStockpile:
 
             # Fetch fresh data
             self.data = self.fetch_data()
-            self.unique_footprints = self.data['footprint'].unique()
+            self.unique_footprints = self.get_unique_footprints()
     
             self.refresh_call = True
             self.clean_up_hex_sequence_table()
@@ -797,6 +802,14 @@ class DrawAMTStockpile:
         for entry in self.selected_points:
             if isinstance(entry, dict) and isinstance(entry.get("member_hexes"), list):
                 entry["member_hexes"] = ",".join(str(hex_id) for hex_id in entry["member_hexes"])
+
+    def empty_amt_dataframe(self):
+        return pd.DataFrame(columns=self.AMT_COLUMNS)
+
+    def get_unique_footprints(self):
+        if self.data is None or self.data.empty or "footprint" not in self.data.columns:
+            return []
+        return self.data["footprint"].dropna().unique()
 
     def update_chunk_settings(self, chunk_settings):
         self.chunk_settings = chunk_settings or {}
@@ -970,6 +983,10 @@ class DrawAMTStockpile:
             filtered_data[grade] = filtered_data[grade].fillna(0)
 
         filtered_data["_positive_balance"] = filtered_data["balance"].apply(self.positive_tonnes)
+        filtered_data = filtered_data[filtered_data["_positive_balance"] > 0].copy()
+        if filtered_data.empty:
+            return [], "All hexagons in this footprint have zero or negative balance."
+
         coordinates = filtered_data[["long", "lat"]].to_numpy() - np.array(reclaim_start_point)
         basis_coordinates = np.linalg.solve(matrix, coordinates.T).T
         filtered_data["_reclaim_axis"] = basis_coordinates[:, 0]
@@ -1119,15 +1136,21 @@ class DrawAMTStockpile:
         return chunk_lookup
     
     def fetch_data(self):
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             query = "SELECT * FROM opening_AMT_stockpile_inventories"
             data = pd.read_sql(query, conn)
-            conn.close()
+            if data.empty:
+                return self.empty_amt_dataframe()
             return data
         except Exception as e:
-            print(f"Error fetching data: {e}")
-            return pd.DataFrame()
+            if "opening_AMT_stockpile_inventories" not in str(e):
+                print(f"Error fetching data: {e}")
+            return self.empty_amt_dataframe()
+        finally:
+            if conn is not None:
+                conn.close()
 
     def init_layout(self):
         self.app.layout = dbc.Container([
@@ -1426,7 +1449,11 @@ class DrawAMTStockpile:
         filtered_data = filtered_data.copy()
         filtered_data.loc[:, "lat"] = pd.to_numeric(filtered_data["lat"], errors="coerce").round(9)
         filtered_data.loc[:, "long"] = pd.to_numeric(filtered_data["long"], errors="coerce").round(9)
+        filtered_data.loc[:, "balance"] = pd.to_numeric(filtered_data["balance"], errors="coerce")
         filtered_data = filtered_data.dropna(subset=["lat", "long"])
+        filtered_data = filtered_data[filtered_data["balance"] > 0]
+        if filtered_data.empty:
+            return fig
 
         # Remove outliers using IQR method
         q1_lat, q3_lat = np.percentile(filtered_data["lat"], [25, 75])
@@ -1448,6 +1475,7 @@ class DrawAMTStockpile:
         filtered_data["lat_tooltip"] = filtered_data["lat"].round(2)
         filtered_data["long_tooltip"] = filtered_data["long"].round(2)
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
+            filtered_data[grade] = pd.to_numeric(filtered_data[grade], errors="coerce").fillna(0)
             filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
 
         chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
@@ -1487,45 +1515,29 @@ class DrawAMTStockpile:
 
         remaining_data = filtered_data[filtered_data["chunk_sequence"].isna()]
         if not remaining_data.empty:
-            colors = remaining_data.apply(
-                lambda row:
-                "red" if row["hex_updated"] == "True" and row["balance"] <= 0 else
-                "purple" if row["hex_updated"] == "True" else
-                "green" if row["hex_updated"] == "False" else
-                "blue",
-                axis=1
-            )
-
-            # Add traces for each color group
-            for color, group in remaining_data.groupby(colors):
-                fig.add_trace(go.Scatter(
-                    x=group["long"],
-                    y=group["lat"],
-                    mode="markers",
-                    marker=dict(size=hex_size, symbol="hexagon", color=color),
-                    name={
-                        "green": "Not Started",
-                        "red": "Negative Balance",
-                        "purple": "Started",
-                        "blue": "Other"
-                    }.get(color, "Other"),
-                    customdata=group[[
-                        "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
-                        "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
-                        "lat_tooltip", "long_tooltip"
-                    ]],
-                    hovertemplate=(
-                        "Hex: %{customdata[0]}<br>" +
-                        "Latitude: %{customdata[7]:.2f}<br>" +
-                        "Longitude: %{customdata[8]:.2f}<br>" +
-                        "Balance: %{customdata[1]}t<br>" +
-                        "Fe Grade: %{customdata[2]:.2f}%<br>" +
-                        "Si Grade: %{customdata[3]:.2f}%<br>" +
-                        "Al Grade: %{customdata[4]:.2f}%<br>" +
-                        "P Grade: %{customdata[5]:.2f}%<br>" +
-                        "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
-                    )
-                ))
+            fig.add_trace(go.Scatter(
+                x=remaining_data["long"],
+                y=remaining_data["lat"],
+                mode="markers",
+                marker=dict(size=hex_size, symbol="hexagon", color="#2ca02c"),
+                name="Available Hexagons",
+                customdata=remaining_data[[
+                    "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
+                    "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
+                    "lat_tooltip", "long_tooltip"
+                ]],
+                hovertemplate=(
+                    "Hex: %{customdata[0]}<br>" +
+                    "Latitude: %{customdata[7]:.2f}<br>" +
+                    "Longitude: %{customdata[8]:.2f}<br>" +
+                    "Balance: %{customdata[1]}t<br>" +
+                    "Fe Grade: %{customdata[2]:.2f}%<br>" +
+                    "Si Grade: %{customdata[3]:.2f}%<br>" +
+                    "Al Grade: %{customdata[4]:.2f}%<br>" +
+                    "P Grade: %{customdata[5]:.2f}%<br>" +
+                    "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
+                )
+            ))
 
         direction = self.reclaim_directions.get(selected_footprint)
         if direction:

@@ -71,7 +71,7 @@ class OpeningStockpileInventories:
             # Close the connection
             conn.close()
 
-    def call_opening_AMT_stockpile_inventories(self, build):
+    def call_opening_AMT_stockpile_inventories(self, build, start_time=None):
         # Call the function to connect
         conn = self.connect_snowflake_with_service_account()
 
@@ -94,6 +94,18 @@ class OpeningStockpileInventories:
         else:  # If build is a single string
             location_filter = f"CONTAINS(LOCATION_NAME, '{build}')"
             source_location_filter = f"CONTAINS(SOURCELOCATIONNAME, '{build}')"
+
+        restore_movement_filter = "1 = 0"
+        if start_time is not None:
+            if hasattr(start_time, "toPyDateTime"):
+                start_time = start_time.toPyDateTime()
+            if isinstance(start_time, datetime):
+                start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
+            restore_movement_filter = (
+                f"TO_TIMESTAMP_NTZ(fq.LAST_UPDATE) > TO_TIMESTAMP_NTZ('{start_time}')\n"
+                f"                    AND TO_TIMESTAMP_NTZ(mr.LOADEDDATETIME) >= TO_TIMESTAMP_NTZ('{start_time}')\n"
+                f"                    AND TO_TIMESTAMP_NTZ(mr.LOADEDDATETIME) < TO_TIMESTAMP_NTZ(fq.LAST_UPDATE)"
+            )
         
         # SQL Query with dynamic CONTAINS filter
         query = f"""
@@ -108,7 +120,8 @@ class OpeningStockpileInventories:
                     SIO2, 
                     AL2O3, 
                     MN, 
-                    P
+                    P,
+                    MAX(LAST_UPDATE) AS LAST_UPDATE
                 FROM
                     AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_HEX_GRADES
                 WHERE 
@@ -126,28 +139,33 @@ class OpeningStockpileInventories:
                 ORDER BY 
                     HEX
             ),
-            second_query AS (
+            movement_rows AS (
                 SELECT 
+                    SOURCELOCATIONNAME, 
+                    LOADEDDATETIME, 
                     SOURCEHEX, 
-                    SUM(WMT) AS WMT
-                FROM (
-                    SELECT 
-                        SOURCELOCATIONNAME, 
-                        LOADEDDATETIME, 
-                        SOURCEHEX, 
-                        AVG(TONNES) AS WMT
-                    FROM
-                        AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT
-                    WHERE 
-                        {source_location_filter}
-                    GROUP BY
-                        SOURCELOCATIONNAME,
-                        LOADEDDATETIME,
-                        DUMPEDDATETIME,
-                        SOURCEHEX
-                )
-                GROUP BY 
+                    AVG(TONNES) AS WMT
+                FROM
+                    AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT
+                WHERE 
+                    {source_location_filter}
+                GROUP BY
+                    SOURCELOCATIONNAME,
+                    LOADEDDATETIME,
+                    DUMPEDDATETIME,
                     SOURCEHEX
+            ),
+            second_query AS (
+                SELECT
+                    fq.HEX AS SOURCEHEX,
+                    SUM(mr.WMT) AS WMT
+                FROM
+                    first_query fq
+                    JOIN movement_rows mr ON fq.HEX = mr.SOURCEHEX
+                WHERE
+                    {restore_movement_filter}
+                GROUP BY
+                    fq.HEX
             ),
             hex_coordinates AS (
                 SELECT DISTINCT 
@@ -166,11 +184,12 @@ class OpeningStockpileInventories:
                 fq.MN,
                 fq.P,
                 CASE 
-                    WHEN sq.SOURCEHEX IS NOT NULL THEN fq.WMT - sq.WMT
+                    WHEN sq.SOURCEHEX IS NOT NULL THEN fq.WMT + sq.WMT
                     ELSE fq.WMT
                 END AS FINAL_WMT,
                 fq.LONGITUDE,
                 fq.LATITUDE,
+                fq.LAST_UPDATE,
                 hc.SOURCEHEXEASTING,
                 hc.SOURCEHEXNORTHING,
                 CASE 
@@ -287,9 +306,15 @@ class OpeningStockpileInventories:
             long REAL,
             northing REAL,
             easting REAL,
+            last_update TEXT,
             hex_updated TEXT
         )
         ''')
+
+        cursor.execute("PRAGMA table_info(opening_AMT_stockpile_inventories)")
+        existing_columns = {column[1] for column in cursor.fetchall()}
+        if "last_update" not in existing_columns:
+            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
 
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
@@ -311,6 +336,7 @@ class OpeningStockpileInventories:
                     "long": row.get("LONGITUDE", None),
                     "northing": row.get("SOURCEHEXNORTHING", None),
                     "easting": row.get("SOURCEHEXEASTING", None),
+                    "last_update": row.get("LAST_UPDATE", None),
                     "hex_updated": row.get("HEX_UPDATED", None)
                 }
 
@@ -320,8 +346,8 @@ class OpeningStockpileInventories:
                     continue
 
                 cursor.execute('''
-                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, hex_updated)
-                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :hex_updated)
+                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, last_update, hex_updated)
+                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :last_update, :hex_updated)
                 ''', mapped_row)
 
         # Commit and close the connection
@@ -442,9 +468,15 @@ class OpeningStockpileInventories:
             long REAL,
             northing REAL,
             easting REAL,
+            last_update TEXT,
             hex_updated TEXT
         )
         ''')
+
+        cursor.execute("PRAGMA table_info(opening_AMT_stockpile_inventories)")
+        existing_columns = {column[1] for column in cursor.fetchall()}
+        if "last_update" not in existing_columns:
+            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
 
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')

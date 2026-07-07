@@ -93,20 +93,12 @@ class CaseModeller:
             f"Max Blend Options per Steady State = "
             f"{self.configured_max_decision_blend_options()}."
         )
-        try:
-            while self.current_time < self.periods.get_periods()["period_2_end"]:
-                self.check_abort_requested()
-                # Run optimization and only advance time if successful
-                self.run_optimization_step()
-                self.steady_state_tracker += 1
-                self.check_abort_requested()
-        finally:
-            if not (self.abort_requested or self.abort_callback()):
-                # Save stockpile build report to database
-                self.save_build_report()
-
-                # Save blend results to database
-                self.save_optimised_blend_report()
+        while self.current_time < self.periods.get_periods()["period_2_end"]:
+            self.check_abort_requested()
+            # Run optimization and only advance time if successful
+            self.run_optimization_step()
+            self.steady_state_tracker += 1
+            self.check_abort_requested()
 
     def run_optimization_step(self):
         """Run a single optimization step for the initial steady state duration."""
@@ -132,6 +124,8 @@ class CaseModeller:
         blend_option_timeout_seconds = self.configured_blend_option_timeout_seconds()
         max_decision_blend_options = self.configured_max_decision_blend_options()
         step_solver_config = self.solver_config_for_current_step()
+        last_solver_result = None
+        no_selected_blend_message = "No feasible blend found."
 
         if not events:
             result = {
@@ -186,6 +180,7 @@ class CaseModeller:
                 step_solver_config,
                 excluded_source_sets,
             )
+            last_solver_result = result
             self.check_abort_requested()
 
             if not result['Linprog_result_object'].success:
@@ -215,11 +210,18 @@ class CaseModeller:
                     active_source_ids = self.active_source_ids_from_result(result)
                     active_source_signature = frozenset(active_source_ids)
                     if not active_source_ids or active_source_signature in candidate_source_signatures:
+                        if not candidate_source_sets:
+                            no_selected_blend_message = (
+                                "No further distinct blend options remained after applying guardrails."
+                            )
                         print("No further distinct blend options found.")
                         break
 
                     lock_violations = self.grade_block_pair_lock_violations_from_result(result)
                     if lock_violations:
+                        no_selected_blend_message = (
+                            "All candidate blends were rejected by the grade block lock rule."
+                        )
                         excluded_source_sets.append(set(active_source_ids))
                         candidate_source_signatures.add(active_source_signature)
                         print(
@@ -230,6 +232,9 @@ class CaseModeller:
 
                     grade_block_duration_issues = self.grade_block_pair_duration_issues_from_result(result)
                     if grade_block_duration_issues:
+                        no_selected_blend_message = (
+                            "All candidate blends were rejected by Min Grade Block Pair Duration."
+                        )
                         excluded_source_sets.append(set(active_source_ids))
                         candidate_source_signatures.add(active_source_signature)
                         print(
@@ -243,6 +248,9 @@ class CaseModeller:
                         required_min_feed_duration is not None
                         and potential_feed_duration + Optimizer.SOLUTION_TOLERANCE < required_min_feed_duration
                     ):
+                        no_selected_blend_message = (
+                            "All candidate blends were rejected by Min Stockpile Feed Duration."
+                        )
                         excluded_source_sets.append(set(active_source_ids))
                         candidate_source_signatures.add(active_source_signature)
                         active_source_names = self.active_source_names_from_result(result)
@@ -286,6 +294,16 @@ class CaseModeller:
 
         if events and len(candidate_source_sets) >= max_decision_blend_options:
             print(f"Stopped after {max_decision_blend_options} feasible blend options.")
+
+        if events and self.decision_point_results.empty:
+            self.record_no_selected_blend(
+                last_solver_result,
+                events,
+                period_crusher_target,
+                initial_steady_state_duration,
+                no_selected_blend_message,
+                step_solver_config,
+            )
 
         # Check if there is any decision point results
         if "source_actual_tonnes" in self.decision_point_results:
@@ -411,7 +429,8 @@ class CaseModeller:
             # Prepare for next cycle
             
             steady_state_start_time = self.current_time
-            steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+            steady_state_duration = self.latest_result_duration(initial_steady_state_duration)
+            steady_state_end_time = steady_state_start_time + timedelta(hours=steady_state_duration)
             
             try:
                 self.balance_tracker.update_balances(filtered_decision_point_results_to_user_choice, 
@@ -442,7 +461,8 @@ class CaseModeller:
             # Prepare for next cycle (no results)
             
             steady_state_start_time = self.current_time
-            steady_state_end_time = steady_state_start_time + timedelta(hours=float(self.results.iloc[-1]["steady_state_duration"]))
+            steady_state_duration = self.latest_result_duration(initial_steady_state_duration)
+            steady_state_end_time = steady_state_start_time + timedelta(hours=steady_state_duration)
 
             try:
                 self.balance_tracker.update_balances(self.decision_point_results, 
@@ -913,9 +933,82 @@ class CaseModeller:
         )
         self.optimization_diagnostics.append(diagnostics)
 
+    def record_no_selected_blend(
+        self,
+        result,
+        events,
+        period_crusher_target,
+        steady_state_duration,
+        message,
+        solver_config,
+    ):
+        """Record a no-blend row when all solver candidates were rejected before reporting."""
+        if result is None:
+            result = {
+                "steady_state_duration": steady_state_duration,
+                "diagnostics": Optimizer.build_diagnostics(
+                    events,
+                    period_crusher_target,
+                    steady_state_duration,
+                    self.periods,
+                    self.period_tracker,
+                    self.min_stockpiles,
+                    self.max_stockpiles,
+                    self.min_stockpile_contribution_ratio,
+                    [],
+                    message,
+                    0,
+                    solver_config,
+                ),
+            }
+        else:
+            result = dict(result)
+            result.setdefault("steady_state_duration", steady_state_duration)
+            diagnostics = dict(result.get("diagnostics") or {})
+            diagnostics["solver_status"] = message
+            likely_causes = list(diagnostics.get("likely_causes") or [])
+            if message not in likely_causes:
+                likely_causes.append(message)
+            diagnostics["likely_causes"] = likely_causes
+            result["diagnostics"] = diagnostics
+
+        result["Linprog_result_object"] = SimpleNamespace(
+            success=False,
+            status=message,
+            status_code=getattr(result.get("Linprog_result_object"), "status_code", None),
+        )
+        self.register_optimization_diagnostic(result, events, message)
+
+        stored_blend_option = self.blend_option
+        self.blend_option = "No blend found"
+        self.record_results(result)
+        self.blend_option = stored_blend_option
+
+    def latest_result_duration(self, default_duration=None):
+        if (
+            self.results is not None
+            and not self.results.empty
+            and "steady_state_duration" in self.results.columns
+        ):
+            durations = pd.to_numeric(
+                self.results["steady_state_duration"],
+                errors="coerce",
+            ).dropna()
+            if not durations.empty:
+                return max(float(durations.iloc[-1]), 0.0)
+
+        if default_duration is None:
+            default_duration = self.calculate_initial_steady_state_duration()
+        try:
+            return max(float(default_duration or 0), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def advance_time(self):
         """Advance current time and update period if needed."""
-        steady_state_duration = float(self.results.iloc[-1]["steady_state_duration"])
+        steady_state_duration = self.latest_result_duration()
+        if steady_state_duration <= Optimizer.SOLUTION_TOLERANCE:
+            raise ValueError("Steady state duration is zero; cannot advance optimisation time.")
         self.current_time += timedelta(hours=steady_state_duration)
 
         # Switch periods if needed
@@ -927,12 +1020,17 @@ class CaseModeller:
     def record_results(self, result):
         """Record results from an optimization run into the main DataFrame."""
         if not result['Linprog_result_object'].success:
+            failed_blend_label = (
+                self.blend_option
+                if isinstance(self.blend_option, str)
+                else "No blend selected"
+            )
             report_data = [
                 {
                     "start_datetime": self.current_time,
                     "end_datetime": self.current_time + timedelta(hours=result["steady_state_duration"]),
                     "steady_state_number": self.steady_state_tracker,
-                    "blend_option": "No blend selected",
+                    "blend_option": failed_blend_label,
                     "blend_ID": "No blend selected",
                     "solver_score": result.get("solver_score", ""),
                     "steady_state_duration": result["steady_state_duration"],

@@ -1347,15 +1347,25 @@ class UserInputs(QMainWindow):
 
         builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
 
-        if self.is_project_loaded:
-            self.finish_AMT_stockpile_table(data_source, getattr(self, "AMT_stockpile_data", {}))
-            return
+        if data_source:
+            if (
+                getattr(self, "project_load_restore_in_progress", False)
+                and self.restore_loaded_AMT_data_to_database(data_source)
+            ):
+                self.finish_AMT_stockpile_table(data_source, getattr(self, "AMT_stockpile_data", {}))
+                return
 
-        if any(self.stockpile_data_AMT_column.values()):
+            if getattr(self, "project_load_restore_in_progress", False):
+                self.project_load_waiting_for_AMT = True
+
             self.run_background_task(
                 "Fetching AMT stockpile data from Snowflake...",
-                lambda: self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds),
-                lambda AMT_stockpile_data: self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data),
+                lambda: self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(
+                    builds,
+                    self.start_time_choice,
+                ),
+                lambda AMT_stockpile_data: self.finish_AMT_stockpile_table_from_fetch(data_source, AMT_stockpile_data),
+                self.handle_AMT_stockpile_fetch_error,
             )
             return
 
@@ -1363,9 +1373,39 @@ class UserInputs(QMainWindow):
         self.opening_stockpile_inventories.clear_AMT_stockpile_database()
         self.finish_AMT_stockpile_table(data_source, {})
 
+    def restore_loaded_AMT_data_to_database(self, data_source):
+        AMT_stockpile_data = getattr(self, "AMT_stockpile_data", {}) or {}
+        if not isinstance(AMT_stockpile_data, dict) or not AMT_stockpile_data:
+            return False
+
+        selected_footprints = {str(stockpile_name).upper() for stockpile_name in data_source}
+        saved_footprints = {
+            str(footprint).upper()
+            for footprint, rows in AMT_stockpile_data.items()
+            if rows
+        }
+        if not selected_footprints.issubset(saved_footprints):
+            return False
+
+        self.opening_stockpile_inventories.save_AMT_to_database(AMT_stockpile_data)
+        return True
+
+    def finish_AMT_stockpile_table_from_fetch(self, data_source, AMT_stockpile_data):
+        self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data)
+
+        if getattr(self, "project_load_waiting_for_AMT", False):
+            self.project_load_waiting_for_AMT = False
+            self.continue_project_load_after_stockpile_setup()
+
+    def handle_AMT_stockpile_fetch_error(self, error_message):
+        self.project_load_waiting_for_AMT = False
+        self.project_load_restore_in_progress = False
+        self.show_error_popup(error_message)
+
     def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
-        self.AMT_stockpile_data = AMT_stockpile_data
+        self.AMT_stockpile_data = AMT_stockpile_data or {}
         self.start_dash_AMT_map_thread()
+        self.refresh_AMT_map_data_from_database()
 
         # Set Table Dimensions
         self.AMT_stockpile_table.setRowCount(len(data_source))
@@ -1449,10 +1489,25 @@ class UserInputs(QMainWindow):
             
             self.setup_AMT_stockpile_table_first_call = False  
 
+    def refresh_AMT_map_data_from_database(self):
+        draw_AMT_map = getattr(self, "draw_AMT_map", None)
+        if draw_AMT_map is None:
+            return
+
+        draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
+        draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table or [])
+        draw_AMT_map.data = draw_AMT_map.fetch_data()
+        draw_AMT_map.unique_footprints = draw_AMT_map.get_unique_footprints()
+        draw_AMT_map.clean_up_hex_sequence_table()
+        draw_AMT_map.update_sequence_counter()
+
     def get_AMT_stockpile_data(self, builds):
         if any(self.stockpile_data_AMT_column.values()):
             QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
-            self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(builds)
+            self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(
+                builds,
+                self.start_time_choice,
+            )
         else:    
             QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
@@ -2175,17 +2230,32 @@ class UserInputs(QMainWindow):
 
     def handle_run_program_error(self, error_message):
         self.project_load_continuation_pending = False
-        self.show_error_popup(error_message)
+
+        error_title = "Error"
+        error_text = str(error_message)
+        if isinstance(error_message, dict):
+            error_title = error_message.get("title") or error_title
+            error_text = str(error_message.get("message", ""))
+
+        if hasattr(self, "decision_status_label"):
+            self.decision_status_label.setText(f"{error_title}. Review diagnostics below.")
+        if hasattr(self, "decision_output"):
+            self.display_decision_output(f"\n--- {error_title} ---\n{error_text}")
+
+        self.tabs.setTabEnabled(self.calendar_tab_index, True)
+        self.tabs.setTabEnabled(self.decision_point_tab_index, True)
         for tab_index in [
-            self.decision_point_tab_index,
             self.results_tab_index,
             self.profiles_tab_index,
             self.sqlite_reports_tab_index,
             self.optimised_grade_profile_tab_index,
         ]:
             self.tabs.setTabEnabled(tab_index, False)
-        self.tabs.setTabEnabled(self.calendar_tab_index, True)
-        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        self.decision_input.setEnabled(False)
+        self.enter_button.setEnabled(False)
+        self.decision_select_button.setEnabled(False)
+        self.tabs.setCurrentIndex(self.decision_point_tab_index)
+        self.show_error_popup(error_message)
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
@@ -2223,19 +2293,12 @@ class UserInputs(QMainWindow):
         if not self.store_AMT_chunk_settings():
             return
 
-        if not self.load_AMT_map_first_call:
-    
-            try:
-                response = requests.post("http://localhost:8054/trigger-refresh", timeout=5)
+        try:
+            requests.post("http://localhost:8054/trigger-refresh", timeout=5)
 
-            except requests.exceptions.RequestException:
-                print("Refresh timed out.")
+        except requests.exceptions.RequestException:
+            print("Refresh timed out.")
 
-            finally:
-                self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
-
-
-        # Load the Dash app into the QWebEngineView
         self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
 
         self.load_AMT_map_first_call = False
@@ -2758,7 +2821,7 @@ class UserInputs(QMainWindow):
         if isinstance(error_message, dict):
             title = error_message.get("title", title)
             error_message = error_message.get("message", "")
-        if (title or "").lower() in {"infeasible run", "run aborted"}:
+        if (title or "").lower() in {"infeasible run", "run aborted", "stockpile selection required"}:
             QMessageBox.information(self, title, str(error_message))
             return
         QMessageBox.critical(self, title or "Error", str(error_message))
@@ -3345,7 +3408,7 @@ class UserInputs(QMainWindow):
         conn = sqlite3.connect("blendmaster.db")
         try:
             df = pd.read_sql("SELECT * FROM build_report", conn)
-        except sqlite3.OperationalError as e:
+        except (sqlite3.Error, pd.errors.DatabaseError) as e:
             print(f"Warning: {e}")
             df = pd.DataFrame()
         finally:
@@ -4201,6 +4264,7 @@ class UserInputs(QMainWindow):
                 "crusher_rate_input_value": self.crusher_rate_input_value,
                 'hex_sequence_table': self.hex_sequence_table,
                 'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
+                'AMT_stockpile_data': getattr(self, "AMT_stockpile_data", {}),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
                 "solver_config": self.solver_config,
             }
@@ -4231,6 +4295,7 @@ class UserInputs(QMainWindow):
             )
             
             if not file_path:  # If no file was selected, return early
+                self.is_project_loaded = False
                 return
 
             # Load the selected file
@@ -4267,6 +4332,7 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
             self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
+            self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
             self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
             self.solver_config = self.normalized_solver_config(
                 loaded_state.get("solver_config", {})
@@ -4280,11 +4346,22 @@ class UserInputs(QMainWindow):
 
         except FileNotFoundError:
             QMessageBox.warning(self, "Error", "No saved projects found!")
+            self.is_project_loaded = False
+            return
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+            self.is_project_loaded = False
+            return
         
+        self.project_load_restore_in_progress = True
         self.handle_site_config_submit()
         self.store_stockpile_table()
+        if getattr(self, "project_load_waiting_for_AMT", False):
+            return
+        self.continue_project_load_after_stockpile_setup()
+
+    def continue_project_load_after_stockpile_setup(self):
+        self.project_load_restore_in_progress = False
         if any((self.stockpile_data_AMT_column or {}).values()):
             self.store_hex_sequence_table()
         self.project_load_continuation_pending = True
@@ -4316,6 +4393,7 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table = []
         self.hex_sequence_table_argument = []
         self.stockpile_data_AMT_column = {}
+        self.AMT_stockpile_data = {}
         self.AMT_chunk_settings = {}
         self.solver_config = {}
         self.min_stockpiles = None
@@ -4325,6 +4403,8 @@ class UserInputs(QMainWindow):
         self.current_cancel_callback = None
         self.background_tasks = []
         self.project_load_continuation_pending = False
+        self.project_load_restore_in_progress = False
+        self.project_load_waiting_for_AMT = False
 
     def clear_sqlite_session_data(self):
         try:

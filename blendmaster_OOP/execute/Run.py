@@ -22,6 +22,17 @@ class InfeasibleRunError(BlendMasterRunError):
         super().__init__(message, title="Infeasible Run")
 
 
+class StockpileSelectionRunError(BlendMasterRunError):
+    def __init__(self, stockpile_name):
+        message = (
+            f"APS Mining.csv contains transactions with destination stockpile '{stockpile_name}', "
+            "but that stockpile is not selected in Stockpile Inventories.\n\n"
+            "Go back to Stockpile Inventories and tick Use for this stockpile, or remove/change "
+            "those destination transactions in APS Mining.csv."
+        )
+        super().__init__(message, title="Stockpile Selection Required")
+
+
 class Run:
     
     def __init__(self, gui):
@@ -76,19 +87,16 @@ class Run:
             print("Invalid input. Please enter a number.")
 
         database_manager = DatabaseManager()
+        expit_payload_transactions_to_save = None
 
         if user_interaction_mode == 2 and file_path:
 
             expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, start_time)
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
-            #expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
-            expit_payload_transactions_copy = expit_payload_transactions.copy()
-            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
+            expit_payload_transactions_to_save = expit_payload_transactions.copy()
 
         elif user_interaction_mode == 1 and file_path:
-            #expit_payload_transactions.to_excel(fr"C:\BlendMaster\blendmaster_OOP\output\expit_payload_transactions.xlsx")
-            expit_payload_transactions_copy = expit_payload_transactions.copy()
-            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_copy)
+            expit_payload_transactions_to_save = expit_payload_transactions.copy()
 
         else: 
             print("No APS schedule imported.")
@@ -137,6 +145,9 @@ class Run:
             builtins.input = original_input
 
         if run_exception is not None:
+            stockpile_selection_error = self._stockpile_selection_error(run_exception)
+            if stockpile_selection_error is not None:
+                raise stockpile_selection_error
             raise run_exception
 
         self._validate_optimization_results()
@@ -145,6 +156,20 @@ class Run:
             max_stockpiles,
             min_stockpile_contribution_ratio,
         )
+
+        self.case_bridge.print("Optimisation complete. Writing database tables...")
+
+        if expit_payload_transactions_to_save is not None:
+            self.case_bridge.print("Writing expit payload transactions to database...")
+            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_to_save)
+
+        self.case_bridge.print("Writing build report to database...")
+        self.case_modeller.save_build_report()
+
+        self.case_bridge.print("Writing optimised blend, depletion and profile reports to database...")
+        self.case_modeller.save_optimised_blend_report()
+
+        self.case_bridge.print("Database tables written successfully.")
 
         return periods
 
@@ -158,6 +183,19 @@ class Run:
                 f"GB_{index + 1:06d}" for index in range(len(expit_payload_transactions))
             ]
         return expit_payload_transactions
+
+    @staticmethod
+    def _stockpile_selection_error(exception):
+        message = str(exception)
+        marker = "Stockpile '"
+        if (
+            marker not in message
+            or "not selected or found in Stockpile Inventories" not in message
+        ):
+            return None
+
+        stockpile_name = message.split(marker, 1)[1].split("'", 1)[0]
+        return StockpileSelectionRunError(stockpile_name)
 
     @staticmethod
     def _normalize_stockpile_contribution_ratio(min_stockpile_contribution_ratio=None):
