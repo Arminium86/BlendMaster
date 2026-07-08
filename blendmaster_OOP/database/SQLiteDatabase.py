@@ -367,9 +367,17 @@ class DatabaseManager:
             source_grade_si REAL,
             source_grade_al REAL,
             source_grade_p REAL,
-            source_grade_mn REAL
+            source_grade_mn REAL,
+            source_type TEXT
         )
         ''')
+
+        cursor.execute("PRAGMA table_info(optimised_stockpile_depletion_report)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "source_type" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE optimised_stockpile_depletion_report ADD COLUMN source_type TEXT"
+            )
 
         # Clear the table
         cursor.execute('DELETE FROM optimised_stockpile_depletion_report')
@@ -392,6 +400,7 @@ class DatabaseManager:
             }
             source_opening_balance = steady_state['source_opening_balance']
             source_closing_balance = steady_state['source_closing_balance']
+            source_type = steady_state.get('source_type', 'stockpile')
 
             # Calculate per-second depletion
             source_actual_tonnes_per_second = equipment_rate_output / 3600
@@ -420,6 +429,7 @@ class DatabaseManager:
                     "source_opening_balance": current_balance,
                     "source_actual_tonnes": source_actual_tonnes,
                     "source_closing_balance": source_closing_balance,
+                    "source_type": source_type,
                     **{f"source_grade_{k}": v for k, v in grades.items()}
                 })
 
@@ -437,10 +447,36 @@ class DatabaseManager:
         # Insert second transactions into the database
         for _, row in transactions_df.iterrows():
             cursor.execute('''
-            INSERT INTO optimised_stockpile_depletion_report VALUES (
-                :start_datetime, :end_datetime, :steady_state_number, :period, :source,
-                :source_opening_balance, :source_actual_tonnes, :source_closing_balance,
-                :source_grade_fe, :source_grade_si, :source_grade_al, :source_grade_p, :source_grade_mn
+            INSERT INTO optimised_stockpile_depletion_report (
+                start_datetime,
+                end_datetime,
+                steady_state_number,
+                period,
+                source,
+                source_opening_balance,
+                source_actual_tonnes,
+                source_closing_balance,
+                source_grade_fe,
+                source_grade_si,
+                source_grade_al,
+                source_grade_p,
+                source_grade_mn,
+                source_type
+            ) VALUES (
+                :start_datetime,
+                :end_datetime,
+                :steady_state_number,
+                :period,
+                :source,
+                :source_opening_balance,
+                :source_actual_tonnes,
+                :source_closing_balance,
+                :source_grade_fe,
+                :source_grade_si,
+                :source_grade_al,
+                :source_grade_p,
+                :source_grade_mn,
+                :source_type
             )
             ''', row.to_dict())
 
@@ -463,6 +499,333 @@ class StockpileProfileReport:
             if column not in data.columns:
                 data[column] = pd.NA
         return data
+
+    @staticmethod
+    def weighted_average(group, value_column, weight_column):
+        values = pd.to_numeric(group.get(value_column), errors="coerce")
+        weights = pd.to_numeric(group.get(weight_column), errors="coerce").fillna(0)
+        valid = values.notna() & (weights > 0)
+        if valid.any() and weights[valid].sum() > 0:
+            return float((values[valid] * weights[valid]).sum() / weights[valid].sum())
+        return float(values.dropna().mean()) if values.dropna().any() else 0
+
+    @staticmethod
+    def assign_steady_state_window(data, time_column, steady_states):
+        data = data.copy()
+        data[time_column] = pd.to_datetime(data[time_column], errors="coerce")
+        data["_steady_state_start"] = pd.NaT
+        data["_steady_state_end"] = pd.NaT
+
+        if data.empty or steady_states.empty:
+            return data
+
+        for _, state in steady_states.iterrows():
+            start_time = state["start_datetime"]
+            end_time = state["end_datetime"]
+            mask = (data[time_column] >= start_time) & (data[time_column] < end_time)
+            data.loc[mask, "steady_state_number"] = state["steady_state_number"]
+            data.loc[mask, "_steady_state_start"] = start_time
+            data.loc[mask, "_steady_state_end"] = end_time
+
+        return data
+
+    @staticmethod
+    def aggregate_grade_block_movements(data, tonnes_column, grade_prefix, extra_columns=None):
+        if data.empty:
+            return pd.DataFrame()
+
+        extra_columns = extra_columns or []
+        data = data.copy()
+        data[tonnes_column] = pd.to_numeric(data[tonnes_column], errors="coerce").fillna(0)
+        data = data[
+            data["source"].notna()
+            & data["steady_state_number"].notna()
+            & (data[tonnes_column] > 0)
+        ]
+        if data.empty:
+            return pd.DataFrame()
+
+        records = []
+        for (source, steady_state_number), group in data.groupby(
+            ["source", "steady_state_number"], dropna=False, sort=False
+        ):
+            record = {
+                "source": source,
+                "steady_state_number": steady_state_number,
+                "_steady_state_start": group["_steady_state_start"].dropna().iloc[0]
+                if not group["_steady_state_start"].dropna().empty
+                else pd.NaT,
+                "_steady_state_end": group["_steady_state_end"].dropna().iloc[0]
+                if not group["_steady_state_end"].dropna().empty
+                else pd.NaT,
+                tonnes_column: float(group[tonnes_column].sum()),
+            }
+            for grade in ["fe", "si", "al", "p", "mn"]:
+                record[f"grade_{grade}"] = StockpileProfileReport.weighted_average(
+                    group,
+                    f"{grade_prefix}{grade}",
+                    tonnes_column,
+                )
+            for column in extra_columns:
+                values = [
+                    str(value)
+                    for value in group[column].dropna().unique()
+                    if str(value).strip()
+                ]
+                record[column] = ", ".join(values)
+            if "delivered_datetime" in group:
+                delivered = pd.to_datetime(group["delivered_datetime"], errors="coerce").dropna()
+                if not delivered.empty:
+                    record["first_delivery_datetime"] = delivered.min()
+                    record["last_delivery_datetime"] = delivered.max()
+            records.append(record)
+
+        return pd.DataFrame(records)
+
+    @staticmethod
+    def create_grade_block_profile_rows(
+        expit_payload_transactions,
+        build_report,
+        optimised_blend_report,
+        steady_states,
+        profile_start_datetime,
+    ):
+        profile_columns = [
+            "steady_state_number", "agent", "time", "stockpile", "balance",
+            "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
+            "source_or_destination", "source_type", "arrival_tonnes",
+            "tonnes_to_crusher", "tonnes_to_stockpile", "movement_tonnes",
+            "movement_destination"
+        ]
+        if steady_states.empty:
+            return pd.DataFrame(columns=profile_columns)
+
+        expit_payload_transactions = expit_payload_transactions.copy()
+        build_report = build_report.copy()
+        optimised_blend_report = optimised_blend_report.copy()
+
+        arrival_groups = pd.DataFrame()
+        if not expit_payload_transactions.empty:
+            for column in ["payload", "source_grade_fe", "source_grade_si", "source_grade_al", "source_grade_p", "source_grade_mn"]:
+                if column in expit_payload_transactions:
+                    expit_payload_transactions[column] = pd.to_numeric(
+                        expit_payload_transactions[column], errors="coerce"
+                    ).fillna(0)
+            expit_payload_transactions = StockpileProfileReport.assign_steady_state_window(
+                expit_payload_transactions,
+                "delivered_datetime",
+                steady_states,
+            )
+            arrival_groups = StockpileProfileReport.aggregate_grade_block_movements(
+                expit_payload_transactions,
+                "payload",
+                "source_grade_",
+            ).rename(columns={"payload": "arrival_tonnes"})
+
+        crusher_groups = pd.DataFrame()
+        if not optimised_blend_report.empty and "source_type" in optimised_blend_report:
+            direct_tip_rows = optimised_blend_report[
+                optimised_blend_report["source_type"].astype(str).str.lower().eq("grade_block")
+            ].copy()
+            if not direct_tip_rows.empty:
+                direct_tip_rows["source_actual_tonnes"] = pd.to_numeric(
+                    direct_tip_rows["source_actual_tonnes"], errors="coerce"
+                ).fillna(0)
+                direct_tip_rows["_steady_state_start"] = pd.to_datetime(
+                    direct_tip_rows["start_datetime"], errors="coerce"
+                )
+                direct_tip_rows["_steady_state_end"] = pd.to_datetime(
+                    direct_tip_rows["end_datetime"], errors="coerce"
+                )
+                crusher_groups = StockpileProfileReport.aggregate_grade_block_movements(
+                    direct_tip_rows,
+                    "source_actual_tonnes",
+                    "source_grade_",
+                ).rename(columns={"source_actual_tonnes": "tonnes_to_crusher"})
+
+        stockpile_groups = pd.DataFrame()
+        if not build_report.empty:
+            build_report["payload"] = pd.to_numeric(build_report["payload"], errors="coerce").fillna(0)
+            build_report["delivered_datetime"] = pd.to_datetime(
+                build_report["delivered_datetime"], errors="coerce"
+            )
+            build_report["_steady_state_start"] = pd.to_datetime(
+                build_report.get("steady_state_start_datetime"), errors="coerce"
+            )
+            build_report["_steady_state_end"] = pd.to_datetime(
+                build_report.get("steady_state_end_datetime"), errors="coerce"
+            )
+
+            if not expit_payload_transactions.empty:
+                grade_lookup = expit_payload_transactions[[
+                    column for column in [
+                        "source", "delivered_datetime", "source_grade_fe",
+                        "source_grade_si", "source_grade_al", "source_grade_p",
+                        "source_grade_mn"
+                    ]
+                    if column in expit_payload_transactions.columns
+                ]].copy()
+                grade_lookup["delivered_datetime"] = pd.to_datetime(
+                    grade_lookup["delivered_datetime"], errors="coerce"
+                )
+                build_report = build_report.merge(
+                    grade_lookup.drop_duplicates(subset=["source", "delivered_datetime"]),
+                    how="left",
+                    on=["source", "delivered_datetime"],
+                    suffixes=("", "_expit"),
+                )
+
+            for grade in ["fe", "si", "al", "p", "mn"]:
+                source_grade_column = f"source_grade_{grade}"
+                if source_grade_column not in build_report:
+                    build_report[source_grade_column] = build_report.get(f"grade_{grade}", 0)
+                build_report[source_grade_column] = pd.to_numeric(
+                    build_report[source_grade_column], errors="coerce"
+                ).fillna(pd.to_numeric(build_report.get(f"grade_{grade}", 0), errors="coerce"))
+
+            if build_report["steady_state_number"].isna().any():
+                build_report = StockpileProfileReport.assign_steady_state_window(
+                    build_report,
+                    "delivered_datetime",
+                    steady_states,
+                )
+
+            stockpile_groups = StockpileProfileReport.aggregate_grade_block_movements(
+                build_report,
+                "payload",
+                "source_grade_",
+                extra_columns=["stockpile"],
+            ).rename(columns={"payload": "tonnes_to_stockpile"})
+
+        movement_groups = arrival_groups
+        for frame in [crusher_groups, stockpile_groups]:
+            if frame.empty:
+                continue
+            if movement_groups.empty:
+                movement_groups = frame
+            else:
+                movement_groups = movement_groups.merge(
+                    frame,
+                    how="outer",
+                    on=["source", "steady_state_number"],
+                    suffixes=("", "_movement"),
+                )
+                for column in ["_steady_state_start", "_steady_state_end"]:
+                    movement_column = f"{column}_movement"
+                    if movement_column in movement_groups:
+                        movement_groups[column] = movement_groups[column].combine_first(
+                            movement_groups[movement_column]
+                        )
+                        movement_groups = movement_groups.drop(columns=[movement_column])
+                for grade in ["fe", "si", "al", "p", "mn"]:
+                    movement_column = f"grade_{grade}_movement"
+                    if movement_column in movement_groups:
+                        movement_groups[f"grade_{grade}"] = movement_groups[f"grade_{grade}"].combine_first(
+                            movement_groups[movement_column]
+                        )
+                        movement_groups = movement_groups.drop(columns=[movement_column])
+
+        if movement_groups.empty:
+            return pd.DataFrame(columns=profile_columns)
+
+        for column in ["arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile"]:
+            if column not in movement_groups:
+                movement_groups[column] = 0
+            movement_groups[column] = pd.to_numeric(movement_groups[column], errors="coerce").fillna(0)
+
+        movement_groups["effective_arrival_tonnes"] = movement_groups[[
+            "arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile"
+        ]].assign(
+            total_depleted=movement_groups["tonnes_to_crusher"] + movement_groups["tonnes_to_stockpile"]
+        )[["arrival_tonnes", "total_depleted"]].max(axis=1)
+
+        records = []
+        for source, group in movement_groups.sort_values(
+            ["source", "_steady_state_start"]
+        ).groupby("source", sort=False):
+            running_balance = 0.0
+            records.append({
+                "steady_state_number": None,
+                "agent": "EX",
+                "time": profile_start_datetime,
+                "stockpile": source,
+                "balance": running_balance,
+                "grade_fe": group["grade_fe"].dropna().iloc[0] if group["grade_fe"].dropna().any() else 0,
+                "grade_si": group["grade_si"].dropna().iloc[0] if group["grade_si"].dropna().any() else 0,
+                "grade_al": group["grade_al"].dropna().iloc[0] if group["grade_al"].dropna().any() else 0,
+                "grade_p": group["grade_p"].dropna().iloc[0] if group["grade_p"].dropna().any() else 0,
+                "grade_mn": group["grade_mn"].dropna().iloc[0] if group["grade_mn"].dropna().any() else 0,
+                "source_or_destination": "Not yet delivered",
+                "source_type": "grade_block",
+                "arrival_tonnes": 0,
+                "tonnes_to_crusher": 0,
+                "tonnes_to_stockpile": 0,
+                "movement_tonnes": 0,
+                "movement_destination": "",
+            })
+
+            for _, row in group.sort_values("_steady_state_start").iterrows():
+                start_time = row["_steady_state_start"]
+                end_time = row["_steady_state_end"]
+                if pd.isna(start_time) or pd.isna(end_time):
+                    continue
+
+                arrived = float(row["effective_arrival_tonnes"] or 0)
+                to_crusher = float(row["tonnes_to_crusher"] or 0)
+                to_stockpile = float(row["tonnes_to_stockpile"] or 0)
+                total_depleted = to_crusher + to_stockpile
+                opening_balance = running_balance + arrived
+                closing_balance = max(opening_balance - total_depleted, 0)
+
+                destinations = []
+                if to_crusher > 0:
+                    destinations.append("Crusher")
+                if to_stockpile > 0:
+                    stockpile_text = row.get("stockpile", "")
+                    destinations.append(f"Stockpile ({stockpile_text})" if stockpile_text else "Stockpile")
+                movement_destination = " + ".join(destinations)
+
+                records.append({
+                    "steady_state_number": row["steady_state_number"],
+                    "agent": "EX",
+                    "time": start_time,
+                    "stockpile": source,
+                    "balance": opening_balance,
+                    "grade_fe": row.get("grade_fe", 0),
+                    "grade_si": row.get("grade_si", 0),
+                    "grade_al": row.get("grade_al", 0),
+                    "grade_p": row.get("grade_p", 0),
+                    "grade_mn": row.get("grade_mn", 0),
+                    "source_or_destination": "Payloads arrived at ROM / Crusher Area",
+                    "source_type": "grade_block",
+                    "arrival_tonnes": arrived,
+                    "tonnes_to_crusher": 0,
+                    "tonnes_to_stockpile": 0,
+                    "movement_tonnes": 0,
+                    "movement_destination": "Arrived at ROM / Crusher Area",
+                })
+                records.append({
+                    "steady_state_number": row["steady_state_number"],
+                    "agent": "EX",
+                    "time": end_time,
+                    "stockpile": source,
+                    "balance": closing_balance,
+                    "grade_fe": row.get("grade_fe", 0),
+                    "grade_si": row.get("grade_si", 0),
+                    "grade_al": row.get("grade_al", 0),
+                    "grade_p": row.get("grade_p", 0),
+                    "grade_mn": row.get("grade_mn", 0),
+                    "source_or_destination": movement_destination or "No depletion",
+                    "source_type": "grade_block",
+                    "arrival_tonnes": 0,
+                    "tonnes_to_crusher": to_crusher,
+                    "tonnes_to_stockpile": to_stockpile,
+                    "movement_tonnes": total_depleted,
+                    "movement_destination": movement_destination,
+                })
+                running_balance = closing_balance
+
+        return pd.DataFrame(records, columns=profile_columns)
 
     @staticmethod
     def write_optimised_stockpile_profile_report_to_database(periods: PeriodManager):
@@ -490,7 +853,8 @@ class StockpileProfileReport:
                 [
                     "start_datetime", "steady_state_number", "period", "source",
                     "source_opening_balance", "source_grade_fe", "source_grade_si",
-                    "source_grade_al", "source_grade_p", "source_grade_mn"
+                    "source_grade_al", "source_grade_p", "source_grade_mn",
+                    "source_type"
                 ],
             )
             opening_stockpile_inventories = StockpileProfileReport.read_table_or_empty(
@@ -504,8 +868,41 @@ class StockpileProfileReport:
             optimised_blend_report = StockpileProfileReport.read_table_or_empty(
                 conn,
                 "optimised_blend_report",
-                ["start_datetime", "end_datetime", "steady_state_number"],
+                [
+                    "start_datetime", "end_datetime", "steady_state_number",
+                    "source", "source_id", "source_type", "source_actual_tonnes",
+                    "source_grade_fe", "source_grade_si", "source_grade_al",
+                    "source_grade_p", "source_grade_mn", "crusher_actual_tonnes",
+                    "actual_direct_tip_ratio"
+                ],
             )
+            expit_payload_transactions = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "expit_payload_transactions",
+                [
+                    "agent", "source", "start_datetime", "payload",
+                    "source_grade_fe", "source_grade_si", "source_grade_al",
+                    "source_grade_mn", "source_grade_p", "destination",
+                    "delivered_datetime", "direct_tip_id", "destination_type",
+                    "planned_destination", "fallback_destination",
+                    "aps_direct_tip_candidate"
+                ],
+            )
+
+            steady_states = optimised_blend_report[[
+                "steady_state_number", "start_datetime", "end_datetime"
+            ]].dropna(subset=["steady_state_number", "start_datetime", "end_datetime"]).drop_duplicates()
+            if not steady_states.empty:
+                steady_states = steady_states.copy()
+                steady_states["start_datetime"] = pd.to_datetime(
+                    steady_states["start_datetime"], errors="coerce"
+                )
+                steady_states["end_datetime"] = pd.to_datetime(
+                    steady_states["end_datetime"], errors="coerce"
+                )
+                steady_states = steady_states.dropna(
+                    subset=["start_datetime", "end_datetime"]
+                ).sort_values("start_datetime")
 
             # Prepare data from build_report (table 1)
             build_report_prepared = build_report.rename(columns={
@@ -514,13 +911,21 @@ class StockpileProfileReport:
                 'source': 'source_or_destination',
                 'agent': 'agent',
             })
+            build_report_prepared['source_type'] = 'stockpile'
             build_report_prepared = build_report_prepared[[
                 'steady_state_number', 'agent', 'time', 'stockpile', 'balance',
-                'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn', 'source_or_destination'
+                'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn',
+                'source_or_destination', 'source_type'
             ]]
+            build_report_prepared["source_or_destination"] = (
+                "From " + build_report_prepared["source_or_destination"].astype(str)
+            )
 
             # Prepare data from optimised_stockpile_depletion_report (table 2)
-            depletion_report_prepared = optimised_stockpile_depletion_report.rename(columns={
+            stockpile_depletion_report = optimised_stockpile_depletion_report[
+                ~optimised_stockpile_depletion_report["source_type"].astype(str).str.lower().eq("grade_block")
+            ].copy()
+            depletion_report_prepared = stockpile_depletion_report.rename(columns={
                 'start_datetime': 'time',
                 'source_opening_balance': 'balance',
                 'source': 'stockpile',
@@ -532,13 +937,38 @@ class StockpileProfileReport:
             })
             depletion_report_prepared['agent'] = "RC"
             depletion_report_prepared['source_or_destination'] = 'Crusher'
+            depletion_report_prepared['source_type'] = (
+                depletion_report_prepared['source_type']
+                .fillna('')
+                .replace('', 'stockpile')
+            )
             depletion_report_prepared = depletion_report_prepared[[
                 'steady_state_number', 'agent', 'time', 'stockpile', 'balance',
-                'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn', 'source_or_destination'
+                'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn',
+                'source_or_destination', 'source_type'
             ]]
 
+            grade_block_profile_prepared = StockpileProfileReport.create_grade_block_profile_rows(
+                expit_payload_transactions,
+                build_report,
+                optimised_blend_report,
+                steady_states,
+                start_datetime,
+            )
+
+            movement_columns = [
+                "arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile",
+                "movement_tonnes", "movement_destination"
+            ]
+            for frame in [build_report_prepared, depletion_report_prepared]:
+                for column in movement_columns:
+                    frame[column] = 0 if column != "movement_destination" else ""
+
             # Combine the two reports
-            combined_report = pd.concat([build_report_prepared, depletion_report_prepared], ignore_index=True)
+            combined_report = pd.concat(
+                [build_report_prepared, depletion_report_prepared, grade_block_profile_prepared],
+                ignore_index=True
+            )
 
             # Add data from opening_stockpile_inventories for stockpiles not in the combined report
             stockpiles_in_combined = combined_report['stockpile'].unique()
@@ -557,15 +987,33 @@ class StockpileProfileReport:
             opening_stockpiles_not_in_combined['steady_state_number'] = None
             opening_stockpiles_not_in_combined['agent'] = None
             opening_stockpiles_not_in_combined['source_or_destination'] = None
+            opening_stockpiles_not_in_combined['source_type'] = 'stockpile'
+            for column in movement_columns:
+                opening_stockpiles_not_in_combined[column] = 0 if column != "movement_destination" else ""
 
             # Combine all reports
-            final_combined_report = pd.concat([combined_report, opening_stockpiles_not_in_combined], ignore_index=True)
+            report_frames = [combined_report]
+            if not opening_stockpiles_not_in_combined.empty:
+                report_frames.append(opening_stockpiles_not_in_combined)
+            final_combined_report = pd.concat(report_frames, ignore_index=True)
+            for column in movement_columns:
+                if column not in final_combined_report:
+                    final_combined_report[column] = 0 if column != "movement_destination" else ""
 
             # Extend the transactions to minute-level granularity
             extended_report = []
+            movement_quantity_columns = [
+                "arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile",
+                "movement_tonnes"
+            ]
+            movement_text_columns = ["movement_destination"]
             for stockpile, group in final_combined_report.groupby('stockpile'):
+                group = group.copy()
                 # Parse time column
                 group['time'] = pd.to_datetime(group['time'], errors='coerce')
+                group = group.dropna(subset=['time'])
+                if group.empty:
+                    continue
 
                 # Create minute range
                 all_times = pd.date_range(start=start_datetime, end=end_datetime, freq='min')
@@ -577,9 +1025,17 @@ class StockpileProfileReport:
 
                 # Perform the merge on the truncated time
                 extended_group = extended_group.merge(group, how='left', on='time')
+                movement_quantity_values = (
+                    extended_group[movement_quantity_columns]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .fillna(0)
+                )
+                movement_text_values = extended_group[movement_text_columns].fillna("")
 
                 # Fill forward and backward with the first and last transaction values
                 extended_group = extended_group.infer_objects(copy=False).ffill().bfill()
+                extended_group[movement_quantity_columns] = movement_quantity_values
+                extended_group[movement_text_columns] = movement_text_values
 
                 # Append to the extended report list
                 extended_report.append(extended_group)
@@ -590,7 +1046,9 @@ class StockpileProfileReport:
             profile_columns = [
                 "time", "steady_state_number", "agent", "stockpile", "balance",
                 "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
-                "source_or_destination"
+                "source_or_destination", "source_type", "arrival_tonnes",
+                "tonnes_to_crusher", "tonnes_to_stockpile", "movement_tonnes",
+                "movement_destination"
             ]
             if extended_report:
                 extended_combined_report = pd.concat(extended_report, ignore_index=True)

@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
@@ -70,6 +70,16 @@ class UserInputs(QMainWindow):
         self.main_tab = QWidget()
         self.calendar_tab_index = self.tabs.addTab(self.main_tab, "Calendar")
         self.main_tab_layout = QVBoxLayout(self.main_tab)
+        self.main_tab_layout.setContentsMargins(14, 12, 14, 12)
+        self.main_tab_layout.setSpacing(8)
+
+        calendar_title = QLabel("Calendar")
+        calendar_title.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
+        self.main_tab_layout.addWidget(calendar_title)
+
+        calendar_subtitle = QLabel("Set period rates, targets, direct-tip constraints, and source states.")
+        calendar_subtitle.setStyleSheet("font-size: 12px; color: #64748b; padding-bottom: 4px;")
+        self.main_tab_layout.addWidget(calendar_subtitle)
 
         # Calendar table
         self.main_table = CustomTableWidget()
@@ -1783,9 +1793,19 @@ class UserInputs(QMainWindow):
     def populate_calendar(self):
         # Define Parent Colors
         parent_colors = {
-            "green": QColor(200, 255, 200),
-            "blue": QColor(200, 200, 255),
-            "red": QColor(255, 200, 200),
+            "green": QColor("#e5f7ed"),
+            "blue": QColor("#e8f0ff"),
+            "red": QColor("#ffe7ea"),
+        }
+        section_colors = {
+            "green": QColor("#c8f0d6"),
+            "blue": QColor("#d7e4ff"),
+            "red": QColor("#ffd3da"),
+        }
+        section_foreground = {
+            "green": QColor("#14532d"),
+            "blue": QColor("#1e3a8a"),
+            "red": QColor("#7f1d1d"),
         }
 
         # Configure the main table
@@ -1793,6 +1813,39 @@ class UserInputs(QMainWindow):
         self.main_table.setRowCount(len(self.calendar_rows))
         self.main_table.setHorizontalHeaderLabels(self.calendar_headers)
         self.main_table.verticalHeader().setVisible(False)
+        self.main_table.setAlternatingRowColors(True)
+        self.main_table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.main_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.main_table.setShowGrid(True)
+        self.main_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #ffffff;
+                alternate-background-color: #f8fafc;
+                gridline-color: #d8e0ea;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+                selection-background-color: #bfdbfe;
+                selection-color: #0f172a;
+            }
+            QHeaderView::section {
+                background-color: #f1f5f9;
+                color: #172033;
+                font-weight: 700;
+                border: 0;
+                border-right: 1px solid #d8e0ea;
+                border-bottom: 1px solid #cbd5e1;
+                padding: 7px 8px;
+            }
+            QTableWidget::item {
+                padding: 5px 8px;
+            }
+            QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 3px 8px;
+            }
+        """)
 
         # Bold Font for Captions
         bold_font = QFont()
@@ -1809,12 +1862,16 @@ class UserInputs(QMainWindow):
                     row_key = key
                     caption, editables, color_group, default_values = value
                     # Process the dictionary value (tuple) as needed
+            is_section_row = not any(editables)
             
             # Caption Column
             item_caption = QTableWidgetItem(caption)
             item_caption.setFlags(Qt.ItemIsEnabled)  # Non-editable
             item_caption.setFont(bold_font)
-            item_caption.setBackground(QBrush(parent_colors[color_group]))  # Parent group color
+            item_caption.setForeground(QBrush(section_foreground[color_group]))
+            item_caption.setBackground(QBrush(
+                section_colors[color_group] if is_section_row else parent_colors[color_group]
+            ))
             self.main_table.setItem(row_idx, 0, item_caption)
 
             # Editable and Non-Editable Cells with Default Values
@@ -1835,11 +1892,20 @@ class UserInputs(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)  # Center align all values
                 if not is_editable:
                     item.setFlags(Qt.ItemIsEnabled)  # Non-editable
-                    item.setBackground(QBrush(QColor(200, 200, 200)))  # Grey background
+                    item.setBackground(QBrush(
+                        section_colors[color_group] if is_section_row else QColor("#eef2f7")
+                    ))
+                    if is_section_row:
+                        item.setFont(bold_font)
+                else:
+                    item.setBackground(QBrush(QColor("#ffffff")))
                 self.main_table.setItem(row_idx, col_idx, item)
+            self.main_table.setRowHeight(row_idx, 30)
 
         # Resize Columns
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.main_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.main_table.setColumnWidth(0, max(260, self.main_table.columnWidth(0)))
 
     def load_calendar_inputs(self):
         if self.calendar_inputs:
@@ -2517,17 +2583,25 @@ class UserInputs(QMainWindow):
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
-        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Stockpile Profiles (Optimised)")
+        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Depletion Profiles (Optimised)")
         self.profiles_layout = QVBoxLayout(self.profiles_tab)
+        self.profiles_layout.setContentsMargins(12, 10, 12, 10)
+        self.profiles_layout.setSpacing(8)
 
         # Create the bottom frame
         self.bottom_frame = QFrame()
-        self.bottom_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
-        self.bottom_frame.setLineWidth(2)  # Set the frame's border width
-        self.bottom_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
+        self.bottom_frame.setFrameStyle(QFrame.NoFrame)
+        self.bottom_frame.setStyleSheet("""
+            QFrame {
+                background-color: #f8fafc;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+            }
+        """)
 
         # Add layout to the frame
         self.bottom_layout = QHBoxLayout()
+        self.bottom_layout.setContentsMargins(8, 8, 8, 8)
         self.bottom_frame.setLayout(self.bottom_layout)
 
         # Add the frame to the parent layout
@@ -2535,12 +2609,12 @@ class UserInputs(QMainWindow):
 
         # Bottom Section (Stockpile Profiles Chart Placeholder)
         self.stockpile_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
-        self.stockpile_profile_chart_view.setStyleSheet("border: 1px solid black;")
+        self.stockpile_profile_chart_view.setStyleSheet("border: 0; background-color: #f8fafc;")
         self.bottom_layout.addWidget(self.stockpile_profile_chart_view)
 
         # Add a button to load the chart
-        self.load_profile_chart_button = QPushButton("Load or Update Chart")
-        self.load_profile_chart_button.setFixedWidth(200)
+        self.load_profile_chart_button = QPushButton("Load or Update Depletion Profiles")
+        self.load_profile_chart_button.setFixedWidth(260)
         self.load_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
         self.load_profile_chart_button.clicked.connect(self.load_profiles)  # Connect button to function
 
@@ -4605,6 +4679,16 @@ class UserInputs(QMainWindow):
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Copy):
+            self.copy_selection_to_clipboard()
+            event.accept()
+            return
+
+        if event.matches(QKeySequence.Paste):
+            self.paste_clipboard_to_selection()
+            event.accept()
+            return
+
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):  # Check for Enter key
             current_row = self.currentRow()
             current_column = self.currentColumn()
@@ -4616,6 +4700,91 @@ class CustomTableWidget(QTableWidget):
         else:
             # Default behavior for other keys
             super().keyPressEvent(event)
+
+    def copy_selection_to_clipboard(self):
+        indexes = sorted(self.selectedIndexes(), key=lambda index: (index.row(), index.column()))
+        if not indexes:
+            return
+
+        rows = sorted({index.row() for index in indexes})
+        columns = sorted({index.column() for index in indexes})
+        selected_cells = {(index.row(), index.column()) for index in indexes}
+
+        copied_rows = []
+        for row in rows:
+            values = []
+            for column in columns:
+                values.append(self.cell_display_text(row, column) if (row, column) in selected_cells else "")
+            copied_rows.append("\t".join(values))
+
+        QApplication.clipboard().setText("\n".join(copied_rows))
+
+    def paste_clipboard_to_selection(self):
+        clipboard_text = QApplication.clipboard().text()
+        if not clipboard_text:
+            return
+
+        rows = [
+            row.split("\t")
+            for row in clipboard_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        ]
+        if rows and rows[-1] == [""]:
+            rows.pop()
+        if not rows:
+            return
+
+        selected_indexes = sorted(self.selectedIndexes(), key=lambda index: (index.row(), index.column()))
+        if selected_indexes:
+            start_row = selected_indexes[0].row()
+            start_column = selected_indexes[0].column()
+        else:
+            start_row = max(self.currentRow(), 0)
+            start_column = max(self.currentColumn(), 0)
+
+        if len(rows) == 1 and len(rows[0]) == 1 and selected_indexes:
+            value = rows[0][0]
+            for index in selected_indexes:
+                self.set_cell_display_text(index.row(), index.column(), value)
+            return
+
+        for row_offset, row_values in enumerate(rows):
+            target_row = start_row + row_offset
+            if target_row >= self.rowCount():
+                break
+            for column_offset, value in enumerate(row_values):
+                target_column = start_column + column_offset
+                if target_column >= self.columnCount():
+                    break
+                self.set_cell_display_text(target_row, target_column, value)
+
+    def cell_display_text(self, row, column):
+        widget = self.cellWidget(row, column)
+        if isinstance(widget, QComboBox):
+            return widget.currentText()
+
+        item = self.item(row, column)
+        return item.text() if item else ""
+
+    def set_cell_display_text(self, row, column, value):
+        widget = self.cellWidget(row, column)
+        if isinstance(widget, QComboBox):
+            value = str(value).strip()
+            if widget.findText(value) == -1:
+                widget.addItem(value)
+            widget.setCurrentText(value)
+            return
+        if widget is not None:
+            return
+
+        item = self.item(row, column)
+        if item is not None and not (item.flags() & Qt.ItemIsEditable):
+            return
+
+        if item is None:
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignCenter)
+            self.setItem(row, column, item)
+        item.setText(str(value))
 
 class CustomWebEngineView(QWebEngineView):
     def __init__(self):

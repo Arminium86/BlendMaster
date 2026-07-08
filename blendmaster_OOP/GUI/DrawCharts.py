@@ -1,7 +1,7 @@
 import sqlite3
 import pandas as pd
 import random
-import requests, time
+import requests, time, traceback
 import dash
 from dash import dcc, html, Input, Output, dash_table, Dash, State, callback_context
 import dash_bootstrap_components as dbc
@@ -25,6 +25,25 @@ class DrawStockProfiles:
         """
         self.db_path = db_path
         self.port = port
+        self.depletion_palette = [
+            "#7FB3D5",
+            "#82C4A2",
+            "#F3B56B",
+            "#D6B56D",
+            "#B59EDB",
+            "#E68A92",
+            "#79B8A9",
+            "#A5B4FC",
+            "#F2C94C",
+            "#8ECAD1",
+        ]
+        self.destination_pastel_palette = [
+            ("#B7D8F3", "#F6C28B"),
+            ("#C8E6C9", "#F4B6C2"),
+            ("#C9B8EA", "#F7E7A3"),
+            ("#BFD8D2", "#F3C7A6"),
+            ("#A5B4FC", "#D9C28F"),
+        ]
         self.app = Dash(__name__, server=Flask(__name__))  # Flask server for custom routes
         self.setup_layout()  # Set up the initial layout
         self.setup_callbacks()  # Set up the callbacks
@@ -44,7 +63,53 @@ class DrawStockProfiles:
             print(f"Error fetching data: {e}")
             return pd.DataFrame()
 
-    def create_charts(self, data):
+    def fetch_crusher_data(self):
+        """
+        Fetch one row per optimised steady state for the actual crusher feed chart.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            query = """
+                SELECT
+                    steady_state_number,
+                    start_datetime,
+                    end_datetime,
+                    blend_ID,
+                    steady_state_duration,
+                    crusher_actual_tonnes,
+                    crusher_rate_input,
+                    crusher_rate_output,
+                    actual_direct_tip_ratio
+                FROM optimised_blend_report
+            """
+            data = pd.read_sql(query, conn)
+            conn.close()
+        except Exception as e:
+            print(f"Error fetching crusher profile data: {e}")
+            return pd.DataFrame()
+
+        if data.empty:
+            return data
+
+        data = data.drop_duplicates(
+            subset=["steady_state_number", "start_datetime", "end_datetime", "blend_ID"]
+        ).copy()
+        data["start_datetime"] = pd.to_datetime(data["start_datetime"], errors="coerce")
+        data["end_datetime"] = pd.to_datetime(data["end_datetime"], errors="coerce")
+        for column in ["crusher_actual_tonnes", "crusher_rate_input", "crusher_rate_output", "actual_direct_tip_ratio"]:
+            data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
+        data["direct_tip_tonnes"] = data["crusher_actual_tonnes"] * data["actual_direct_tip_ratio"]
+        data["stockpile_feed_tonnes"] = (
+            data["crusher_actual_tonnes"] - data["direct_tip_tonnes"]
+        ).clip(lower=0)
+        data["direct_tip_rate_output"] = data["crusher_rate_output"] * data["actual_direct_tip_ratio"]
+        data["stockpile_feed_rate_output"] = (
+            data["crusher_rate_output"] - data["direct_tip_rate_output"]
+        ).clip(lower=0)
+        data["end_datetime_display"] = data["end_datetime"].dt.strftime("%Y-%m-%d %H:%M")
+        return data.sort_values("start_datetime")
+
+    def create_charts(self, data, crusher_data=None):
         """
         Create individual charts for each unique stockpile with random colors.
         :param data: DataFrame containing the data for the charts.
@@ -54,27 +119,51 @@ class DrawStockProfiles:
             print("No data available to create charts.")
             return [html.Div("No data available.")]
 
-        # Preprocess data: round and add aliases
-        data['Balance'] = data['balance'].round(1).fillna('None')
+        data = data.copy()
+        data['Balance'] = pd.to_numeric(data['balance'], errors='coerce').round(1)
+        for column in [
+            "arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile",
+            "movement_tonnes"
+        ]:
+            if column not in data.columns:
+                data[column] = 0
+            data[column] = pd.to_numeric(data[column], errors='coerce').fillna(0)
+        if "movement_destination" not in data.columns:
+            data["movement_destination"] = ""
         data['Steady State Number'] = data['steady_state_number'].fillna('None')
         data['Agent'] = data['agent'].fillna('None')
         data['Source or Destination'] = data['source_or_destination'].fillna('None')
+        data['profile_type'] = data.apply(self.profile_type_for_row, axis=1)
 
         # Format grades: round to 2 decimals and add % suffix
         for col in data.columns:
             if col.startswith('grade_'):
                 alias = col.replace('grade_', 'Grade ').capitalize()
-                data[alias] = data[col].round(2).astype(str) + '%'
+                data[alias] = pd.to_numeric(data[col], errors='coerce').round(2).astype(str) + '%'
 
-        # Generate a random color for each unique stockpile
-        unique_stockpiles = data['stockpile'].unique()
-        random_colors = {stockpile: self.generate_random_color() for stockpile in unique_stockpiles}
+        unique_sources = sorted(data['stockpile'].dropna().unique())
+        source_colors = {
+            stockpile: self.depletion_palette[index % len(self.depletion_palette)]
+            for index, stockpile in enumerate(unique_sources)
+        }
 
         charts = []
+        crusher_chart = self.create_actual_crusher_feed_chart(crusher_data)
+        if crusher_chart is not None:
+            charts.append(crusher_chart)
 
-        for stockpile in unique_stockpiles:
-            stockpile_data = data[data['stockpile'] == stockpile]
-            stockpile_color = random_colors[stockpile]
+        for stockpile in unique_sources:
+            stockpile_full_data = data[data['stockpile'] == stockpile].copy()
+            if stockpile_full_data.empty:
+                continue
+            movement_summary = self.grade_block_movement_summary(stockpile_full_data)
+            stockpile_data = stockpile_full_data.copy()
+            stockpile_data = self.prepare_profile_for_chart(stockpile_data)
+            if stockpile_data.empty:
+                continue
+            stockpile_color = source_colors[stockpile]
+            profile_type = stockpile_data['profile_type'].dropna().iloc[0]
+            profile_badge_color = "#2563eb" if profile_type == "Stockpile" else "#7c3aed"
 
             fig = px.area(
                 stockpile_data,
@@ -88,25 +177,564 @@ class DrawStockProfiles:
                     'Source or Destination': True,
                     **{alias: True for alias in stockpile_data.columns if alias.startswith('Grade ')}
                 },
-                title=f"Stockpile: {stockpile}"
             )
             fig.update_layout(
-                title=dict(
-                    text=f"Stockpile: {stockpile}",
-                    font=dict(color=stockpile_color)
-                ),
+                height=260,
+                margin=dict(l=54, r=26, t=14, b=48),
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#eef4fb",
                 xaxis_title='Time',
-                yaxis_title='Balance',
-                legend_title='Stockpile',
+                yaxis_title='Balance (WMT)',
+                showlegend=False,
                 font=dict(
-                family="Segoe UI",  # Set the font
-                size=14,            # Font size
-                color="black"       # Font color (optional)
+                    family="Segoe UI",
+                    size=12,
+                    color="#1f2937"
+                ),
+                hoverlabel=dict(
+                    bgcolor="#111827",
+                    font_size=12,
+                    font_family="Segoe UI"
                 )
             )
-            charts.append(dcc.Graph(figure=fig))
+            fig.update_traces(
+                line=dict(color=stockpile_color, width=2.4),
+                fillcolor=self.hex_to_rgba(stockpile_color, 0.42),
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Balance: %{y:,.1f} WMT<extra></extra>",
+            )
+            fig.update_xaxes(
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.30)",
+                zeroline=False,
+            )
+            fig.update_yaxes(
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.35)",
+                zeroline=False,
+            )
+
+            header_children = [
+                html.Span(
+                    profile_type,
+                    style={
+                        "backgroundColor": profile_badge_color,
+                        "color": "#ffffff",
+                        "fontSize": "12px",
+                        "fontWeight": "700",
+                        "padding": "4px 10px",
+                        "borderRadius": "999px",
+                        "marginRight": "10px",
+                    },
+                ),
+                html.Span(
+                    stockpile,
+                    style={
+                        "fontSize": "16px",
+                        "fontWeight": "650",
+                        "color": "#1f2937",
+                    },
+                ),
+            ]
+
+            card_children = [
+                html.Div(
+                    children=header_children,
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "padding": "12px 16px 4px 16px",
+                    },
+                )
+            ]
+            if profile_type == "Grade Block":
+                card_children.append(self.grade_block_summary_row(movement_summary))
+            card_children.append(
+                dcc.Graph(
+                    figure=fig,
+                    config={"displayModeBar": False, "responsive": True},
+                    style={"height": "270px"},
+                )
+            )
+            if profile_type == "Grade Block":
+                destination_chart = self.create_grade_block_destination_chart(
+                    stockpile_full_data,
+                    stockpile,
+                )
+                if destination_chart is not None:
+                    card_children.append(destination_chart)
+
+            charts.append(html.Div(
+                children=card_children,
+                style={
+                    "backgroundColor": "#ffffff",
+                    "border": "1px solid #dbe4ee",
+                    "borderRadius": "8px",
+                    "boxShadow": "0 8px 22px rgba(15, 23, 42, 0.06)",
+                    "margin": "0 0 16px 0",
+                    "overflow": "hidden",
+                },
+            ))
 
         return charts
+
+    def create_actual_crusher_feed_chart(self, crusher_data):
+        if crusher_data is None or crusher_data.empty:
+            return None
+
+        data = crusher_data.copy()
+        data = data.dropna(subset=["start_datetime"])
+        if data.empty:
+            return None
+
+        stockpile_series = self.expand_interval_series(
+            data,
+            "stockpile_feed_rate_output",
+            [
+                "end_datetime_display",
+                "steady_state_duration",
+                "stockpile_feed_tonnes",
+                "crusher_actual_tonnes",
+                "crusher_rate_output",
+            ],
+        )
+        direct_tip_series = self.expand_interval_series(
+            data,
+            "direct_tip_rate_output",
+            [
+                "end_datetime_display",
+                "steady_state_duration",
+                "direct_tip_tonnes",
+                "crusher_actual_tonnes",
+                "crusher_rate_output",
+            ],
+        )
+        target_series = self.expand_interval_series(
+            data,
+            "crusher_rate_input",
+            [
+                "end_datetime_display",
+                "steady_state_duration",
+            ],
+        )
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=stockpile_series["x"],
+            y=stockpile_series["y"],
+            name="Stockpile Feed",
+            mode="lines",
+            stackgroup="crusher_feed",
+            line=dict(color="#5DAF83", width=1.4, shape="hv"),
+            fillcolor="rgba(130, 196, 162, 0.58)",
+            customdata=stockpile_series["customdata"],
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                "End: %{customdata[0]}<br>"
+                "Duration: %{customdata[1]:.2f} hrs<br>"
+                "Stockpile Feed Rate: %{y:,.1f} t/h<br>"
+                "Stockpile Feed Tonnes: %{customdata[2]:,.1f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
+                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=direct_tip_series["x"],
+            y=direct_tip_series["y"],
+            name="Direct Tip",
+            mode="lines",
+            stackgroup="crusher_feed",
+            line=dict(color="#D9933F", width=1.4, shape="hv"),
+            fillcolor="rgba(243, 181, 107, 0.68)",
+            customdata=direct_tip_series["customdata"],
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                "End: %{customdata[0]}<br>"
+                "Duration: %{customdata[1]:.2f} hrs<br>"
+                "Direct Tip Rate: %{y:,.1f} t/h<br>"
+                "Direct Tip Tonnes: %{customdata[2]:,.1f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
+                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=target_series["x"],
+            y=target_series["y"],
+            mode="lines",
+            name="Crusher Rate Input",
+            line=dict(color="#dc2626", width=3, shape="hv"),
+            customdata=target_series["customdata"],
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                "End: %{customdata[0]}<br>"
+                "Duration: %{customdata[1]:.2f} hrs<br>"
+                "Crusher Rate Input: %{y:,.1f} t/h<extra></extra>"
+            ),
+        ))
+        fig.update_layout(
+            height=255,
+            margin=dict(l=58, r=24, t=12, b=50),
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#eef4fb",
+            xaxis_title="Time",
+            yaxis_title="Crusher Rate Output (t/h)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+            ),
+            font=dict(family="Segoe UI", size=12, color="#1f2937"),
+            hoverlabel=dict(bgcolor="#111827", font_size=12, font_family="Segoe UI"),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.30)", zeroline=False)
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.35)", zeroline=False)
+
+        return html.Div(
+            children=[
+                html.Div(
+                    children=[
+                        html.Span(
+                            "Crusher",
+                            style={
+                                "backgroundColor": "#0f766e",
+                                "color": "#ffffff",
+                                "fontSize": "12px",
+                                "fontWeight": "700",
+                                "padding": "4px 10px",
+                                "borderRadius": "999px",
+                                "marginRight": "10px",
+                            },
+                        ),
+                        html.Span(
+                            "Actual Crusher Feed",
+                            style={
+                                "fontSize": "16px",
+                                "fontWeight": "650",
+                                "color": "#1f2937",
+                            },
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "padding": "12px 16px 4px 16px",
+                    },
+                ),
+                dcc.Graph(
+                    figure=fig,
+                    config={"displayModeBar": False, "responsive": True},
+                    style={"height": "260px"},
+                ),
+            ],
+            style={
+                "backgroundColor": "#ffffff",
+                "border": "1px solid #dbe4ee",
+                "borderRadius": "8px",
+                "boxShadow": "0 8px 22px rgba(15, 23, 42, 0.06)",
+                "margin": "0 0 16px 0",
+                "overflow": "hidden",
+            },
+        )
+
+    def create_grade_block_destination_chart(self, stockpile_data, source_name):
+        destination_series = self.grade_block_destination_series(stockpile_data)
+        if destination_series.empty:
+            return None
+
+        stockpile_color, crusher_color = self.destination_color_pair(source_name)
+        custom_columns = [
+            "event_stockpile_tonnes",
+            "event_crusher_tonnes",
+            "stockpile_cumulative_tonnes",
+            "crusher_cumulative_tonnes",
+            "total_destination_tonnes",
+        ]
+        customdata = destination_series[custom_columns].to_numpy(dtype=object)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=destination_series["time"],
+            y=destination_series["stockpile_cumulative_tonnes"],
+            name="Sent to Stockpile",
+            mode="lines",
+            stackgroup="destination_split",
+            line=dict(color=stockpile_color, width=1.5, shape="hv"),
+            fillcolor=self.hex_to_rgba(stockpile_color, 0.66),
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                "Sent to Stockpile at this time: %{customdata[0]:,.1f} WMT<br>"
+                "Cumulative Sent to Stockpile: %{customdata[2]:,.1f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.1f} WMT<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=destination_series["time"],
+            y=destination_series["crusher_cumulative_tonnes"],
+            name="Sent to Crusher",
+            mode="lines",
+            stackgroup="destination_split",
+            line=dict(color=crusher_color, width=1.5, shape="hv"),
+            fillcolor=self.hex_to_rgba(crusher_color, 0.68),
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                "Sent to Crusher at this time: %{customdata[1]:,.1f} WMT<br>"
+                "Cumulative Sent to Crusher: %{customdata[3]:,.1f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.1f} WMT<extra></extra>"
+            ),
+        ))
+        fig.update_layout(
+            height=170,
+            margin=dict(l=54, r=26, t=8, b=42),
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#f4f8fc",
+            xaxis_title="Time",
+            yaxis_title="Cumulative Destination Tonnes (WMT)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                bgcolor="rgba(255,255,255,0.72)",
+            ),
+            font=dict(family="Segoe UI", size=11, color="#1f2937"),
+            hoverlabel=dict(bgcolor="#111827", font_size=12, font_family="Segoe UI"),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.28)", zeroline=False)
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.32)", zeroline=False)
+
+        return html.Div(
+            children=[
+                html.Div(
+                    "Destination Split",
+                    style={
+                        "fontSize": "12px",
+                        "fontWeight": "700",
+                        "color": "#475569",
+                        "padding": "0 0 2px 2px",
+                    },
+                ),
+                dcc.Graph(
+                    figure=fig,
+                    config={"displayModeBar": False, "responsive": True},
+                    style={"height": "178px"},
+                ),
+            ],
+            style={"padding": "0 16px 14px 16px"},
+        )
+
+    @staticmethod
+    def grade_block_destination_series(stockpile_data):
+        if stockpile_data is None or stockpile_data.empty:
+            return pd.DataFrame()
+
+        data = stockpile_data.copy()
+        data["time"] = pd.to_datetime(data.get("time"), errors="coerce")
+        for column in ["tonnes_to_stockpile", "tonnes_to_crusher"]:
+            if column not in data:
+                data[column] = 0
+            data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
+        data = data.dropna(subset=["time"])
+        if data.empty:
+            return pd.DataFrame()
+
+        movement_rows = data[
+            (data["tonnes_to_stockpile"] > 0) | (data["tonnes_to_crusher"] > 0)
+        ].copy()
+        if movement_rows.empty:
+            return pd.DataFrame()
+
+        movements = (
+            movement_rows
+            .groupby("time", as_index=False)[["tonnes_to_stockpile", "tonnes_to_crusher"]]
+            .sum()
+            .sort_values("time")
+        )
+
+        start_time = data["time"].min()
+        end_time = data["time"].max()
+        if pd.isna(start_time):
+            start_time = movements["time"].min()
+        if pd.isna(end_time) or end_time <= movements["time"].max():
+            end_time = movements["time"].max() + pd.Timedelta(minutes=1)
+
+        rows = [{
+            "time": start_time,
+            "event_stockpile_tonnes": 0.0,
+            "event_crusher_tonnes": 0.0,
+            "stockpile_cumulative_tonnes": 0.0,
+            "crusher_cumulative_tonnes": 0.0,
+            "total_destination_tonnes": 0.0,
+        }]
+
+        stockpile_cumulative = 0.0
+        crusher_cumulative = 0.0
+        for _, row in movements.iterrows():
+            event_stockpile = float(row["tonnes_to_stockpile"] or 0)
+            event_crusher = float(row["tonnes_to_crusher"] or 0)
+            stockpile_cumulative += event_stockpile
+            crusher_cumulative += event_crusher
+            rows.append({
+                "time": row["time"],
+                "event_stockpile_tonnes": event_stockpile,
+                "event_crusher_tonnes": event_crusher,
+                "stockpile_cumulative_tonnes": stockpile_cumulative,
+                "crusher_cumulative_tonnes": crusher_cumulative,
+                "total_destination_tonnes": stockpile_cumulative + crusher_cumulative,
+            })
+
+        rows.append({
+            "time": end_time,
+            "event_stockpile_tonnes": 0.0,
+            "event_crusher_tonnes": 0.0,
+            "stockpile_cumulative_tonnes": stockpile_cumulative,
+            "crusher_cumulative_tonnes": crusher_cumulative,
+            "total_destination_tonnes": stockpile_cumulative + crusher_cumulative,
+        })
+
+        return pd.DataFrame(rows).dropna(subset=["time"]).sort_values("time")
+
+    def destination_color_pair(self, source_name):
+        palette = getattr(self, "destination_pastel_palette", None) or [
+            ("#B7D8F3", "#F6C28B"),
+            ("#C8E6C9", "#F4B6C2"),
+            ("#C9B8EA", "#F7E7A3"),
+        ]
+        seed = sum((index + 1) * ord(char) for index, char in enumerate(str(source_name)))
+        return palette[seed % len(palette)]
+
+    @staticmethod
+    def expand_interval_series(data, value_column, custom_columns):
+        x_values = []
+        y_values = []
+        custom_values = []
+
+        for _, row in data.sort_values("start_datetime").iterrows():
+            start_time = row.get("start_datetime")
+            end_time = row.get("end_datetime")
+            if pd.isna(start_time) or pd.isna(end_time):
+                continue
+
+            y_value = row.get(value_column, 0)
+            try:
+                y_value = float(y_value)
+            except (TypeError, ValueError):
+                y_value = 0
+
+            custom_row = [row.get(column, "") for column in custom_columns]
+            x_values.extend([start_time, end_time])
+            y_values.extend([y_value, y_value])
+            custom_values.extend([custom_row, custom_row])
+
+        return {
+            "x": x_values,
+            "y": y_values,
+            "customdata": np.array(custom_values, dtype=object),
+        }
+
+    @staticmethod
+    def grade_block_movement_summary(stockpile_data):
+        data = stockpile_data.copy()
+        movement_destination = data.get("movement_destination", pd.Series("", index=data.index)).fillna("").astype(str)
+        source_or_destination = data.get("source_or_destination", pd.Series("", index=data.index)).fillna("").astype(str)
+        arrival_mask = (
+            movement_destination.str.contains("arrived", case=False, na=False)
+            | source_or_destination.str.contains("arrived", case=False, na=False)
+        )
+        arrival_source = data.loc[arrival_mask, "arrival_tonnes"] if arrival_mask.any() else data.get("arrival_tonnes", 0)
+        arrival_tonnes = float(pd.to_numeric(arrival_source, errors="coerce").fillna(0).sum())
+        tonnes_to_crusher = float(pd.to_numeric(
+            data.get("tonnes_to_crusher", 0), errors="coerce"
+        ).fillna(0).sum())
+        tonnes_to_stockpile = float(pd.to_numeric(
+            data.get("tonnes_to_stockpile", 0), errors="coerce"
+        ).fillna(0).sum())
+        remaining_tonnes = arrival_tonnes - tonnes_to_crusher - tonnes_to_stockpile
+        if abs(remaining_tonnes) < 0.5:
+            remaining_tonnes = 0
+
+        return {
+            "arrival_tonnes": arrival_tonnes,
+            "tonnes_to_crusher": tonnes_to_crusher,
+            "tonnes_to_stockpile": tonnes_to_stockpile,
+            "remaining_tonnes": max(remaining_tonnes, 0),
+        }
+
+    def grade_block_summary_row(self, summary):
+        return html.Div(
+            children=[
+                self.summary_chip("Arrived at ROM / Crusher Area", summary["arrival_tonnes"], "#e0f2fe", "#075985"),
+                self.summary_chip("To Crusher", summary["tonnes_to_crusher"], "#fee2e2", "#991b1b"),
+                self.summary_chip("To Stockpile", summary["tonnes_to_stockpile"], "#dbeafe", "#1e40af"),
+                self.summary_chip("Remaining", summary["remaining_tonnes"], "#f1f5f9", "#334155"),
+            ],
+            style={
+                "display": "flex",
+                "gap": "8px",
+                "flexWrap": "wrap",
+                "padding": "2px 16px 8px 16px",
+            },
+        )
+
+    @staticmethod
+    def summary_chip(label, value, background_color, text_color):
+        return html.Span(
+            f"{label}: {value:,.1f} WMT",
+            style={
+                "backgroundColor": background_color,
+                "color": text_color,
+                "fontSize": "12px",
+                "fontWeight": "650",
+                "padding": "5px 9px",
+                "borderRadius": "999px",
+            },
+        )
+
+    @staticmethod
+    def prepare_profile_for_chart(stockpile_data, max_points=900):
+        stockpile_data = stockpile_data.copy()
+        stockpile_data['time'] = pd.to_datetime(stockpile_data['time'], errors='coerce')
+        stockpile_data['Balance'] = pd.to_numeric(stockpile_data['Balance'], errors='coerce')
+        stockpile_data = stockpile_data.dropna(subset=['time', 'Balance']).sort_values('time')
+        if stockpile_data.empty:
+            return stockpile_data
+
+        balance_changed = stockpile_data['Balance'].ne(stockpile_data['Balance'].shift())
+        keep_mask = balance_changed | balance_changed.shift(-1, fill_value=False)
+        keep_mask.iloc[0] = True
+        keep_mask.iloc[-1] = True
+        stockpile_data = stockpile_data.loc[keep_mask].copy()
+
+        if len(stockpile_data) > max_points:
+            sampled_positions = np.linspace(0, len(stockpile_data) - 1, max_points).round().astype(int)
+            stockpile_data = stockpile_data.iloc[np.unique(sampled_positions)].copy()
+
+        return stockpile_data
+
+    @staticmethod
+    def profile_type_for_row(row):
+        source_type = str(row.get("source_type", "") or "").strip().lower()
+        source_name = str(row.get("stockpile", "") or "").strip()
+        if source_type in {"grade_block", "grade block", "gradeblock"}:
+            return "Grade Block"
+        if source_type == "stockpile":
+            return "Stockpile"
+        if source_name.startswith("Reserves/"):
+            return "Grade Block"
+        return "Stockpile"
+
+    @staticmethod
+    def hex_to_rgba(hex_color, alpha):
+        hex_color = hex_color.lstrip("#")
+        if len(hex_color) != 6:
+            return f"rgba(127, 179, 213, {alpha})"
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {alpha})"
 
     def setup_layout(self):
         """
@@ -115,8 +743,40 @@ class DrawStockProfiles:
         self.app.layout = html.Div(
             children=[
                 dcc.Input(id="manual-refresh", type="hidden"),  # Add the hidden input component
-                html.Div(id="chart-container", children=[]),
-            ]
+                html.Div(
+                    children=[
+                        html.Div(
+                            children=[
+                                html.Div(
+                                    "Depletion Profiles",
+                                    style={
+                                        "fontSize": "22px",
+                                        "fontWeight": "750",
+                                        "color": "#172033",
+                                    },
+                                ),
+                                html.Div(
+                                    "Optimised stockpile and grade-block balances through time",
+                                    style={
+                                        "fontSize": "13px",
+                                        "color": "#64748b",
+                                        "marginTop": "2px",
+                                    },
+                                ),
+                            ],
+                            style={"padding": "14px 4px 12px 4px"},
+                        ),
+                        html.Div(id="chart-container", children=[]),
+                    ],
+                    style={
+                        "backgroundColor": "#f8fafc",
+                        "padding": "12px 18px 18px 18px",
+                        "minHeight": "100vh",
+                        "fontFamily": "Segoe UI, Arial, sans-serif",
+                    },
+                ),
+            ],
+            style={"margin": "0", "backgroundColor": "#f8fafc"},
         )
 
     def setup_callbacks(self):
@@ -131,10 +791,26 @@ class DrawStockProfiles:
             """
             Callback to update charts dynamically when triggered.
             """
-            data = self.fetch_data()
-            if 'time' in data.columns:
-                data['time'] = pd.to_datetime(data['time'], errors='coerce')
-            return self.create_charts(data)
+            try:
+                data = self.fetch_data()
+                if 'time' in data.columns:
+                    data = data.copy()
+                    data['time'] = pd.to_datetime(data['time'], errors='coerce')
+                crusher_data = self.fetch_crusher_data()
+                return self.create_charts(data, crusher_data)
+            except Exception:
+                print(traceback.format_exc())
+                return html.Div(
+                    "Unable to load depletion profiles. Check the console for details.",
+                    style={
+                        "padding": "16px",
+                        "backgroundColor": "#fff7ed",
+                        "border": "1px solid #fdba74",
+                        "borderRadius": "8px",
+                        "color": "#9a3412",
+                        "fontWeight": "600",
+                    },
+                )
 
     def setup_routes(self):
         """
@@ -621,7 +1297,7 @@ class DrawGanttChart:
                 "source_blend_ratio_agg", "actual_direct_tip_ratio", "crusher_actual_tonnes",
                 "crusher_rate_output", "crusher_actual_grade_fe", "crusher_actual_grade_si",
                 "crusher_actual_grade_al", "crusher_actual_grade_p", "crusher_actual_grade_mn",
-            ]]
+            ]].copy()
             
             # Apply rounding to specific numeric columns
             data["steady_state_duration"] = data["steady_state_duration"].round(2)
@@ -639,7 +1315,7 @@ class DrawGanttChart:
             if click_data and "points" in click_data:
                 clicked_lane = click_data['points'][0]['y']  # Match lane (y-axis value) to blend_ID
                 clicked_blend_id = data.loc[data['lane'] == clicked_lane, 'blend_ID'].iloc[0]
-                filtered_data = data[data['blend_ID'] == clicked_blend_id]
+                filtered_data = data[data['blend_ID'] == clicked_blend_id].copy()
                 return filtered_data.to_dict("records")
             
             return data.to_dict("records")
