@@ -58,7 +58,22 @@ class Run:
     def is_abort_requested(self):
         return bool(self.abort_requested)
     
-    def execute(self, start_time, expit_mode, file_path, blend_mode, stockpile_data, calendar_inputs, hex_sequence_table, min_stockpiles=None, max_stockpiles=None, min_stockpile_contribution_ratio=None, solver_config=None):
+    def execute(
+        self,
+        start_time,
+        expit_mode,
+        file_path,
+        blend_mode,
+        stockpile_data,
+        calendar_inputs,
+        hex_sequence_table,
+        min_stockpiles=None,
+        max_stockpiles=None,
+        min_stockpile_contribution_ratio=None,
+        solver_config=None,
+        reevaluate_aps_direct_tip=False,
+        selected_aps_crusher=None,
+    ):
         self.abort_requested = False
 
         # Install required libraries
@@ -71,7 +86,11 @@ class Run:
 
         # Process APS expit data (mining.csv)
         if file_path:
-            expit_data_handler = ExpitDataHandler(file_path)
+            expit_data_handler = ExpitDataHandler(
+                file_path,
+                include_crusher_destinations=reevaluate_aps_direct_tip,
+                selected_crusher_name=selected_aps_crusher,
+            )
             expit_payload_transactions = expit_data_handler.process_transactions()
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
         else:

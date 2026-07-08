@@ -53,7 +53,9 @@ class BalanceTracker:
 
             # Loop through expit payload transactions and build stockpiles
             for _, transaction in expit_payload_transactions.iterrows():
-                name = transaction["destination"].replace("Stockpiles/", "")
+                name = self.resolve_payload_build_stockpile(transaction)
+                if not name:
+                    continue
                 delivered_datetime = transaction["delivered_datetime"]
                 payload = float(transaction["payload"] or 0)
                 agent = transaction["agent"]
@@ -131,6 +133,39 @@ class BalanceTracker:
     def get_build_transactions(self):
         """Retrieve the list of build transactions."""
         return pd.DataFrame(self.build_report)
+
+    def resolve_payload_build_stockpile(self, transaction):
+        destination = self.clean_stockpile_name(transaction.get("destination", ""))
+        if destination:
+            return destination
+
+        fallback_destination = self.clean_stockpile_name(transaction.get("fallback_destination", ""))
+        if fallback_destination:
+            return fallback_destination
+
+        destination_type = str(transaction.get("destination_type", "") or "").strip().lower()
+        aps_direct_tip_candidate = str(
+            transaction.get("aps_direct_tip_candidate", False)
+        ).strip().lower() in {"true", "1", "yes"}
+        if destination_type == "crusher" or aps_direct_tip_candidate:
+            return self.first_receiving_stockpile()
+
+        return ""
+
+    @staticmethod
+    def clean_stockpile_name(value):
+        if value is None or pd.isna(value):
+            return ""
+        value = str(value).strip()
+        if not value:
+            return ""
+        return value.replace("Stockpiles/", "")
+
+    def first_receiving_stockpile(self):
+        for name, state in self.state.items():
+            if str(state).strip().lower() in {"build", "auto"}:
+                return name
+        return ""
 
     def register_direct_tipped_tonnes(self, filtered_decision_point_results_to_user_choice: DataFrame):
         for payload_id, tonnes in self.get_direct_tipped_tonnes(filtered_decision_point_results_to_user_choice).items():

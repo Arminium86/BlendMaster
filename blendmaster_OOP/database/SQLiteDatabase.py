@@ -261,14 +261,28 @@ class DatabaseManager:
             source_grade_p REAL,
             destination TEXT,
             delivered_datetime TEXT,
-            direct_tip_id TEXT
+            direct_tip_id TEXT,
+            destination_type TEXT,
+            planned_destination TEXT,
+            fallback_destination TEXT,
+            aps_direct_tip_candidate INTEGER
         )
         ''')
 
         cursor.execute("PRAGMA table_info(expit_payload_transactions)")
         existing_columns = {row[1] for row in cursor.fetchall()}
-        if "direct_tip_id" not in existing_columns:
-            cursor.execute("ALTER TABLE expit_payload_transactions ADD COLUMN direct_tip_id TEXT")
+        optional_columns = {
+            "direct_tip_id": "TEXT",
+            "destination_type": "TEXT",
+            "planned_destination": "TEXT",
+            "fallback_destination": "TEXT",
+            "aps_direct_tip_candidate": "INTEGER",
+        }
+        for column_name, column_type in optional_columns.items():
+            if column_name not in existing_columns:
+                cursor.execute(
+                    f"ALTER TABLE expit_payload_transactions ADD COLUMN {column_name} {column_type}"
+                )
 
         cursor.execute('DELETE FROM expit_payload_transactions')
 
@@ -276,6 +290,12 @@ class DatabaseManager:
             results["direct_tip_id"] = [
                 f"GB_{index + 1:06d}" for index in range(len(results))
             ]
+        for column_name in optional_columns:
+            if column_name not in results.columns:
+                results[column_name] = "" if column_name != "aps_direct_tip_candidate" else 0
+        results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
+            lambda value: str(value).strip().lower() in {"true", "1", "yes"}
+        ).astype(int)
 
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -295,7 +315,11 @@ class DatabaseManager:
                 source_grade_p,
                 destination,
                 delivered_datetime,
-                direct_tip_id
+                direct_tip_id,
+                destination_type,
+                planned_destination,
+                fallback_destination,
+                aps_direct_tip_candidate
             ) VALUES (
                 :agent, 
                 :source, 
@@ -308,7 +332,11 @@ class DatabaseManager:
                 :source_grade_p, 
                 :destination, 
                 :delivered_datetime,
-                :direct_tip_id
+                :direct_tip_id,
+                :destination_type,
+                :planned_destination,
+                :fallback_destination,
+                :aps_direct_tip_candidate
             )
             ''', row.to_dict())
 

@@ -1,13 +1,14 @@
 import sys, threading, requests, os, pickle, copy, traceback
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
+from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
 from classes.PeriodManager import PeriodManager
 from datetime import datetime, timedelta
@@ -516,6 +517,7 @@ class UserInputs(QMainWindow):
             }}
             #siteConfigTab QLineEdit,
             #siteConfigTab QComboBox,
+            #siteConfigTab QListWidget,
             #siteConfigTab QDateTimeEdit {{
                 background-color: #ffffff;
                 border: 1px solid #cbd5e1;
@@ -525,6 +527,7 @@ class UserInputs(QMainWindow):
             }}
             #siteConfigTab QLineEdit:disabled,
             #siteConfigTab QComboBox:disabled,
+            #siteConfigTab QListWidget:disabled,
             #siteConfigTab QDateTimeEdit:disabled {{
                 color: #7b8794;
                 background-color: #f5f7fa;
@@ -550,8 +553,8 @@ class UserInputs(QMainWindow):
 
         form_card = QFrame()
         form_card.setObjectName("siteConfigCard")
-        form_card.setMinimumWidth(500)
-        form_card.setMaximumWidth(640)
+        form_card.setMinimumWidth(620)
+        form_card.setMaximumWidth(820)
         form_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         layout = QFormLayout(form_card)
         layout.setContentsMargins(18, 16, 18, 18)
@@ -656,6 +659,28 @@ class UserInputs(QMainWindow):
 
         layout.addRow(file_label, file_layout)
 
+        self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate APS direct tip tonnes")
+        self.reevaluate_aps_direct_tip_checkbox.setChecked(False)
+        self.aps_crusher_button = QPushButton("Get Crusher Names")
+        self.aps_crusher_button.setFixedWidth(140)
+        self.aps_crusher_button.setEnabled(False)
+        self.aps_crusher_button.clicked.connect(self.load_aps_crusher_names)
+        self.aps_crusher_input = QListWidget()
+        self.aps_crusher_input.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.aps_crusher_input.setMinimumWidth(420)
+        self.aps_crusher_input.setFixedHeight(74)
+        self.aps_crusher_input.setEnabled(False)
+
+        aps_direct_tip_layout = QVBoxLayout()
+        aps_direct_tip_layout.setSpacing(6)
+        aps_direct_tip_header_layout = QHBoxLayout()
+        aps_direct_tip_header_layout.addWidget(self.reevaluate_aps_direct_tip_checkbox)
+        aps_direct_tip_header_layout.addWidget(self.aps_crusher_button)
+        aps_direct_tip_header_layout.addStretch()
+        aps_direct_tip_layout.addLayout(aps_direct_tip_header_layout)
+        aps_direct_tip_layout.addWidget(self.aps_crusher_input)
+        layout.addRow(QLabel("APS Direct Tip:"), aps_direct_tip_layout)
+
         # --- Input 4: Optimised Blend Choices ---
         blend_label = QLabel("Optimised Blend Choices:")
         blend_label.setStyleSheet("font-weight: bold;")
@@ -704,14 +729,28 @@ class UserInputs(QMainWindow):
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
+        self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.toggle_aps_direct_tip_controls)
+        self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.validate_form)
+        self.aps_crusher_input.itemSelectionChanged.connect(self.validate_form)
 
     def validate_form(self):
         """Enable or disable the submit button based on form completion."""
+        aps_direct_tip_ready = True
+        if (
+            hasattr(self, "reevaluate_aps_direct_tip_checkbox")
+            and self.reevaluate_aps_direct_tip_checkbox.isChecked()
+        ):
+            aps_direct_tip_ready = (
+                bool(self.file_path.text().strip())
+                and hasattr(self, "aps_crusher_input")
+                and bool(self.selected_aps_crusher_names())
+            )
         all_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
+            and aps_direct_tip_ready
         )
         self.submit_button.setEnabled(all_fields_populated)
         self.save_button.setEnabled(all_fields_populated)
@@ -814,6 +853,86 @@ class UserInputs(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "CSV Files (*.csv);;All Files (*)")
         if file_path:
             self.file_path.setText(file_path)
+            if hasattr(self, "aps_crusher_input"):
+                self.aps_crusher_input.clear()
+
+    def toggle_aps_direct_tip_controls(self, enabled):
+        if hasattr(self, "aps_crusher_button"):
+            self.aps_crusher_button.setEnabled(bool(enabled))
+        if hasattr(self, "aps_crusher_input"):
+            self.aps_crusher_input.setEnabled(bool(enabled))
+            if not enabled:
+                self.aps_crusher_input.clear()
+
+    @staticmethod
+    def normalized_aps_crusher_choice(choice):
+        if choice is None:
+            return []
+        if isinstance(choice, (list, tuple, set)):
+            return [str(value).strip() for value in choice if str(value).strip()]
+        choice = str(choice).strip()
+        return [choice] if choice else []
+
+    def selected_aps_crusher_names(self):
+        if not hasattr(self, "aps_crusher_input"):
+            return []
+        if isinstance(self.aps_crusher_input, QListWidget):
+            return [
+                item.text().strip()
+                for item in self.aps_crusher_input.selectedItems()
+                if item.text().strip()
+            ]
+        if isinstance(self.aps_crusher_input, QComboBox):
+            text = self.aps_crusher_input.currentText().strip()
+            return [text] if text else []
+        return []
+
+    def set_aps_crusher_items(self, crusher_names, selected_crushers=None):
+        if not hasattr(self, "aps_crusher_input"):
+            return
+        selected_crushers = set(self.normalized_aps_crusher_choice(selected_crushers))
+        self.aps_crusher_input.clear()
+        self.aps_crusher_input.addItems(crusher_names)
+        if isinstance(self.aps_crusher_input, QListWidget):
+            for row in range(self.aps_crusher_input.count()):
+                item = self.aps_crusher_input.item(row)
+                item.setSelected(item.text().strip() in selected_crushers)
+
+    def load_aps_crusher_names(self):
+        file_path = self.file_path.text().strip() if hasattr(self, "file_path") else ""
+        if not file_path:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Select an APS Mining.csv file before loading crusher names.",
+            )
+            return
+
+        try:
+            crusher_names = ExpitDataHandler.get_distinct_crusher_destinations(file_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "BlendMaster",
+                f"Unable to read crusher names from APS Mining.csv: {exc}",
+            )
+            return
+
+        previous_selection = self.selected_aps_crusher_names()
+        self.set_aps_crusher_items(crusher_names, previous_selection)
+        if crusher_names:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                f"Found {len(crusher_names)} crusher destination(s). Select one or more crushers to re-evaluate.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "No crusher destinations were found in the selected APS Mining.csv file.",
+            )
+        self.validate_form()
 
     def update_mine_dropdown(self):
         """Update the Mine dropdown based on the selected Hub."""
@@ -848,10 +967,24 @@ class UserInputs(QMainWindow):
 
             self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
             self.file_path_choice = self.file_path.text()
+            self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
+            self.aps_direct_tip_crusher_choice = (
+                self.selected_aps_crusher_names()
+                if self.reevaluate_aps_direct_tip_choice
+                else []
+            )
             self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
             
             self.hub_input_choice = self.hub_input.currentText().strip()
             self.mine_input_choice = self.mine_input.currentText().strip()
+
+            if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
+                QMessageBox.warning(
+                    self,
+                    "Missing Information",
+                    "Load and select a crusher destination before re-evaluating APS direct tip tonnes.",
+                )
+                return
 
             if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
                 self.submit_button.setEnabled(False)
@@ -866,21 +999,56 @@ class UserInputs(QMainWindow):
                 QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
             
         else:
-            
-            self.time_mode.setCurrentIndex(self.time_mode_choice - 1)
-            self.start_time.setDateTime(QDateTime(
-                self.start_time_choice.year,
-                self.start_time_choice.month,
-                self.start_time_choice.day,
-                self.start_time_choice.hour,
-                self.start_time_choice.minute,
-                self.start_time_choice.second
-            ))
-            self.expit_mode.setCurrentText(str(self.expit_mode_choice))
-            self.file_path.setText(str(self.file_path_choice))
-            self.blend_mode.setCurrentText(str(self.blend_mode_choice))
-            self.hub_input.setCurrentText(str(self.hub_input_choice))
-            self.mine_input.setCurrentText(str(self.mine_input_choice))
+            if self.project_load_restore_in_progress:
+                self.time_mode.setCurrentIndex(self.time_mode_choice - 1)
+                self.start_time.setDateTime(QDateTime(
+                    self.start_time_choice.year,
+                    self.start_time_choice.month,
+                    self.start_time_choice.day,
+                    self.start_time_choice.hour,
+                    self.start_time_choice.minute,
+                    self.start_time_choice.second
+                ))
+                self.expit_mode.setCurrentText(str(self.expit_mode_choice))
+                self.file_path.setText(str(self.file_path_choice))
+                if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
+                    self.reevaluate_aps_direct_tip_checkbox.setChecked(
+                        bool(getattr(self, "reevaluate_aps_direct_tip_choice", False))
+                    )
+                if hasattr(self, "aps_crusher_input"):
+                    saved_crushers = self.normalized_aps_crusher_choice(
+                        getattr(self, "aps_direct_tip_crusher_choice", [])
+                    )
+                    self.set_aps_crusher_items(saved_crushers, saved_crushers)
+                self.blend_mode.setCurrentText(str(self.blend_mode_choice))
+                self.hub_input.setCurrentText(str(self.hub_input_choice))
+                self.mine_input.setCurrentText(str(self.mine_input_choice))
+            else:
+                self.time_mode_choice = self.time_mode.currentIndex() + 1
+                if self.time_mode_choice == 2:
+                    self.start_time_choice = self.start_time.dateTime().toPyDateTime()
+                else:
+                    self.start_time_choice = datetime.now()
+
+                self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+                self.file_path_choice = self.file_path.text()
+                self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
+                self.aps_direct_tip_crusher_choice = (
+                    self.selected_aps_crusher_names()
+                    if self.reevaluate_aps_direct_tip_choice
+                    else []
+                )
+                self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+                self.hub_input_choice = self.hub_input.currentText().strip()
+                self.mine_input_choice = self.mine_input.currentText().strip()
+
+                if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
+                    QMessageBox.warning(
+                        self,
+                        "Missing Information",
+                        "Load and select a crusher destination before re-evaluating APS direct tip tonnes.",
+                    )
+                    return
 
             if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
                 if not self.stockpile_data:
@@ -2212,7 +2380,9 @@ class UserInputs(QMainWindow):
             self.min_stockpiles,
             self.max_stockpiles,
             self.min_stockpile_contribution_ratio,
-            active_solver_config
+            active_solver_config,
+            getattr(self, "reevaluate_aps_direct_tip_choice", False),
+            getattr(self, "aps_direct_tip_crusher_choice", []),
         )
 
     def finish_run_program(self, periods):
@@ -4219,6 +4389,14 @@ class UserInputs(QMainWindow):
             self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
+        if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
+            self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
+        if hasattr(self, "aps_crusher_input"):
+            self.aps_direct_tip_crusher_choice = (
+                self.selected_aps_crusher_names()
+                if self.reevaluate_aps_direct_tip_choice
+                else []
+            )
         if hasattr(self, "blend_mode"):
             self.blend_mode_choice = self.blend_mode.currentIndex() + 1
 
@@ -4249,6 +4427,8 @@ class UserInputs(QMainWindow):
                 "default_start_datetime_str": self.default_start_datetime_str,
                 "expit_mode_choice": self.expit_mode_choice,
                 "file_path_choice": self.file_path_choice,
+                "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
+                "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
                 "hub_input_choice": self.hub_input_choice,
                 "opening_stockpile_inventories": self.opening_stockpile_inventories,
@@ -4312,6 +4492,15 @@ class UserInputs(QMainWindow):
             self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
             self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
             self.file_path_choice = loaded_state.get("file_path_choice", "")
+            self.reevaluate_aps_direct_tip_choice = loaded_state.get(
+                "reevaluate_aps_direct_tip_choice", False
+            )
+            self.aps_direct_tip_crusher_choice = loaded_state.get(
+                "aps_direct_tip_crusher_choice", []
+            )
+            self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
+                self.aps_direct_tip_crusher_choice
+            )
             self.mine_input_choice = loaded_state.get("mine_input_choice", None)
             self.hub_input_choice = loaded_state.get("hub_input_choice", None)
             self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
@@ -4377,6 +4566,8 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = None
         self.expit_mode_choice = None
         self.file_path_choice = None
+        self.reevaluate_aps_direct_tip_choice = False
+        self.aps_direct_tip_crusher_choice = []
         self.mine_input_choice = None
         self.hub_input_choice = None
         self.opening_stockpile_inventories = None

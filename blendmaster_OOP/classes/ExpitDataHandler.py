@@ -5,11 +5,45 @@ from datetime import datetime
 from pandas import DataFrame
 
 class ExpitDataHandler:
-    def __init__(self, input_data):
+    def __init__(self, input_data, include_crusher_destinations=False, selected_crusher_name=None):
+        self.include_crusher_destinations = bool(include_crusher_destinations)
+        self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
+        self.source_stockpile_fallbacks = {}
         self.data = pd.read_csv(input_data)
         if not self.data.empty:
             self._preprocess_data()
             self._group_data()
+
+    @staticmethod
+    def _normalize_selected_crusher_names(selected_crusher_name):
+        if selected_crusher_name is None:
+            return set()
+        if isinstance(selected_crusher_name, (list, tuple, set)):
+            return {
+                str(name).strip()
+                for name in selected_crusher_name
+                if str(name).strip()
+            }
+        selected_crusher_name = str(selected_crusher_name).strip()
+        return {selected_crusher_name} if selected_crusher_name else set()
+
+    @staticmethod
+    def get_distinct_crusher_destinations(input_data):
+        data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in {"Destination.Type", "Destination.FullName"}
+        )
+        if data.empty or "Destination.Type" not in data or "Destination.FullName" not in data:
+            return []
+
+        destination_type = data["Destination.Type"].astype("string").str.strip()
+        crusher_names = (
+            data.loc[destination_type == "Crusher", "Destination.FullName"]
+            .astype("string")
+            .str.strip()
+            .dropna()
+        )
+        return sorted(name for name in crusher_names.unique() if name)
 
     def _preprocess_data(self):
         # Explicit datetime parsing with the correct format
@@ -41,11 +75,69 @@ class ExpitDataHandler:
             "HaulageResult.TruckPayload": "float64",
             "HaulageResult.NumberOfTrips": "float64"
         })
-        # Filter and sort data (no direct tip yet)
+        self.source_stockpile_fallbacks = self._build_source_stockpile_fallbacks(self.data)
+
+        destination_type = self.data["Destination.Type"].str.strip()
+        destination_name = self.data["Destination.FullName"].str.strip()
+        stockpile_destination_mask = destination_type == "Stockpile"
+        crusher_destination_mask = pd.Series(False, index=self.data.index)
+        if self.include_crusher_destinations and self.selected_crusher_names:
+            crusher_destination_mask = (
+                (destination_type == "Crusher")
+                & destination_name.isin(self.selected_crusher_names)
+            )
+
+        # Filter and sort data. Stockpile destinations remain the planned APS builds.
+        # Selected crusher destinations are added as re-evaluable direct-tip candidates.
         self.data = self.data[
             (self.data["Source.Type"] == "Reserve") &
-            (self.data["Destination.Type"] == "Stockpile")
+            (stockpile_destination_mask | crusher_destination_mask)
         ].sort_values(by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"])
+
+    def _build_source_stockpile_fallbacks(self, data):
+        stockpile_rows = data[
+            (data["Source.Type"].str.strip() == "Reserve")
+            & (data["Destination.Type"].str.strip() == "Stockpile")
+        ].copy()
+        if stockpile_rows.empty:
+            return {}
+
+        stockpile_rows["Mining.wetTonnes"] = pd.to_numeric(
+            stockpile_rows["Mining.wetTonnes"], errors="coerce"
+        ).fillna(0)
+        destination_totals = (
+            stockpile_rows
+            .groupby(["Source.FullName", "Destination.FullName"], as_index=False)["Mining.wetTonnes"]
+            .sum()
+            .sort_values(
+                by=["Source.FullName", "Mining.wetTonnes", "Destination.FullName"],
+                ascending=[True, False, True]
+            )
+        )
+        return (
+            destination_totals
+            .drop_duplicates("Source.FullName")
+            .set_index("Source.FullName")["Destination.FullName"]
+            .to_dict()
+        )
+
+    def _payload_destination_metadata(self, row):
+        destination_type = str(row.get("Destination.Type", "") or "").strip()
+        planned_destination = str(row.get("Destination.FullName", "") or "").strip()
+        source_name = str(row.get("Source.FullName", "") or "").strip()
+        is_crusher_destination = destination_type == "Crusher"
+        fallback_destination = (
+            self.source_stockpile_fallbacks.get(source_name, "")
+            if is_crusher_destination
+            else planned_destination
+        )
+        return {
+            "destination": fallback_destination if is_crusher_destination else planned_destination,
+            "destination_type": destination_type,
+            "planned_destination": planned_destination,
+            "fallback_destination": fallback_destination,
+            "aps_direct_tip_candidate": bool(is_crusher_destination),
+        }
 
     def _group_data(self):
         # Create WeightedRate column without directly inserting into the fragmented DataFrame
@@ -106,9 +198,12 @@ class ExpitDataHandler:
                     start_time = row["Time.StartTime"]
                     destination = row["Destination.FullName"]
                     source_name = row["Source.FullName"]
+                    destination_metadata = self._payload_destination_metadata(row)
                     load_time = payload / row["HaulageResult.LoaderProductionRate.Wtph"]
                     num_trips = tonnes / payload
                     int_trips = int(num_trips)
+                    delivery_time = None
+                    mining_start_time = start_time
 
                     for trip in range(int_trips):
                         if trip == 0:
@@ -140,8 +235,8 @@ class ExpitDataHandler:
                             "source_grade_al": row["Mining.grades_al"],
                             "source_grade_mn": row["Mining.grades_mn"],
                             "source_grade_p": row["Mining.grades_p"],
-                            "destination": destination,
-                            "delivered_datetime": delivery_time
+                            "delivered_datetime": delivery_time,
+                            **destination_metadata,
                         })
 
                     # Handle fractional tonnes (top-up case)
@@ -184,16 +279,46 @@ class ExpitDataHandler:
                                 if group.at[i + 1, "Mining.wetTonnes"] <= 0:
                                     group.at[i + 1, "Mining.wetTonnes"] = 0  # Mark as used
 
+                            if delivery_time is not None:
+                                delivery_time = (
+                                    delivery_time +
+                                    timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                        load_time)
+                                )
+                                mining_start_time = (mining_start_time +
+                                timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                            load_time)
+                                )
+                            else:
+                                delivery_time = (
+                                    start_time +
+                                    timedelta(hours=load_time +
+                                            row["HaulageResult.Times.LoadedTravel"] / 60 +
+                                            row["HaulageResult.Times.SpotAtDump"] / 60 +
+                                            row["HaulageResult.Times.Dumping"] / 60)
+                                )
+                                mining_start_time = start_time
+
+                        elif delivery_time is not None:
                             delivery_time = (
                                 delivery_time +
                                 timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
                                     load_time)
                             )
-                            
-                            mining_start_time = (mining_start_time +
-                            timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
-                                        load_time)
+                            mining_start_time = (
+                                mining_start_time +
+                                timedelta(hours=row["HaulageResult.Times.SpotAtLoader"] / 60 +
+                                    load_time)
                             )
+                        else:
+                            delivery_time = (
+                                start_time +
+                                timedelta(hours=load_time +
+                                        row["HaulageResult.Times.LoadedTravel"] / 60 +
+                                        row["HaulageResult.Times.SpotAtDump"] / 60 +
+                                        row["HaulageResult.Times.Dumping"] / 60)
+                            )
+                            mining_start_time = start_time
 
                         # Append the topped-up trip
                         self.results.append({
@@ -206,8 +331,8 @@ class ExpitDataHandler:
                             "source_grade_al": weighted_grades["Grade_al"],
                             "source_grade_mn": weighted_grades["Grade_mn"],
                             "source_grade_p": weighted_grades["Grade_p"],
-                            "destination": destination,
-                            "delivered_datetime": delivery_time
+                            "delivered_datetime": delivery_time,
+                            **destination_metadata,
                         })
 
             return pd.DataFrame(self.results)
@@ -365,6 +490,9 @@ class ExpitDataHandler:
                 else: continue
 
             # Concatenate all updated groups into one DataFrame
+            if not updated_groups:
+                return updated_transactions.reset_index(drop=True)
+
             updated_transactions = pd.concat(updated_groups, ignore_index=True)
             
             return updated_transactions
