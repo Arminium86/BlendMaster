@@ -55,13 +55,100 @@ class UserInputs(QMainWindow):
 
         # Add AMT Stockpile Tab
         self.AMT_stockpile_tab = QWidget()
+        self.AMT_stockpile_tab.setObjectName("amtStockpileTab")
         self.AMT_stockpile_tab_index = self.tabs.addTab(self.AMT_stockpile_tab, "AMT Stockpiles")
         self.AMT_stockpile_tab_layout = QHBoxLayout(self.AMT_stockpile_tab)
+        self.AMT_stockpile_tab_layout.setContentsMargins(12, 10, 12, 10)
+        self.AMT_stockpile_tab_layout.setSpacing(10)
+        self.AMT_stockpile_tab.setStyleSheet("""
+            QWidget#amtStockpileTab {
+                background-color: #f8fafc;
+            }
+            QTableWidget#amtStockpileTable {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+                gridline-color: #e5e7eb;
+                selection-background-color: #dbeafe;
+                selection-color: #0f172a;
+                alternate-background-color: #f8fbff;
+            }
+            QHeaderView::section {
+                background-color: #f1f5f9;
+                color: #0f172a;
+                font-weight: 700;
+                border: 0;
+                border-right: 1px solid #dbe4ee;
+                border-bottom: 1px solid #dbe4ee;
+                padding: 7px 8px;
+            }
+            QFrame#amtSettingsFrame,
+            QFrame#amtMapFrame {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+            }
+            QLabel#amtPanelTitle {
+                color: #172033;
+                font-size: 18px;
+                font-weight: 750;
+            }
+            QLabel#amtPanelSubtitle {
+                color: #64748b;
+                font-size: 12px;
+                padding-bottom: 4px;
+            }
+            QPushButton#loadAMTMapButton {
+                background-color: #0f766e;
+                color: white;
+                border: 1px solid #0f766e;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: 650;
+                padding: 8px 14px;
+            }
+            QPushButton#loadAMTMapButton:hover {
+                background-color: #0d9488;
+            }
+            QPushButton#submitAMTChunksButton {
+                background-color: #2563eb;
+                color: white;
+                border: 1px solid #2563eb;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: 650;
+                padding: 8px 14px;
+            }
+            QPushButton#submitAMTChunksButton:hover {
+                background-color: #1d4ed8;
+            }
+        """)
 
         # Stockpile AMT Table
         self.AMT_stockpile_table = CustomTableWidget()
+        self.AMT_stockpile_table.setObjectName("amtStockpileTable")
         self.AMT_stockpile_table.setMinimumWidth(560)
-        self.AMT_stockpile_tab_layout.addWidget(self.AMT_stockpile_table, stretch=0)
+        self.AMT_stockpile_table.setAlternatingRowColors(True)
+        self.AMT_stockpile_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        self.AMT_settings_frame = QFrame()
+        self.AMT_settings_frame.setObjectName("amtSettingsFrame")
+        self.AMT_settings_frame.setFrameShape(QFrame.NoFrame)
+        self.AMT_settings_layout = QVBoxLayout(self.AMT_settings_frame)
+        self.AMT_settings_layout.setContentsMargins(12, 12, 12, 12)
+        self.AMT_settings_layout.setSpacing(8)
+
+        AMT_settings_title = QLabel("Chunk Settings")
+        AMT_settings_title.setObjectName("amtPanelTitle")
+        self.AMT_settings_layout.addWidget(AMT_settings_title)
+
+        AMT_settings_subtitle = QLabel("Set reclaim rate and target hours for each selected AMT stockpile.")
+        AMT_settings_subtitle.setObjectName("amtPanelSubtitle")
+        AMT_settings_subtitle.setWordWrap(True)
+        self.AMT_settings_layout.addWidget(AMT_settings_subtitle)
+        self.AMT_settings_layout.addWidget(self.AMT_stockpile_table)
+
+        self.AMT_stockpile_tab_layout.addWidget(self.AMT_settings_frame, stretch=0)
 
         # Add Solver Configuration Tab
         self.setup_solver_configuration_tab()
@@ -1632,32 +1719,36 @@ class UserInputs(QMainWindow):
 
             # Frame to surround the map view
             self.AMT_map_frame = QFrame()
-            self.AMT_map_frame.setFrameShape(QFrame.Box)
-            self.AMT_map_frame.setFrameShadow(QFrame.Sunken)
-            self.AMT_map_frame.setLineWidth(1)
-            self.AMT_map_frame.setStyleSheet("border: 0.5px solid black;")
+            self.AMT_map_frame.setObjectName("amtMapFrame")
+            self.AMT_map_frame.setFrameShape(QFrame.NoFrame)
             frame_layout = QVBoxLayout()
-            frame_layout.addWidget(self.AMT_map_view)
+            frame_layout.setContentsMargins(8, 8, 8, 8)
+            frame_layout.setSpacing(0)
+            frame_layout.addWidget(self.AMT_map_view, stretch=1)
             self.AMT_map_frame.setLayout(frame_layout)
 
             # Horizontal layout for map view and button
             self.AMT_stockpile_tab_vertical_layout = QVBoxLayout()
+            self.AMT_stockpile_tab_vertical_layout.setContentsMargins(0, 0, 0, 0)
+            self.AMT_stockpile_tab_vertical_layout.setSpacing(8)
             self.AMT_stockpile_tab_vertical_layout.addWidget(self.AMT_map_frame)
 
             # Add a button to load the chart
             self.load_AMT_button = QPushButton("Load or Update AMT Map")
-            self.load_AMT_button.setFixedWidth(200)
-            self.load_AMT_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional styling
+            self.load_AMT_button.setObjectName("loadAMTMapButton")
+            self.load_AMT_button.setMinimumWidth(190)
             self.load_AMT_button.clicked.connect(self.load_AMT_map)  # Connect button to function
-            self.AMT_stockpile_tab_vertical_layout.addWidget(self.load_AMT_button)
 
             # Add Submit Button at the Bottom
             submit_button = QPushButton("Submit")
-            submit_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional styling
+            submit_button.setObjectName("submitAMTChunksButton")
+            submit_button.setMinimumWidth(110)
             submit_button.clicked.connect(self.store_hex_sequence_table)
 
             # Align button to the bottom-left using layout
             button_layout = QHBoxLayout()
+            button_layout.setContentsMargins(0, 0, 0, 0)
+            button_layout.addWidget(self.load_AMT_button)
             button_layout.addWidget(submit_button)
             button_layout.addStretch()  # Push the button to the left
             self.AMT_stockpile_tab_vertical_layout.addLayout(button_layout)
@@ -2495,17 +2586,56 @@ class UserInputs(QMainWindow):
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
+        self.results_tab.setObjectName("resultsTab")
         self.results_tab_index = self.tabs.addTab(self.results_tab, "Results (Optimised)")
         self.results_layout = QVBoxLayout(self.results_tab)
+        self.results_layout.setContentsMargins(12, 10, 12, 10)
+        self.results_layout.setSpacing(10)
+        self.results_tab.setStyleSheet("""
+            QWidget#resultsTab {
+                background-color: #f8fafc;
+            }
+            QFrame#resultsChartFrame {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+            }
+            QPushButton#loadResultsChartButton {
+                background-color: #0f766e;
+                color: white;
+                border: 1px solid #0f766e;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: 650;
+                padding: 8px 14px;
+            }
+            QPushButton#loadResultsChartButton:hover {
+                background-color: #115e59;
+            }
+            QPushButton#loadResultsChartButton:pressed {
+                background-color: #134e4a;
+            }
+        """)
+
+        header_layout = QVBoxLayout()
+        header_layout.setSpacing(2)
+        results_title = QLabel("Optimised Results")
+        results_title.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
+        results_subtitle = QLabel("Blend schedule, source mix and crusher performance")
+        results_subtitle.setStyleSheet("font-size: 12px; color: #64748b;")
+        header_layout.addWidget(results_title)
+        header_layout.addWidget(results_subtitle)
+        self.results_layout.addLayout(header_layout)
 
         # Create a QFrame
         self.top_frame = QFrame()
-        self.top_frame.setFrameStyle(QFrame.Box | QFrame.Plain)  # Set a plain box-style frame
-        self.top_frame.setLineWidth(2)  # Set the frame's border width
-        self.top_frame.setStyleSheet("border-color: black;")  # Optional: Set border color
+        self.top_frame.setObjectName("resultsChartFrame")
+        self.top_frame.setFrameStyle(QFrame.NoFrame)
 
         # Add layout to the frame
         self.top_layout = QHBoxLayout()
+        self.top_layout.setContentsMargins(8, 8, 8, 8)
+        self.top_layout.setSpacing(0)
         self.top_frame.setLayout(self.top_layout)
 
         # Add the frame to the parent layout
@@ -2513,17 +2643,19 @@ class UserInputs(QMainWindow):
 
         # Top (Gantt Chart with CustomWebEngineView)
         self.gantt_chart_view = CustomWebEngineView()
-        self.gantt_chart_view.setStyleSheet("border: 1px solid black;")
+        self.gantt_chart_view.setStyleSheet("border: 0; background-color: #ffffff;")
         self.top_layout.addWidget(self.gantt_chart_view)
 
         # Add a button to load the chart
         self.load_chart_button = QPushButton("Load or Update Chart")
+        self.load_chart_button.setObjectName("loadResultsChartButton")
         self.load_chart_button.setFixedWidth(200)
-        self.load_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Optional: Style the button
         self.load_chart_button.clicked.connect(self.load_gantt_chart)  # Connect button to function
 
-        # Add the button to the layout (you can position it as needed)
-        self.results_layout.addWidget(self.load_chart_button)
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(self.load_chart_button)
+        controls_layout.addStretch()
+        self.results_layout.addLayout(controls_layout)
 
     def load_AMT_map(self):
         if not self.store_AMT_chunk_settings():
@@ -2570,7 +2702,7 @@ class UserInputs(QMainWindow):
             if conn is not None:
                 conn.close()
 
-        available_height = self.results_tab.height() - self.load_chart_button.sizeHint().height() - 28
+        available_height = self.results_tab.height() - self.load_chart_button.sizeHint().height() - 92
         available_height = max(420, available_height)
         desired_height = max(420, min(desired_height, available_height))
 

@@ -248,20 +248,29 @@ class DrawStockProfiles:
             ]
             if profile_type == "Grade Block":
                 card_children.append(self.grade_block_summary_row(movement_summary))
-            card_children.append(
-                dcc.Graph(
-                    figure=fig,
-                    config={"displayModeBar": False, "responsive": True},
-                    style={"height": "270px"},
-                )
-            )
-            if profile_type == "Grade Block":
                 destination_chart = self.create_grade_block_destination_chart(
                     stockpile_full_data,
                     stockpile,
                 )
                 if destination_chart is not None:
                     card_children.append(destination_chart)
+                else:
+                    card_children.append(html.Div(
+                        "No destination movements available for this grade block.",
+                        style={
+                            "padding": "18px 16px 22px 16px",
+                            "color": "#64748b",
+                            "fontSize": "13px",
+                        },
+                    ))
+            else:
+                card_children.append(
+                    dcc.Graph(
+                        figure=fig,
+                        config={"displayModeBar": False, "responsive": True},
+                        style={"height": "270px"},
+                    )
+                )
 
             charts.append(html.Div(
                 children=card_children,
@@ -486,8 +495,8 @@ class DrawStockProfiles:
             ),
         ))
         fig.update_layout(
-            height=170,
-            margin=dict(l=54, r=26, t=8, b=42),
+            height=260,
+            margin=dict(l=60, r=26, t=10, b=48),
             paper_bgcolor="#ffffff",
             plot_bgcolor="#f4f8fc",
             xaxis_title="Time",
@@ -520,7 +529,7 @@ class DrawStockProfiles:
                 dcc.Graph(
                     figure=fig,
                     config={"displayModeBar": False, "responsive": True},
-                    style={"height": "178px"},
+                    style={"height": "270px"},
                 ),
             ],
             style={"padding": "0 16px 14px 16px"},
@@ -541,14 +550,47 @@ class DrawStockProfiles:
         if data.empty:
             return pd.DataFrame()
 
-        movement_rows = data[
+        movement_destination = data.get(
+            "movement_destination",
+            pd.Series("", index=data.index),
+        ).fillna("").astype(str)
+        source_or_destination = data.get(
+            "source_or_destination",
+            pd.Series("", index=data.index),
+        ).fillna("").astype(str)
+        data["_is_arrival"] = (
+            pd.to_numeric(data.get("arrival_tonnes", 0), errors="coerce").fillna(0) > 0
+        ) | movement_destination.str.contains("arrived", case=False, na=False) | source_or_destination.str.contains(
+            "arrived", case=False, na=False
+        )
+        data["_is_movement"] = (
             (data["tonnes_to_stockpile"] > 0) | (data["tonnes_to_crusher"] > 0)
-        ].copy()
-        if movement_rows.empty:
+        )
+
+        movement_records = []
+        last_arrival_time = None
+        for _, row in data.sort_values("time").iterrows():
+            if bool(row.get("_is_arrival")):
+                last_arrival_time = row["time"]
+            if not bool(row.get("_is_movement")):
+                continue
+
+            movement_time = row["time"]
+            allocation_time = movement_time
+            if last_arrival_time is not None and last_arrival_time <= movement_time:
+                allocation_time = last_arrival_time
+
+            movement_records.append({
+                "time": allocation_time,
+                "tonnes_to_stockpile": row["tonnes_to_stockpile"],
+                "tonnes_to_crusher": row["tonnes_to_crusher"],
+            })
+
+        if not movement_records:
             return pd.DataFrame()
 
         movements = (
-            movement_rows
+            pd.DataFrame(movement_records)
             .groupby("time", as_index=False)[["tonnes_to_stockpile", "tonnes_to_crusher"]]
             .sum()
             .sort_values("time")
@@ -1053,31 +1095,55 @@ class DrawGanttChart:
             style={
                 'display': 'flex',
                 'flexDirection': 'column',
-                'gap': '10px',
+                'gap': '12px',
                 'padding': '12px',
                 'boxSizing': 'border-box',
-                'fontFamily': 'Segoe UI'
+                'fontFamily': 'Segoe UI, Arial, sans-serif',
+                'backgroundColor': '#f8fafc',
+                'minHeight': '100vh',
             },
             children=[
                 # Gantt Chart
                 html.Div(
                     style={
                         'width': '100%',
-                        'paddingBottom': '4px',
+                        'backgroundColor': '#ffffff',
+                        'border': '1px solid #dbe4ee',
+                        'borderRadius': '8px',
+                        'boxShadow': '0 8px 22px rgba(15, 23, 42, 0.06)',
+                        'padding': '12px 14px 14px 14px',
+                        'boxSizing': 'border-box',
                     },
                     children=[
-                        html.H3(
-                            "Gantt Chart & Blend Details",
-                            style={'margin': '0 0 8px 0', 'fontWeight': '600'}
+                        html.Div(
+                            children=[
+                                html.Div(
+                                    "Gantt Chart & Blend Details",
+                                    style={
+                                        'fontSize': '18px',
+                                        'fontWeight': '750',
+                                        'color': '#172033',
+                                    },
+                                ),
+                                html.Div(
+                                    "Click a bar to filter the steady-state table below.",
+                                    style={
+                                        'fontSize': '12px',
+                                        'color': '#64748b',
+                                        'marginTop': '2px',
+                                    },
+                                ),
+                            ],
+                            style={'margin': '0 0 10px 0'},
                         ),
                         dcc.Graph(
                             id="gantt-chart",
                             style={
                                 'width': '100%',
                                 'height': '320px',
-                                'border': '1px solid black',
+                                'border': '0',
                                 'padding': '0',
-                                'borderRadius': '4px',
+                                'borderRadius': '6px',
                                 'overflow': 'hidden',
                                 'boxSizing': 'border-box'
                             }
@@ -1086,8 +1152,24 @@ class DrawGanttChart:
                 ),
                 # Property Table
                 html.Div(
+                    style={
+                        'backgroundColor': '#ffffff',
+                        'border': '1px solid #dbe4ee',
+                        'borderRadius': '8px',
+                        'boxShadow': '0 8px 22px rgba(15, 23, 42, 0.05)',
+                        'padding': '10px 12px 12px 12px',
+                        'boxSizing': 'border-box',
+                    },
                     children=[
-                        html.H2(""),
+                        html.Div(
+                            "Steady-State Details",
+                            style={
+                                'fontSize': '15px',
+                                'fontWeight': '750',
+                                'color': '#172033',
+                                'margin': '0 0 8px 0',
+                            },
+                        ),
                         dash_table.DataTable(
                             id="property-table",
                             columns=[
@@ -1103,19 +1185,23 @@ class DrawGanttChart:
                             style_table={
                                 'overflowX': 'auto',
                                 'overflowY': 'auto',
-                                'maxHeight': '360px'
+                                'maxHeight': '360px',
+                                'border': '1px solid #e2e8f0',
+                                'borderRadius': '6px',
                             },
                             style_cell={
                                 'textAlign': 'center',
-                                'padding': '5px',
+                                'padding': '7px 8px',
                                 'whiteSpace': 'normal',
                                 'overflow': 'hidden',
                                 'textOverflow': 'ellipsis',
                                 'maxWidth': '150px',
                                 'height': 'auto',
                                 'lineHeight': '1.2',
-                                'fontFamily': 'Segoe UI',  # Set font for table cells
-                                'fontSize': '14px'         # Set font size for table cells
+                                'fontFamily': 'Segoe UI, Arial, sans-serif',
+                                'fontSize': '12px',
+                                'color': '#1f2937',
+                                'border': '1px solid #e5e7eb',
                             },
                             style_cell_conditional=[
                                 {'if': {'column_id': 'start_datetime'}, 'textAlign': 'center'},
@@ -1144,14 +1230,28 @@ class DrawGanttChart:
                             style_header={
                                 'fontWeight': 'bold',
                                 'textAlign': 'center',
-                                'fontFamily': 'Segoe UI',  # Set font for header
-                                'fontSize': '14px',        # Set font size for header
+                                'fontFamily': 'Segoe UI, Arial, sans-serif',
+                                'fontSize': '12px',
                                 'whiteSpace': 'normal',
                                 'height': 'auto',
                                 'lineHeight': '1.2',
-                                'padding': '5px',
+                                'padding': '8px',
                                 'overflow': 'hidden',
+                                'backgroundColor': '#f1f5f9',
+                                'color': '#0f172a',
+                                'border': '1px solid #dbe4ee',
                             },
+                            style_data_conditional=[
+                                {
+                                    'if': {'row_index': 'odd'},
+                                    'backgroundColor': '#f8fafc',
+                                },
+                                {
+                                    'if': {'state': 'selected'},
+                                    'backgroundColor': '#e0f2fe',
+                                    'border': '1px solid #38bdf8',
+                                },
+                            ],
                             hidden_columns=["lane"],  # Hide the lane column
                         )
                     ]
@@ -1172,9 +1272,9 @@ class DrawGanttChart:
             base_chart_style = {
                 'width': '100%',
                 'height': '320px',
-                'border': '1px solid black',
+                'border': '0',
                 'padding': '0',
-                'borderRadius': '4px',
+                'borderRadius': '6px',
                 'overflow': 'hidden',
                 'boxSizing': 'border-box'
             }
@@ -1236,7 +1336,7 @@ class DrawGanttChart:
                 marker=dict(
                     line=dict(
                         width=1,  # Border thickness
-                        color="black"  # Border color
+                        color="#475569"  # Border color
                     )
                 )
             )
@@ -1246,15 +1346,22 @@ class DrawGanttChart:
             fig.update_layout(
                 xaxis_title="",
                 yaxis_title="Blend",
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#eef4fb",
                 font=dict(
-                    family="Segoe UI",  # Set the font
-                    size=14,            # Font size
-                    color="black"       # Font color (optional)
+                    family="Segoe UI, Arial, sans-serif",
+                    size=12,
+                    color="#1f2937"
                 ),
                 yaxis=dict(
                     tickmode='array',
                     tickvals=lane_labels['lane'],
                     ticktext=lane_labels['blend_ID']  # Label lanes with blend_ID
+                ),
+                xaxis=dict(
+                    showgrid=True,
+                    gridcolor="rgba(148, 163, 184, 0.30)",
+                    zeroline=False,
                 ),
                 showlegend=True,
                 legend=dict(
@@ -1264,13 +1371,17 @@ class DrawGanttChart:
                 y=1.0,          # Position the legend vertically (can go beyond plot height)
                 xanchor="left", # Anchor the legend box horizontally
                 x=1.02,         # Position the legend horizontally
-                bgcolor="rgba(255,255,255,0.5)",
-                bordercolor="black",
+                bgcolor="rgba(255,255,255,0.82)",
+                bordercolor="#dbe4ee",
                 borderwidth=1
                 ),
                 autosize=True,
                 height=chart_height,
                 margin=dict(l=64, r=260, t=20, b=54)
+            )
+            fig.update_yaxes(
+                showgrid=False,
+                zeroline=False,
             )
 
             return fig, chart_style
@@ -1829,96 +1940,187 @@ class DrawAMTStockpile:
                 conn.close()
 
     def init_layout(self):
+        page_style = {
+            "backgroundColor": "#f8fafc",
+            "fontFamily": "Segoe UI, Arial, sans-serif",
+            "padding": "14px 16px 18px",
+            "color": "#172033",
+        }
+        card_style = {
+            "backgroundColor": "#ffffff",
+            "border": "1px solid #d8e0ea",
+            "borderRadius": "8px",
+            "boxShadow": "0 8px 20px rgba(15, 23, 42, 0.05)",
+            "padding": "12px",
+        }
+        label_style = {
+            "fontSize": "12px",
+            "fontWeight": "700",
+            "color": "#334155",
+            "marginBottom": "6px",
+        }
+        button_style = {
+            "borderRadius": "5px",
+            "fontWeight": "650",
+            "fontSize": "12px",
+            "padding": "7px 10px",
+            "marginRight": "8px",
+            "marginBottom": "8px",
+        }
+
         self.app.layout = dbc.Container([
-
-            html.H5("AMT Stockpile Chunks"),
-
-            # Dropdown for footprint selection
-            dbc.Row([
-                dbc.Col([
-                    dcc.Dropdown(
-                        id="footprint-dropdown",
-                        options=[{"label": fp, "value": fp} for fp in self.unique_footprints],
-                        placeholder="Select a Footprint",
-                        style={"marginBottom": "10px"}
+            html.Div([
+                html.Div([
+                    html.H4(
+                        "AMT Stockpile Chunks",
+                        style={"fontWeight": "750", "margin": "0", "letterSpacing": "0", "color": "#172033"}
                     ),
-                    dcc.Upload(
-                        id="upload-dxf",
-                        children=dbc.Button("Overlay arch_d", color="secondary", size="md"),
-                        multiple=False,  # Allow only one file at a time
-                        style={"marginBottom": "10px"}
-                    )
-                ], 
-                width=6),
+                    html.Div(
+                        "Digitize reclaim and cut directions, then generate practical chunks for AMT stockpiles.",
+                        style={"fontSize": "12px", "color": "#64748b", "marginTop": "3px"}
+                    ),
+                ]),
+            ], style={**card_style, "marginBottom": "10px"}),
+
+            dbc.Row([
                 dbc.Col([
                     html.Div([
-                        dbc.Button("Digitize Reclaim Direction", id="digitize-direction-button", color="info", size="sm", style={"marginRight": "8px"}),
-                        dbc.Button("Digitize Cut Direction", id="digitize-cut-direction-button", color="info", size="sm", style={"marginRight": "8px"}),
-                        dbc.Button("Generate Chunks", id="generate-chunks-button", color="success", size="sm", style={"marginRight": "8px"}),
-                        dbc.Button("Clear Footprint Chunks", id="clear-footprint-button", color="warning", size="sm"),
-                    ], style={"marginBottom": "8px"}),
-                    html.Div(
-                        id="chunk-status",
-                        children=self.status_message,
-                        style={"fontSize": "12px", "fontWeight": "bold", "color": "darkblue"}
-                    )
-                ], width=6),
-            ]),
+                        html.Label("Selected Footprint", style=label_style),
+                        dcc.Dropdown(
+                            id="footprint-dropdown",
+                            options=[{"label": fp, "value": fp} for fp in self.unique_footprints],
+                            placeholder="Select a footprint",
+                            style={"fontSize": "13px"}
+                        ),
+                        html.Div(style={"height": "8px"}),
+                        dcc.Upload(
+                            id="upload-dxf",
+                            children=dbc.Button(
+                                "Overlay arch_d",
+                                size="sm",
+                                style={
+                                    **button_style,
+                                    "backgroundColor": "#475569",
+                                    "borderColor": "#475569",
+                                    "color": "#ffffff",
+                                    "marginBottom": "0",
+                                }
+                            ),
+                            multiple=False,
+                        ),
+                    ], style=card_style)
+                ], md=5),
+                dbc.Col([
+                    html.Div([
+                        html.Div([
+                            dbc.Button(
+                                "Digitize Reclaim Direction",
+                                id="digitize-direction-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#0e7490", "borderColor": "#0e7490", "color": "#ffffff"}
+                            ),
+                            dbc.Button(
+                                "Digitize Cut Direction",
+                                id="digitize-cut-direction-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#2563eb", "borderColor": "#2563eb", "color": "#ffffff"}
+                            ),
+                            dbc.Button(
+                                "Generate Chunks",
+                                id="generate-chunks-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#15803d", "borderColor": "#15803d", "color": "#ffffff"}
+                            ),
+                            dbc.Button(
+                                "Clear Footprint Chunks",
+                                id="clear-footprint-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#f59e0b", "borderColor": "#f59e0b", "color": "#172033"}
+                            ),
+                        ]),
+                        html.Div(
+                            id="chunk-status",
+                            children=self.status_message,
+                            style={
+                                "display": "inline-block",
+                                "fontSize": "12px",
+                                "fontWeight": "700",
+                                "color": "#1e3a8a",
+                                "backgroundColor": "#eff6ff",
+                                "border": "1px solid #bfdbfe",
+                                "borderRadius": "999px",
+                                "padding": "6px 10px",
+                            }
+                        )
+                    ], style={**card_style, "minHeight": "100%"})
+                ], md=7),
+            ], style={"marginBottom": "10px"}),
 
-            # Hex Size Control (Slider)
+            html.Div([
+                html.Label("Hexagon Marker Size", style=label_style),
+                dcc.Slider(
+                    id="hex-size-slider",
+                    min=5,
+                    max=50,
+                    step=1,
+                    value=25,
+                    marks={5: "5", 25: "25", 50: "50"},
+                    tooltip={"placement": "bottom", "always_visible": True}
+                )
+            ], style={**card_style, "marginBottom": "10px"}),
+
             dbc.Row([
                 dbc.Col([
-                    html.Label(
-                        "Hexagon Marker Size:",
-                        style={
-                            "fontSize": "16px",  # Font size
-                            "fontWeight": "bold",  # Make text bold
-                            "color": "darkblue",  # Change text color
-                            "fontFamily": "Arial, sans-serif",  # Set font family
-                            "marginBottom": "5px"  # Add space below label
-                        }
-                    ),
-                    dcc.Slider(
-                        id="hex-size-slider",
-                        min=5,
-                        max=50,
-                        step=1,
-                        value=25,  # Default hex size
-                        marks={5: "5", 25: "25", 50: "50"},
-                        tooltip={"placement": "bottom", "always_visible": True}
-                    )
-                ], width=6),
-            ], style={"marginBottom": "20px"}),
-
-            # Graph and Table Layout
-            dbc.Row([
-                # Graph (75% width)
+                    html.Div([
+                        dcc.Graph(
+                            id="scatter-plot",
+                            config={"scrollZoom": True},
+                            style={"height": "600px", "width": "100%"}
+                        )
+                    ], style={**card_style, "padding": "8px"})
+                ], md=9),
                 dbc.Col([
-                    dcc.Graph(
-                        id="scatter-plot",
-                        config={"scrollZoom": True},
-                        style={"height": "600px", "width": "100%"}
-                    )
-                ], width=9),
-
-                # Table (25% width)
-                dbc.Col([
-                    dash_table.DataTable(
-                        id="selected-table",
-                        columns=[{"name": col, "id": col} for col in
-                                ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
-                                'grade_mn', 'hex_count', 'chunk_size']],
-                        data=self.selected_points or [],
-                        row_deletable=False,
-                        editable=False,
-                        style_table={'overflowX': 'auto', 'maxHeight': '600px', 'overflowY': 'auto'},
-                        style_cell={'textAlign': 'center', 'fontFamily': 'Segoe UI', 'fontSize': '10.5px'},
-                        style_header={'fontWeight': 'bold', 'fontSize': '12px', 'fontFamily': 'Segoe UI', 'textAlign': 'center'}
-                    )
-                ], width=3),
+                    html.Div([
+                        html.Div(
+                            "Chunk Sequence",
+                            style={"fontWeight": "750", "fontSize": "14px", "marginBottom": "8px", "color": "#172033"}
+                        ),
+                        dash_table.DataTable(
+                            id="selected-table",
+                            columns=[{"name": col, "id": col} for col in
+                                    ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
+                                    'grade_mn', 'hex_count', 'chunk_size']],
+                            data=self.selected_points or [],
+                            row_deletable=False,
+                            editable=False,
+                            style_table={'overflowX': 'auto', 'maxHeight': '580px', 'overflowY': 'auto'},
+                            style_cell={
+                                'textAlign': 'center',
+                                'fontFamily': 'Segoe UI',
+                                'fontSize': '10.5px',
+                                'padding': '6px',
+                                'border': '1px solid #e5e7eb',
+                                'color': '#172033',
+                            },
+                            style_header={
+                                'fontWeight': 'bold',
+                                'fontSize': '11px',
+                                'fontFamily': 'Segoe UI',
+                                'textAlign': 'center',
+                                'backgroundColor': '#f1f5f9',
+                                'border': '1px solid #dbe4ee',
+                                'color': '#172033',
+                            },
+                            style_data_conditional=[
+                                {'if': {'row_index': 'odd'}, 'backgroundColor': '#f8fbff'},
+                                {'if': {'state': 'selected'}, 'backgroundColor': '#dbeafe', 'border': '1px solid #93c5fd'},
+                            ],
+                        )
+                    ], style={**card_style, "height": "100%"})
+                ], md=3),
             ]),
 
-        ], fluid=False)
+        ], fluid=True, style=page_style)
 
         if not self.refresh_call:
 
@@ -2157,8 +2359,9 @@ class DrawAMTStockpile:
         chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
         filtered_data["chunk_sequence"] = filtered_data["hex"].map(chunk_lookup)
         chunk_palette = [
-            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+            "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7",
+            "#BFD8D2", "#C9B8EA", "#F4B6C2", "#8ECAD1", "#D7E8BA",
+            "#F3C0A8", "#B8D8F0", "#E7D3A0", "#C6E2C6", "#D8C8E8"
         ]
 
         chunked_data = filtered_data[filtered_data["chunk_sequence"].notna()]
@@ -2168,7 +2371,13 @@ class DrawAMTStockpile:
                 x=group["long"],
                 y=group["lat"],
                 mode="markers",
-                marker=dict(size=hex_size, symbol="hexagon", color=color),
+                marker=dict(
+                    size=hex_size,
+                    symbol="hexagon",
+                    color=color,
+                    line=dict(color="#334155", width=1),
+                    opacity=0.95
+                ),
                 name=f"Chunk {int(chunk_sequence)}",
                 customdata=group[[
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
@@ -2195,7 +2404,13 @@ class DrawAMTStockpile:
                 x=remaining_data["long"],
                 y=remaining_data["lat"],
                 mode="markers",
-                marker=dict(size=hex_size, symbol="hexagon", color="#2ca02c"),
+                marker=dict(
+                    size=hex_size,
+                    symbol="hexagon",
+                    color="#94a3b8",
+                    line=dict(color="#475569", width=1),
+                    opacity=0.72
+                ),
                 name="Available Hexagons",
                 customdata=remaining_data[[
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
@@ -2253,24 +2468,43 @@ class DrawAMTStockpile:
             title={
                 "text": f"Stockpile AMT Map: {selected_footprint}",
                 "font": {
-                    "size": 20,  # Title font size
-                    "family": "Arial, sans-serif",  # Font family
-                    "color": "darkblue"  # Font color
+                    "size": 17,
+                    "family": "Segoe UI, Arial, sans-serif",
+                    "color": "#172033"
                 },
-                "x": 0.5,  # Centers the title
+                "x": 0.5,
             },
             xaxis=dict(
                 title="Longitude",
-                titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
-                tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+                titlefont=dict(size=13, family="Segoe UI, Arial, sans-serif", color="#172033"),
+                tickfont=dict(size=11, family="Segoe UI, Arial, sans-serif", color="#475569"),
+                gridcolor="#d7e2ee",
+                zeroline=False
             ),
             yaxis=dict(
                 title="Latitude",
-                titlefont=dict(size=16, family="Arial, sans-serif", color="black"),
-                tickfont=dict(size=12, family="Arial, sans-serif", color="gray")
+                titlefont=dict(size=13, family="Segoe UI, Arial, sans-serif", color="#172033"),
+                tickfont=dict(size=11, family="Segoe UI, Arial, sans-serif", color="#475569"),
+                gridcolor="#d7e2ee",
+                zeroline=False
             ),
             xaxis_scaleanchor="y",
-            yaxis_scaleanchor="x"
+            yaxis_scaleanchor="x",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#eef4fb",
+            margin=dict(l=58, r=20, t=58, b=56),
+            legend=dict(
+                bgcolor="rgba(255,255,255,0.9)",
+                bordercolor="#d8e0ea",
+                borderwidth=1,
+                font=dict(size=11, color="#334155"),
+                orientation="v"
+            ),
+            hoverlabel=dict(
+                bgcolor="#172033",
+                bordercolor="#172033",
+                font=dict(color="#ffffff", family="Segoe UI, Arial, sans-serif", size=12)
+            )
         )
 
         # Preserve zoom state if relayout data is provided
