@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget
@@ -282,6 +282,7 @@ class UserInputs(QMainWindow):
         self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout, stretch=1)
 
         self.setup_grade_profile_tab()
+        self.setup_agent_instructions_tab()
 
         # Workflow controls
         self.load_profiles_first_call = True
@@ -318,6 +319,7 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(self.blend_config_tab_index, False)
         self.tabs.setTabEnabled(self.blend_sequence_tab_index, False)
         self.tabs.setTabEnabled(self.grade_profile_tab_index, False)
+        self.tabs.setTabEnabled(self.agent_tab_index, bool(getattr(self, "agent_enabled_choice", False)))
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -787,6 +789,12 @@ class UserInputs(QMainWindow):
 
         layout.addRow(blend_label, self.blend_mode)
 
+        agent_label = QLabel("PoC Agent:")
+        agent_label.setStyleSheet("font-weight: bold;")
+        self.agent_enabled_checkbox = QCheckBox("Enable BlendMaster agent bridge")
+        self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
+        layout.addRow(agent_label, self.agent_enabled_checkbox)
+
         # Save and load button
         self.save_button = QPushButton("Save Project")
         self.save_button.setFixedWidth(100)
@@ -826,6 +834,7 @@ class UserInputs(QMainWindow):
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
+        self.agent_enabled_checkbox.toggled.connect(self.toggle_agent_enabled)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.toggle_aps_direct_tip_controls)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.validate_form)
         self.aps_crusher_input.itemSelectionChanged.connect(self.validate_form)
@@ -1071,6 +1080,11 @@ class UserInputs(QMainWindow):
                 else []
             )
             self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
+            self.agent_enabled_choice = (
+                self.agent_enabled_checkbox.isChecked()
+                if hasattr(self, "agent_enabled_checkbox")
+                else False
+            )
             
             self.hub_input_choice = self.hub_input.currentText().strip()
             self.mine_input_choice = self.mine_input.currentText().strip()
@@ -1118,6 +1132,14 @@ class UserInputs(QMainWindow):
                     )
                     self.set_aps_crusher_items(saved_crushers, saved_crushers)
                 self.blend_mode.setCurrentText(str(self.blend_mode_choice))
+                if hasattr(self, "agent_enabled_checkbox"):
+                    self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
+                if hasattr(self, "agent_story_input"):
+                    self.agent_story_input.setPlainText(getattr(self, "agent_story_text", ""))
+                if hasattr(self, "agent_run_instructions_input"):
+                    self.agent_run_instructions_input.setPlainText(getattr(self, "agent_run_instructions_text", ""))
+                if hasattr(self, "agent_bridge_port_input"):
+                    self.agent_bridge_port_input.setText(str(getattr(self, "agent_bridge_port", 8765)))
                 self.hub_input.setCurrentText(str(self.hub_input_choice))
                 self.mine_input.setCurrentText(str(self.mine_input_choice))
             else:
@@ -1136,6 +1158,11 @@ class UserInputs(QMainWindow):
                     else []
                 )
                 self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+                self.agent_enabled_choice = (
+                    self.agent_enabled_checkbox.isChecked()
+                    if hasattr(self, "agent_enabled_checkbox")
+                    else False
+                )
                 self.hub_input_choice = self.hub_input.currentText().strip()
                 self.mine_input_choice = self.mine_input.currentText().strip()
 
@@ -1172,9 +1199,2055 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(self.stockpile_tab_index, True)
         self.tabs.setCurrentIndex(self.stockpile_tab_index)  # Switch to the next tab
 
+        if getattr(self, "agent_workflow_after_site_config", False):
+            self.agent_workflow_after_site_config = False
+            QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
+
     def handle_site_config_error(self, error_message):
         self.submit_button.setEnabled(True)
+        if getattr(self, "agent_workflow_after_site_config", False):
+            self.agent_workflow_after_site_config = False
+            self.stop_agent_workflow_apply(f"Agent workflow stopped on Site Configuration fetch: {error_message}")
         self.show_error_popup(error_message)
+
+    def setup_agent_instructions_tab(self):
+        self.agent_tab = QWidget()
+        self.agent_tab.setObjectName("agentInstructionsTab")
+        self.agent_tab_index = self.tabs.addTab(self.agent_tab, "Agent Instructions")
+        self.agent_layout = QVBoxLayout(self.agent_tab)
+        self.agent_layout.setContentsMargins(14, 12, 14, 12)
+        self.agent_layout.setSpacing(10)
+        self.agent_tab.setStyleSheet("""
+            QWidget#agentInstructionsTab {
+                background-color: #f8fafc;
+            }
+            QFrame#agentPanel {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+            }
+            QLabel#agentTitle {
+                color: #172033;
+                font-size: 20px;
+                font-weight: 750;
+            }
+            QLabel#agentSubtitle,
+            QLabel#agentMuted {
+                color: #64748b;
+                font-size: 12px;
+            }
+            QTextEdit,
+            QTableWidget,
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #b8c4d2;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #eef7f0;
+                border-color: #98d4a6;
+            }
+        """)
+
+        title = QLabel("BlendMaster Agent Bridge")
+        title.setObjectName("agentTitle")
+        self.agent_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "BlendMaster launches the local bridge. Connect Codex to the MCP endpoint, then submit a request from here."
+        )
+        subtitle.setObjectName("agentSubtitle")
+        subtitle.setWordWrap(True)
+        self.agent_layout.addWidget(subtitle)
+
+        bridge_frame = QFrame()
+        bridge_frame.setObjectName("agentPanel")
+        bridge_layout = QVBoxLayout(bridge_frame)
+        bridge_layout.setContentsMargins(12, 10, 12, 10)
+
+        bridge_row = QHBoxLayout()
+        self.agent_bridge_status_label = QLabel("Bridge stopped.")
+        self.agent_bridge_status_label.setObjectName("agentMuted")
+        self.agent_bridge_port_input = QLineEdit()
+        self.agent_bridge_port_input.setText(str(getattr(self, "agent_bridge_port", 8765)))
+        self.agent_bridge_port_input.setValidator(QIntValidator(1024, 65535, self))
+        self.agent_bridge_port_input.setFixedWidth(80)
+        self.agent_bridge_url_input = QLineEdit()
+        self.agent_bridge_url_input.setReadOnly(True)
+        self.agent_bridge_url_input.setText(self.agent_bridge_mcp_url())
+        self.agent_bridge_url_input.setMinimumWidth(360)
+        self.agent_bridge_port_input.textChanged.connect(
+            lambda: self.agent_bridge_url_input.setText(self.agent_bridge_mcp_url())
+        )
+
+        self.agent_start_bridge_button = QPushButton("Start Bridge")
+        self.agent_start_bridge_button.clicked.connect(self.start_agent_bridge)
+        self.agent_stop_bridge_button = QPushButton("Stop Bridge")
+        self.agent_stop_bridge_button.clicked.connect(self.stop_agent_bridge)
+
+        bridge_row.addWidget(QLabel("Port:"))
+        bridge_row.addWidget(self.agent_bridge_port_input)
+        bridge_row.addWidget(QLabel("MCP URL:"))
+        bridge_row.addWidget(self.agent_bridge_url_input, stretch=1)
+        bridge_row.addWidget(self.agent_start_bridge_button)
+        bridge_row.addWidget(self.agent_stop_bridge_button)
+        bridge_layout.addLayout(bridge_row)
+        bridge_layout.addWidget(self.agent_bridge_status_label)
+        self.agent_layout.addWidget(bridge_frame)
+
+        text_frame = QFrame()
+        text_frame.setObjectName("agentPanel")
+        text_layout = QHBoxLayout(text_frame)
+        text_layout.setContentsMargins(12, 10, 12, 10)
+        text_layout.setSpacing(10)
+
+        story_layout = QVBoxLayout()
+        story_label = QLabel("Blending Story")
+        story_label.setStyleSheet("font-weight: 700;")
+        self.agent_story_input = QTextEdit()
+        self.agent_story_input.setPlaceholderText(
+            "Describe the blending problem, practical constraints, operating habits, outputs, and pitfalls."
+        )
+        self.agent_story_input.setPlainText(getattr(self, "agent_story_text", ""))
+        story_layout.addWidget(story_label)
+        story_layout.addWidget(self.agent_story_input)
+
+        instructions_layout = QVBoxLayout()
+        instructions_label = QLabel("Run Instructions")
+        instructions_label.setStyleSheet("font-weight: 700;")
+        self.agent_run_instructions_input = QTextEdit()
+        self.agent_run_instructions_input.setPlaceholderText(
+            "Tell the agent what to try for this run and which outcomes or guardrails matter most."
+        )
+        self.agent_run_instructions_input.setPlainText(getattr(self, "agent_run_instructions_text", ""))
+        instructions_layout.addWidget(instructions_label)
+        instructions_layout.addWidget(self.agent_run_instructions_input)
+
+        text_layout.addLayout(story_layout, stretch=1)
+        text_layout.addLayout(instructions_layout, stretch=1)
+        self.agent_layout.addWidget(text_frame, stretch=2)
+
+        action_layout = QHBoxLayout()
+        self.agent_submit_request_button = QPushButton("Submit Agent Request")
+        self.agent_submit_request_button.clicked.connect(self.submit_agent_request)
+        self.agent_apply_proposals_button = QPushButton("Apply Selected Proposals")
+        self.agent_apply_proposals_button.clicked.connect(self.apply_selected_agent_proposals)
+        self.agent_clear_button = QPushButton("Clear Agent Output")
+        self.agent_clear_button.clicked.connect(self.clear_agent_output)
+        action_layout.addWidget(self.agent_submit_request_button)
+        action_layout.addWidget(self.agent_apply_proposals_button)
+        action_layout.addWidget(self.agent_clear_button)
+        action_layout.addStretch()
+        self.agent_layout.addLayout(action_layout)
+
+        bottom_layout = QHBoxLayout()
+
+        proposal_layout = QVBoxLayout()
+        proposal_label = QLabel("Proposed Constraints / Run Results")
+        proposal_label.setStyleSheet("font-weight: 700;")
+        self.agent_proposals_table = CustomTableWidget()
+        self.agent_proposals_table.setColumnCount(5)
+        self.agent_proposals_table.setHorizontalHeaderLabels(
+            ["Apply", "Target", "Current Value", "Proposed Value", "Rationale"]
+        )
+        self.agent_proposals_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.agent_proposals_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        proposal_layout.addWidget(proposal_label)
+        proposal_layout.addWidget(self.agent_proposals_table)
+
+        console_layout = QVBoxLayout()
+        console_label = QLabel("Agent Console")
+        console_label.setStyleSheet("font-weight: 700;")
+        self.agent_console_output = QTextEdit()
+        self.agent_console_output.setReadOnly(True)
+        console_layout.addWidget(console_label)
+        console_layout.addWidget(self.agent_console_output)
+
+        bottom_layout.addLayout(proposal_layout, stretch=2)
+        bottom_layout.addLayout(console_layout, stretch=1)
+        self.agent_layout.addLayout(bottom_layout, stretch=3)
+
+        self.agent_poll_timer = QTimer(self)
+        self.agent_poll_timer.setInterval(1500)
+        self.agent_poll_timer.timeout.connect(self.poll_agent_request_result)
+        self.update_agent_bridge_status()
+
+    def toggle_agent_enabled(self, enabled):
+        self.agent_enabled_choice = bool(enabled)
+        if hasattr(self, "agent_tab_index"):
+            self.tabs.setTabEnabled(self.agent_tab_index, self.agent_enabled_choice)
+        if self.agent_enabled_choice:
+            self.start_agent_bridge()
+        else:
+            self.stop_agent_bridge(silent=True)
+
+    def agent_repo_dir(self):
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def agent_bridge_dir(self):
+        bridge_dir = os.path.join(self.agent_repo_dir(), ".blendmaster_agent_bridge")
+        os.makedirs(bridge_dir, exist_ok=True)
+        return bridge_dir
+
+    def agent_bridge_port_value(self):
+        if hasattr(self, "agent_bridge_port_input"):
+            text = self.agent_bridge_port_input.text().strip()
+            if text:
+                try:
+                    return int(text)
+                except ValueError:
+                    pass
+        return int(getattr(self, "agent_bridge_port", 8765) or 8765)
+
+    def agent_bridge_base_url(self):
+        return f"http://127.0.0.1:{self.agent_bridge_port_value()}"
+
+    def agent_bridge_mcp_url(self):
+        return f"{self.agent_bridge_base_url()}/mcp"
+
+    def agent_bridge_store_file(self):
+        return os.path.join(self.agent_bridge_dir(), "bridge_state.json")
+
+    def update_agent_bridge_status(self, message=None):
+        if hasattr(self, "agent_bridge_url_input"):
+            self.agent_bridge_url_input.setText(self.agent_bridge_mcp_url())
+        if not hasattr(self, "agent_bridge_status_label"):
+            return
+        if message:
+            self.agent_bridge_status_label.setText(message)
+            return
+        if self.is_agent_bridge_healthy():
+            self.agent_bridge_status_label.setText(
+                f"Bridge running. In Codex custom MCP, use Streamable HTTP: {self.agent_bridge_mcp_url()}"
+            )
+        else:
+            self.agent_bridge_status_label.setText("Bridge stopped.")
+
+    def is_agent_bridge_healthy(self):
+        try:
+            response = requests.get(f"{self.agent_bridge_base_url()}/health", timeout=0.5)
+            return response.ok and bool(response.json().get("ok"))
+        except Exception:
+            return False
+
+    def start_agent_bridge(self):
+        if not hasattr(self, "agent_bridge_port_input"):
+            return
+        self.agent_bridge_port = self.agent_bridge_port_value()
+        if self.is_agent_bridge_healthy():
+            self.update_agent_bridge_status("Bridge already running.")
+            self.append_agent_console(f"Bridge already running at {self.agent_bridge_mcp_url()}.")
+            return
+
+        server_script = os.path.join(self.agent_repo_dir(), "GUI", "AgentBridgeServer.py")
+        if not os.path.exists(server_script):
+            self.append_agent_console(f"Bridge server script not found: {server_script}")
+            self.update_agent_bridge_status("Bridge failed to start.")
+            return
+
+        log_path = os.path.join(self.agent_bridge_dir(), "bridge.log")
+        command = [
+            sys.executable,
+            server_script,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.agent_bridge_port),
+            "--store-file",
+            self.agent_bridge_store_file(),
+        ]
+
+        try:
+            self.agent_bridge_log_handle = open(log_path, "a", encoding="utf-8")
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            self.agent_bridge_process = subprocess.Popen(
+                command,
+                cwd=self.agent_repo_dir(),
+                stdout=self.agent_bridge_log_handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+        except Exception as exc:
+            self.append_agent_console(f"Failed to start bridge: {exc}")
+            self.update_agent_bridge_status("Bridge failed to start.")
+            return
+
+        for _ in range(20):
+            QApplication.processEvents()
+            if self.is_agent_bridge_healthy():
+                self.update_agent_bridge_status()
+                self.append_agent_console(f"Started bridge at {self.agent_bridge_mcp_url()}.")
+                self.append_agent_console("Codex custom MCP setup: select Streamable HTTP and use the MCP URL above.")
+                return
+            QThread.msleep(100)
+
+        self.update_agent_bridge_status("Bridge process launched, but health check has not responded yet.")
+        self.append_agent_console(f"Bridge launched. If it does not respond, check {log_path}.")
+
+    def stop_agent_bridge(self, silent=False):
+        if hasattr(self, "agent_poll_timer"):
+            self.agent_poll_timer.stop()
+        process = getattr(self, "agent_bridge_process", None)
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        self.agent_bridge_process = None
+        log_handle = getattr(self, "agent_bridge_log_handle", None)
+        if log_handle:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+        self.agent_bridge_log_handle = None
+        self.update_agent_bridge_status("Bridge stopped.")
+        if not silent:
+            self.append_agent_console("Bridge stopped.")
+
+    def append_agent_console(self, message):
+        if not hasattr(self, "agent_console_output"):
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.agent_console_output.append(f"[{timestamp}] {message}")
+        scrollbar = self.agent_console_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def clear_agent_output(self):
+        if hasattr(self, "agent_console_output"):
+            self.agent_console_output.clear()
+        if hasattr(self, "agent_proposals_table"):
+            self.agent_proposals_table.setRowCount(0)
+        self.agent_latest_proposals = []
+        self.agent_current_request_id = None
+        self.agent_seen_trace_count = 0
+
+    def submit_agent_request(self):
+        if not getattr(self, "agent_enabled_choice", False):
+            QMessageBox.information(self, "BlendMaster Agent", "Enable the agent bridge from Site Configuration first.")
+            return
+        self.start_agent_bridge()
+        if not self.is_agent_bridge_healthy():
+            QMessageBox.warning(self, "BlendMaster Agent", "The agent bridge is not running.")
+            return
+
+        self.store_solver_config_inputs(show_errors=False)
+        payload = {
+            "story": self.agent_story_input.toPlainText() if hasattr(self, "agent_story_input") else "",
+            "instructions": self.agent_run_instructions_input.toPlainText() if hasattr(self, "agent_run_instructions_input") else "",
+            "context": self.build_agent_context(),
+        }
+
+        try:
+            response = requests.post(f"{self.agent_bridge_base_url()}/app/request", json=payload, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            request_item = data.get("request", {})
+            self.agent_current_request_id = request_item.get("request_id")
+            self.agent_seen_trace_count = 0
+            self.agent_latest_proposals = []
+            self.agent_proposals_table.setRowCount(0)
+            self.append_agent_console(f"Submitted request {self.agent_current_request_id}. Waiting for Codex result.")
+            self.agent_poll_timer.start()
+        except Exception as exc:
+            QMessageBox.warning(self, "BlendMaster Agent", f"Unable to submit agent request: {exc}")
+
+    def poll_agent_request_result(self):
+        request_id = getattr(self, "agent_current_request_id", None)
+        if not request_id:
+            self.agent_poll_timer.stop()
+            return
+
+        try:
+            response = requests.get(f"{self.agent_bridge_base_url()}/app/request/{request_id}", timeout=3)
+            response.raise_for_status()
+            request_item = response.json().get("request", {})
+        except Exception as exc:
+            self.append_agent_console(f"Unable to poll bridge: {exc}")
+            return
+
+        trace = request_item.get("trace", [])
+        for message in trace[getattr(self, "agent_seen_trace_count", 0):]:
+            self.append_agent_console(message)
+        self.agent_seen_trace_count = len(trace)
+
+        status = request_item.get("status")
+        if status == "pending":
+            return
+
+        self.agent_poll_timer.stop()
+        result = request_item.get("result") or {}
+        self.populate_agent_proposals(result)
+        if status == "completed":
+            self.append_agent_console("Agent result received.")
+        else:
+            self.append_agent_console("Agent request ended without a completed result.")
+
+    def build_agent_context(self):
+        selected_stockpiles = sorted(
+            name for name, selected in (self.stockpile_data_use_column or {}).items() if selected
+        )
+        selected_amt_stockpiles = sorted(
+            name for name, selected in (self.stockpile_data_AMT_column or {}).items() if selected
+        )
+        context = {
+            "agent_result_contract": {
+                "preferred_apply_path": (
+                    "Return broad workflow sections when the app should visibly apply a run through the UI: "
+                    "site_configuration, selected_stockpiles, selected_amt_stockpiles, amt_chunking, "
+                    "solver_config, and calendar_rates. If any stockpile is selected as AMT, "
+                    "hex_sequence_table is required. The app cannot submit AMT stockpiles from agent output "
+                    "without the generated chunk rows."
+                ),
+                "hex_sequence_table_contract": (
+                    "For AMT workflows, include hex_sequence_table as a list of chunk dictionaries that can be "
+                    "loaded into the AMT map and submitted downstream. Each row should include footprint, "
+                    "sequence, hex chunk id, balance/tonnes, weighted grade fields, hex_count, chunk_size, "
+                    "and member_hexes. Do not return placeholder rows containing only footprint/sequence/chunk_id; "
+                    "those rows cannot build AMT maps or opening balances. If the full table is large, return "
+                    "hex_sequence_table_file pointing to a JSON file containing these complete rows."
+                ),
+                "fallback_apply_path": (
+                    "Return project_file/project_state only for complete restore, or proposed_constraints "
+                    "only for small leaf-level edits. Use targets such as "
+                    "solver_config.blend_option_timeout_seconds, calendar_rates.crusher_rate.Period_1, "
+                    "selected_stockpiles, or amt_chunking.STOCKPILE.chunk_reclaim_hours."
+                ),
+            },
+            "site_configuration": {
+                "hub": getattr(self, "hub_input_choice", None),
+                "mine": getattr(self, "mine_input_choice", None),
+                "start_time": getattr(self, "start_time_choice", None),
+                "aps_mining_csv": getattr(self, "file_path_choice", ""),
+                "reevaluate_aps_direct_tip": getattr(self, "reevaluate_aps_direct_tip_choice", False),
+                "selected_aps_crushers": getattr(self, "aps_direct_tip_crusher_choice", []),
+                "blend_mode": getattr(self, "blend_mode_choice", None),
+            },
+            "blend_settings": {
+                "min_stockpiles": getattr(self, "min_stockpiles", None),
+                "max_stockpiles": getattr(self, "max_stockpiles", None),
+                "min_stockpile_contribution_ratio": getattr(self, "min_stockpile_contribution_ratio", None),
+            },
+            "solver_configuration": self.normalized_solver_config(getattr(self, "solver_config", {})),
+            "selected_stockpiles": selected_stockpiles,
+            "selected_amt_stockpiles": selected_amt_stockpiles,
+            "calendar_inputs": getattr(self, "calendar_inputs", {}),
+            "latest_decision_trace": (
+                self.decision_output.toPlainText()[-8000:]
+                if hasattr(self, "decision_output")
+                else ""
+            ),
+        }
+        return self.make_agent_json_safe(context)
+
+    def make_agent_json_safe(self, value, depth=0):
+        if depth > 6:
+            return str(value)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat(timespec="seconds")
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        if isinstance(value, pd.DataFrame):
+            return {
+                "columns": list(value.columns),
+                "row_count": len(value),
+                "sample_rows": self.make_agent_json_safe(value.head(25).to_dict("records"), depth + 1),
+            }
+        if isinstance(value, dict):
+            return {str(key): self.make_agent_json_safe(item, depth + 1) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            values = list(value)
+            limited = values[:100]
+            result = [self.make_agent_json_safe(item, depth + 1) for item in limited]
+            if len(values) > len(limited):
+                result.append(f"... {len(values) - len(limited)} more item(s)")
+            return result
+        return str(value)
+
+    def populate_agent_proposals(self, result):
+        if not hasattr(self, "agent_proposals_table"):
+            return
+        self.agent_proposals_table.setRowCount(0)
+        self.agent_latest_proposals = []
+
+        summary = result.get("summary") if isinstance(result, dict) else None
+        if summary:
+            self.append_agent_console(f"Summary: {summary}")
+        for message in (result.get("messages", []) if isinstance(result, dict) else []):
+            self.append_agent_console(message)
+
+        self.agent_latest_result = result if isinstance(result, dict) else {}
+        workflow_payload = self.extract_agent_workflow_payload(self.agent_latest_result)
+        if workflow_payload:
+            row = self.agent_proposals_table.rowCount()
+            self.agent_proposals_table.insertRow(row)
+            apply_item = QTableWidgetItem()
+            apply_item.setFlags(apply_item.flags() | Qt.ItemIsUserCheckable)
+            apply_item.setCheckState(Qt.Checked)
+            apply_item.setTextAlignment(Qt.AlignCenter)
+            self.agent_proposals_table.setItem(row, 0, apply_item)
+            self.agent_proposals_table.setItem(row, 1, QTableWidgetItem("agent_workflow"))
+            self.agent_proposals_table.setItem(row, 2, QTableWidgetItem("Fresh app workflow"))
+            self.agent_proposals_table.setItem(
+                row,
+                3,
+                QTableWidgetItem(self.summarize_agent_workflow_payload(workflow_payload)),
+            )
+            self.agent_proposals_table.setItem(
+                row,
+                4,
+                QTableWidgetItem("Drive the normal UI sequence: Site Configuration, Stockpiles, AMT if needed, Solver Configuration, Calendar."),
+            )
+            self.agent_latest_proposals.append({
+                "target": "agent_workflow",
+                "value": workflow_payload,
+                "rationale": "Drive the app through the normal UI workflow.",
+                "applyable": True,
+                "action": "agent_workflow",
+                "workflow_payload": workflow_payload,
+            })
+
+        project_load_source = self.extract_agent_project_load_source(self.agent_latest_result)
+        if project_load_source:
+            source_kind, source_payload, source_label = project_load_source
+            row = self.agent_proposals_table.rowCount()
+            self.agent_proposals_table.insertRow(row)
+            apply_item = QTableWidgetItem()
+            apply_item.setFlags(apply_item.flags() | Qt.ItemIsUserCheckable)
+            apply_item.setCheckState(Qt.Unchecked if workflow_payload else Qt.Checked)
+            apply_item.setTextAlignment(Qt.AlignCenter)
+            self.agent_proposals_table.setItem(row, 0, apply_item)
+            self.agent_proposals_table.setItem(row, 1, QTableWidgetItem("project_load"))
+            self.agent_proposals_table.setItem(row, 2, QTableWidgetItem("Current app state"))
+            self.agent_proposals_table.setItem(row, 3, QTableWidgetItem(source_label))
+            self.agent_proposals_table.setItem(
+                row,
+                4,
+                QTableWidgetItem("Restore this agent result through the same path as Load Project."),
+            )
+            self.agent_latest_proposals.append({
+                "target": "project_load",
+                "value": source_label,
+                "rationale": "Restore through project load path.",
+                "applyable": True,
+                "action": "project_load",
+                "source_kind": source_kind,
+                "source_payload": source_payload,
+            })
+
+        proposals = []
+        if isinstance(result, dict):
+            proposals = result.get("proposed_constraints") or result.get("constraints") or []
+        if isinstance(proposals, dict):
+            proposals = [
+                {"target": key, "value": value, "rationale": ""}
+                for key, value in proposals.items()
+            ]
+        if not isinstance(proposals, list):
+            proposals = []
+        proposals = self.expand_agent_proposals(proposals)
+
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            target = str(proposal.get("target") or proposal.get("name") or "").strip()
+            if not target:
+                continue
+            value = proposal.get("value", proposal.get("proposed_value", ""))
+            rationale = str(proposal.get("rationale", proposal.get("reason", "")))
+            current_value = self.get_agent_target_current_value(target)
+            applyable = self.is_known_agent_target(target)
+            workflow_managed = bool(workflow_payload and self.is_agent_workflow_target(target))
+
+            row = self.agent_proposals_table.rowCount()
+            self.agent_proposals_table.insertRow(row)
+            apply_item = QTableWidgetItem()
+            if applyable:
+                apply_item.setFlags(apply_item.flags() | Qt.ItemIsUserCheckable)
+                apply_item.setCheckState(Qt.Checked)
+            elif workflow_managed:
+                apply_item.setText("Workflow")
+                apply_item.setFlags(Qt.ItemIsEnabled)
+            else:
+                apply_item.setText("Review")
+                apply_item.setFlags(Qt.ItemIsEnabled)
+            apply_item.setTextAlignment(Qt.AlignCenter)
+            self.agent_proposals_table.setItem(row, 0, apply_item)
+            self.agent_proposals_table.setItem(row, 1, QTableWidgetItem(target))
+            self.agent_proposals_table.setItem(row, 2, QTableWidgetItem(self.format_agent_value(current_value)))
+            self.agent_proposals_table.setItem(row, 3, QTableWidgetItem(self.format_agent_value(value)))
+            self.agent_proposals_table.setItem(row, 4, QTableWidgetItem(rationale))
+            self.agent_latest_proposals.append(
+                {"target": target, "value": value, "rationale": rationale, "applyable": applyable}
+            )
+
+        self.agent_proposals_table.resizeColumnsToContents()
+        if not self.agent_latest_proposals:
+            self.append_agent_console("No proposed constraints were returned.")
+
+    def extract_agent_workflow_payload(self, result):
+        if not isinstance(result, dict):
+            return {}
+
+        proposals = self.agent_result_proposal_items(result)
+        target_values = {}
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            target = str(proposal.get("target") or proposal.get("name") or "").strip()
+            if not target:
+                continue
+            target_values[target.lower()] = proposal.get("value", proposal.get("proposed_value", ""))
+
+        def section(keys, dict_only=True):
+            for key in keys:
+                if key in result:
+                    value = result.get(key)
+                    if not dict_only or isinstance(value, dict):
+                        return copy.deepcopy(value)
+            for key in keys:
+                value = target_values.get(str(key).lower())
+                if value is not None and (not dict_only or isinstance(value, dict)):
+                    return copy.deepcopy(value)
+            return None
+
+        payload = {}
+
+        site_config = section(["site_configuration", "site_config"], dict_only=True)
+        if site_config:
+            payload["site_configuration"] = site_config
+
+        selected_value = section(["selected_stockpiles", "stockpiles"], dict_only=False)
+        selected_amt_value = section(["selected_amt_stockpiles", "amt_stockpiles"], dict_only=False)
+        selected_stockpiles = self.normalized_agent_selected_stockpile_payload(selected_value, selected_amt_value)
+        if selected_stockpiles:
+            payload["selected_stockpiles"] = selected_stockpiles
+
+        solver_config = section(["solver_configuration", "solver_config"], dict_only=True)
+        if not solver_config:
+            solver_config = self.nested_agent_target_values(target_values, "solver_config.")
+        blend_settings = section(["blend_settings"], dict_only=True)
+        if not blend_settings:
+            blend_settings = self.nested_agent_target_values(target_values, "blend_settings.")
+        if solver_config:
+            payload["solver_configuration"] = solver_config
+        if blend_settings:
+            payload["blend_settings"] = blend_settings
+
+        calendar_rates = section(["calendar_rates", "calendar"], dict_only=True)
+        if not calendar_rates:
+            calendar_rates = self.nested_agent_target_values(target_values, "calendar_rates.")
+        if calendar_rates:
+            payload["calendar_rates"] = calendar_rates
+
+        amt_chunking = section(["amt_chunking", "AMT_chunk_settings"], dict_only=True)
+        if not amt_chunking:
+            amt_chunking = self.nested_agent_target_values(target_values, "amt_chunking.")
+        if not amt_chunking:
+            amt_chunking = self.amt_chunking_from_agent_results(
+                result.get("amt_chunk_results") or target_values.get("amt_chunk_results")
+            )
+        if amt_chunking:
+            payload["amt_chunking"] = amt_chunking
+
+        hex_sequence_table = section(
+            ["hex_sequence_table", "hex_sequence_table_argument", "amt_hex_sequence", "amt_chunk_sequence"],
+            dict_only=False,
+        )
+        hex_sequence_table_file = section(
+            ["hex_sequence_table_file", "amt_hex_sequence_file", "amt_chunk_sequence_file"],
+            dict_only=False,
+        )
+        file_hex_sequence_table = self.load_agent_hex_sequence_table_file(hex_sequence_table_file)
+        if file_hex_sequence_table and not self.agent_hex_sequence_table_has_required_fields(hex_sequence_table):
+            hex_sequence_table = file_hex_sequence_table
+        if isinstance(hex_sequence_table, list):
+            payload["hex_sequence_table"] = self.normalized_agent_hex_sequence_table(hex_sequence_table)
+        if hex_sequence_table_file:
+            payload["hex_sequence_table_file"] = str(hex_sequence_table_file)
+
+        return payload
+
+    def agent_result_proposal_items(self, result):
+        proposals = result.get("proposed_constraints") or result.get("constraints") or []
+        if isinstance(proposals, dict):
+            return [
+                {"target": key, "value": value, "rationale": ""}
+                for key, value in proposals.items()
+            ]
+        if isinstance(proposals, list):
+            return proposals
+        return []
+
+    @staticmethod
+    def nested_agent_target_values(target_values, prefix):
+        nested = {}
+        prefix = str(prefix).lower()
+        for target, value in target_values.items():
+            if not target.startswith(prefix):
+                continue
+            path = [part for part in target[len(prefix):].split(".") if part]
+            if not path:
+                continue
+            cursor = nested
+            for part in path[:-1]:
+                cursor = cursor.setdefault(part, {})
+            cursor[path[-1]] = copy.deepcopy(value)
+        return nested
+
+    def normalized_agent_selected_stockpile_payload(self, selected_value, selected_amt_value=None):
+        use_names = []
+        amt_names = []
+
+        if isinstance(selected_value, dict):
+            use_names = (
+                selected_value.get("use")
+                or selected_value.get("selected")
+                or selected_value.get("stockpiles")
+                or selected_value.get("inventory")
+                or []
+            )
+            amt_names = selected_value.get("amt") or selected_value.get("selected_amt") or []
+        elif selected_value is not None:
+            use_names = selected_value
+
+        if selected_amt_value is not None:
+            amt_names = selected_amt_value
+
+        use_names = self.agent_value_to_list(use_names)
+        amt_names = self.agent_value_to_list(amt_names)
+        if not use_names and amt_names:
+            use_names = list(amt_names)
+
+        result = {}
+        if use_names:
+            result["use"] = use_names
+        if amt_names:
+            result["amt"] = amt_names
+        return result
+
+    @staticmethod
+    def agent_value_to_list(value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [item for item in value if str(item).strip()]
+        return [value]
+
+    def amt_chunking_from_agent_results(self, chunk_results):
+        if not isinstance(chunk_results, list):
+            return {}
+        chunking = {}
+        for item in chunk_results:
+            if not isinstance(item, dict):
+                continue
+            stockpile = item.get("stockpile") or item.get("footprint") or item.get("name")
+            if not stockpile:
+                continue
+            settings = {}
+            if item.get("average_reclaim_rate") is not None:
+                settings["average_reclaim_rate_tph"] = item.get("average_reclaim_rate")
+            if item.get("average_reclaim_rate_tph") is not None:
+                settings["average_reclaim_rate_tph"] = item.get("average_reclaim_rate_tph")
+            if item.get("chunk_reclaim_hours") is not None:
+                settings["chunk_reclaim_hours"] = item.get("chunk_reclaim_hours")
+            if settings:
+                chunking[str(stockpile)] = settings
+        return chunking
+
+    def load_agent_hex_sequence_table_file(self, path_value):
+        if not path_value:
+            return []
+        path = os.path.abspath(os.path.expanduser(str(path_value)))
+        if not os.path.exists(path):
+            self.append_agent_console(f"hex_sequence_table_file was supplied but not found: {path}")
+            return []
+        try:
+            if path.lower().endswith(".json"):
+                with open(path, "r", encoding="utf-8") as file:
+                    data = json.load(file)
+                if isinstance(data, dict):
+                    data = data.get("hex_sequence_table") or data.get("rows") or data.get("data") or []
+                return data if isinstance(data, list) else []
+            if path.lower().endswith(".csv"):
+                return pd.read_csv(path).to_dict("records")
+        except Exception as exc:
+            self.append_agent_console(f"Unable to load hex_sequence_table_file {path}: {exc}")
+        return []
+
+    def normalized_agent_hex_sequence_table(self, rows):
+        if not isinstance(rows, list):
+            return []
+        normalized_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = copy.deepcopy(row)
+            footprint = (
+                normalized.get("footprint")
+                or normalized.get("stockpile")
+                or normalized.get("stockpile_name")
+                or normalized.get("source")
+                or normalized.get("source_id")
+            )
+            sequence = normalized.get("sequence") or normalized.get("chunk_sequence") or normalized.get("chunk_number")
+            if footprint is not None:
+                normalized["footprint"] = str(footprint)
+            if sequence is not None:
+                try:
+                    normalized["sequence"] = int(float(sequence))
+                except (TypeError, ValueError):
+                    normalized["sequence"] = sequence
+
+            chunk_hex = (
+                normalized.get("hex")
+                or normalized.get("chunk_id")
+                or normalized.get("chunk")
+                or normalized.get("chunk_name")
+            )
+            if chunk_hex is None and footprint is not None and sequence is not None:
+                try:
+                    chunk_hex = f"{footprint}_CHUNK_{int(float(sequence)):03d}"
+                except (TypeError, ValueError):
+                    chunk_hex = f"{footprint}_CHUNK_{sequence}"
+            if chunk_hex is not None:
+                normalized["hex"] = str(chunk_hex)
+
+            balance = self.first_agent_numeric_value(
+                normalized,
+                ["balance", "tonnes", "total_tonnes", "chunk_tonnes", "chunk_balance", "source_opening_balance"],
+            )
+            if balance is not None:
+                normalized["balance"] = balance
+
+            grade_aliases = {
+                "grade_fe": ["grade_fe", "fe", "fe_grade", "grade_fe_pct", "Fe Grade", "Grade Fe (%)"],
+                "grade_si": ["grade_si", "si", "si_grade", "grade_si_pct", "Si Grade", "Grade Si (%)"],
+                "grade_al": ["grade_al", "al", "al_grade", "grade_al_pct", "Al Grade", "Grade Al (%)"],
+                "grade_p": ["grade_p", "p", "p_grade", "grade_p_pct", "P Grade", "Grade P (%)"],
+                "grade_mn": ["grade_mn", "mn", "mn_grade", "grade_mn_pct", "Mn Grade", "Grade Mn (%)"],
+            }
+            for target, aliases in grade_aliases.items():
+                value = self.first_agent_numeric_value(normalized, aliases)
+                if value is not None:
+                    normalized[target] = value
+
+            member_hexes = (
+                normalized.get("member_hexes")
+                or normalized.get("member_hex_ids")
+                or normalized.get("hexes")
+                or normalized.get("member_hex")
+                or normalized.get("hex_members")
+                or normalized.get("members")
+            )
+            if isinstance(member_hexes, list):
+                normalized["member_hexes"] = ",".join(str(item) for item in member_hexes if str(item).strip())
+            elif member_hexes is not None:
+                normalized["member_hexes"] = str(member_hexes)
+
+            if normalized.get("hex_count") is None and normalized.get("member_hexes"):
+                normalized["hex_count"] = len([item for item in str(normalized["member_hexes"]).split(",") if item.strip()])
+
+            normalized_rows.append(normalized)
+        return normalized_rows
+
+    @staticmethod
+    def first_agent_numeric_value(row, keys):
+        for key in keys:
+            if key not in row:
+                continue
+            value = row.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def agent_hex_sequence_table_has_required_fields(self, rows):
+        valid, _ = self.validate_agent_hex_sequence_table(rows)
+        return valid
+
+    def validate_agent_hex_sequence_table(self, rows):
+        rows = self.normalized_agent_hex_sequence_table(rows)
+        if not rows:
+            return False, "hex_sequence_table is empty."
+
+        missing = {
+            "footprint": 0,
+            "sequence": 0,
+            "hex": 0,
+            "balance": 0,
+            "member_hexes": 0,
+            "grade_fe": 0,
+            "grade_si": 0,
+            "grade_al": 0,
+            "grade_p": 0,
+            "grade_mn": 0,
+        }
+        total_positive_balance = 0.0
+        for row in rows:
+            if not row.get("footprint"):
+                missing["footprint"] += 1
+            if row.get("sequence") in (None, ""):
+                missing["sequence"] += 1
+            if not row.get("hex"):
+                missing["hex"] += 1
+            balance = self.first_agent_numeric_value(row, ["balance"])
+            if balance is None:
+                missing["balance"] += 1
+            else:
+                total_positive_balance += max(balance, 0)
+            if not str(row.get("member_hexes") or "").strip():
+                missing["member_hexes"] += 1
+            for grade_key in ("grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"):
+                if self.first_agent_numeric_value(row, [grade_key]) is None:
+                    missing[grade_key] += 1
+
+        missing_parts = [
+            f"{field} missing in {count} row(s)"
+            for field, count in missing.items()
+            if count
+        ]
+        if total_positive_balance <= 0:
+            missing_parts.append("total positive balance is 0")
+        if missing_parts:
+            return False, "; ".join(missing_parts)
+        return True, ""
+
+    def summarize_agent_workflow_payload(self, payload):
+        parts = []
+        if payload.get("site_configuration"):
+            parts.append("Site Config")
+        selected = payload.get("selected_stockpiles") or {}
+        if selected:
+            use_count = len(selected.get("use") or [])
+            amt_count = len(selected.get("amt") or [])
+            parts.append(f"Stockpiles ({use_count} use, {amt_count} AMT)")
+        if payload.get("amt_chunking") or payload.get("hex_sequence_table"):
+            if payload.get("hex_sequence_table"):
+                valid_hex_table, _ = self.validate_agent_hex_sequence_table(payload.get("hex_sequence_table"))
+                parts.append("AMT chunks ready" if valid_hex_table else "AMT chunks incomplete")
+            else:
+                parts.append("AMT settings only")
+        if payload.get("solver_configuration") or payload.get("blend_settings"):
+            parts.append("Solver Config")
+        if payload.get("calendar_rates"):
+            parts.append("Calendar")
+        return " -> ".join(parts) if parts else "No workflow sections"
+
+    def is_agent_workflow_target(self, target):
+        target_text = str(target or "").strip()
+        target_key = target_text.lower()
+        if target_key in {
+            "site_configuration",
+            "site_config",
+            "selected_stockpiles",
+            "selected_amt_stockpiles",
+            "stockpiles",
+            "amt_stockpiles",
+            "solver_configuration",
+            "solver_config",
+            "blend_settings",
+            "calendar_rates",
+            "calendar",
+            "amt_chunking",
+            "hex_sequence_table",
+            "hex_sequence_table_file",
+        }:
+            return True
+        return target_text.startswith((
+            "solver_config.",
+            "blend_settings.",
+            "calendar_rates.",
+            "calendar.",
+            "amt_chunking.",
+        ))
+
+    def extract_agent_project_load_source(self, result):
+        if not isinstance(result, dict):
+            return None
+
+        project_file = (
+            result.get("project_file")
+            or result.get("project_path")
+            or result.get("prj_file")
+            or result.get("blendmaster_project_file")
+        )
+        if project_file:
+            return ("project_file", project_file, str(project_file))
+
+        project_state = result.get("project_state") or result.get("blendmaster_project_state")
+        if isinstance(project_state, dict):
+            return ("project_state", project_state, "Embedded project state")
+
+        proposals = result.get("proposed_constraints") or result.get("constraints") or []
+        if isinstance(proposals, dict):
+            proposals = [
+                {"target": key, "value": value}
+                for key, value in proposals.items()
+            ]
+        if not isinstance(proposals, list):
+            return None
+
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            target = str(proposal.get("target") or proposal.get("name") or "").strip().lower()
+            value = proposal.get("value", proposal.get("proposed_value", ""))
+            if target in {"project_file", "project_path", "prj_file", "blendmaster_project_file"} and value:
+                return ("project_file", value, str(value))
+            if target in {"project_state", "blendmaster_project_state"} and isinstance(value, dict):
+                return ("project_state", value, "Embedded project state")
+
+        return None
+
+    def expand_agent_proposals(self, proposals):
+        expanded = []
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            target = str(proposal.get("target") or proposal.get("name") or "").strip()
+            value = proposal.get("value", proposal.get("proposed_value", ""))
+            rationale = str(proposal.get("rationale", proposal.get("reason", "")))
+            target_key = target.strip().lower()
+
+            if target_key in {"solver_configuration", "solver_config"} and isinstance(value, dict):
+                expanded.extend(self.expand_agent_solver_configuration(value, rationale))
+                continue
+
+            if target_key == "blend_settings" and isinstance(value, dict):
+                for key, item_value in value.items():
+                    expanded.append({
+                        "target": f"blend_settings.{key}",
+                        "value": item_value,
+                        "rationale": rationale,
+                    })
+                continue
+
+            if target_key == "calendar_rates" and isinstance(value, dict):
+                expanded.extend(self.expand_agent_calendar_rates(value, rationale))
+                continue
+
+            if target_key == "amt_chunking" and isinstance(value, dict):
+                expanded.extend(self.expand_agent_amt_chunking(value, rationale))
+                continue
+
+            expanded.append(proposal)
+        return expanded
+
+    def expand_agent_solver_configuration(self, solver_values, rationale):
+        expanded = []
+        for key, value in solver_values.items():
+            if key == "contaminant_thresholds" and isinstance(value, dict):
+                for contaminant, threshold in value.items():
+                    expanded.append({
+                        "target": f"solver_config.contaminant_thresholds.{str(contaminant).lower()}",
+                        "value": threshold,
+                        "rationale": rationale,
+                    })
+                continue
+            expanded.append({
+                "target": f"solver_config.{key}",
+                "value": value,
+                "rationale": rationale,
+            })
+        return expanded
+
+    def expand_agent_calendar_rates(self, calendar_values, rationale):
+        expanded = []
+        for raw_key, value in calendar_values.items():
+            normalized_raw_key = str(raw_key or "").strip().lower().replace(" ", "_")
+
+            if normalized_raw_key in {
+                "direct_tip_ratio",
+                "direct_tip",
+                "crusher_direct_tip_ratio",
+                "crusher_direct_feed_ratio",
+            } and isinstance(value, dict):
+                for bound_key, bound_value in value.items():
+                    normalized_bound = str(bound_key or "").strip().lower().replace(" ", "_")
+                    if normalized_bound in {"min", "minimum"}:
+                        expanded.extend(self.expand_agent_calendar_rates({"direct_tip_ratio_min": bound_value}, rationale))
+                    elif normalized_bound in {"max", "maximum"}:
+                        expanded.extend(self.expand_agent_calendar_rates({"direct_tip_ratio_max": bound_value}, rationale))
+                continue
+
+            if normalized_raw_key in {"grade_limits", "grade_targets", "target_grades", "grades"} and isinstance(value, dict):
+                for grade_key, grade_value in value.items():
+                    normalized_grade = str(grade_key or "").strip().lower().replace("grade_", "")
+                    if normalized_grade not in {"fe", "si", "al", "p", "mn"}:
+                        continue
+                    if isinstance(grade_value, dict):
+                        for bound_key, bound_value in grade_value.items():
+                            normalized_bound = str(bound_key or "").strip().lower().replace(" ", "_")
+                            if normalized_bound in {"min", "minimum"}:
+                                expanded.extend(self.expand_agent_calendar_rates({f"{normalized_grade}_min": bound_value}, rationale))
+                            elif normalized_bound in {"max", "maximum"}:
+                                expanded.extend(self.expand_agent_calendar_rates({f"{normalized_grade}_max": bound_value}, rationale))
+                    else:
+                        expanded.extend(self.expand_agent_calendar_rates({normalized_grade: grade_value}, rationale))
+                continue
+
+            row_key = self.agent_calendar_key_alias(raw_key)
+            if not row_key:
+                expanded.append({
+                    "target": f"calendar_rates.{raw_key}",
+                    "value": value,
+                    "rationale": rationale,
+                })
+                continue
+
+            if isinstance(value, dict):
+                for raw_period, period_value in value.items():
+                    period = self.agent_period_key_alias(raw_period)
+                    if not period:
+                        expanded.append({
+                            "target": f"calendar_rates.{row_key}.{raw_period}",
+                            "value": period_value,
+                            "rationale": rationale,
+                        })
+                        continue
+                    expanded.append({
+                        "target": f"calendar_rates.{row_key}.{period}",
+                        "value": period_value,
+                        "rationale": rationale,
+                    })
+            else:
+                for period in ["Preplan", "Period_1", "Period_2"]:
+                    expanded.append({
+                        "target": f"calendar_rates.{row_key}.{period}",
+                        "value": value,
+                        "rationale": rationale,
+                    })
+        return expanded
+
+    def expand_agent_amt_chunking(self, chunking_values, rationale):
+        expanded = []
+        for stockpile, settings in chunking_values.items():
+            if not isinstance(settings, dict):
+                expanded.append({
+                    "target": f"amt_chunking.{stockpile}",
+                    "value": settings,
+                    "rationale": rationale,
+                })
+                continue
+            for key, value in settings.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key in {"average_reclaim_rate", "average_reclaim_rate_tph", "average_reclaim_rate_t/h", "reclaim_rate_tph"}:
+                    field = "average_reclaim_rate_tph"
+                elif normalized_key in {"chunk_reclaim_hours", "chunk_hours", "reclaim_hours"}:
+                    field = "chunk_reclaim_hours"
+                else:
+                    field = normalized_key
+                expanded.append({
+                    "target": f"amt_chunking.{stockpile}.{field}",
+                    "value": value,
+                    "rationale": rationale,
+                })
+        return expanded
+
+    def format_agent_value(self, value):
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, default=str)
+        return "" if value is None else str(value)
+
+    def normalized_agent_target(self, target):
+        target = str(target or "").strip()
+        if target.startswith("solver_config."):
+            return target.split(".", 1)[1]
+        if target.startswith("blend_settings."):
+            return target.split(".", 1)[1]
+        return target
+
+    def agent_calendar_key_alias(self, key):
+        normalized = str(key or "").strip().lower().replace(" ", "_")
+        normalized = normalized.replace(".", "_")
+        normalized = normalized.replace("(t/h)", "").replace("tph", "tph")
+        aliases = {
+            "crusher_rate": "crusher_rate",
+            "crusher_rate_tph": "crusher_rate",
+            "crusher_rate_output": "crusher_rate",
+            "reclaim_rate": "reclaim_equipment_max_reclaim_rate",
+            "reclaim_rate_tph": "reclaim_equipment_max_reclaim_rate",
+            "max_reclaim_rate": "reclaim_equipment_max_reclaim_rate",
+            "max_reclaim_rate_tph": "reclaim_equipment_max_reclaim_rate",
+            "reclaim_equipment_max_reclaim_rate": "reclaim_equipment_max_reclaim_rate",
+            "direct_tip_ratio_minimum": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_min": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_min_min": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_minimum_min": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_minimum_minimum": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_minimum_value": "crusher_direct_tip_ratio_min",
+            "direct_tip_minimum": "crusher_direct_tip_ratio_min",
+            "direct_tip_min": "crusher_direct_tip_ratio_min",
+            "direct_tip_min_value": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_min_value": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_min_preplan": "crusher_direct_tip_ratio_min",
+            "crusher_direct_feed_ratio_min": "crusher_direct_tip_ratio_min",
+            "crusher_direct_feed_ratio_minimum": "crusher_direct_tip_ratio_min",
+            "crusher_direct_tip_ratio_min": "crusher_direct_tip_ratio_min",
+            "direct_tip_ratio_maximum": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_max": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_max_max": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_maximum_max": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_maximum_maximum": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_maximum_value": "crusher_direct_tip_ratio_max",
+            "direct_tip_maximum": "crusher_direct_tip_ratio_max",
+            "direct_tip_max": "crusher_direct_tip_ratio_max",
+            "direct_tip_max_value": "crusher_direct_tip_ratio_max",
+            "direct_tip_ratio_max_value": "crusher_direct_tip_ratio_max",
+            "crusher_direct_feed_ratio_max": "crusher_direct_tip_ratio_max",
+            "crusher_direct_feed_ratio_maximum": "crusher_direct_tip_ratio_max",
+            "crusher_direct_tip_ratio_max": "crusher_direct_tip_ratio_max",
+        }
+        for element in ["fe", "si", "al", "p", "mn"]:
+            aliases[f"{element}_min"] = f"crusher_target_{element}_min"
+            aliases[f"{element}_max"] = f"crusher_target_{element}_max"
+            aliases[f"crusher_target_{element}_min"] = f"crusher_target_{element}_min"
+            aliases[f"crusher_target_{element}_max"] = f"crusher_target_{element}_max"
+        return aliases.get(normalized, normalized if self.find_calendar_row_by_key(normalized) is not None else None)
+
+    def agent_period_key_alias(self, period):
+        normalized = str(period or "").strip().lower().replace(" ", "_")
+        aliases = {
+            "preplan": "Preplan",
+            "period_1": "Period_1",
+            "period1": "Period_1",
+            "p1": "Period_1",
+            "1": "Period_1",
+            "period_2": "Period_2",
+            "period2": "Period_2",
+            "p2": "Period_2",
+            "2": "Period_2",
+        }
+        return aliases.get(normalized, str(period) if str(period) in getattr(self, "calendar_headers", []) else None)
+
+    def find_calendar_row_by_key(self, row_key):
+        if not hasattr(self, "calendar_rows"):
+            return None
+        for row_idx, row in enumerate(self.calendar_rows):
+            if isinstance(row, dict) and row_key in row:
+                return row_idx
+        return None
+
+    def find_calendar_column_by_period(self, period):
+        if not hasattr(self, "calendar_headers"):
+            return None
+        try:
+            return self.calendar_headers.index(period)
+        except ValueError:
+            return None
+
+    def parse_agent_calendar_target(self, target):
+        target = str(target or "").strip()
+        prefixes = ("calendar_rates.", "calendar.")
+        for prefix in prefixes:
+            if target.startswith(prefix):
+                remainder = target[len(prefix):]
+                parts = remainder.split(".")
+                if len(parts) >= 2:
+                    period = self.agent_period_key_alias(parts[-1])
+                    row_key = self.agent_calendar_key_alias(".".join(parts[:-1]))
+                    if row_key and period:
+                        return row_key, period
+        return None
+
+    def is_known_agent_target(self, target):
+        key = self.normalized_agent_target(target)
+        if target in {"site_configuration", "site_config"}:
+            return True
+        if target in {"selected_stockpiles", "selected_amt_stockpiles", "amt_stockpiles"}:
+            return hasattr(self, "stockpile_table")
+        if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
+            parsed = self.parse_agent_calendar_target(target)
+            return bool(parsed and self.find_calendar_row_by_key(parsed[0]) is not None and self.find_calendar_column_by_period(parsed[1]) is not None)
+        if str(target).startswith("amt_chunking."):
+            return hasattr(self, "AMT_stockpile_table")
+        known = {
+            "min_stockpiles",
+            "max_stockpiles",
+            "min_stockpile_contribution_ratio",
+            "stockpile_feasibility_mode",
+            "min_feed_duration_hours",
+            "direct_tip_enabled",
+            "direct_tip_cash_incentive",
+            "stay_on_same_blend_incentive",
+            "blend_option_timeout_seconds",
+            "max_blend_options_per_steady_state",
+            "min_grade_block_pair_duration_hours",
+            "stay_on_same_grade_block_pair_incentive",
+            "grade_block_lock_enabled",
+            "prefer_fewer_stockpiles",
+            "balance_preference",
+            "prefer_amt_stockpiles",
+            "prefer_contaminated_stockpiles",
+            "contaminant_thresholds.si",
+            "contaminant_thresholds.al",
+            "contaminant_thresholds.p",
+            "contaminant_thresholds.mn",
+            "prefer_low_fe_stockpiles",
+            "low_fe_threshold",
+        }
+        return key in known
+
+    def get_agent_target_current_value(self, target):
+        if target == "selected_stockpiles":
+            return sorted(
+                name for name, selected in (self.stockpile_data_use_column or {}).items() if selected
+            )
+        if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
+            parsed = self.parse_agent_calendar_target(target)
+            if parsed:
+                row_key, period = parsed
+                row_idx = self.find_calendar_row_by_key(row_key)
+                col_idx = self.find_calendar_column_by_period(period)
+                if row_idx is not None and col_idx is not None and hasattr(self, "main_table"):
+                    return self.get_main_table_cell_text(row_idx, col_idx)
+        if str(target).startswith("amt_chunking."):
+            return self.get_agent_amt_chunking_current_value(target)
+        key = self.normalized_agent_target(target)
+        if key == "min_stockpiles":
+            return self.min_stockpiles_input.text() if hasattr(self, "min_stockpiles_input") else None
+        if key == "max_stockpiles":
+            return self.max_stockpiles_input.text() if hasattr(self, "max_stockpiles_input") else None
+        if key == "min_stockpile_contribution_ratio":
+            return self.min_stockpile_contribution_ratio_input.text() if hasattr(self, "min_stockpile_contribution_ratio_input") else None
+        solver_config = self.normalized_solver_config(getattr(self, "solver_config", {}))
+        if key.startswith("contaminant_thresholds."):
+            contaminant = key.split(".", 1)[1]
+            return solver_config.get("contaminant_thresholds", {}).get(contaminant)
+        return solver_config.get(key, "Review only")
+
+    def get_agent_amt_chunking_current_value(self, target):
+        parts = str(target).split(".")
+        if len(parts) < 3 or not hasattr(self, "AMT_stockpile_table"):
+            return None
+        stockpile, field = parts[1], parts[2]
+        field_column = {
+            "average_reclaim_rate_tph": 1,
+            "chunk_reclaim_hours": 2,
+        }.get(field)
+        if field_column is None:
+            return None
+        for row in range(self.AMT_stockpile_table.rowCount()):
+            item = self.AMT_stockpile_table.item(row, 0)
+            if item and item.text().strip().upper() == stockpile.upper():
+                value_item = self.AMT_stockpile_table.item(row, field_column)
+                return value_item.text() if value_item else None
+        return None
+
+    def apply_selected_agent_proposals(self):
+        if not getattr(self, "agent_latest_proposals", None):
+            QMessageBox.information(self, "BlendMaster Agent", "No proposals are available to apply.")
+            return
+
+        applied = 0
+        skipped = 0
+        calendar_changed = False
+        for row, proposal in enumerate(self.agent_latest_proposals):
+            if not proposal.get("applyable", False):
+                continue
+            apply_item = self.agent_proposals_table.item(row, 0)
+            if apply_item is None or apply_item.checkState() != Qt.Checked:
+                continue
+            if proposal.get("action") == "agent_workflow":
+                self.start_agent_workflow_apply(proposal.get("workflow_payload") or proposal.get("value") or {})
+                return
+            if proposal.get("action") == "project_load":
+                if self.apply_agent_project_load(proposal):
+                    self.append_agent_console("Agent result restored through the project-load path.")
+                    QMessageBox.information(self, "BlendMaster Agent", "Agent result loaded as a project.")
+                return
+            if self.apply_agent_target_value(proposal["target"], proposal["value"]):
+                applied += 1
+                if str(proposal["target"]).startswith(("calendar_rates.", "calendar.")):
+                    calendar_changed = True
+            else:
+                skipped += 1
+
+        if calendar_changed:
+            self.store_calendar_inputs_no_run()
+        self.store_solver_config_inputs(show_errors=False)
+        self.append_agent_console(f"Applied {applied} proposal(s). Skipped {skipped} proposal(s). Review-only rows were left unchanged.")
+        QMessageBox.information(self, "BlendMaster Agent", f"Applied {applied} proposal(s).")
+
+    def start_agent_workflow_apply(self, payload):
+        if not isinstance(payload, dict) or not payload:
+            QMessageBox.information(self, "BlendMaster Agent", "No workflow proposal is available to apply.")
+            return
+
+        self.agent_workflow_active = True
+        self.agent_workflow_payload = copy.deepcopy(payload)
+        self.agent_workflow_after_site_config = False
+        self.agent_workflow_waiting_for_amt = False
+        self.append_agent_console("Starting guided agent apply through the normal UI workflow.")
+        QTimer.singleShot(0, self.agent_workflow_apply_site_configuration)
+
+    def stop_agent_workflow_apply(self, message):
+        self.agent_workflow_active = False
+        self.agent_workflow_after_site_config = False
+        self.agent_workflow_waiting_for_amt = False
+        self.append_agent_console(message)
+
+    def agent_workflow_apply_site_configuration(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        site_config = payload.get("site_configuration") or {}
+        self.tabs.setCurrentIndex(self.site_config_tab_index)
+        self.apply_agent_site_configuration_payload(site_config)
+        if not self.submit_button.isEnabled():
+            self.stop_agent_workflow_apply(
+                "Agent workflow stopped on Site Configuration: required site fields are still missing or invalid."
+            )
+            return
+        self.agent_workflow_after_site_config = True
+        self.is_project_loaded = False
+        self.append_agent_console("Agent workflow: Site Configuration populated; submitting.")
+        self.handle_site_config_submit()
+
+    def apply_agent_site_configuration_payload(self, site_config):
+        if not isinstance(site_config, dict):
+            site_config = {}
+
+        def set_combo(combo, value):
+            if value is None:
+                return
+            text = str(value)
+            index = combo.findText(text)
+            if index < 0:
+                normalized_text = self.normalized_agent_combo_text(text)
+                for item_index in range(combo.count()):
+                    if self.normalized_agent_combo_text(combo.itemText(item_index)) == normalized_text:
+                        index = item_index
+                        break
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            else:
+                combo.setCurrentText(text)
+
+        set_combo(self.hub_input, site_config.get("hub"))
+        if site_config.get("hub") is not None:
+            self.update_mine_dropdown()
+        set_combo(self.mine_input, site_config.get("mine"))
+
+        start_time = self.parse_agent_datetime_value(
+            site_config.get("start_time")
+            or site_config.get("start_datetime")
+            or site_config.get("set_datetime")
+        )
+        if isinstance(start_time, datetime):
+            self.time_mode.setCurrentIndex(1)
+            self.start_time.setEnabled(True)
+            self.start_time.setDateTime(QDateTime(
+                start_time.year,
+                start_time.month,
+                start_time.day,
+                start_time.hour,
+                start_time.minute,
+                start_time.second,
+            ))
+
+        file_path = (
+            site_config.get("aps_mining_csv")
+            or site_config.get("mining_csv")
+            or site_config.get("file_path")
+        )
+        if file_path:
+            self.file_path.setText(str(file_path))
+
+        direct_tip_enabled = (
+            site_config.get("reevaluate_aps_direct_tip")
+            if "reevaluate_aps_direct_tip" in site_config
+            else site_config.get("re_evaluate_aps_direct_tip")
+        )
+        crushers = (
+            site_config.get("selected_aps_crushers")
+            or site_config.get("aps_direct_tip_crushers")
+            or site_config.get("crusher_destinations")
+            or []
+        )
+        if direct_tip_enabled is not None:
+            self.reevaluate_aps_direct_tip_checkbox.setChecked(bool(direct_tip_enabled))
+        if crushers:
+            self.reevaluate_aps_direct_tip_checkbox.setChecked(True)
+            self.set_aps_crusher_items(crushers, crushers)
+
+        blend_mode = site_config.get("blend_mode") or site_config.get("optimised_blend_choices")
+        if blend_mode is not None:
+            if isinstance(blend_mode, str):
+                blend_text = (
+                    "Prompt User at Decision Point"
+                    if "prompt" in blend_mode.lower() or "manual" in blend_mode.lower()
+                    else "Select Best Result Automatically"
+                )
+                set_combo(self.blend_mode, blend_text)
+            else:
+                index = int(blend_mode) - 1
+                if 0 <= index < self.blend_mode.count():
+                    self.blend_mode.setCurrentIndex(index)
+
+        if hasattr(self, "agent_enabled_checkbox"):
+            self.agent_enabled_checkbox.setChecked(True)
+        self.validate_form()
+
+    @staticmethod
+    def normalized_agent_combo_text(value):
+        text = str(value or "").strip().lower()
+        text = text.replace("_", " ").replace("-", " ")
+        for suffix in (" mine", " hub"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)]
+        return " ".join(text.split())
+
+    def agent_workflow_apply_stockpiles(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        selected_payload = payload.get("selected_stockpiles")
+        self.tabs.setCurrentIndex(self.stockpile_tab_index)
+
+        if selected_payload:
+            if self.apply_agent_selected_stockpiles(selected_payload):
+                selected = self.normalized_agent_selected_stockpile_payload(selected_payload)
+                use_count = len(selected.get("use") or [])
+                amt_count = len(selected.get("amt") or [])
+                self.append_agent_console(f"Agent workflow: selected {use_count} stockpile(s), {amt_count} as AMT.")
+            else:
+                self.stop_agent_workflow_apply(
+                    "Agent workflow stopped: selected stockpiles could not be applied to the Stockpile Inventories table. "
+                    f"{self.agent_stockpile_match_diagnostic(selected_payload)}"
+                )
+                return
+        else:
+            self.append_agent_console("Agent workflow: no selected_stockpiles section returned; leaving Stockpile Inventories as currently shown.")
+
+        selected = self.normalized_agent_selected_stockpile_payload(selected_payload) if selected_payload else {}
+        has_amt = bool(selected.get("amt"))
+        self.agent_workflow_waiting_for_amt = has_amt
+        self.store_stockpile_table()
+        if not has_amt:
+            QTimer.singleShot(250, self.agent_workflow_apply_solver_configuration)
+
+    def agent_stockpile_match_diagnostic(self, selected_payload):
+        selected = self.normalized_agent_selected_stockpile_payload(selected_payload)
+        requested = (selected.get("use") or [])[:6]
+        available = []
+        if hasattr(self, "stockpile_table"):
+            for row in range(min(self.stockpile_table.rowCount(), 6)):
+                item = self.stockpile_table.item(row, 2)
+                if item:
+                    available.append(item.text().strip())
+        return (
+            f"Requested sample: {requested or 'none'}. "
+            f"Available table sample: {available or 'none'}. "
+            f"Current site is Hub={self.hub_input.currentText()}, Mine={self.mine_input.currentText()}."
+        )
+
+    def agent_workflow_apply_amt_stockpiles(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)
+
+        amt_chunking = payload.get("amt_chunking") or {}
+        if amt_chunking:
+            applied = self.apply_agent_amt_chunking_payload(amt_chunking)
+            self.append_agent_console(f"Agent workflow: applied AMT chunk settings for {applied} stockpile(s).")
+
+        hex_sequence_table = self.normalized_agent_hex_sequence_table(payload.get("hex_sequence_table") or [])
+        if not hex_sequence_table:
+            self.stop_agent_workflow_apply(
+                "Agent workflow paused on AMT Stockpiles: AMT workflow results must include hex_sequence_table with the generated chunk rows."
+            )
+            return
+
+        if not all(isinstance(item, dict) for item in hex_sequence_table):
+            self.stop_agent_workflow_apply("Agent workflow stopped: AMT hex/chunk sequence contains invalid rows.")
+            return
+
+        valid, validation_message = self.validate_agent_hex_sequence_table(hex_sequence_table)
+        if not valid:
+            file_note = ""
+            if payload.get("hex_sequence_table_file"):
+                file_note = f" Supplied hex_sequence_table_file: {payload.get('hex_sequence_table_file')}."
+            self.stop_agent_workflow_apply(
+                "Agent workflow paused on AMT Stockpiles: the supplied hex_sequence_table is incomplete. "
+                f"{validation_message}. Full AMT chunk rows must include footprint, sequence, hex chunk id, "
+                "positive balance, grade_fe/grade_si/grade_al/grade_p/grade_mn, and member_hexes so the map, "
+                f"chunk sequence table, and opening balances can be built.{file_note}"
+            )
+            return
+
+        if not self.store_AMT_chunk_settings():
+            self.stop_agent_workflow_apply("Agent workflow stopped: AMT chunk settings are not valid.")
+            return
+
+        if not self.load_agent_amt_sequence_into_map(hex_sequence_table):
+            self.stop_agent_workflow_apply("Agent workflow stopped: unable to load the supplied AMT hex/chunk sequence into the AMT map.")
+            return
+
+        self.total_AMT_stockpile_balances = {}
+        self.populate_total_AMT_stockpile_balances()
+        self.activate_manual_setup_tab()
+        self.navigate_to_solver_configuration()
+        QTimer.singleShot(250, self.agent_workflow_apply_solver_configuration)
+
+    def load_agent_amt_sequence_into_map(self, hex_sequence_table):
+        if not isinstance(hex_sequence_table, list) or not all(isinstance(item, dict) for item in hex_sequence_table):
+            return False
+
+        self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
+        self.hex_sequence_table_argument = copy.deepcopy(hex_sequence_table)
+
+        draw_AMT_map = getattr(self, "draw_AMT_map", None)
+        if draw_AMT_map is None:
+            return False
+
+        draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
+        draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table)
+        draw_AMT_map.clean_up_hex_sequence_table()
+        draw_AMT_map.update_sequence_counter()
+
+        self.hex_sequence_table = copy.deepcopy(draw_AMT_map.selected_points)
+        self.hex_sequence_table_argument = copy.deepcopy(draw_AMT_map.selected_points)
+        self.refresh_AMT_map_data_from_database()
+
+        if hasattr(self, "AMT_map_view"):
+            self.load_AMT_map()
+            self.append_agent_console("Agent workflow: loaded supplied AMT chunk sequence into the AMT map.")
+        return True
+
+    def apply_agent_amt_chunking_payload(self, amt_chunking):
+        applied = 0
+        if not isinstance(amt_chunking, dict):
+            return applied
+        for stockpile, settings in amt_chunking.items():
+            if not isinstance(settings, dict):
+                continue
+            if settings.get("average_reclaim_rate_tph") is not None:
+                if self.apply_agent_amt_chunking_target(
+                    f"amt_chunking.{stockpile}.average_reclaim_rate_tph",
+                    settings.get("average_reclaim_rate_tph"),
+                ):
+                    applied += 1
+            elif settings.get("average_reclaim_rate") is not None:
+                if self.apply_agent_amt_chunking_target(
+                    f"amt_chunking.{stockpile}.average_reclaim_rate_tph",
+                    settings.get("average_reclaim_rate"),
+                ):
+                    applied += 1
+            if settings.get("chunk_reclaim_hours") is not None:
+                self.apply_agent_amt_chunking_target(
+                    f"amt_chunking.{stockpile}.chunk_reclaim_hours",
+                    settings.get("chunk_reclaim_hours"),
+                )
+        if hasattr(self, "AMT_stockpile_table"):
+            self.store_AMT_chunk_settings()
+        return applied
+
+    def agent_workflow_apply_solver_configuration(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        if not hasattr(self, "min_stockpiles_input"):
+            self.stop_agent_workflow_apply("Agent workflow stopped: Solver Configuration tab is not ready.")
+            return
+
+        self.tabs.setCurrentIndex(self.solver_config_tab_index)
+        applied = 0
+        blend_settings = payload.get("blend_settings") or {}
+        for proposal in self.expand_agent_proposals([{"target": "blend_settings", "value": blend_settings}]):
+            if self.apply_agent_target_value(proposal.get("target"), proposal.get("value")):
+                applied += 1
+
+        solver_config = payload.get("solver_configuration") or {}
+        for proposal in self.expand_agent_proposals([{"target": "solver_config", "value": solver_config}]):
+            if self.apply_agent_target_value(proposal.get("target"), proposal.get("value")):
+                applied += 1
+
+        if applied:
+            self.append_agent_console(f"Agent workflow: applied {applied} Solver Configuration setting(s); submitting.")
+        else:
+            self.append_agent_console("Agent workflow: no Solver Configuration settings returned; submitting current values.")
+
+        if not self.store_solver_config_inputs():
+            self.stop_agent_workflow_apply("Agent workflow stopped: Solver Configuration inputs are not valid.")
+            return
+
+        self.setup_calendar()
+        self.tabs.setTabEnabled(self.calendar_tab_index, True)
+        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        QTimer.singleShot(250, self.agent_workflow_apply_calendar)
+
+    def agent_workflow_apply_calendar(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        calendar_rates = payload.get("calendar_rates") or {}
+        self.tabs.setCurrentIndex(self.calendar_tab_index)
+
+        applied = 0
+        if calendar_rates:
+            for proposal in self.expand_agent_proposals([{"target": "calendar_rates", "value": calendar_rates}]):
+                if self.apply_agent_target_value(proposal.get("target"), proposal.get("value")):
+                    applied += 1
+            self.append_agent_console(f"Agent workflow: applied {applied} Calendar value(s); submitting and starting optimisation.")
+            self.agent_workflow_active = False
+            self.store_calendar_inputs()
+            return
+
+        self.stop_agent_workflow_apply("Agent workflow completed at Calendar: no calendar_rates were returned, so optimisation was not started.")
+
+    def apply_agent_project_load(self, proposal):
+        source_kind = proposal.get("source_kind")
+        source_payload = proposal.get("source_payload")
+
+        try:
+            if source_kind == "project_file":
+                project_path = str(source_payload)
+                loaded_state = self.load_project_state_from_path(project_path)
+                source_label = project_path
+            elif source_kind == "project_state":
+                loaded_state = copy.deepcopy(source_payload)
+                source_label = "embedded project state"
+            else:
+                QMessageBox.warning(self, "BlendMaster Agent", "The selected agent result is not a project-load proposal.")
+                return False
+
+            loaded_state = self.normalized_agent_project_state(loaded_state)
+            self.restore_loaded_state(loaded_state, source_label=source_label, show_success=False)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "BlendMaster Agent", f"Unable to load agent project result: {exc}")
+            self.append_agent_console(f"Agent project load failed: {exc}")
+            return False
+
+    def load_project_state_from_path(self, project_path):
+        if not project_path:
+            raise ValueError("Project path is empty.")
+        project_path = os.path.abspath(os.path.expanduser(str(project_path)))
+        if not os.path.exists(project_path):
+            raise FileNotFoundError(project_path)
+        if project_path.lower().endswith(".prj"):
+            with open(project_path, "rb") as file:
+                return pickle.load(file)
+        if project_path.lower().endswith(".json"):
+            with open(project_path, "r", encoding="utf-8") as file:
+                return json.load(file)
+        raise ValueError("Agent project_file must point to a .prj or .json project-state file.")
+
+    def normalized_agent_project_state(self, loaded_state):
+        if not isinstance(loaded_state, dict):
+            raise ValueError("Agent project state must be a dictionary.")
+
+        loaded_state = copy.deepcopy(loaded_state)
+        site_config = loaded_state.pop("site_configuration", None)
+        if isinstance(site_config, dict):
+            self.merge_agent_site_configuration_into_state(loaded_state, site_config)
+
+        if "solver_configuration" in loaded_state and "solver_config" not in loaded_state:
+            loaded_state["solver_config"] = loaded_state.pop("solver_configuration")
+
+        for datetime_key in [
+            "start_time_choice",
+            "default_start_datetime",
+            "default_end_datetime",
+        ]:
+            loaded_state[datetime_key] = self.parse_agent_datetime_value(loaded_state.get(datetime_key))
+
+        if loaded_state.get("stockpile_data_use_column") is None:
+            loaded_state["stockpile_data_use_column"] = {}
+        if loaded_state.get("stockpile_data_AMT_column") is None:
+            loaded_state["stockpile_data_AMT_column"] = {}
+        if loaded_state.get("saved_blends_for_schedule") is None:
+            loaded_state["saved_blends_for_schedule"] = []
+        if loaded_state.get("stored_blend_sequence_table_for_gantt") is None:
+            loaded_state["stored_blend_sequence_table_for_gantt"] = []
+        if loaded_state.get("stored_blend_sequence_table_for_gantt_default") is None:
+            loaded_state["stored_blend_sequence_table_for_gantt_default"] = []
+        if loaded_state.get("hex_sequence_table") is None:
+            loaded_state["hex_sequence_table"] = []
+        if loaded_state.get("AMT_stockpile_data") is None:
+            loaded_state["AMT_stockpile_data"] = {}
+        if loaded_state.get("AMT_chunk_settings") is None:
+            loaded_state["AMT_chunk_settings"] = {}
+        if loaded_state.get("solver_config") is None:
+            loaded_state["solver_config"] = {}
+        if loaded_state.get("time_mode_choice") is None:
+            loaded_state["time_mode_choice"] = 2 if loaded_state.get("start_time_choice") else 1
+        if loaded_state.get("expit_mode_choice") is None:
+            loaded_state["expit_mode_choice"] = 1
+        if loaded_state.get("blend_mode_choice") is None:
+            loaded_state["blend_mode_choice"] = 1
+        if loaded_state.get("start_time_choice") is None:
+            loaded_state["start_time_choice"] = datetime.now()
+        if not loaded_state.get("default_start_datetime_str") and loaded_state.get("default_start_datetime"):
+            loaded_state["default_start_datetime_str"] = loaded_state["default_start_datetime"].strftime("%Y-%m-%d %H:%M:%S")
+        if not loaded_state.get("default_end_datetime_str") and loaded_state.get("default_end_datetime"):
+            loaded_state["default_end_datetime_str"] = loaded_state["default_end_datetime"].strftime("%Y-%m-%d %H:%M:%S")
+
+        loaded_state["solver_config"] = self.normalized_solver_config(loaded_state.get("solver_config", {}))
+        if loaded_state.get("calendar_inputs") is not None:
+            loaded_state["calendar_inputs"]["solver_config"] = copy.deepcopy(loaded_state["solver_config"])
+
+        return loaded_state
+
+    def merge_agent_site_configuration_into_state(self, loaded_state, site_config):
+        if "hub" in site_config:
+            loaded_state["hub_input_choice"] = site_config.get("hub")
+        if "mine" in site_config:
+            loaded_state["mine_input_choice"] = site_config.get("mine")
+        if "start_time" in site_config:
+            loaded_state["start_time_choice"] = self.parse_agent_datetime_value(site_config.get("start_time"))
+            loaded_state["time_mode_choice"] = 2
+        if "aps_mining_csv" in site_config:
+            loaded_state["file_path_choice"] = site_config.get("aps_mining_csv")
+        if "file_path" in site_config:
+            loaded_state["file_path_choice"] = site_config.get("file_path")
+        if "reevaluate_aps_direct_tip" in site_config:
+            loaded_state["reevaluate_aps_direct_tip_choice"] = bool(site_config.get("reevaluate_aps_direct_tip"))
+        if "selected_aps_crushers" in site_config:
+            loaded_state["aps_direct_tip_crusher_choice"] = site_config.get("selected_aps_crushers") or []
+        if "blend_mode" in site_config:
+            blend_mode = site_config.get("blend_mode")
+            if isinstance(blend_mode, str):
+                loaded_state["blend_mode_choice"] = 2 if "prompt" in blend_mode.lower() or "manual" in blend_mode.lower() else 1
+            else:
+                loaded_state["blend_mode_choice"] = blend_mode
+
+    def parse_agent_datetime_value(self, value):
+        if value is None or isinstance(value, datetime):
+            return value
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return value
+
+    def apply_agent_target_value(self, target, value):
+        if target in {"site_configuration", "site_config"}:
+            self.apply_agent_site_configuration_payload(value)
+            return True
+        if target == "selected_stockpiles":
+            return self.apply_agent_selected_stockpiles(value)
+        if target in {"selected_amt_stockpiles", "amt_stockpiles"}:
+            return self.apply_agent_selected_stockpiles({"amt": value})
+        if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
+            return self.apply_agent_calendar_target(target, value)
+        if str(target).startswith("amt_chunking."):
+            return self.apply_agent_amt_chunking_target(target, value)
+
+        key = self.normalized_agent_target(target)
+
+        def set_line_edit(widget, proposed_value):
+            widget.setText("" if proposed_value is None else str(proposed_value))
+
+        def to_bool(proposed_value):
+            if isinstance(proposed_value, bool):
+                return proposed_value
+            return str(proposed_value).strip().lower() in {"1", "true", "yes", "y", "enabled", "on"}
+
+        if key == "min_stockpiles":
+            set_line_edit(self.min_stockpiles_input, value)
+            return True
+        if key == "max_stockpiles":
+            set_line_edit(self.max_stockpiles_input, value)
+            return True
+        if key == "min_stockpile_contribution_ratio":
+            set_line_edit(self.min_stockpile_contribution_ratio_input, value)
+            return True
+        if key == "stockpile_feasibility_mode":
+            label = {
+                "stockpile_must_be_feasible": "Stockpile blend must be feasible",
+                "stockpile_can_rely_on_grade_blocks": "Stockpile blend can rely on grade blocks",
+            }.get(str(value), str(value))
+            self.stockpile_feasibility_combo.setCurrentText(label)
+            return True
+        if key == "min_feed_duration_hours":
+            set_line_edit(self.min_feed_duration_input, value)
+            return True
+        if key == "direct_tip_enabled":
+            self.direct_tip_enabled_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "direct_tip_cash_incentive":
+            set_line_edit(self.direct_tip_cash_incentive_input, value)
+            return True
+        if key == "stay_on_same_blend_incentive":
+            set_line_edit(self.stay_on_same_blend_incentive_input, value)
+            return True
+        if key == "blend_option_timeout_seconds":
+            set_line_edit(self.blend_option_timeout_input, value)
+            return True
+        if key == "max_blend_options_per_steady_state":
+            set_line_edit(self.max_blend_options_input, value)
+            return True
+        if key == "min_grade_block_pair_duration_hours":
+            set_line_edit(self.min_grade_block_pair_duration_input, value)
+            return True
+        if key == "stay_on_same_grade_block_pair_incentive":
+            set_line_edit(self.stay_on_same_grade_block_pair_incentive_input, value)
+            return True
+        if key == "grade_block_lock_enabled":
+            self.grade_block_lock_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "prefer_fewer_stockpiles":
+            self.prefer_fewer_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "balance_preference":
+            label = {
+                "none": "No balance preference",
+                "lower": "Lower balance first",
+                "higher": "Higher balance first",
+            }.get(str(value), str(value))
+            self.balance_preference_combo.setCurrentText(label)
+            return True
+        if key == "prefer_amt_stockpiles":
+            self.prefer_amt_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "prefer_contaminated_stockpiles":
+            self.prefer_contaminated_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "contaminant_thresholds.si":
+            set_line_edit(self.contaminant_si_threshold_input, value)
+            return True
+        if key == "contaminant_thresholds.al":
+            set_line_edit(self.contaminant_al_threshold_input, value)
+            return True
+        if key == "contaminant_thresholds.p":
+            set_line_edit(self.contaminant_p_threshold_input, value)
+            return True
+        if key == "contaminant_thresholds.mn":
+            set_line_edit(self.contaminant_mn_threshold_input, value)
+            return True
+        if key == "prefer_low_fe_stockpiles":
+            self.prefer_low_fe_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "low_fe_threshold":
+            set_line_edit(self.low_fe_threshold_input, value)
+            return True
+        return False
+
+    def apply_agent_selected_stockpiles(self, value):
+        if not hasattr(self, "stockpile_table"):
+            return False
+        use_names = []
+        amt_names = None
+        if isinstance(value, dict):
+            use_names = value.get("use") or value.get("selected") or value.get("stockpiles") or []
+            amt_names = value.get("amt")
+        elif isinstance(value, (list, tuple, set)):
+            use_names = value
+        else:
+            use_names = [value]
+
+        use_set = {str(name).strip().upper() for name in use_names if str(name).strip()}
+        amt_set = {str(name).strip().upper() for name in (amt_names or []) if str(name).strip()} if amt_names is not None else None
+        if not use_set and amt_set:
+            use_set = set(amt_set)
+        if not use_set:
+            return False
+
+        matched_any = False
+        for row in range(self.stockpile_table.rowCount()):
+            stockpile_item = self.stockpile_table.item(row, 2)
+            if not stockpile_item:
+                continue
+            stockpile_name = stockpile_item.text().strip()
+            stockpile_key = stockpile_name.upper()
+            use_checked = stockpile_key in use_set
+            matched_any = matched_any or use_checked or (amt_set is not None and stockpile_key in amt_set)
+            self.set_stockpile_checkbox(row, 0, use_checked)
+            self.stockpile_data_use_column[stockpile_name] = use_checked
+            if amt_set is not None:
+                amt_checked = stockpile_key in amt_set
+                self.set_stockpile_checkbox(row, 1, amt_checked)
+                self.stockpile_data_AMT_column[stockpile_name] = amt_checked
+        return matched_any
+
+    def set_stockpile_checkbox(self, row, column, checked):
+        checkbox_widget = self.stockpile_table.cellWidget(row, column)
+        if not checkbox_widget or not checkbox_widget.layout() or checkbox_widget.layout().count() == 0:
+            return
+        checkbox = checkbox_widget.layout().itemAt(0).widget()
+        if isinstance(checkbox, QCheckBox):
+            checkbox.setChecked(bool(checked))
+
+    def apply_agent_calendar_target(self, target, value):
+        parsed = self.parse_agent_calendar_target(target)
+        if not parsed or not hasattr(self, "main_table"):
+            return False
+        row_key, period = parsed
+        row_idx = self.find_calendar_row_by_key(row_key)
+        col_idx = self.find_calendar_column_by_period(period)
+        if row_idx is None or col_idx is None:
+            return False
+
+        widget = self.main_table.cellWidget(row_idx, col_idx)
+        if isinstance(widget, QComboBox):
+            text = str(value)
+            if widget.findText(text) == -1:
+                widget.addItem(text)
+            widget.setCurrentText(text)
+            return True
+
+        item = self.main_table.item(row_idx, col_idx)
+        if item is None:
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignCenter)
+            self.main_table.setItem(row_idx, col_idx, item)
+        item.setText("" if value is None else str(value))
+        return True
+
+    def apply_agent_amt_chunking_target(self, target, value):
+        parts = str(target).split(".")
+        if len(parts) < 3 or not hasattr(self, "AMT_stockpile_table"):
+            return False
+        stockpile, field = parts[1], parts[2]
+        field_column = {
+            "average_reclaim_rate_tph": 1,
+            "chunk_reclaim_hours": 2,
+        }.get(field)
+        if field_column is None:
+            return False
+        for row in range(self.AMT_stockpile_table.rowCount()):
+            stockpile_item = self.AMT_stockpile_table.item(row, 0)
+            if not stockpile_item or stockpile_item.text().strip().upper() != stockpile.upper():
+                continue
+            item = self.AMT_stockpile_table.item(row, field_column)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignCenter)
+                self.AMT_stockpile_table.setItem(row, field_column, item)
+            item.setText("" if value is None else str(value))
+            if self.AMT_stockpile_table.columnCount() > 3:
+                try:
+                    rate = float(self.AMT_stockpile_table.item(row, 1).text())
+                    hours = float(self.AMT_stockpile_table.item(row, 2).text())
+                    chunk_item = self.AMT_stockpile_table.item(row, 3)
+                    if chunk_item is None:
+                        chunk_item = QTableWidgetItem()
+                        chunk_item.setTextAlignment(Qt.AlignCenter)
+                        self.AMT_stockpile_table.setItem(row, 3, chunk_item)
+                    chunk_item.setText(f"{rate * hours:.0f}")
+                except Exception:
+                    pass
+            return True
+        return False
     
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -1662,8 +3735,15 @@ class UserInputs(QMainWindow):
             self.project_load_waiting_for_AMT = False
             self.continue_project_load_after_stockpile_setup()
 
+        if getattr(self, "agent_workflow_waiting_for_amt", False):
+            self.agent_workflow_waiting_for_amt = False
+            QTimer.singleShot(250, self.agent_workflow_apply_amt_stockpiles)
+
     def handle_AMT_stockpile_fetch_error(self, error_message):
         self.project_load_waiting_for_AMT = False
+        self.agent_workflow_waiting_for_amt = False
+        if getattr(self, "agent_workflow_active", False):
+            self.stop_agent_workflow_apply(f"Agent workflow stopped while fetching AMT stockpile data: {error_message}")
         self.project_load_restore_in_progress = False
         self.show_error_popup(error_message)
 
@@ -4605,6 +6685,14 @@ class UserInputs(QMainWindow):
             )
         if hasattr(self, "blend_mode"):
             self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+        if hasattr(self, "agent_enabled_checkbox"):
+            self.agent_enabled_choice = self.agent_enabled_checkbox.isChecked()
+        if hasattr(self, "agent_story_input"):
+            self.agent_story_text = self.agent_story_input.toPlainText()
+        if hasattr(self, "agent_run_instructions_input"):
+            self.agent_run_instructions_text = self.agent_run_instructions_input.toPlainText()
+        if hasattr(self, "agent_bridge_port_input"):
+            self.agent_bridge_port = self.agent_bridge_port_value()
 
         if hasattr(self, "blend_data_from_config_table_inputs"):
             self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
@@ -4625,6 +6713,10 @@ class UserInputs(QMainWindow):
             state_to_save = {
                 "tab_states": tab_states,
                 "blend_mode_choice": self.blend_mode_choice,
+                "agent_enabled_choice": self.agent_enabled_choice,
+                "agent_story_text": self.agent_story_text,
+                "agent_run_instructions_text": self.agent_run_instructions_text,
+                "agent_bridge_port": self.agent_bridge_port,
                 "calendar_inputs": self.calendar_inputs,
                 "crusher_rate": self.crusher_rate,
                 "default_end_datetime": self.default_end_datetime,
@@ -4688,56 +6780,8 @@ class UserInputs(QMainWindow):
             with open(file_path, 'rb') as file:
                 loaded_state = pickle.load(file)
 
-            # Unpack loaded state into variables
-            self.blend_mode_choice = loaded_state.get("blend_mode_choice", None)
-            self.crusher_rate = loaded_state.get("crusher_rate", None)
-            self.calendar_inputs = loaded_state.get("calendar_inputs", None)
-            self.default_end_datetime = loaded_state.get("default_end_datetime", None)
-            self.default_end_datetime_str = loaded_state.get("default_end_datetime_str", "")
-            self.default_start_datetime = loaded_state.get("default_start_datetime", None)
-            self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
-            self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
-            self.file_path_choice = loaded_state.get("file_path_choice", "")
-            self.reevaluate_aps_direct_tip_choice = loaded_state.get(
-                "reevaluate_aps_direct_tip_choice", False
-            )
-            self.aps_direct_tip_crusher_choice = loaded_state.get(
-                "aps_direct_tip_crusher_choice", []
-            )
-            self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
-                self.aps_direct_tip_crusher_choice
-            )
-            self.mine_input_choice = loaded_state.get("mine_input_choice", None)
-            self.hub_input_choice = loaded_state.get("hub_input_choice", None)
-            self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
-            self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule") or []
-            self.start_time_choice = loaded_state.get("start_time_choice", None)
-            self.stockpile_data = loaded_state.get("stockpile_data", None)
-            self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", None)
-            self.stored_blend_sequence_table_for_gantt = (
-                loaded_state.get("stored_blend_sequence_table_for_gantt") or []
-            )
-            self.stored_blend_sequence_table_for_gantt_default = (
-                loaded_state.get("stored_blend_sequence_table_for_gantt_default") or []
-            )
-            self.time_mode_choice = loaded_state.get("time_mode_choice", None)
-            self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
-            self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
-            self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
-            self.hex_sequence_table = loaded_state.get("hex_sequence_table", None)
-            self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
-            self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", None)
-            self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
-            self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
-            self.solver_config = self.normalized_solver_config(
-                loaded_state.get("solver_config", {})
-            )
-            if self.calendar_inputs is not None:
-                self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
-
-            tab_states = loaded_state.get("tab_states", {})
-            for index, enabled in tab_states.items():
-                self.tabs.setTabEnabled(index, enabled)
+            self.restore_loaded_state(loaded_state, source_label=file_path, show_success=False)
+            return
 
         except FileNotFoundError:
             QMessageBox.warning(self, "Error", "No saved projects found!")
@@ -4747,13 +6791,88 @@ class UserInputs(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
             self.is_project_loaded = False
             return
-        
+
+    def restore_loaded_state(self, loaded_state, source_label=None, show_success=False):
+        """Restore app state using the same path as Load Project."""
+        self.is_project_loaded = True
+        loaded_state = self.normalized_agent_project_state(loaded_state)
+
+        # Unpack loaded state into variables
+        self.blend_mode_choice = loaded_state.get("blend_mode_choice", None)
+        self.agent_enabled_choice = loaded_state.get("agent_enabled_choice", False)
+        self.agent_story_text = loaded_state.get("agent_story_text", "")
+        self.agent_run_instructions_text = loaded_state.get("agent_run_instructions_text", "")
+        self.agent_bridge_port = loaded_state.get("agent_bridge_port", 8765)
+        if hasattr(self, "agent_enabled_checkbox"):
+            self.agent_enabled_checkbox.setChecked(bool(self.agent_enabled_choice))
+        if hasattr(self, "agent_story_input"):
+            self.agent_story_input.setPlainText(self.agent_story_text)
+        if hasattr(self, "agent_run_instructions_input"):
+            self.agent_run_instructions_input.setPlainText(self.agent_run_instructions_text)
+        if hasattr(self, "agent_bridge_port_input"):
+            self.agent_bridge_port_input.setText(str(self.agent_bridge_port))
+        self.crusher_rate = loaded_state.get("crusher_rate", None)
+        self.calendar_inputs = loaded_state.get("calendar_inputs", None)
+        self.default_end_datetime = loaded_state.get("default_end_datetime", None)
+        self.default_end_datetime_str = loaded_state.get("default_end_datetime_str", "")
+        self.default_start_datetime = loaded_state.get("default_start_datetime", None)
+        self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
+        self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
+        self.file_path_choice = loaded_state.get("file_path_choice", "")
+        self.reevaluate_aps_direct_tip_choice = loaded_state.get(
+            "reevaluate_aps_direct_tip_choice", False
+        )
+        self.aps_direct_tip_crusher_choice = loaded_state.get(
+            "aps_direct_tip_crusher_choice", []
+        )
+        self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
+            self.aps_direct_tip_crusher_choice
+        )
+        self.mine_input_choice = loaded_state.get("mine_input_choice", None)
+        self.hub_input_choice = loaded_state.get("hub_input_choice", None)
+        self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
+        if self.opening_stockpile_inventories is None:
+            self.opening_stockpile_inventories = OpeningStockpileInventories()
+        self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule") or []
+        self.start_time_choice = loaded_state.get("start_time_choice", None)
+        self.stockpile_data = loaded_state.get("stockpile_data", None)
+        self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", {})
+        self.stored_blend_sequence_table_for_gantt = (
+            loaded_state.get("stored_blend_sequence_table_for_gantt") or []
+        )
+        self.stored_blend_sequence_table_for_gantt_default = (
+            loaded_state.get("stored_blend_sequence_table_for_gantt_default") or []
+        )
+        self.time_mode_choice = loaded_state.get("time_mode_choice", None)
+        self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
+        self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
+        self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
+        self.hex_sequence_table = loaded_state.get("hex_sequence_table", [])
+        self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
+        self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
+        self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
+        self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+        self.solver_config = self.normalized_solver_config(
+            loaded_state.get("solver_config", {})
+        )
+        if self.calendar_inputs is not None:
+            self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
+
+        tab_states = loaded_state.get("tab_states", {})
+        for index, enabled in tab_states.items():
+            if isinstance(index, str) and index.isdigit():
+                index = int(index)
+            if isinstance(index, int) and 0 <= index < self.tabs.count():
+                self.tabs.setTabEnabled(index, enabled)
+
         self.project_load_restore_in_progress = True
         self.handle_site_config_submit()
         self.store_stockpile_table()
         if getattr(self, "project_load_waiting_for_AMT", False):
             return
         self.continue_project_load_after_stockpile_setup()
+        if show_success:
+            QMessageBox.information(self, "BlendMaster", f"Project state loaded from {source_label or 'agent result'}.")
 
     def continue_project_load_after_stockpile_setup(self):
         self.project_load_restore_in_progress = False
@@ -4774,6 +6893,20 @@ class UserInputs(QMainWindow):
         self.file_path_choice = None
         self.reevaluate_aps_direct_tip_choice = False
         self.aps_direct_tip_crusher_choice = []
+        self.agent_enabled_choice = False
+        self.agent_story_text = ""
+        self.agent_run_instructions_text = ""
+        self.agent_bridge_port = 8765
+        self.agent_bridge_process = None
+        self.agent_bridge_log_handle = None
+        self.agent_current_request_id = None
+        self.agent_seen_trace_count = 0
+        self.agent_latest_proposals = []
+        self.agent_latest_result = {}
+        self.agent_workflow_active = False
+        self.agent_workflow_payload = {}
+        self.agent_workflow_after_site_config = False
+        self.agent_workflow_waiting_for_amt = False
         self.mine_input_choice = None
         self.hub_input_choice = None
         self.opening_stockpile_inventories = None
@@ -4808,6 +6941,10 @@ class UserInputs(QMainWindow):
             DatabaseManager.clear_all_tables()
         except sqlite3.Error as e:
             print(f"Warning: failed to clear SQLite session data: {e}")
+
+    def closeEvent(self, event):
+        self.stop_agent_bridge(silent=True)
+        super().closeEvent(event)
     
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
