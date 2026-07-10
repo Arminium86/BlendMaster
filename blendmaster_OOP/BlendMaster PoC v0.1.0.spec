@@ -4,8 +4,8 @@
 a = Analysis(
     ['C:\\BlendMaster\\blendmaster_OOP\\GUI\\InitialiseGUI.py'],
     pathex=['C:\\BlendMaster\\blendmaster_OOP'],
-    binaries=[],
-    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background.png', 'resources')],
+    binaries=[('C:\\Users\\armin.sabet\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\pulp\\solverdir\\cbc\\win\\i64\\cbc.exe', 'pulp\\solverdir\\cbc\\win\\i64')],
+    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background.png', 'resources'), ('C:\\Users\\armin.sabet\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\pulp\\solverdir\\cbc\\win\\i64\\coin-license.txt', 'pulp\\solverdir\\cbc\\win\\i64')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
