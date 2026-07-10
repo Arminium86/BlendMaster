@@ -176,6 +176,22 @@ class DatabaseManager:
         self.write_optimised_stockpile_depletion_report_to_database(results)
         StockpileProfileReport.write_optimised_stockpile_profile_report_to_database(periods)
 
+    def write_product_build_report_to_database(self, results: pd.DataFrame):
+        database_name = "blendmaster.db"
+        conn = sqlite3.connect(database_name)
+        try:
+            if results is None:
+                results = pd.DataFrame()
+            results = results.copy()
+            for column in results.columns:
+                if pd.api.types.is_datetime64_any_dtype(results[column]):
+                    results[column] = pd.to_datetime(results[column]).dt.strftime("%Y-%m-%d %H:%M:%S")
+            results.to_sql("product_build_report", conn, if_exists="replace", index=False)
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"Product build report saved to database {database_name}")
+
     def write_build_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
         database_name = 'blendmaster.db'
@@ -595,7 +611,8 @@ class StockpileProfileReport:
             "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
             "source_or_destination", "source_type", "arrival_tonnes",
             "tonnes_to_crusher", "tonnes_to_stockpile", "movement_tonnes",
-            "movement_destination"
+            "movement_destination", "steady_state_start_datetime",
+            "steady_state_end_datetime"
         ]
         if steady_states.empty:
             return pd.DataFrame(columns=profile_columns)
@@ -758,11 +775,13 @@ class StockpileProfileReport:
                 "source_or_destination": "Not yet delivered",
                 "source_type": "grade_block",
                 "arrival_tonnes": 0,
-                "tonnes_to_crusher": 0,
-                "tonnes_to_stockpile": 0,
-                "movement_tonnes": 0,
-                "movement_destination": "",
-            })
+                    "tonnes_to_crusher": 0,
+                    "tonnes_to_stockpile": 0,
+                    "movement_tonnes": 0,
+                    "movement_destination": "",
+                    "steady_state_start_datetime": pd.NaT,
+                    "steady_state_end_datetime": pd.NaT,
+                })
 
             for _, row in group.sort_values("_steady_state_start").iterrows():
                 start_time = row["_steady_state_start"]
@@ -803,11 +822,13 @@ class StockpileProfileReport:
                     "tonnes_to_stockpile": 0,
                     "movement_tonnes": 0,
                     "movement_destination": "Arrived at ROM / Crusher Area",
+                    "steady_state_start_datetime": start_time,
+                    "steady_state_end_datetime": end_time,
                 })
                 records.append({
                     "steady_state_number": row["steady_state_number"],
                     "agent": "EX",
-                    "time": end_time,
+                    "time": start_time,
                     "stockpile": source,
                     "balance": closing_balance,
                     "grade_fe": row.get("grade_fe", 0),
@@ -822,6 +843,8 @@ class StockpileProfileReport:
                     "tonnes_to_stockpile": to_stockpile,
                     "movement_tonnes": total_depleted,
                     "movement_destination": movement_destination,
+                    "steady_state_start_datetime": start_time,
+                    "steady_state_end_datetime": end_time,
                 })
                 running_balance = closing_balance
 
@@ -862,6 +885,14 @@ class StockpileProfileReport:
                 "opening_stockpile_inventories",
                 [
                     "name", "balance", "grade_fe", "grade_si", "grade_al",
+                    "grade_p", "grade_mn"
+                ],
+            )
+            opening_amt_stockpile_inventories = StockpileProfileReport.read_table_or_empty(
+                conn,
+                "opening_AMT_stockpile_inventories",
+                [
+                    "footprint", "balance", "grade_fe", "grade_si", "grade_al",
                     "grade_p", "grade_mn"
                 ],
             )
@@ -970,11 +1001,50 @@ class StockpileProfileReport:
                 ignore_index=True
             )
 
-            # Add data from opening_stockpile_inventories for stockpiles not in the combined report
-            stockpiles_in_combined = combined_report['stockpile'].unique()
-            opening_stockpiles_not_in_combined = opening_stockpile_inventories[
-                ~opening_stockpile_inventories['name'].isin(stockpiles_in_combined)
-            ].rename(columns={
+            # Backfill baseline rows only for stockpiles that are actually used as
+            # crusher feed sources or build destinations. AMT openings are stored
+            # at hex level, so aggregate them by footprint before matching.
+            used_stockpiles = set()
+
+            def add_names(values):
+                for value in values:
+                    if pd.isna(value):
+                        continue
+                    text = str(value).strip()
+                    if text:
+                        used_stockpiles.add(text)
+
+            add_names(build_report["stockpile"].dropna().unique())
+
+            if not optimised_stockpile_depletion_report.empty:
+                source_types = (
+                    optimised_stockpile_depletion_report["source_type"]
+                    .fillna("")
+                    .astype(str)
+                    .str.lower()
+                )
+                add_names(
+                    optimised_stockpile_depletion_report.loc[
+                        ~source_types.isin({"grade_block", "grade block", "gradeblock"}),
+                        "source",
+                    ].dropna().unique()
+                )
+
+            if not optimised_blend_report.empty:
+                source_types = (
+                    optimised_blend_report["source_type"]
+                    .fillna("")
+                    .astype(str)
+                    .str.lower()
+                )
+                add_names(
+                    optimised_blend_report.loc[
+                        ~source_types.isin({"grade_block", "grade block", "gradeblock"}),
+                        "source",
+                    ].dropna().unique()
+                )
+
+            weighted_opening_rows = opening_stockpile_inventories.rename(columns={
                 'name': 'stockpile',
                 'balance': 'balance',
                 'grade_fe': 'grade_fe',
@@ -982,8 +1052,87 @@ class StockpileProfileReport:
                 'grade_al': 'grade_al',
                 'grade_p': 'grade_p',
                 'grade_mn': 'grade_mn'
-            })
-            opening_stockpiles_not_in_combined['time'] = start_datetime  # Set time to start_datetime
+            }).copy()
+            weighted_opening_rows["opening_source_priority"] = 1
+
+            amt_opening_rows = pd.DataFrame(columns=[
+                "stockpile", "balance", "grade_fe", "grade_si", "grade_al",
+                "grade_p", "grade_mn", "opening_source_priority"
+            ])
+            if not opening_amt_stockpile_inventories.empty:
+                amt_openings = opening_amt_stockpile_inventories.copy()
+                amt_openings["balance"] = (
+                    pd.to_numeric(amt_openings["balance"], errors="coerce")
+                    .fillna(0)
+                    .clip(lower=0)
+                )
+                amt_openings = amt_openings[
+                    amt_openings["footprint"].notna()
+                    & (amt_openings["footprint"].astype(str).str.strip() != "")
+                    & (amt_openings["balance"] > 0)
+                ]
+                amt_records = []
+                for footprint, group in amt_openings.groupby("footprint", sort=False):
+                    record = {
+                        "stockpile": str(footprint).strip(),
+                        "balance": float(group["balance"].sum()),
+                        "opening_source_priority": 0,
+                    }
+                    for grade in ["fe", "si", "al", "p", "mn"]:
+                        record[f"grade_{grade}"] = StockpileProfileReport.weighted_average(
+                            group,
+                            f"grade_{grade}",
+                            "balance",
+                        )
+                    amt_records.append(record)
+                if amt_records:
+                    amt_opening_rows = pd.DataFrame(amt_records)
+
+            opening_sources = pd.concat(
+                [weighted_opening_rows, amt_opening_rows],
+                ignore_index=True,
+                sort=False,
+            )
+            expected_opening_columns = [
+                "stockpile", "balance", "grade_fe", "grade_si", "grade_al",
+                "grade_p", "grade_mn", "opening_source_priority"
+            ]
+            for column in expected_opening_columns:
+                if column not in opening_sources:
+                    opening_sources[column] = pd.NA
+            opening_sources["stockpile"] = opening_sources["stockpile"].astype(str).str.strip()
+            opening_sources = opening_sources[
+                opening_sources["stockpile"].isin(used_stockpiles)
+            ].copy()
+            opening_sources = (
+                opening_sources
+                .sort_values(["opening_source_priority", "stockpile"])
+                .drop_duplicates(subset=["stockpile"], keep="first")
+            )
+
+            combined_times = combined_report[["stockpile", "time"]].copy()
+            combined_times["stockpile"] = combined_times["stockpile"].astype(str).str.strip()
+            combined_times["time"] = pd.to_datetime(combined_times["time"], errors="coerce")
+            profile_start = pd.to_datetime(start_datetime, errors="coerce")
+            stockpiles_with_start_profile_row = {
+                str(value).strip()
+                for value in combined_times.loc[
+                    combined_times["time"].notna()
+                    & (combined_times["time"] <= profile_start),
+                    "stockpile",
+                ].dropna().unique()
+                if str(value).strip()
+            }
+            opening_stockpiles_not_in_combined = opening_sources[
+                ~opening_sources['stockpile'].isin(stockpiles_with_start_profile_row)
+            ].copy()
+            opening_stockpiles_not_in_combined = opening_stockpiles_not_in_combined[
+                [
+                    "stockpile", "balance", "grade_fe", "grade_si",
+                    "grade_al", "grade_p", "grade_mn"
+                ]
+            ]
+            opening_stockpiles_not_in_combined['time'] = start_datetime
             opening_stockpiles_not_in_combined['steady_state_number'] = None
             opening_stockpiles_not_in_combined['agent'] = None
             opening_stockpiles_not_in_combined['source_or_destination'] = None

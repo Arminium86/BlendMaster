@@ -40,6 +40,7 @@ class Optimizer:
     TIE_BREAK_REWARD_PER_TONNE = 1.0
     FEWER_STOCKPILE_PENALTY = 10.0
     SOURCE_SELECTION_EPSILON_PENALTY = 0.001
+    PRODUCT_BUILD_TONNES_TOLERANCE = 0.1
 
     @staticmethod
     def selection_source_name(event):
@@ -87,6 +88,21 @@ class Optimizer:
         
         if result['Linprog_result_object'].success: 
             steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data, period_tracker)
+            (
+                steady_state_duration,
+                product_build_controller_source,
+                product_build_controller_tonnes,
+            ) = self.update_steady_state_duration_for_product_build_completion(
+                result,
+                steady_state_duration,
+                solver_config,
+            )
+            if product_build_controller_source is not None:
+                # Product-build completion is a time boundary only. Do not add
+                # the depleted-source equality constraint used for stockpile or
+                # grade-block depletion boundaries.
+                steady_state_controller_source = None
+                steady_state_controller_tonnes = None
             filtered_event_pool = self.filter_events_by_steady_state_window(
                 event_pool, current_time, steady_state_duration
             )
@@ -134,6 +150,46 @@ class Optimizer:
                 else: return result
 
         else: return result
+
+    @staticmethod
+    def update_steady_state_duration_for_product_build_completion(
+        result,
+        steady_state_duration,
+        solver_config,
+    ):
+        """Shorten a steady state if the active product build reaches target tonnes."""
+        solver_config = solver_config or {}
+        target_build = solver_config.get("target_product_build") or {}
+        target_build_state = solver_config.get("target_product_build_state") or {}
+        if not target_build:
+            return steady_state_duration, None, None
+
+        def safe_float(value, default=0.0):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        target_tonnes = safe_float(target_build.get("target_tonnes"), 0.0)
+        opening_tonnes = safe_float(target_build_state.get("tonnes"), 0.0)
+        remaining_tonnes = target_tonnes - opening_tonnes
+        crusher_rate_output = safe_float(result.get("crusher_rate_output"), 0.0)
+        if (
+            target_tonnes <= Optimizer.SOLUTION_TOLERANCE
+            or remaining_tonnes <= Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE
+            or crusher_rate_output <= Optimizer.SOLUTION_TOLERANCE
+        ):
+            return steady_state_duration, None, None
+
+        duration_to_complete = remaining_tonnes / crusher_rate_output
+        if (
+            duration_to_complete > Optimizer.SOLUTION_TOLERANCE
+            and duration_to_complete < steady_state_duration - Optimizer.SOLUTION_TOLERANCE
+        ):
+            build_name = target_build.get("build_name") or "Product build"
+            return duration_to_complete, f"{build_name} complete", remaining_tonnes
+
+        return steady_state_duration, None, None
 
     @staticmethod
     def filter_events_by_steady_state_window(event_pool, current_time, steady_state_duration):
@@ -380,6 +436,32 @@ class Optimizer:
             except (TypeError, ValueError):
                 return default
 
+        target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
+        brand_guidance_mode = solver_config.get("brand_guidance_mode", "ignore")
+        brand_guidance_incentive = safe_float(solver_config.get("brand_guidance_incentive", 0.0), 0.0)
+
+        def event_brand_match_proportion(event):
+            if not target_product_brand or not event.is_stockpile:
+                return 0.0
+            proportions = getattr(event, "aps_brand_proportions", {}) or {}
+            normalized_proportions = {
+                str(brand or "").strip().upper(): safe_float(proportion)
+                for brand, proportion in proportions.items()
+            }
+            if target_product_brand in normalized_proportions:
+                return max(0.0, min(1.0, normalized_proportions[target_product_brand]))
+            event_brand = str(getattr(event, "aps_brand", "") or "").strip().upper()
+            return 1.0 if event_brand == target_product_brand else 0.0
+
+        if (
+            target_product_brand
+            and brand_guidance_mode == "force_match"
+        ):
+            bounds = [
+                (0, upper if (not event.is_stockpile or event_brand_match_proportion(event) > 0) else 0)
+                for (lower, upper), event in zip(bounds, event_pool)
+            ]
+
         preference_rewards = [0.0] * len(event_pool)
         balance_preference = solver_config.get("balance_preference", "none")
         if balance_preference in ("lower", "higher") and event_pool:
@@ -444,8 +526,16 @@ class Optimizer:
                     and str(event.stockpile) in previous_grade_block_pair_stockpile_source_ids
                 ):
                     grade_block_pair_reward = stay_on_same_grade_block_pair_incentive
+            brand_match_proportion = event_brand_match_proportion(event)
+            brand_guidance_reward = 0
+            brand_guidance_penalty = 0
+            if target_product_brand and brand_guidance_incentive and event.is_stockpile:
+                if brand_guidance_mode == "prefer_match":
+                    brand_guidance_reward = brand_guidance_incentive * brand_match_proportion
+                elif brand_guidance_mode == "penalize_mismatch":
+                    brand_guidance_penalty = brand_guidance_incentive * (1 - brand_match_proportion)
             base_costs.append(
-                dmc + event.cost + event.cash - preference_reward - direct_tip_reward - continuity_reward - grade_block_pair_reward
+                dmc + event.cost + event.cash + brand_guidance_penalty - preference_reward - direct_tip_reward - continuity_reward - grade_block_pair_reward - brand_guidance_reward
             )
 
         throughput_reward = max(
@@ -479,37 +569,64 @@ class Optimizer:
             A_eq = None
             b_eq = None
 
+        enforce_steady_state_grades = not (
+            solver_config.get("allow_offspec_steady_states_for_product_build", False)
+            and solver_config.get("product_builds_configured", False)
+        )
+
         # Minimum crusher grade (turned into an upper-bound inequality)
-        A_ub_min_crusher_grade_fe = [[-event.grade_fe + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade_fe = [0]
-        
-        A_ub_min_crusher_grade_si = [[-event.grade_si + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade_si = [0]
+        if enforce_steady_state_grades:
+            A_ub_min_crusher_grade_fe = [[-event.grade_fe + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            b_ub_min_crusher_grade_fe = [0]
 
-        A_ub_min_crusher_grade_al = [[-event.grade_al + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade_al = [0]
+            A_ub_min_crusher_grade_si = [[-event.grade_si + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            b_ub_min_crusher_grade_si = [0]
 
-        A_ub_min_crusher_grade_p = [[-event.grade_p + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade_p = [0]
+            A_ub_min_crusher_grade_al = [[-event.grade_al + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            b_ub_min_crusher_grade_al = [0]
 
-        A_ub_min_crusher_grade_mn = [[-event.grade_mn + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
-        b_ub_min_crusher_grade_mn = [0]
+            A_ub_min_crusher_grade_p = [[-event.grade_p + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            b_ub_min_crusher_grade_p = [0]
 
-        # Max crusher grade (upper-bound inequality)
-        A_ub_max_crusher_grade_fe = [[event.grade_fe - period_crusher_target["target_fe_max"] for event in event_pool]]
-        b_ub_max_crusher_grade_fe = [0]
+            A_ub_min_crusher_grade_mn = [[-event.grade_mn + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            b_ub_min_crusher_grade_mn = [0]
 
-        A_ub_max_crusher_grade_si = [[event.grade_si - period_crusher_target["target_si_max"] for event in event_pool]]
-        b_ub_max_crusher_grade_si = [0]
+            # Max crusher grade (upper-bound inequality)
+            A_ub_max_crusher_grade_fe = [[event.grade_fe - period_crusher_target["target_fe_max"] for event in event_pool]]
+            b_ub_max_crusher_grade_fe = [0]
 
-        A_ub_max_crusher_grade_al = [[event.grade_al - period_crusher_target["target_al_max"] for event in event_pool]]
-        b_ub_max_crusher_grade_al = [0]
+            A_ub_max_crusher_grade_si = [[event.grade_si - period_crusher_target["target_si_max"] for event in event_pool]]
+            b_ub_max_crusher_grade_si = [0]
 
-        A_ub_max_crusher_grade_p = [[event.grade_p - period_crusher_target["target_p_max"] for event in event_pool]]
-        b_ub_max_crusher_grade_p = [0]
+            A_ub_max_crusher_grade_al = [[event.grade_al - period_crusher_target["target_al_max"] for event in event_pool]]
+            b_ub_max_crusher_grade_al = [0]
 
-        A_ub_max_crusher_grade_mn = [[event.grade_mn - period_crusher_target["target_mn_max"] for event in event_pool]]
-        b_ub_max_crusher_grade_mn = [0]
+            A_ub_max_crusher_grade_p = [[event.grade_p - period_crusher_target["target_p_max"] for event in event_pool]]
+            b_ub_max_crusher_grade_p = [0]
+
+            A_ub_max_crusher_grade_mn = [[event.grade_mn - period_crusher_target["target_mn_max"] for event in event_pool]]
+            b_ub_max_crusher_grade_mn = [0]
+        else:
+            A_ub_min_crusher_grade_fe = []
+            b_ub_min_crusher_grade_fe = []
+            A_ub_min_crusher_grade_si = []
+            b_ub_min_crusher_grade_si = []
+            A_ub_min_crusher_grade_al = []
+            b_ub_min_crusher_grade_al = []
+            A_ub_min_crusher_grade_p = []
+            b_ub_min_crusher_grade_p = []
+            A_ub_min_crusher_grade_mn = []
+            b_ub_min_crusher_grade_mn = []
+            A_ub_max_crusher_grade_fe = []
+            b_ub_max_crusher_grade_fe = []
+            A_ub_max_crusher_grade_si = []
+            b_ub_max_crusher_grade_si = []
+            A_ub_max_crusher_grade_al = []
+            b_ub_max_crusher_grade_al = []
+            A_ub_max_crusher_grade_p = []
+            b_ub_max_crusher_grade_p = []
+            A_ub_max_crusher_grade_mn = []
+            b_ub_max_crusher_grade_mn = []
 
         # Step 3: Crusher capacity constraint
         A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
@@ -539,7 +656,7 @@ class Optimizer:
         stockpile_feasibility_mode = solver_config.get(
             "stockpile_feasibility_mode", "stockpile_must_be_feasible"
         )
-        if stockpile_feasibility_mode == "stockpile_must_be_feasible" and stockpile_indices:
+        if enforce_steady_state_grades and stockpile_feasibility_mode == "stockpile_must_be_feasible" and stockpile_indices:
             grade_constraint_specs = [
                 ("grade_fe", "target_fe_min", "target_fe_max"),
                 ("grade_si", "target_si_min", "target_si_max"),
@@ -559,6 +676,47 @@ class Optimizer:
                     )
                 A_ub_stockpile_grade_feasibility.extend([min_row, max_row])
                 b_ub_stockpile_grade_feasibility.extend([0, 0])
+
+        # Product-build grade targeting. When the active product build can be
+        # completed inside this steady state, constrain the cumulative build
+        # inventory plus the candidate feed so the build is on spec at target
+        # tonnes. Earlier off-spec steady states are allowed only until the
+        # build is close enough to complete.
+        A_ub_product_build_grade = []
+        b_ub_product_build_grade = []
+        target_product_build = solver_config.get("target_product_build") or {}
+        target_product_build_state = solver_config.get("target_product_build_state") or {}
+        if target_product_build:
+            opening_product_tonnes = safe_float(target_product_build_state.get("tonnes"), 0.0)
+            target_product_tonnes = safe_float(target_product_build.get("target_tonnes"), 0.0)
+            remaining_product_tonnes = max(target_product_tonnes - opening_product_tonnes, 0.0)
+            steady_state_capacity = period_crusher_target["crusher_rate"] * steady_state_duration
+            product_build_can_complete = (
+                target_product_tonnes > Optimizer.SOLUTION_TOLERANCE
+                and remaining_product_tonnes <= steady_state_capacity + Optimizer.SOLUTION_TOLERANCE
+            )
+            if product_build_can_complete:
+                for grade_key in ["fe", "si", "al", "p", "mn"]:
+                    min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
+                    max_target = safe_float(target_product_build.get(f"target_{grade_key}_max"), 100.0)
+                    opening_grade_metal = safe_float(
+                        target_product_build_state.get(f"grade_{grade_key}_metal"),
+                        0.0,
+                    )
+
+                    min_row = [
+                        min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0))
+                        for event in event_pool
+                    ]
+                    max_row = [
+                        safe_float(getattr(event, f"grade_{grade_key}", 0.0)) - max_target
+                        for event in event_pool
+                    ]
+                    A_ub_product_build_grade.extend([min_row, max_row])
+                    b_ub_product_build_grade.extend([
+                        opening_grade_metal - min_target * opening_product_tonnes,
+                        max_target * opening_product_tonnes - opening_grade_metal,
+                    ])
 
         # Step 4: Add a constraint for grade block to stockpile feed ratio
         # Maximum ratio of grade block to stockpile feed (use second value below. 0 means no constraint. 10 means max 0.1 grade block / stockpile feed)
@@ -649,6 +807,7 @@ class Optimizer:
             + A_ub_min_crusher_grade_mn
             + A_ub_max_crusher_grade_mn
             + A_ub_stockpile_grade_feasibility
+            + A_ub_product_build_grade
             + A_ub_max_quantity
         )
 
@@ -667,6 +826,7 @@ class Optimizer:
             + b_ub_min_crusher_grade_mn
             + b_ub_max_crusher_grade_mn
             + b_ub_stockpile_grade_feasibility
+            + b_ub_product_build_grade
             + b_ub_max_quantity
         )
 

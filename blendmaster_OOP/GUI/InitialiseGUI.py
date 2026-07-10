@@ -153,6 +153,9 @@ class UserInputs(QMainWindow):
         # Add Solver Configuration Tab
         self.setup_solver_configuration_tab()
 
+        # Add Product Build Settings tab
+        self.setup_product_build_settings_tab()
+
         # Add calendar Tab
         self.main_tab = QWidget()
         self.calendar_tab_index = self.tabs.addTab(self.main_tab, "Calendar")
@@ -223,9 +226,9 @@ class UserInputs(QMainWindow):
 
         self.setup_profiles_tab()
 
-        self.setup_sqlite_reports_tab()
-
         self.setup_optimised_grade_profile_tab()
+
+        self.setup_sqlite_reports_tab()
 
         # Add Setup Blends tab
         self.blend_config_tab = QWidget()
@@ -310,6 +313,7 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(self.stockpile_tab_index, False)
         self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, False)
         self.tabs.setTabEnabled(self.solver_config_tab_index, False)
+        self.tabs.setTabEnabled(self.product_build_tab_index, False)
         self.tabs.setTabEnabled(self.calendar_tab_index, False)
         self.tabs.setTabEnabled(self.decision_point_tab_index, False)
         self.tabs.setTabEnabled(self.results_tab_index, False)
@@ -400,6 +404,29 @@ class UserInputs(QMainWindow):
         feasibility_layout.addWidget(self.stockpile_feasibility_combo)
         feasibility_layout.addStretch()
         self.solver_config_layout.addLayout(feasibility_layout)
+
+        self.allow_offspec_steady_states_checkbox = QCheckBox(
+            "Off-spec steady states are allowed if ultimate build is on spec"
+        )
+        self.solver_config_layout.addWidget(self.allow_offspec_steady_states_checkbox)
+
+        brand_guidance_layout = QHBoxLayout()
+        brand_guidance_layout.addWidget(QLabel("2WP Product Guidance:"))
+        self.brand_guidance_mode_combo = QComboBox()
+        self.brand_guidance_mode_combo.addItems([
+            "Ignore 2WP brand guidance",
+            "Prefer matching product brand",
+            "Penalize mismatched product brand",
+            "Force matching product brand",
+        ])
+        self.brand_guidance_mode_combo.setFixedWidth(240)
+        self.brand_guidance_incentive_input = self.create_solver_threshold_input("0.0", threshold_validator)
+        brand_guidance_layout.addWidget(self.brand_guidance_mode_combo)
+        brand_guidance_layout.addWidget(QLabel("Incentive/Penalty:"))
+        brand_guidance_layout.addWidget(self.brand_guidance_incentive_input)
+        brand_guidance_layout.addWidget(QLabel("$/t"))
+        brand_guidance_layout.addStretch()
+        self.solver_config_layout.addLayout(brand_guidance_layout)
 
         direct_tip_layout = QHBoxLayout()
         self.direct_tip_enabled_checkbox = QCheckBox("Enable Direct Tip")
@@ -509,6 +536,357 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addLayout(submit_layout)
         self.solver_config_layout.addStretch()
 
+    def setup_product_build_settings_tab(self):
+        self.product_build_tab = QWidget()
+        self.product_build_tab_index = self.tabs.addTab(self.product_build_tab, "Product Build Settings")
+        self.product_build_layout = QVBoxLayout(self.product_build_tab)
+        self.product_build_layout.setContentsMargins(14, 12, 14, 12)
+        self.product_build_layout.setSpacing(8)
+
+        self.product_build_tab.setStyleSheet("""
+            QWidget {
+                background-color: #f8fafc;
+            }
+            QTableWidget {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+                gridline-color: #e5e7eb;
+                selection-background-color: #dbeafe;
+                selection-color: #0f172a;
+                alternate-background-color: #f8fbff;
+            }
+            QHeaderView::section {
+                background-color: #f1f5f9;
+                color: #0f172a;
+                font-weight: 700;
+                border: 0;
+                border-right: 1px solid #dbe4ee;
+                border-bottom: 1px solid #dbe4ee;
+                padding: 7px 8px;
+            }
+        """)
+
+        title_label = QLabel("Product Build Settings")
+        title_label.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
+        self.product_build_layout.addWidget(title_label)
+
+        subtitle_label = QLabel(
+            "Define post-crusher product builds. Crusher output is accumulated into each build until its target tonnes are reached."
+        )
+        subtitle_label.setStyleSheet("font-size: 12px; color: #64748b; padding-bottom: 4px;")
+        subtitle_label.setWordWrap(True)
+        self.product_build_layout.addWidget(subtitle_label)
+
+        top_layout = QHBoxLayout()
+        self.product_build_count_input = QLineEdit()
+        self.product_build_count_input.setFixedWidth(80)
+        self.product_build_count_input.setText(str(len(getattr(self, "product_build_settings", []) or [])))
+        self.product_build_count_input.setValidator(QIntValidator(0, 50, self))
+        self.product_build_count_button = QPushButton("Create")
+        self.product_build_count_button.clicked.connect(self.set_product_build_count_from_input)
+        top_layout.addWidget(QLabel("Number of builds"))
+        top_layout.addWidget(self.product_build_count_input)
+        top_layout.addWidget(self.product_build_count_button)
+        top_layout.addStretch()
+        self.product_build_layout.addLayout(top_layout)
+
+        self.product_build_table = CustomTableWidget()
+        self.product_build_table.setAlternatingRowColors(True)
+        self.product_build_table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.product_build_headers = [
+            "Build",
+            "Brand",
+            "Target Tonnes",
+            "Fe Min",
+            "Fe Max",
+            "Si Min",
+            "Si Max",
+            "Al Min",
+            "Al Max",
+            "P Min",
+            "P Max",
+            "Mn Min",
+            "Mn Max",
+        ]
+        self.product_build_table.setColumnCount(len(self.product_build_headers))
+        self.product_build_table.setHorizontalHeaderLabels(self.product_build_headers)
+        self.product_build_table.verticalHeader().setVisible(False)
+        self.product_build_layout.addWidget(self.product_build_table)
+
+        button_layout = QHBoxLayout()
+        self.product_build_submit_button = QPushButton("Submit")
+        self.product_build_submit_button.clicked.connect(self.handle_product_build_settings_submit)
+        self.product_build_delete_button = QPushButton("Delete Selected Build(s)")
+        self.product_build_delete_button.clicked.connect(self.delete_selected_product_build_rows)
+        button_layout.addWidget(self.product_build_submit_button)
+        button_layout.addWidget(self.product_build_delete_button)
+        button_layout.addStretch()
+        self.product_build_layout.addLayout(button_layout)
+
+        self.populate_product_build_table()
+
+    def default_product_brand_labels(self):
+        return ["FB", "SS", "FF", "KF"]
+
+    def parse_product_brand_labels(self, value):
+        if isinstance(value, (list, tuple, set)):
+            raw_labels = value
+        else:
+            raw_labels = str(value or "").replace(";", ",").split(",")
+        labels = []
+        for label in raw_labels:
+            cleaned = str(label or "").strip().upper()
+            if cleaned and cleaned not in labels:
+                labels.append(cleaned)
+        return labels or self.default_product_brand_labels()
+
+    def product_brand_options(self):
+        return self.parse_product_brand_labels(
+            getattr(self, "product_brand_labels_choice", self.default_product_brand_labels())
+        )
+
+    def product_build_name_for_row(self, row_idx, brand):
+        brand = str(brand or "").strip().upper()
+        if not brand:
+            return f"Build {row_idx + 1}"
+
+        brand_count = 0
+        for index in range(row_idx + 1):
+            if index == row_idx:
+                row_brand = brand
+            else:
+                brand_widget = self.product_build_table.cellWidget(index, 1)
+                row_brand = (
+                    brand_widget.currentText().strip().upper()
+                    if isinstance(brand_widget, QComboBox)
+                    else ""
+                )
+            if row_brand == brand:
+                brand_count += 1
+        return f"{brand} Build {brand_count}"
+
+    def set_product_build_count_from_input(self):
+        try:
+            count = int(self.product_build_count_input.text().strip() or 0)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Product build count must be a whole number.")
+            return
+        self.set_product_build_table_row_count(count)
+
+    def set_product_build_table_row_count(self, count):
+        count = max(int(count or 0), 0)
+        existing = self.read_product_build_settings_from_table(show_errors=False) or []
+        self.product_build_table.setRowCount(count)
+        for row_idx in range(count):
+            source = existing[row_idx] if row_idx < len(existing) else {}
+            self.populate_product_build_table_row(row_idx, source)
+        self.renumber_product_build_rows()
+        self.resize_product_build_table()
+
+    def populate_product_build_table(self):
+        settings = getattr(self, "product_build_settings", []) or []
+        if hasattr(self, "product_build_count_input"):
+            self.product_build_count_input.setText(str(len(settings)))
+        self.product_build_table.setRowCount(len(settings))
+        for row_idx, setting in enumerate(settings):
+            self.populate_product_build_table_row(row_idx, setting)
+        self.renumber_product_build_rows()
+        self.resize_product_build_table()
+
+    def populate_product_build_table_row(self, row_idx, setting=None):
+        setting = setting or {}
+        brand_combo = QComboBox()
+        brand_combo.addItems(self.product_brand_options())
+        selected_brand = str(setting.get("brand") or "").strip().upper()
+        if selected_brand and brand_combo.findText(selected_brand) == -1:
+            brand_combo.addItem(selected_brand)
+        if selected_brand:
+            brand_combo.setCurrentText(selected_brand)
+        self.product_build_table.setCellWidget(row_idx, 1, brand_combo)
+
+        brand = brand_combo.currentText().strip().upper()
+        build_name = self.product_build_name_for_row(row_idx, brand)
+        build_item = QTableWidgetItem(build_name)
+        build_item.setFlags(Qt.ItemIsEnabled)
+        build_item.setTextAlignment(Qt.AlignCenter)
+        self.product_build_table.setItem(row_idx, 0, build_item)
+        brand_combo.currentTextChanged.connect(
+            lambda _text: self.renumber_product_build_rows()
+        )
+
+        defaults = {
+            "target_tonnes": 0,
+            "target_fe_min": 0,
+            "target_fe_max": 100,
+            "target_si_min": 0,
+            "target_si_max": 100,
+            "target_al_min": 0,
+            "target_al_max": 100,
+            "target_p_min": 0,
+            "target_p_max": 100,
+            "target_mn_min": 0,
+            "target_mn_max": 100,
+        }
+        keys = [
+            "target_tonnes",
+            "target_fe_min",
+            "target_fe_max",
+            "target_si_min",
+            "target_si_max",
+            "target_al_min",
+            "target_al_max",
+            "target_p_min",
+            "target_p_max",
+            "target_mn_min",
+            "target_mn_max",
+        ]
+        for col_idx, key in enumerate(keys, start=2):
+            value = setting.get(key, defaults[key])
+            item = QTableWidgetItem("" if value is None else str(value))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.product_build_table.setItem(row_idx, col_idx, item)
+
+    def resize_product_build_table(self):
+        if not hasattr(self, "product_build_table"):
+            return
+        for col_idx in range(self.product_build_table.columnCount()):
+            self.product_build_table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeToContents)
+        self.product_build_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+
+    def read_product_build_settings_from_table(self, show_errors=True):
+        if not hasattr(self, "product_build_table"):
+            return []
+
+        settings = []
+        grade_keys = {
+            "Fe": ("target_fe_min", "target_fe_max"),
+            "Si": ("target_si_min", "target_si_max"),
+            "Al": ("target_al_min", "target_al_max"),
+            "P": ("target_p_min", "target_p_max"),
+            "Mn": ("target_mn_min", "target_mn_max"),
+        }
+
+        def parse_number(row, col, label):
+            item = self.product_build_table.item(row, col)
+            text = item.text().strip() if item else ""
+            try:
+                return float(text or 0)
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"{label} in row {row + 1} must be a number.")
+                return None
+
+        brand_counts = {}
+        for row_idx in range(self.product_build_table.rowCount()):
+            brand_widget = self.product_build_table.cellWidget(row_idx, 1)
+            brand = brand_widget.currentText().strip().upper() if isinstance(brand_widget, QComboBox) else ""
+            if brand:
+                brand_counts[brand] = brand_counts.get(brand, 0) + 1
+                build_name = f"{brand} Build {brand_counts[brand]}"
+            else:
+                build_name = f"Build {row_idx + 1}"
+            target_tonnes = parse_number(row_idx, 2, "Target Tonnes")
+            if target_tonnes is None:
+                return None
+            if target_tonnes < 0:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"Target Tonnes in row {row_idx + 1} cannot be negative.")
+                return None
+
+            setting = {
+                "build_id": row_idx + 1,
+                "build_name": build_name,
+                "brand": brand,
+                "target_tonnes": target_tonnes,
+            }
+            for grade_label, (min_key, max_key) in grade_keys.items():
+                min_col = self.product_build_headers.index(f"{grade_label} Min")
+                max_col = self.product_build_headers.index(f"{grade_label} Max")
+                min_value = parse_number(row_idx, min_col, f"{grade_label} Min")
+                max_value = parse_number(row_idx, max_col, f"{grade_label} Max")
+                if min_value is None or max_value is None:
+                    return None
+                if min_value > max_value:
+                    if show_errors:
+                        QMessageBox.warning(
+                            self,
+                            "Invalid Input",
+                            f"{grade_label} Min cannot be greater than {grade_label} Max in row {row_idx + 1}.",
+                        )
+                    return None
+                setting[min_key] = min_value
+                setting[max_key] = max_value
+            settings.append(setting)
+        return settings
+
+    def update_product_build_name_for_row(self, row_idx, brand):
+        if not hasattr(self, "product_build_table") or row_idx >= self.product_build_table.rowCount():
+            return
+        brand = str(brand or "").strip().upper()
+        build_name = self.product_build_name_for_row(row_idx, brand)
+        item = self.product_build_table.item(row_idx, 0)
+        if item is None:
+            item = QTableWidgetItem()
+            item.setFlags(Qt.ItemIsEnabled)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.product_build_table.setItem(row_idx, 0, item)
+        item.setText(build_name)
+
+    def delete_selected_product_build_rows(self):
+        if not hasattr(self, "product_build_table"):
+            return
+
+        selected_rows = sorted(
+            {index.row() for index in self.product_build_table.selectedIndexes()},
+            reverse=True,
+        )
+        if not selected_rows:
+            selected_rows = [self.product_build_table.currentRow()]
+        selected_rows = [row for row in selected_rows if row >= 0]
+        if not selected_rows:
+            return
+
+        for row in selected_rows:
+            self.product_build_table.removeRow(row)
+
+        self.renumber_product_build_rows()
+        if hasattr(self, "product_build_count_input"):
+            self.product_build_count_input.setText(str(self.product_build_table.rowCount()))
+        self.store_product_build_settings(show_errors=False)
+        self.resize_product_build_table()
+
+    def renumber_product_build_rows(self):
+        if not hasattr(self, "product_build_table"):
+            return
+        for row_idx in range(self.product_build_table.rowCount()):
+            brand_widget = self.product_build_table.cellWidget(row_idx, 1)
+            brand = brand_widget.currentText() if isinstance(brand_widget, QComboBox) else ""
+            self.update_product_build_name_for_row(row_idx, brand)
+
+    def store_product_build_settings(self, show_errors=True):
+        settings = self.read_product_build_settings_from_table(show_errors=show_errors)
+        if settings is None:
+            return False
+        self.product_build_settings = settings
+        if self.calendar_inputs is None:
+            self.calendar_inputs = {}
+        self.calendar_inputs["product_build_settings"] = copy.deepcopy(self.product_build_settings)
+        self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        return True
+
+    def navigate_to_product_build_settings(self):
+        self.populate_product_build_table()
+        self.tabs.setTabEnabled(self.product_build_tab_index, True)
+        self.tabs.setCurrentIndex(self.product_build_tab_index)
+
+    def handle_product_build_settings_submit(self):
+        if not self.store_product_build_settings():
+            return
+        self.setup_calendar()
+        self.tabs.setTabEnabled(self.calendar_tab_index, True)
+        self.tabs.setCurrentIndex(self.calendar_tab_index)
+
     def create_solver_threshold_input(self, default_value, validator):
         input_field = QLineEdit()
         input_field.setText(default_value)
@@ -554,6 +932,9 @@ class UserInputs(QMainWindow):
             },
             "prefer_low_fe_stockpiles": False,
             "low_fe_threshold": 58.0,
+            "allow_offspec_steady_states_for_product_build": False,
+            "brand_guidance_mode": "ignore",
+            "brand_guidance_incentive": 0.0,
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -758,7 +1139,7 @@ class UserInputs(QMainWindow):
 
         layout.addRow(file_label, file_layout)
 
-        self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate APS direct tip tonnes")
+        self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate 2WP direct tip tonnes")
         self.reevaluate_aps_direct_tip_checkbox.setChecked(False)
         self.aps_crusher_button = QPushButton("Get Crusher Names")
         self.aps_crusher_button.setFixedWidth(140)
@@ -778,7 +1159,18 @@ class UserInputs(QMainWindow):
         aps_direct_tip_header_layout.addStretch()
         aps_direct_tip_layout.addLayout(aps_direct_tip_header_layout)
         aps_direct_tip_layout.addWidget(self.aps_crusher_input)
-        layout.addRow(QLabel("APS Direct Tip:"), aps_direct_tip_layout)
+        layout.addRow(QLabel("2WP Direct Tip:"), aps_direct_tip_layout)
+
+        product_brand_label = QLabel("Product Brands:")
+        product_brand_label.setStyleSheet("font-weight: bold;")
+        self.product_brand_labels_input = QLineEdit()
+        self.product_brand_labels_input.setFixedWidth(300)
+        self.product_brand_labels_input.setText(", ".join(getattr(
+            self,
+            "product_brand_labels_choice",
+            self.default_product_brand_labels(),
+        )))
+        layout.addRow(product_brand_label, self.product_brand_labels_input)
 
         # --- Input 4: Optimised Blend Choices ---
         blend_label = QLabel("Optimised Blend Choices:")
@@ -833,6 +1225,7 @@ class UserInputs(QMainWindow):
         self.time_mode.currentIndexChanged.connect(self.validate_form)
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
+        self.product_brand_labels_input.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
         self.agent_enabled_checkbox.toggled.connect(self.toggle_agent_enabled)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.toggle_aps_direct_tip_controls)
@@ -1040,6 +1433,53 @@ class UserInputs(QMainWindow):
             )
         self.validate_form()
 
+    def refresh_aps_stockpile_brand_map(self):
+        self.aps_stockpile_brand_map = {}
+        file_path = getattr(self, "file_path_choice", "") or ""
+        if not file_path:
+            return
+        try:
+            self.aps_stockpile_brand_map = ExpitDataHandler.get_stockpile_brand_guidance(
+                file_path,
+                self.product_brand_options(),
+            )
+        except Exception as exc:
+            self.aps_stockpile_brand_map = {}
+            print(f"Warning: unable to derive APS stockpile brand guidance: {exc}")
+
+    def aps_brand_info_for_stockpile(self, stockpile_name):
+        brand_map = getattr(self, "aps_stockpile_brand_map", {}) or {}
+        if not brand_map:
+            return {}
+        normalized_name = str(stockpile_name or "").strip().upper().replace("STOCKPILES/", "")
+        lookup = {
+            str(name or "").strip().upper().replace("STOCKPILES/", ""): value
+            for name, value in brand_map.items()
+        }
+        return lookup.get(normalized_name, {})
+
+    def format_aps_brand_summary(self, brand_info):
+        proportions = (brand_info or {}).get("brand_proportions") or {}
+        if not proportions:
+            return ""
+        ordered = sorted(proportions.items(), key=lambda item: item[1], reverse=True)
+        if len(ordered) == 1:
+            return ordered[0][0]
+        return ", ".join(f"{brand} {proportion * 100:.0f}%" for brand, proportion in ordered)
+
+    def apply_aps_brand_guidance_to_stockpile_data(self):
+        if not isinstance(self.stockpile_data, dict):
+            return
+        for stockpile_name, attributes in self.stockpile_data.items():
+            if not isinstance(attributes, dict):
+                continue
+            brand_info = self.aps_brand_info_for_stockpile(stockpile_name)
+            attributes["aps_brand"] = brand_info.get("primary_brand", "")
+            attributes["aps_brand_proportions"] = brand_info.get("brand_proportions", {})
+            attributes["aps_brand_tonnes"] = brand_info.get("brand_tonnes", {})
+            attributes["aps_brand_total_tonnes"] = brand_info.get("total_tonnes", 0)
+            attributes["aps_brand_summary"] = self.format_aps_brand_summary(brand_info)
+
     def update_mine_dropdown(self):
         """Update the Mine dropdown based on the selected Hub."""
         hub_selection = self.hub_input.currentText()
@@ -1080,6 +1520,11 @@ class UserInputs(QMainWindow):
                 else []
             )
             self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
+            self.product_brand_labels_choice = self.parse_product_brand_labels(
+                self.product_brand_labels_input.text()
+                if hasattr(self, "product_brand_labels_input")
+                else self.default_product_brand_labels()
+            )
             self.agent_enabled_choice = (
                 self.agent_enabled_checkbox.isChecked()
                 if hasattr(self, "agent_enabled_checkbox")
@@ -1140,6 +1585,10 @@ class UserInputs(QMainWindow):
                     self.agent_run_instructions_input.setPlainText(getattr(self, "agent_run_instructions_text", ""))
                 if hasattr(self, "agent_bridge_port_input"):
                     self.agent_bridge_port_input.setText(str(getattr(self, "agent_bridge_port", 8765)))
+                if hasattr(self, "product_brand_labels_input"):
+                    self.product_brand_labels_input.setText(", ".join(
+                        self.parse_product_brand_labels(getattr(self, "product_brand_labels_choice", []))
+                    ))
                 self.hub_input.setCurrentText(str(self.hub_input_choice))
                 self.mine_input.setCurrentText(str(self.mine_input_choice))
             else:
@@ -1158,6 +1607,11 @@ class UserInputs(QMainWindow):
                     else []
                 )
                 self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+                self.product_brand_labels_choice = self.parse_product_brand_labels(
+                    self.product_brand_labels_input.text()
+                    if hasattr(self, "product_brand_labels_input")
+                    else self.default_product_brand_labels()
+                )
                 self.agent_enabled_choice = (
                     self.agent_enabled_checkbox.isChecked()
                     if hasattr(self, "agent_enabled_checkbox")
@@ -1193,6 +1647,8 @@ class UserInputs(QMainWindow):
         self.submit_button.setEnabled(True)
         self.save_button.setEnabled(True)
         self.stockpile_data = stockpile_data
+        self.refresh_aps_stockpile_brand_map()
+        self.apply_aps_brand_guidance_to_stockpile_data()
         QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
 
         self.setup_stockpile_table()
@@ -1605,9 +2061,15 @@ class UserInputs(QMainWindow):
                 "preferred_apply_path": (
                     "Return broad workflow sections when the app should visibly apply a run through the UI: "
                     "site_configuration, selected_stockpiles, selected_amt_stockpiles, amt_chunking, "
-                    "solver_config, and calendar_rates. If any stockpile is selected as AMT, "
+                    "solver_config, product_build_settings, and calendar_rates. If any stockpile is selected as AMT, "
                     "hex_sequence_table is required. The app cannot submit AMT stockpiles from agent output "
                     "without the generated chunk rows."
+                ),
+                "product_build_settings_contract": (
+                    "For product build targeting, include product_build_settings as a list of rows with brand, "
+                    "target_tonnes, target_fe_min, target_fe_max, target_si_min, target_si_max, "
+                    "target_al_min, target_al_max, target_p_min, target_p_max, target_mn_min, and target_mn_max. "
+                    "The app applies these rows through the Product Build Settings tab before Calendar."
                 ),
                 "hex_sequence_table_contract": (
                     "For AMT workflows, include hex_sequence_table as a list of chunk dictionaries that can be "
@@ -1621,7 +2083,7 @@ class UserInputs(QMainWindow):
                     "Return project_file/project_state only for complete restore, or proposed_constraints "
                     "only for small leaf-level edits. Use targets such as "
                     "solver_config.blend_option_timeout_seconds, calendar_rates.crusher_rate.Period_1, "
-                    "selected_stockpiles, or amt_chunking.STOCKPILE.chunk_reclaim_hours."
+                    "selected_stockpiles, product_build_settings, or amt_chunking.STOCKPILE.chunk_reclaim_hours."
                 ),
             },
             "site_configuration": {
@@ -1629,6 +2091,7 @@ class UserInputs(QMainWindow):
                 "mine": getattr(self, "mine_input_choice", None),
                 "start_time": getattr(self, "start_time_choice", None),
                 "aps_mining_csv": getattr(self, "file_path_choice", ""),
+                "product_brands": getattr(self, "product_brand_labels_choice", self.default_product_brand_labels()),
                 "reevaluate_aps_direct_tip": getattr(self, "reevaluate_aps_direct_tip_choice", False),
                 "selected_aps_crushers": getattr(self, "aps_direct_tip_crusher_choice", []),
                 "blend_mode": getattr(self, "blend_mode_choice", None),
@@ -1641,6 +2104,7 @@ class UserInputs(QMainWindow):
             "solver_configuration": self.normalized_solver_config(getattr(self, "solver_config", {})),
             "selected_stockpiles": selected_stockpiles,
             "selected_amt_stockpiles": selected_amt_stockpiles,
+            "product_build_settings": getattr(self, "product_build_settings", []),
             "calendar_inputs": getattr(self, "calendar_inputs", {}),
             "latest_decision_trace": (
                 self.decision_output.toPlainText()[-8000:]
@@ -1846,6 +2310,22 @@ class UserInputs(QMainWindow):
         if blend_settings:
             payload["blend_settings"] = blend_settings
 
+        product_build_settings = section(
+            ["product_build_settings", "product_builds", "product_build_settings_tab"],
+            dict_only=False,
+        )
+        if isinstance(product_build_settings, dict):
+            product_build_settings = (
+                product_build_settings.get("builds")
+                or product_build_settings.get("rows")
+                or product_build_settings.get("product_builds")
+                or []
+            )
+        if isinstance(product_build_settings, list):
+            payload["product_build_settings"] = self.normalized_agent_product_build_settings(
+                product_build_settings
+            )
+
         calendar_rates = section(["calendar_rates", "calendar"], dict_only=True)
         if not calendar_rates:
             calendar_rates = self.nested_agent_target_values(target_values, "calendar_rates.")
@@ -1906,6 +2386,75 @@ class UserInputs(QMainWindow):
                 cursor = cursor.setdefault(part, {})
             cursor[path[-1]] = copy.deepcopy(value)
         return nested
+
+    def normalized_agent_product_build_settings(self, product_build_settings):
+        if isinstance(product_build_settings, dict):
+            product_build_settings = (
+                product_build_settings.get("builds")
+                or product_build_settings.get("rows")
+                or product_build_settings.get("product_builds")
+                or []
+            )
+        if not isinstance(product_build_settings, list):
+            return []
+
+        def first_value(mapping, keys, default=None):
+            for key in keys:
+                if isinstance(mapping, dict) and key in mapping and mapping.get(key) not in (None, ""):
+                    return mapping.get(key)
+            return default
+
+        def nested_grade_value(setting, grade, bound, default):
+            grade_key = grade.lower()
+            direct_keys = [
+                f"target_{grade_key}_{bound}",
+                f"{grade_key}_{bound}",
+                f"grade_{grade_key}_{bound}",
+                f"target_grade_{grade_key}_{bound}",
+            ]
+            direct_value = first_value(setting, direct_keys)
+            if direct_value not in (None, ""):
+                return direct_value
+
+            for grades_key in ("grades", "grade_targets", "target_grades"):
+                grades = setting.get(grades_key) if isinstance(setting, dict) else None
+                if not isinstance(grades, dict):
+                    continue
+                grade_entry = (
+                    grades.get(grade_key)
+                    or grades.get(grade_key.upper())
+                    or grades.get(grade.capitalize())
+                )
+                if isinstance(grade_entry, dict):
+                    value = first_value(grade_entry, [bound, "minimum" if bound == "min" else "maximum"])
+                    if value not in (None, ""):
+                        return value
+                elif grade_entry not in (None, ""):
+                    return grade_entry
+            return default
+
+        normalized = []
+        brand_counts = {}
+        for index, setting in enumerate(product_build_settings):
+            if not isinstance(setting, dict):
+                continue
+            brand = str(first_value(setting, ["brand", "brand_label", "product_brand"], "") or "").strip().upper()
+            if brand:
+                brand_counts[brand] = brand_counts.get(brand, 0) + 1
+                default_build_name = f"{brand} Build {brand_counts[brand]}"
+            else:
+                default_build_name = f"Build {index + 1}"
+            row = {
+                "build_id": int(first_value(setting, ["build_id", "id", "sequence"], index + 1) or index + 1),
+                "build_name": default_build_name,
+                "brand": brand,
+                "target_tonnes": first_value(setting, ["target_tonnes", "tonnes", "target_wmt", "target_quantity"], 0),
+            }
+            for grade in ["fe", "si", "al", "p", "mn"]:
+                row[f"target_{grade}_min"] = nested_grade_value(setting, grade, "min", 0)
+                row[f"target_{grade}_max"] = nested_grade_value(setting, grade, "max", 100)
+            normalized.append(row)
+        return normalized
 
     def normalized_agent_selected_stockpile_payload(self, selected_value, selected_amt_value=None):
         use_names = []
@@ -2145,6 +2694,9 @@ class UserInputs(QMainWindow):
                 parts.append("AMT settings only")
         if payload.get("solver_configuration") or payload.get("blend_settings"):
             parts.append("Solver Config")
+        product_builds = payload.get("product_build_settings") or []
+        if product_builds:
+            parts.append(f"Product Builds ({len(product_builds)})")
         if payload.get("calendar_rates"):
             parts.append("Calendar")
         return " -> ".join(parts) if parts else "No workflow sections"
@@ -2162,6 +2714,9 @@ class UserInputs(QMainWindow):
             "solver_configuration",
             "solver_config",
             "blend_settings",
+            "product_build_settings",
+            "product_builds",
+            "product_build_settings_tab",
             "calendar_rates",
             "calendar",
             "amt_chunking",
@@ -2172,6 +2727,7 @@ class UserInputs(QMainWindow):
         return target_text.startswith((
             "solver_config.",
             "blend_settings.",
+            "product_build_settings.",
             "calendar_rates.",
             "calendar.",
             "amt_chunking.",
@@ -2472,6 +3028,8 @@ class UserInputs(QMainWindow):
             return True
         if target in {"selected_stockpiles", "selected_amt_stockpiles", "amt_stockpiles"}:
             return hasattr(self, "stockpile_table")
+        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
+            return hasattr(self, "product_build_table")
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             parsed = self.parse_agent_calendar_target(target)
             return bool(parsed and self.find_calendar_row_by_key(parsed[0]) is not None and self.find_calendar_column_by_period(parsed[1]) is not None)
@@ -2482,6 +3040,9 @@ class UserInputs(QMainWindow):
             "max_stockpiles",
             "min_stockpile_contribution_ratio",
             "stockpile_feasibility_mode",
+            "allow_offspec_steady_states_for_product_build",
+            "brand_guidance_mode",
+            "brand_guidance_incentive",
             "min_feed_duration_hours",
             "direct_tip_enabled",
             "direct_tip_cash_incentive",
@@ -2509,6 +3070,8 @@ class UserInputs(QMainWindow):
             return sorted(
                 name for name, selected in (self.stockpile_data_use_column or {}).items() if selected
             )
+        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
+            return getattr(self, "product_build_settings", [])
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             parsed = self.parse_agent_calendar_target(target)
             if parsed:
@@ -2667,6 +3230,16 @@ class UserInputs(QMainWindow):
         )
         if file_path:
             self.file_path.setText(str(file_path))
+
+        product_brands = (
+            site_config.get("product_brands")
+            or site_config.get("brand_labels")
+            or site_config.get("brands")
+        )
+        if product_brands is not None:
+            self.product_brand_labels_choice = self.parse_product_brand_labels(product_brands)
+            if hasattr(self, "product_brand_labels_input"):
+                self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
 
         direct_tip_enabled = (
             site_config.get("reevaluate_aps_direct_tip")
@@ -2881,6 +3454,27 @@ class UserInputs(QMainWindow):
             self.stop_agent_workflow_apply("Agent workflow stopped: Solver Configuration inputs are not valid.")
             return
 
+        self.navigate_to_product_build_settings()
+        QTimer.singleShot(250, self.agent_workflow_apply_product_build_settings)
+
+    def agent_workflow_apply_product_build_settings(self):
+        payload = getattr(self, "agent_workflow_payload", {}) or {}
+        product_builds = (
+            payload.get("product_build_settings")
+            or payload.get("product_builds")
+            or payload.get("product_build_settings_tab")
+            or []
+        )
+        if isinstance(product_builds, dict):
+            product_builds = product_builds.get("builds") or product_builds.get("rows") or []
+        if isinstance(product_builds, list):
+            self.product_build_settings = self.normalized_agent_product_build_settings(product_builds)
+            self.populate_product_build_table()
+
+        if not self.store_product_build_settings(show_errors=False):
+            self.stop_agent_workflow_apply("Agent workflow stopped: Product Build Settings inputs are not valid.")
+            return
+
         self.setup_calendar()
         self.tabs.setTabEnabled(self.calendar_tab_index, True)
         self.tabs.setCurrentIndex(self.calendar_tab_index)
@@ -2976,6 +3570,15 @@ class UserInputs(QMainWindow):
             loaded_state["AMT_stockpile_data"] = {}
         if loaded_state.get("AMT_chunk_settings") is None:
             loaded_state["AMT_chunk_settings"] = {}
+        if loaded_state.get("product_brand_labels_choice") is None:
+            loaded_state["product_brand_labels_choice"] = self.default_product_brand_labels()
+        loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
+            loaded_state.get("product_brand_labels_choice")
+        )
+        if loaded_state.get("product_build_settings") is None:
+            loaded_state["product_build_settings"] = []
+        if loaded_state.get("aps_stockpile_brand_map") is None:
+            loaded_state["aps_stockpile_brand_map"] = {}
         if loaded_state.get("solver_config") is None:
             loaded_state["solver_config"] = {}
         if loaded_state.get("time_mode_choice") is None:
@@ -3013,6 +3616,10 @@ class UserInputs(QMainWindow):
             loaded_state["reevaluate_aps_direct_tip_choice"] = bool(site_config.get("reevaluate_aps_direct_tip"))
         if "selected_aps_crushers" in site_config:
             loaded_state["aps_direct_tip_crusher_choice"] = site_config.get("selected_aps_crushers") or []
+        if "product_brands" in site_config:
+            loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
+                site_config.get("product_brands")
+            )
         if "blend_mode" in site_config:
             blend_mode = site_config.get("blend_mode")
             if isinstance(blend_mode, str):
@@ -3047,6 +3654,12 @@ class UserInputs(QMainWindow):
             return self.apply_agent_selected_stockpiles(value)
         if target in {"selected_amt_stockpiles", "amt_stockpiles"}:
             return self.apply_agent_selected_stockpiles({"amt": value})
+        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
+            if not hasattr(self, "product_build_table"):
+                return False
+            self.product_build_settings = self.normalized_agent_product_build_settings(value)
+            self.populate_product_build_table()
+            return self.store_product_build_settings(show_errors=False)
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             return self.apply_agent_calendar_target(target, value)
         if str(target).startswith("amt_chunking."):
@@ -3077,6 +3690,33 @@ class UserInputs(QMainWindow):
                 "stockpile_can_rely_on_grade_blocks": "Stockpile blend can rely on grade blocks",
             }.get(str(value), str(value))
             self.stockpile_feasibility_combo.setCurrentText(label)
+            return True
+        if key == "allow_offspec_steady_states_for_product_build":
+            self.allow_offspec_steady_states_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "brand_guidance_mode":
+            normalized = str(value or "").strip().lower().replace(" ", "_")
+            label = {
+                "ignore": "Ignore 2WP brand guidance",
+                "none": "Ignore 2WP brand guidance",
+                "ignore_aps_brand_guidance": "Ignore 2WP brand guidance",
+                "ignore_2wp_brand_guidance": "Ignore 2WP brand guidance",
+                "prefer": "Prefer matching product brand",
+                "prefer_match": "Prefer matching product brand",
+                "prefer_matching_product_brand": "Prefer matching product brand",
+                "penalize": "Penalize mismatched product brand",
+                "penalise": "Penalize mismatched product brand",
+                "penalize_mismatch": "Penalize mismatched product brand",
+                "penalise_mismatch": "Penalize mismatched product brand",
+                "penalize_mismatched_product_brand": "Penalize mismatched product brand",
+                "force": "Force matching product brand",
+                "force_match": "Force matching product brand",
+                "force_matching_product_brand": "Force matching product brand",
+            }.get(normalized, str(value))
+            self.brand_guidance_mode_combo.setCurrentText(label)
+            return True
+        if key == "brand_guidance_incentive":
+            set_line_edit(self.brand_guidance_incentive_input, value)
             return True
         if key == "min_feed_duration_hours":
             set_line_edit(self.min_feed_duration_input, value)
@@ -3256,6 +3896,7 @@ class UserInputs(QMainWindow):
             "Use",
             "AMT",
             "Stockpile Name",
+            "2WP Brand",
             "Build",
             "Balance (WMT)",
             "Grade Fe (%)",
@@ -3276,6 +3917,7 @@ class UserInputs(QMainWindow):
 
         # Choose data source
         data_source = self.stockpile_data
+        self.apply_aps_brand_guidance_to_stockpile_data()
 
         # Set Table Dimensions
         self.stockpile_table.setRowCount(len(self.stockpile_data))
@@ -3320,10 +3962,15 @@ class UserInputs(QMainWindow):
             stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
             self.stockpile_table.setItem(row_idx, 2, stockpile_item)
 
+            brand_item = QTableWidgetItem(str(attributes.get("aps_brand_summary", "")))
+            brand_item.setFlags(Qt.ItemIsEnabled)
+            brand_item.setTextAlignment(Qt.AlignCenter)
+            self.stockpile_table.setItem(row_idx, 3, brand_item)
+
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BUILD", "BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
        
-            for col_idx, key in enumerate(keys, start=3):  # Start after "Use", "AMT", "Stockpile Name"
+            for col_idx, key in enumerate(keys, start=4):  # Start after "Use", "AMT", "Stockpile Name", "2WP Brand"
 
                 try:
                     value = attributes[key]
@@ -3377,12 +4024,13 @@ class UserInputs(QMainWindow):
         self.stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
         self.stockpile_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeToContents)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
+        self.stockpile_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeToContents)
 
         if self.setup_stockpile_table_first_call:
             # Connect cellChanged signal to a slot for live formatting
@@ -3444,6 +4092,7 @@ class UserInputs(QMainWindow):
             "Use",
             "AMT",
             "Stockpile Name",
+            "2WP Brand",
             "Build",
             "Balance (WMT)",
             "Grade Fe (%)",
@@ -3567,10 +4216,7 @@ class UserInputs(QMainWindow):
         if not self.store_solver_config_inputs():
             return
 
-        self.setup_calendar()
-
-        self.tabs.setTabEnabled(self.calendar_tab_index, True)
-        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        self.navigate_to_product_build_settings()
 
     def parse_float_from_table_item(self, item, default=0.0):
         if not item or not item.text().strip():
@@ -4241,6 +4887,8 @@ class UserInputs(QMainWindow):
         }
 
         self.store_stockpile_constraint_inputs()
+        self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
+        self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
 
     def load_solver_config_inputs(self):
         if not hasattr(self, "min_stockpiles_input"):
@@ -4271,6 +4919,17 @@ class UserInputs(QMainWindow):
             "Stockpile blend must be feasible"
         )
         self.stockpile_feasibility_combo.setCurrentText(feasibility_label)
+        self.allow_offspec_steady_states_checkbox.setChecked(
+            bool(solver_config.get("allow_offspec_steady_states_for_product_build", False))
+        )
+        brand_guidance_label = {
+            "ignore": "Ignore 2WP brand guidance",
+            "prefer_match": "Prefer matching product brand",
+            "penalize_mismatch": "Penalize mismatched product brand",
+            "force_match": "Force matching product brand",
+        }.get(solver_config.get("brand_guidance_mode", "ignore"), "Ignore 2WP brand guidance")
+        self.brand_guidance_mode_combo.setCurrentText(brand_guidance_label)
+        self.brand_guidance_incentive_input.setText(str(solver_config.get("brand_guidance_incentive", 0.0)))
         min_feed_duration = solver_config.get("min_feed_duration_hours")
         self.min_feed_duration_input.setText(
             "" if min_feed_duration in (None, "") else str(min_feed_duration)
@@ -4450,6 +5109,11 @@ class UserInputs(QMainWindow):
             "Stay With Same Grade Block Pair Incentive",
             0.0,
         )
+        brand_guidance_incentive = parse_non_negative_input(
+            self.brand_guidance_incentive_input,
+            "2WP Product Guidance Incentive/Penalty",
+            0.0,
+        )
         min_feed_duration_hours = parse_optional_non_negative(
             min_feed_duration_text,
             "Min Stockpile Feed Duration",
@@ -4464,6 +5128,7 @@ class UserInputs(QMainWindow):
             or max_blend_options_per_steady_state is None
             or min_grade_block_pair_duration_hours is None
             or stay_on_same_grade_block_pair_incentive is None
+            or brand_guidance_incentive is None
             or (min_feed_duration_text and min_feed_duration_hours is None)
         ):
             return False
@@ -4477,9 +5142,18 @@ class UserInputs(QMainWindow):
             "Stockpile blend must be feasible": "stockpile_must_be_feasible",
             "Stockpile blend can rely on grade blocks": "stockpile_can_rely_on_grade_blocks"
         }.get(self.stockpile_feasibility_combo.currentText(), "stockpile_must_be_feasible")
+        brand_guidance_mode = {
+            "Ignore 2WP brand guidance": "ignore",
+            "Prefer matching product brand": "prefer_match",
+            "Penalize mismatched product brand": "penalize_mismatch",
+            "Force matching product brand": "force_match",
+        }.get(self.brand_guidance_mode_combo.currentText(), "ignore")
 
         self.solver_config = {
             "stockpile_feasibility_mode": stockpile_feasibility_mode,
+            "allow_offspec_steady_states_for_product_build": self.allow_offspec_steady_states_checkbox.isChecked(),
+            "brand_guidance_mode": brand_guidance_mode,
+            "brand_guidance_incentive": brand_guidance_incentive,
             "min_feed_duration_hours": min_feed_duration_hours,
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
@@ -4572,6 +5246,8 @@ class UserInputs(QMainWindow):
             self.calendar_inputs.get("solver_config", self.solver_config)
         )
         self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
+        self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
+        self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
 
         self.update_decision_point_tab_state()
         self.run_background_task(
@@ -4667,7 +5343,7 @@ class UserInputs(QMainWindow):
     def setup_results_tab(self):
         self.results_tab = QWidget()
         self.results_tab.setObjectName("resultsTab")
-        self.results_tab_index = self.tabs.addTab(self.results_tab, "Results (Optimised)")
+        self.results_tab_index = self.tabs.addTab(self.results_tab, "Results")
         self.results_layout = QVBoxLayout(self.results_tab)
         self.results_layout.setContentsMargins(12, 10, 12, 10)
         self.results_layout.setSpacing(10)
@@ -4699,7 +5375,7 @@ class UserInputs(QMainWindow):
 
         header_layout = QVBoxLayout()
         header_layout.setSpacing(2)
-        results_title = QLabel("Optimised Results")
+        results_title = QLabel("Results")
         results_title.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
         results_subtitle = QLabel("Blend schedule, source mix and crusher performance")
         results_subtitle.setStyleSheet("font-size: 12px; color: #64748b;")
@@ -4795,7 +5471,7 @@ class UserInputs(QMainWindow):
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
-        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Depletion Profiles (Optimised)")
+        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Build and Depletion Profiles")
         self.profiles_layout = QVBoxLayout(self.profiles_tab)
         self.profiles_layout.setContentsMargins(12, 10, 12, 10)
         self.profiles_layout.setSpacing(8)
@@ -4825,8 +5501,8 @@ class UserInputs(QMainWindow):
         self.bottom_layout.addWidget(self.stockpile_profile_chart_view)
 
         # Add a button to load the chart
-        self.load_profile_chart_button = QPushButton("Load or Update Depletion Profiles")
-        self.load_profile_chart_button.setFixedWidth(260)
+        self.load_profile_chart_button = QPushButton("Load or Update Build and Depletion Profiles")
+        self.load_profile_chart_button.setFixedWidth(340)
         self.load_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
         self.load_profile_chart_button.clicked.connect(self.load_profiles)  # Connect button to function
 
@@ -4835,7 +5511,7 @@ class UserInputs(QMainWindow):
 
     def setup_sqlite_reports_tab(self):
         self.sqlite_reports_tab = QWidget()
-        self.sqlite_reports_tab_index = self.tabs.addTab(self.sqlite_reports_tab, "SQLite Reports")
+        self.sqlite_reports_tab_index = self.tabs.addTab(self.sqlite_reports_tab, "Reports")
         self.sqlite_reports_layout = QVBoxLayout(self.sqlite_reports_tab)
 
         controls_layout = QHBoxLayout()
@@ -4873,7 +5549,7 @@ class UserInputs(QMainWindow):
             conn.close()
             return tables
         except Exception as e:
-            QMessageBox.warning(self, "SQLite Reports", f"Unable to list SQLite tables: {e}")
+            QMessageBox.warning(self, "Reports", f"Unable to list SQLite tables: {e}")
             return []
 
     def refresh_sqlite_reports(self):
@@ -4905,7 +5581,7 @@ class UserInputs(QMainWindow):
             df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT {preview_limit}', conn)
             conn.close()
         except Exception as e:
-            QMessageBox.warning(self, "SQLite Reports", f"Unable to load '{table_name}': {e}")
+            QMessageBox.warning(self, "Reports", f"Unable to load '{table_name}': {e}")
             return
 
         if row_count > len(df):
@@ -4968,25 +5644,50 @@ class UserInputs(QMainWindow):
 
     def setup_optimised_grade_profile_tab(self):
         self.optimised_grade_profile_tab = QWidget()
-        self.optimised_grade_profile_tab_index = self.tabs.addTab(self.optimised_grade_profile_tab, "Grade Profiles (Optimised)")
+        self.optimised_grade_profile_tab.setObjectName("optimisedGradeProfileTab")
+        self.optimised_grade_profile_tab_index = self.tabs.addTab(self.optimised_grade_profile_tab, "Grade Profiles")
         self.optimised_grade_profile_layout = QVBoxLayout(self.optimised_grade_profile_tab)
+        self.optimised_grade_profile_layout.setContentsMargins(12, 10, 12, 10)
+        self.optimised_grade_profile_layout.setSpacing(8)
+        self.optimised_grade_profile_tab.setStyleSheet("""
+            QWidget#optimisedGradeProfileTab {
+                background-color: #f8fafc;
+            }
+            QFrame#optimisedGradeProfileFrame {
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 6px;
+            }
+            QPushButton#loadOptimisedGradeProfileButton {
+                background-color: #0f766e;
+                color: white;
+                border: 1px solid #0f766e;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: 650;
+                padding: 8px 14px;
+            }
+            QPushButton#loadOptimisedGradeProfileButton:hover {
+                background-color: #115e59;
+            }
+        """)
 
         self.optimised_grade_profile_frame = QFrame()
-        self.optimised_grade_profile_frame.setFrameShape(QFrame.Box)
-        self.optimised_grade_profile_frame.setLineWidth(1)
+        self.optimised_grade_profile_frame.setObjectName("optimisedGradeProfileFrame")
+        self.optimised_grade_profile_frame.setFrameShape(QFrame.NoFrame)
 
         frame_layout = QVBoxLayout(self.optimised_grade_profile_frame)
-        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
 
         self.optimised_grade_profile_chart_view = CustomWebEngineView()
-        self.optimised_grade_profile_chart_view.setStyleSheet("border: 1px solid black;")
+        self.optimised_grade_profile_chart_view.setStyleSheet("border: 0; background-color: #ffffff;")
         frame_layout.addWidget(self.optimised_grade_profile_chart_view)
 
         self.optimised_grade_profile_layout.addWidget(self.optimised_grade_profile_frame)
 
         self.load_optimised_grade_profile_chart_button = QPushButton("Load or Update Chart")
+        self.load_optimised_grade_profile_chart_button.setObjectName("loadOptimisedGradeProfileButton")
         self.load_optimised_grade_profile_chart_button.setFixedWidth(200)
-        self.load_optimised_grade_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")
         self.load_optimised_grade_profile_chart_button.clicked.connect(self.load_optimised_grade_profiles)
         self.optimised_grade_profile_layout.addWidget(self.load_optimised_grade_profile_chart_button)
 
@@ -5277,7 +5978,12 @@ class UserInputs(QMainWindow):
         if isinstance(error_message, dict):
             title = error_message.get("title", title)
             error_message = error_message.get("message", "")
-        if (title or "").lower() in {"infeasible run", "run aborted", "stockpile selection required"}:
+        if (title or "").lower() in {
+            "infeasible run",
+            "run aborted",
+            "stockpile selection required",
+            "product builds complete",
+        }:
             QMessageBox.information(self, title, str(error_message))
             return
         QMessageBox.critical(self, title or "Error", str(error_message))
@@ -6675,6 +7381,10 @@ class UserInputs(QMainWindow):
             self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
+        if hasattr(self, "product_brand_labels_input"):
+            self.product_brand_labels_choice = self.parse_product_brand_labels(
+                self.product_brand_labels_input.text()
+            )
         if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
             self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
         if hasattr(self, "aps_crusher_input"):
@@ -6693,6 +7403,8 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_text = self.agent_run_instructions_input.toPlainText()
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port = self.agent_bridge_port_value()
+        if hasattr(self, "product_build_table"):
+            self.store_product_build_settings(show_errors=False)
 
         if hasattr(self, "blend_data_from_config_table_inputs"):
             self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
@@ -6725,6 +7437,9 @@ class UserInputs(QMainWindow):
                 "default_start_datetime_str": self.default_start_datetime_str,
                 "expit_mode_choice": self.expit_mode_choice,
                 "file_path_choice": self.file_path_choice,
+                "product_brand_labels_choice": self.product_brand_labels_choice,
+                "product_build_settings": self.product_build_settings,
+                "aps_stockpile_brand_map": getattr(self, "aps_stockpile_brand_map", {}),
                 "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
                 "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
@@ -6819,6 +7534,13 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
         self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
         self.file_path_choice = loaded_state.get("file_path_choice", "")
+        self.product_brand_labels_choice = self.parse_product_brand_labels(
+            loaded_state.get("product_brand_labels_choice", self.default_product_brand_labels())
+        )
+        self.product_build_settings = self.normalized_agent_product_build_settings(
+            loaded_state.get("product_build_settings", []) or []
+        )
+        self.aps_stockpile_brand_map = loaded_state.get("aps_stockpile_brand_map", {}) or {}
         self.reevaluate_aps_direct_tip_choice = loaded_state.get(
             "reevaluate_aps_direct_tip_choice", False
         )
@@ -6891,6 +7613,9 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = None
         self.expit_mode_choice = None
         self.file_path_choice = None
+        self.product_brand_labels_choice = self.default_product_brand_labels()
+        self.product_build_settings = []
+        self.aps_stockpile_brand_map = {}
         self.reevaluate_aps_direct_tip_choice = False
         self.aps_direct_tip_crusher_choice = []
         self.agent_enabled_choice = False

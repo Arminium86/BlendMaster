@@ -107,6 +107,10 @@ class Run:
 
         database_manager = DatabaseManager()
         expit_payload_transactions_to_save = None
+        solver_config = dict(solver_config or {})
+        solver_config["product_builds_configured"] = bool(
+            (calendar_inputs or {}).get("product_build_settings")
+        )
 
         if user_interaction_mode == 2 and file_path:
 
@@ -143,6 +147,7 @@ class Run:
             max_stockpiles=max_stockpiles,
             min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
             solver_config=solver_config,
+            product_build_settings=(calendar_inputs or {}).get("product_build_settings", []),
             abort_callback=self.is_abort_requested,
         )
 
@@ -187,6 +192,9 @@ class Run:
 
         self.case_bridge.print("Writing optimised blend, depletion and profile reports to database...")
         self.case_modeller.save_optimised_blend_report()
+
+        self.case_bridge.print("Writing product build report to database...")
+        self.case_modeller.save_product_build_report()
 
         self.case_bridge.print("Database tables written successfully.")
 

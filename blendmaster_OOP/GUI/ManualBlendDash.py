@@ -2,6 +2,7 @@ import dash
 import sqlite3
 from dash.dependencies import Input, Output
 import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 import random
 import requests
@@ -967,7 +968,8 @@ class DrawGradeProfiles:
                 labels={'time': 'Time', 'grade': grade},
                 color_discrete_sequence=[colors[grade]]
             )
-            fig.update_traces(mode='lines+markers')
+            fig.update_traces(mode='lines')
+            fig.update_layout(hovermode="x unified")
             fig.update_yaxes(type="linear", autorange=True)
             charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
 
@@ -1015,6 +1017,16 @@ class DrawOptimisedGradeProfiles:
             print(f"Error fetching optimised grade profile data: {e}")
             return pd.DataFrame()
 
+    def fetch_product_build_data(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            data = pd.read_sql("SELECT * FROM product_build_report", conn)
+            conn.close()
+            return data
+        except Exception as e:
+            print(f"Error fetching product build grade profile data: {e}")
+            return pd.DataFrame()
+
     def transform_data(self, df, grade_columns):
         if df.empty:
             return pd.DataFrame(columns=["time", "grade", "element"])
@@ -1051,8 +1063,26 @@ class DrawOptimisedGradeProfiles:
                 value = pd.to_numeric(row[grade_mapping[grade]], errors="coerce")
                 if pd.isna(value):
                     continue
-                records.append({"time": row["start_datetime"], "grade": value, "element": grade})
-                records.append({"time": row["end_datetime"], "grade": value, "element": grade})
+                records.append({
+                    "time": row["start_datetime"],
+                    "grade": value,
+                    "element": grade,
+                    "series": "Crusher Feed",
+                    "steady_state_number": row.get("steady_state_number"),
+                    "target_min": row.get(f"crusher_grade_target_min_{grade.split()[-1].lower()}", 0),
+                    "target_max": row.get(f"crusher_grade_target_max_{grade.split()[-1].lower()}", 100),
+                    "tonnes": row.get("crusher_actual_tonnes", 0),
+                })
+                records.append({
+                    "time": row["end_datetime"],
+                    "grade": value,
+                    "element": grade,
+                    "series": "Crusher Feed",
+                    "steady_state_number": row.get("steady_state_number"),
+                    "target_min": row.get(f"crusher_grade_target_min_{grade.split()[-1].lower()}", 0),
+                    "target_max": row.get(f"crusher_grade_target_max_{grade.split()[-1].lower()}", 100),
+                    "tonnes": row.get("crusher_actual_tonnes", 0),
+                })
 
         transformed_df = pd.DataFrame(records)
         if transformed_df.empty:
@@ -1061,11 +1091,186 @@ class DrawOptimisedGradeProfiles:
         transformed_df["time"] = pd.to_datetime(transformed_df["time"])
         return transformed_df
 
+    def transform_product_build_data(self, df, grade_columns, crusher_transformed_df=None):
+        output_columns = [
+            "time", "grade", "element", "series", "steady_state_number",
+            "target_min", "target_max", "tonnes", "target_tonnes",
+        ]
+        if df.empty:
+            return pd.DataFrame(columns=output_columns)
+
+        required_columns = [
+            "product_build_id", "product_build_name", "steady_state_number",
+            "steady_state_start_datetime", "steady_state_end_datetime",
+            "build_closing_tonnes", "target_tonnes",
+            "build_grade_fe", "build_grade_si", "build_grade_al", "build_grade_p", "build_grade_mn",
+        ]
+        missing_columns = [column for column in required_columns if column not in df.columns]
+        if missing_columns:
+            print(f"Product build grade profile data missing columns: {missing_columns}")
+            return pd.DataFrame(columns=output_columns)
+
+        df = df.copy()
+        df["steady_state_start_datetime"] = pd.to_datetime(df["steady_state_start_datetime"], errors="coerce")
+        df["steady_state_end_datetime"] = pd.to_datetime(df["steady_state_end_datetime"], errors="coerce")
+        for column in [
+            "build_opening_tonnes", "build_added_tonnes", "build_closing_tonnes", "target_tonnes",
+            "build_grade_fe", "build_grade_si", "build_grade_al", "build_grade_p", "build_grade_mn",
+            "target_fe_min", "target_fe_max", "target_si_min", "target_si_max",
+            "target_al_min", "target_al_max", "target_p_min", "target_p_max",
+            "target_mn_min", "target_mn_max",
+        ]:
+            if column not in df.columns:
+                df[column] = 0
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+
+        event_columns = [
+            "product_build_id", "product_build_name", "steady_state_number",
+            "steady_state_start_datetime", "steady_state_end_datetime", "blend_ID",
+        ]
+        for column in event_columns:
+            if column not in df.columns:
+                df[column] = ""
+        aggregation = {
+            "build_opening_tonnes": "first",
+            "build_added_tonnes": "first",
+            "build_closing_tonnes": "first",
+            "target_tonnes": "first",
+        }
+        for grade_key in ["fe", "si", "al", "p", "mn"]:
+            aggregation[f"build_grade_{grade_key}"] = "first"
+            aggregation[f"target_{grade_key}_min"] = "first"
+            aggregation[f"target_{grade_key}_max"] = "first"
+
+        events = (
+            df.dropna(subset=["steady_state_start_datetime", "steady_state_end_datetime"])
+            .groupby(event_columns, dropna=False, as_index=False)
+            .agg(aggregation)
+            .sort_values(["steady_state_start_datetime", "product_build_id", "steady_state_end_datetime"])
+        )
+        if "build_added_tonnes" in events.columns:
+            events = events[events["build_added_tonnes"] > 0].copy()
+        if events.empty:
+            return pd.DataFrame(columns=output_columns)
+
+        grade_mapping = {
+            "Grade Fe": "fe",
+            "Grade Si": "si",
+            "Grade Al": "al",
+            "Grade P": "p",
+            "Grade Mn": "mn",
+        }
+
+        crusher_points_by_grade = {}
+        if crusher_transformed_df is not None and not crusher_transformed_df.empty:
+            crusher_data = crusher_transformed_df.copy()
+            crusher_data["time"] = pd.to_datetime(crusher_data["time"], errors="coerce")
+            crusher_data = crusher_data.dropna(subset=["time"])
+            if not crusher_data.empty:
+                for grade in grade_columns:
+                    grade_key = grade_mapping[grade]
+                    grade_rows = (
+                        crusher_data[crusher_data["element"] == grade]
+                        .sort_values("time", kind="mergesort")
+                        .reset_index(drop=True)
+                    )
+                    if not grade_rows.empty:
+                        crusher_points_by_grade[grade_key] = grade_rows
+
+        def crusher_grade_at(grade_key, when, fallback):
+            if grade_key not in crusher_points_by_grade or pd.isna(when):
+                return fallback
+            grade_rows = crusher_points_by_grade[grade_key]
+            exact_rows = grade_rows[grade_rows["time"] == when]
+            if not exact_rows.empty:
+                return exact_rows.iloc[-1]["grade"]
+            prior_rows = grade_rows[grade_rows["time"] <= when]
+            if not prior_rows.empty:
+                return prior_rows.iloc[-1]["grade"]
+            return fallback
+
+        build_order = (
+            events.groupby("product_build_id", dropna=False)
+            .agg(
+                first_start=("steady_state_start_datetime", "min"),
+                first_end=("steady_state_end_datetime", "min"),
+            )
+            .reset_index()
+            .sort_values(["first_start", "first_end", "product_build_id"])
+        )
+
+        records = []
+        previous_end_time = None
+        previous_end_grades = {}
+
+        for _, build_row in build_order.iterrows():
+            build_id = build_row["product_build_id"]
+            build_events = (
+                events[events["product_build_id"] == build_id]
+                .sort_values(["steady_state_start_datetime", "steady_state_end_datetime"])
+                .reset_index(drop=True)
+            )
+            if build_events.empty:
+                continue
+
+            first_event = build_events.iloc[0]
+            last_event = build_events.iloc[-1]
+            build_name = str(first_event.get("product_build_name") or f"Build {build_id}")
+            series_name = f"Product Build: {build_name}"
+            first_start_time = first_event["steady_state_start_datetime"]
+            continuity_tolerance = pd.Timedelta(seconds=1)
+            use_handoff = False
+            if previous_end_time is not None and pd.notna(first_start_time):
+                gap = first_start_time - previous_end_time
+                use_handoff = abs(gap) <= continuity_tolerance
+            segment_start_time = previous_end_time if use_handoff else first_start_time
+
+            for grade in grade_columns:
+                grade_key = grade_mapping[grade]
+                if use_handoff:
+                    start_grade = previous_end_grades.get(grade_key, first_event.get(f"build_grade_{grade_key}", 0))
+                else:
+                    start_grade = crusher_grade_at(
+                        grade_key,
+                        segment_start_time,
+                        first_event.get(f"build_grade_{grade_key}", 0),
+                    )
+
+                records.append({
+                    "time": segment_start_time,
+                    "grade": start_grade,
+                    "element": grade,
+                    "series": series_name,
+                    "steady_state_number": first_event.get("steady_state_number"),
+                    "target_min": first_event.get(f"target_{grade_key}_min", 0),
+                    "target_max": first_event.get(f"target_{grade_key}_max", 100),
+                    "tonnes": first_event.get("build_opening_tonnes", 0),
+                    "target_tonnes": first_event.get("target_tonnes", 0),
+                })
+
+                for _, row in build_events.iterrows():
+                    records.append({
+                        "time": row["steady_state_end_datetime"],
+                        "grade": row.get(f"build_grade_{grade_key}", 0),
+                        "element": grade,
+                        "series": series_name,
+                        "steady_state_number": row.get("steady_state_number"),
+                        "target_min": row.get(f"target_{grade_key}_min", 0),
+                        "target_max": row.get(f"target_{grade_key}_max", 100),
+                        "tonnes": row.get("build_closing_tonnes", 0),
+                        "target_tonnes": row.get("target_tonnes", 0),
+                    })
+
+            previous_end_time = last_event["steady_state_end_datetime"]
+            previous_end_grades = {
+                grade_key: last_event.get(f"build_grade_{grade_key}", 0)
+                for grade_key in ["fe", "si", "al", "p", "mn"]
+            }
+
+        return pd.DataFrame(records, columns=output_columns)
+
     def update_charts(self, data):
         df = pd.DataFrame(data)
-        if df.empty:
-            return [html.Div("No optimised grade profile data available.")]
-
         grade_columns = ['Grade Fe', 'Grade Si', 'Grade Al', 'Grade P', 'Grade Mn']
         colors = {
             'Grade Fe': 'rgb(77, 148, 204)',
@@ -1076,24 +1281,89 @@ class DrawOptimisedGradeProfiles:
         }
 
         transformed_df = self.transform_data(df, grade_columns)
-        if transformed_df.empty:
+        product_build_df = self.fetch_product_build_data()
+        product_transformed_df = self.transform_product_build_data(product_build_df, grade_columns, transformed_df)
+        if transformed_df.empty and product_transformed_df.empty:
             return [html.Div("No optimised grade profile data available.")]
 
         charts = []
         for grade in grade_columns:
             truncated_title = grade.split()[-1]
-            grade_data = transformed_df[transformed_df['element'] == grade]
-            fig = px.line(
-                grade_data,
-                x='time',
-                y='grade',
-                title=f'{truncated_title} Grade Profile',
-                labels={'time': 'Time', 'grade': grade},
-                color_discrete_sequence=[colors[grade]]
+            crusher_grade_data = transformed_df[transformed_df['element'] == grade].copy()
+            product_grade_data = product_transformed_df[product_transformed_df['element'] == grade].copy()
+
+            fig = go.Figure()
+            if not crusher_grade_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=crusher_grade_data["time"],
+                    y=crusher_grade_data["grade"],
+                    name="Crusher Feed",
+                    mode="lines",
+                    line=dict(color=colors[grade], width=2.4, shape="hv"),
+                    customdata=crusher_grade_data[[
+                        "steady_state_number", "target_min", "target_max", "tonnes"
+                    ]].to_numpy(dtype=object),
+                    hovertemplate=(
+                        "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                        f"{truncated_title}: " + "%{y:.2f}%<br>"
+                        "Target: %{customdata[1]:.2f}-%{customdata[2]:.2f}%<br>"
+                        "Steady State: %{customdata[0]}<br>"
+                        "Crusher Tonnes: %{customdata[3]:,.1f} WMT<extra></extra>"
+                    ),
+                ))
+
+            build_palette = [
+                "#82C4A2", "#7FB3D5", "#F3B56B", "#B59EDB", "#E68A92",
+                "#8ECAD1", "#D6B56D", "#A5B4FC",
+            ]
+            for index, (series, series_data) in enumerate(product_grade_data.groupby("series", sort=False)):
+                fig.add_trace(go.Scatter(
+                    x=series_data["time"],
+                    y=series_data["grade"],
+                    name=series,
+                    mode="lines",
+                    line=dict(color=build_palette[index % len(build_palette)], width=2, dash="dot"),
+                    customdata=series_data[[
+                        "steady_state_number", "target_min", "target_max", "tonnes", "target_tonnes"
+                    ]].to_numpy(dtype=object),
+                    hovertemplate=(
+                        "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                        f"{truncated_title}: " + "%{y:.2f}%<br>"
+                        "Target: %{customdata[1]:.2f}-%{customdata[2]:.2f}%<br>"
+                        "Steady State: %{customdata[0]}<br>"
+                        "Build Tonnes: %{customdata[3]:,.1f} / %{customdata[4]:,.1f} WMT<extra></extra>"
+                    ),
+                ))
+
+            fig.update_layout(
+                title=f"{truncated_title} Grade Profile",
+                xaxis_title="Time",
+                yaxis_title=grade,
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#eef4fb",
+                font=dict(family="Segoe UI, Arial, sans-serif", size=12, color="#1f2937"),
+                hoverlabel=dict(
+                    bgcolor="rgba(15, 23, 42, 0.96)",
+                    bordercolor="#94a3b8",
+                    font=dict(color="#f8fafc", family="Segoe UI", size=12),
+                ),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=60, r=24, t=54, b=46),
             )
-            fig.update_traces(mode='lines+markers')
-            fig.update_yaxes(type="linear", autorange=True)
-            charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
+            fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.30)", zeroline=False)
+            fig.update_yaxes(type="linear", autorange=True, showgrid=True, gridcolor="rgba(148, 163, 184, 0.35)", zeroline=False)
+            charts.append(html.Div(
+                dcc.Graph(figure=fig, config={"displayModeBar": False, "responsive": True}),
+                style={
+                    'margin-bottom': '16px',
+                    'backgroundColor': '#ffffff',
+                    'border': '1px solid #dbe4ee',
+                    'borderRadius': '8px',
+                    'boxShadow': '0 8px 22px rgba(15, 23, 42, 0.06)',
+                    'padding': '8px',
+                },
+            ))
 
         return charts
 

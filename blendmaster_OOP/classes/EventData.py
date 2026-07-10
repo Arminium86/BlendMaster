@@ -21,6 +21,8 @@ class EventData:
         is_amt=False,
         source_name=None,
         delivered_datetime=None,
+        aps_brand=None,
+        aps_brand_proportions=None,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -42,6 +44,8 @@ class EventData:
         self._is_amt = is_amt
         self._source_name = source_name
         self._delivered_datetime = delivered_datetime
+        self._aps_brand = aps_brand or ""
+        self._aps_brand_proportions = aps_brand_proportions or {}
 
     # Getters
     @property
@@ -124,6 +128,14 @@ class EventData:
     def delivered_datetime(self):
         return self._delivered_datetime
 
+    @property
+    def aps_brand(self):
+        return self._aps_brand
+
+    @property
+    def aps_brand_proportions(self):
+        return self._aps_brand_proportions
+
     # Setters
     @stockpile.setter
     def stockpile(self, value):
@@ -204,6 +216,14 @@ class EventData:
     @delivered_datetime.setter
     def delivered_datetime(self, value):
         self._delivered_datetime = value
+
+    @aps_brand.setter
+    def aps_brand(self, value):
+        self._aps_brand = value or ""
+
+    @aps_brand_proportions.setter
+    def aps_brand_proportions(self, value):
+        self._aps_brand_proportions = value or {}
     
      # Boolean methods
     @property
@@ -243,4 +263,6 @@ class EventData:
             "is_amt": self._is_amt,
             "source_name": self._source_name,
             "delivered_datetime": self._delivered_datetime,
+            "aps_brand": self._aps_brand,
+            "aps_brand_proportions": self._aps_brand_proportions,
         }

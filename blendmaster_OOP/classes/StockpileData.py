@@ -4,7 +4,8 @@ class StockpileData:
         max_quantity_preplan, max_quantity_period_1, max_quantity_period_2,
         cost_preplan, cost_period_1, cost_period_2,
         cash_preplan, cash_period_1, cash_period_2,
-        equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready, is_AMT
+        equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready, is_AMT,
+        aps_brand=None, aps_brand_proportions=None, aps_brand_tonnes=None
     ):
         self._name = name
         self._balance = balance
@@ -30,6 +31,9 @@ class StockpileData:
         self._auto_turnover_datetime = auto_turnover_datetime
         self._is_ready = is_ready
         self._is_AMT = is_AMT
+        self._aps_brand = aps_brand or ""
+        self._aps_brand_proportions = aps_brand_proportions or {}
+        self._aps_brand_tonnes = aps_brand_tonnes or {}
 
     # Getters
     @property
@@ -127,6 +131,18 @@ class StockpileData:
     @property
     def is_AMT(self):
         return self._is_AMT
+
+    @property
+    def aps_brand(self):
+        return self._aps_brand
+
+    @property
+    def aps_brand_proportions(self):
+        return self._aps_brand_proportions
+
+    @property
+    def aps_brand_tonnes(self):
+        return self._aps_brand_tonnes
     
     # Setters
     @name.setter
@@ -225,6 +241,18 @@ class StockpileData:
     def is_AMT(self, value):
         self._is_AMT = value
 
+    @aps_brand.setter
+    def aps_brand(self, value):
+        self._aps_brand = value or ""
+
+    @aps_brand_proportions.setter
+    def aps_brand_proportions(self, value):
+        self._aps_brand_proportions = value or {}
+
+    @aps_brand_tonnes.setter
+    def aps_brand_tonnes(self, value):
+        self._aps_brand_tonnes = value or {}
+
     # Method to retrieve the original dictionary
     def to_dict(self):
         return {
@@ -251,6 +279,9 @@ class StockpileData:
             "grade_mn": self._grade_mn,
             "auto_turnover_datetime": self._auto_turnover_datetime,
             "is_ready": self._is_ready,
-            "is_AMT": self._is_AMT
+            "is_AMT": self._is_AMT,
+            "aps_brand": self._aps_brand,
+            "aps_brand_proportions": self._aps_brand_proportions,
+            "aps_brand_tonnes": self._aps_brand_tonnes
 
         }

@@ -79,7 +79,22 @@ class DrawStockProfiles:
                     crusher_actual_tonnes,
                     crusher_rate_input,
                     crusher_rate_output,
-                    actual_direct_tip_ratio
+                    actual_direct_tip_ratio,
+                    crusher_actual_grade_fe,
+                    crusher_actual_grade_si,
+                    crusher_actual_grade_al,
+                    crusher_actual_grade_p,
+                    crusher_actual_grade_mn,
+                    crusher_grade_target_min_fe,
+                    crusher_grade_target_max_fe,
+                    crusher_grade_target_min_si,
+                    crusher_grade_target_max_si,
+                    crusher_grade_target_min_al,
+                    crusher_grade_target_max_al,
+                    crusher_grade_target_min_p,
+                    crusher_grade_target_max_p,
+                    crusher_grade_target_min_mn,
+                    crusher_grade_target_max_mn
                 FROM optimised_blend_report
             """
             data = pd.read_sql(query, conn)
@@ -96,7 +111,17 @@ class DrawStockProfiles:
         ).copy()
         data["start_datetime"] = pd.to_datetime(data["start_datetime"], errors="coerce")
         data["end_datetime"] = pd.to_datetime(data["end_datetime"], errors="coerce")
-        for column in ["crusher_actual_tonnes", "crusher_rate_input", "crusher_rate_output", "actual_direct_tip_ratio"]:
+        numeric_columns = [
+            "crusher_actual_tonnes", "crusher_rate_input", "crusher_rate_output",
+            "actual_direct_tip_ratio", "crusher_actual_grade_fe", "crusher_actual_grade_si",
+            "crusher_actual_grade_al", "crusher_actual_grade_p", "crusher_actual_grade_mn",
+            "crusher_grade_target_min_fe", "crusher_grade_target_max_fe",
+            "crusher_grade_target_min_si", "crusher_grade_target_max_si",
+            "crusher_grade_target_min_al", "crusher_grade_target_max_al",
+            "crusher_grade_target_min_p", "crusher_grade_target_max_p",
+            "crusher_grade_target_min_mn", "crusher_grade_target_max_mn",
+        ]
+        for column in numeric_columns:
             data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
         data["direct_tip_tonnes"] = data["crusher_actual_tonnes"] * data["actual_direct_tip_ratio"]
         data["stockpile_feed_tonnes"] = (
@@ -109,15 +134,120 @@ class DrawStockProfiles:
         data["end_datetime_display"] = data["end_datetime"].dt.strftime("%Y-%m-%d %H:%M")
         return data.sort_values("start_datetime")
 
-    def create_charts(self, data, crusher_data=None):
+    def fetch_product_build_data(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            data = pd.read_sql("SELECT * FROM product_build_report", conn)
+            conn.close()
+        except Exception as e:
+            print(f"Error fetching product build profile data: {e}")
+            return pd.DataFrame()
+
+        if data.empty:
+            return data
+
+        data = data.copy()
+        for column in ["steady_state_start_datetime", "steady_state_end_datetime"]:
+            if column in data.columns:
+                data[column] = pd.to_datetime(data[column], errors="coerce")
+        numeric_columns = [
+            "target_tonnes", "build_opening_tonnes", "build_added_tonnes",
+            "build_closing_tonnes", "build_grade_fe", "build_grade_si",
+            "build_grade_al", "build_grade_p", "build_grade_mn",
+            "target_fe_min", "target_fe_max", "target_si_min", "target_si_max",
+            "target_al_min", "target_al_max", "target_p_min", "target_p_max",
+            "target_mn_min", "target_mn_max", "steady_state_duration",
+        ]
+        for column in numeric_columns:
+            if column not in data.columns:
+                data[column] = 0
+            data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
+        return data.sort_values(["product_build_id", "steady_state_start_datetime"])
+
+    @staticmethod
+    def common_time_range(*dataframes):
+        times = []
+        candidate_columns = [
+            "time",
+            "start_datetime",
+            "end_datetime",
+            "steady_state_start_datetime",
+            "steady_state_end_datetime",
+        ]
+        for data in dataframes:
+            if data is None or data.empty:
+                continue
+            for column in candidate_columns:
+                if column not in data.columns:
+                    continue
+                series = pd.to_datetime(data[column], errors="coerce").dropna()
+                if not series.empty:
+                    times.extend(series.tolist())
+
+        if not times:
+            return None
+        return [min(times), max(times)]
+
+    @staticmethod
+    def readable_hoverlabel():
+        return dict(
+            bgcolor="rgba(15, 23, 42, 0.96)",
+            bordercolor="#94a3b8",
+            font=dict(color="#f8fafc", family="Segoe UI", size=12),
+        )
+
+    @staticmethod
+    def extend_completed_product_build_profile(profile, target_tonnes, x_axis_range=None):
+        if profile is None or profile.empty or not x_axis_range:
+            return profile
+        try:
+            target_tonnes = float(target_tonnes or 0)
+        except (TypeError, ValueError):
+            target_tonnes = 0
+        if target_tonnes <= 0:
+            return profile
+
+        axis_end = pd.to_datetime(x_axis_range[1], errors="coerce")
+        if pd.isna(axis_end):
+            return profile
+
+        profile = profile.copy().sort_values("time")
+        last_row = profile.iloc[-1].copy()
+        last_time = pd.to_datetime(last_row.get("time"), errors="coerce")
+        if pd.isna(last_time) or last_time >= axis_end:
+            return profile
+
+        try:
+            last_tonnes = float(last_row.get("tonnes") or 0)
+        except (TypeError, ValueError):
+            last_tonnes = 0
+        if last_tonnes < target_tonnes - 0.1:
+            return profile
+
+        last_row["time"] = axis_end
+        last_row["tonnes"] = target_tonnes
+        last_row["point_type"] = "Complete"
+        last_row["duration"] = 0.0
+        last_row["added_tonnes"] = 0.0
+        return pd.concat([profile, pd.DataFrame([last_row])], ignore_index=True)
+
+    def create_charts(self, data, crusher_data=None, product_build_data=None):
         """
         Create individual charts for each unique stockpile with random colors.
         :param data: DataFrame containing the data for the charts.
         :return: List of Dash Graph components.
         """
-        if data.empty:
+        charts = []
+        x_axis_range = self.common_time_range(data, crusher_data, product_build_data)
+        crusher_chart = self.create_actual_crusher_feed_chart(crusher_data, x_axis_range)
+        if crusher_chart is not None:
+            charts.append(crusher_chart)
+
+        charts.extend(self.create_product_build_charts(product_build_data, x_axis_range))
+
+        if data is None or data.empty:
             print("No data available to create charts.")
-            return [html.Div("No data available.")]
+            return charts or [html.Div("No data available.")]
 
         data = data.copy()
         data['Balance'] = pd.to_numeric(data['balance'], errors='coerce').round(1)
@@ -146,11 +276,6 @@ class DrawStockProfiles:
             stockpile: self.depletion_palette[index % len(self.depletion_palette)]
             for index, stockpile in enumerate(unique_sources)
         }
-
-        charts = []
-        crusher_chart = self.create_actual_crusher_feed_chart(crusher_data)
-        if crusher_chart is not None:
-            charts.append(crusher_chart)
 
         for stockpile in unique_sources:
             stockpile_full_data = data[data['stockpile'] == stockpile].copy()
@@ -191,11 +316,8 @@ class DrawStockProfiles:
                     size=12,
                     color="#1f2937"
                 ),
-                hoverlabel=dict(
-                    bgcolor="#111827",
-                    font_size=12,
-                    font_family="Segoe UI"
-                )
+                hoverlabel=self.readable_hoverlabel(),
+                hovermode="x unified",
             )
             fig.update_traces(
                 line=dict(color=stockpile_color, width=2.4),
@@ -206,6 +328,7 @@ class DrawStockProfiles:
                 showgrid=True,
                 gridcolor="rgba(148, 163, 184, 0.30)",
                 zeroline=False,
+                range=x_axis_range,
             )
             fig.update_yaxes(
                 showgrid=True,
@@ -251,6 +374,7 @@ class DrawStockProfiles:
                 destination_chart = self.create_grade_block_destination_chart(
                     stockpile_full_data,
                     stockpile,
+                    x_axis_range,
                 )
                 if destination_chart is not None:
                     card_children.append(destination_chart)
@@ -286,7 +410,246 @@ class DrawStockProfiles:
 
         return charts
 
-    def create_actual_crusher_feed_chart(self, crusher_data):
+    def create_product_build_charts(self, product_build_data, x_axis_range=None):
+        if product_build_data is None or product_build_data.empty:
+            return []
+
+        data = product_build_data.copy()
+        required_columns = {
+            "product_build_id", "product_build_name", "brand", "target_tonnes",
+            "build_opening_tonnes", "build_added_tonnes", "build_closing_tonnes",
+            "steady_state_number", "steady_state_start_datetime", "steady_state_end_datetime",
+        }
+        if not required_columns.issubset(data.columns):
+            return []
+
+        event_group_columns = [
+            "product_build_id", "product_build_name", "brand", "steady_state_number",
+            "blend_ID", "blend_option", "steady_state_start_datetime", "steady_state_end_datetime",
+        ]
+        for column in event_group_columns:
+            if column not in data.columns:
+                data[column] = ""
+        aggregation = {
+            "target_tonnes": "first",
+            "build_opening_tonnes": "first",
+            "build_added_tonnes": "first",
+            "build_closing_tonnes": "first",
+            "steady_state_duration": "first",
+            "build_complete": "first",
+            "build_on_spec": "first",
+        }
+        for grade in ["fe", "si", "al", "p", "mn"]:
+            aggregation[f"build_grade_{grade}"] = "first"
+            aggregation[f"target_{grade}_min"] = "first"
+            aggregation[f"target_{grade}_max"] = "first"
+        for column in aggregation:
+            if column not in data.columns:
+                data[column] = 0
+
+        events = (
+            data.groupby(event_group_columns, dropna=False, as_index=False)
+            .agg(aggregation)
+            .sort_values(["product_build_id", "steady_state_start_datetime", "steady_state_end_datetime"])
+        )
+        events = events.dropna(subset=["steady_state_start_datetime", "steady_state_end_datetime"])
+        if events.empty:
+            return []
+
+        cards = []
+        colors = ["#82C4A2", "#7FB3D5", "#F3B56B", "#B59EDB", "#E68A92", "#8ECAD1"]
+        for build_index, (build_id, build_events) in enumerate(events.groupby("product_build_id", sort=False)):
+            build_events = build_events.sort_values("steady_state_start_datetime")
+            if build_events.empty:
+                continue
+
+            build_name = str(build_events["product_build_name"].dropna().iloc[0] or f"Build {build_id}")
+            brand = str(build_events["brand"].dropna().iloc[0] or "")
+            target_tonnes = float(build_events["target_tonnes"].max() or 0)
+            current_tonnes = float(build_events["build_closing_tonnes"].max() or 0)
+            remaining_tonnes = max(target_tonnes - current_tonnes, 0)
+            build_color = colors[build_index % len(colors)]
+
+            profile_rows = []
+            previous_grades = {grade: 0.0 for grade in ["fe", "si", "al", "p", "mn"]}
+            for _, row in build_events.iterrows():
+                common = {
+                    "steady_state_number": row.get("steady_state_number"),
+                    "blend_ID": row.get("blend_ID"),
+                    "blend_option": row.get("blend_option"),
+                    "duration": float(row.get("steady_state_duration") or 0),
+                    "added_tonnes": float(row.get("build_added_tonnes") or 0),
+                    "target_tonnes": target_tonnes,
+                    "build_complete": row.get("build_complete"),
+                    "build_on_spec": row.get("build_on_spec"),
+                }
+                closing_grades = {}
+                for grade in ["fe", "si", "al", "p", "mn"]:
+                    closing_grades[grade] = float(row.get(f"build_grade_{grade}") or 0)
+                    common[f"target_{grade}_min"] = float(row.get(f"target_{grade}_min") or 0)
+                    common[f"target_{grade}_max"] = float(row.get(f"target_{grade}_max") or 0)
+
+                opening_common = common.copy()
+                closing_common = common.copy()
+                for grade in ["fe", "si", "al", "p", "mn"]:
+                    opening_common[f"grade_{grade}"] = previous_grades[grade]
+                    closing_common[f"grade_{grade}"] = closing_grades[grade]
+
+                profile_rows.append({
+                    **opening_common,
+                    "time": row["steady_state_start_datetime"],
+                    "tonnes": float(row.get("build_opening_tonnes") or 0),
+                    "point_type": "Opening",
+                })
+                profile_rows.append({
+                    **closing_common,
+                    "time": row["steady_state_end_datetime"],
+                    "tonnes": float(row.get("build_closing_tonnes") or 0),
+                    "point_type": "Closing",
+                })
+                previous_grades = closing_grades
+
+            profile = pd.DataFrame(profile_rows).dropna(subset=["time"]).sort_values("time")
+            profile = self.extend_completed_product_build_profile(profile, target_tonnes, x_axis_range)
+            if profile.empty:
+                continue
+
+            custom_columns = [
+                "point_type", "steady_state_number", "blend_ID", "duration", "added_tonnes",
+                "target_tonnes",
+                "grade_fe", "target_fe_min", "target_fe_max",
+                "grade_si", "target_si_min", "target_si_max",
+                "grade_al", "target_al_min", "target_al_max",
+                "grade_p", "target_p_min", "target_p_max",
+                "grade_mn", "target_mn_min", "target_mn_max",
+            ]
+            customdata = profile[custom_columns].to_numpy(dtype=object)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=profile["time"],
+                y=profile["tonnes"],
+                name="Actual Build Tonnes",
+                mode="lines",
+                line=dict(color=build_color, width=2.4),
+                fill="tozeroy",
+                fillcolor=self.hex_to_rgba(build_color, 0.35),
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
+                    "%{customdata[0]} tonnes: %{y:,.1f} WMT<br>"
+                    "Target tonnes: %{customdata[5]:,.1f} WMT<br>"
+                    "Steady State: %{customdata[1]}<br>"
+                    "Blend ID: %{customdata[2]}<br>"
+                    "Duration: %{customdata[3]:.2f} hrs<br>"
+                    "Added in state: %{customdata[4]:,.1f} WMT<br>"
+                    "Fe: %{customdata[6]:.2f}% (target %{customdata[7]:.2f}-%{customdata[8]:.2f}%)<br>"
+                    "Si: %{customdata[9]:.2f}% (target %{customdata[10]:.2f}-%{customdata[11]:.2f}%)<br>"
+                    "Al: %{customdata[12]:.2f}% (target %{customdata[13]:.2f}-%{customdata[14]:.2f}%)<br>"
+                    "P: %{customdata[15]:.2f}% (target %{customdata[16]:.2f}-%{customdata[17]:.2f}%)<br>"
+                    "Mn: %{customdata[18]:.2f}% (target %{customdata[19]:.2f}-%{customdata[20]:.2f}%)"
+                    "<extra></extra>"
+                ),
+            ))
+            target_x_range = x_axis_range or [profile["time"].min(), profile["time"].max()]
+            fig.add_trace(go.Scatter(
+                x=target_x_range,
+                y=[target_tonnes, target_tonnes],
+                name="Target Tonnes",
+                mode="lines",
+                line=dict(color="#dc2626", width=2.5),
+                hovertemplate="Target tonnes: %{y:,.1f} WMT<extra></extra>",
+            ))
+            fig.update_layout(
+                height=260,
+                margin=dict(l=58, r=26, t=10, b=48),
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#eef4fb",
+                xaxis_title="Time",
+                yaxis_title="Build Tonnes (WMT)",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                    bgcolor="rgba(255,255,255,0.72)",
+                ),
+                font=dict(family="Segoe UI", size=12, color="#1f2937"),
+                hoverlabel=self.readable_hoverlabel(),
+                hovermode="x unified",
+            )
+            fig.update_xaxes(
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.30)",
+                zeroline=False,
+                range=x_axis_range,
+            )
+            fig.update_yaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.35)", zeroline=False)
+
+            cards.append(html.Div(
+                children=[
+                    html.Div(
+                        children=[
+                            html.Span(
+                                "Product Build",
+                                style={
+                                    "backgroundColor": "#0369a1",
+                                    "color": "#ffffff",
+                                    "fontSize": "12px",
+                                    "fontWeight": "700",
+                                    "padding": "4px 10px",
+                                    "borderRadius": "999px",
+                                    "marginRight": "10px",
+                                },
+                            ),
+                            html.Span(
+                                f"{build_name}" + (f" ({brand})" if brand else ""),
+                                style={
+                                    "fontSize": "16px",
+                                    "fontWeight": "650",
+                                    "color": "#1f2937",
+                                },
+                            ),
+                        ],
+                        style={
+                            "display": "flex",
+                            "alignItems": "center",
+                            "padding": "12px 16px 4px 16px",
+                        },
+                    ),
+                    html.Div(
+                        children=[
+                            self.summary_chip("Target", target_tonnes, "#fee2e2", "#991b1b"),
+                            self.summary_chip("Actual", current_tonnes, "#dbeafe", "#1e40af"),
+                            self.summary_chip("Remaining", remaining_tonnes, "#f1f5f9", "#334155"),
+                        ],
+                        style={
+                            "display": "flex",
+                            "gap": "8px",
+                            "flexWrap": "wrap",
+                            "padding": "2px 16px 8px 16px",
+                        },
+                    ),
+                    dcc.Graph(
+                        figure=fig,
+                        config={"displayModeBar": False, "responsive": True},
+                        style={"height": "270px"},
+                    ),
+                ],
+                style={
+                    "backgroundColor": "#ffffff",
+                    "border": "1px solid #dbe4ee",
+                    "borderRadius": "8px",
+                    "boxShadow": "0 8px 22px rgba(15, 23, 42, 0.06)",
+                    "margin": "0 0 16px 0",
+                    "overflow": "hidden",
+                },
+            ))
+
+        return cards
+
+    def create_actual_crusher_feed_chart(self, crusher_data, x_axis_range=None):
         if crusher_data is None or crusher_data.empty:
             return None
 
@@ -295,34 +658,57 @@ class DrawStockProfiles:
         if data.empty:
             return None
 
+        crusher_hover_columns = [
+            "end_datetime_display",
+            "steady_state_duration",
+            None,
+            "crusher_actual_tonnes",
+            "crusher_rate_output",
+            "crusher_actual_grade_fe",
+            "crusher_grade_target_min_fe",
+            "crusher_grade_target_max_fe",
+            "crusher_actual_grade_si",
+            "crusher_grade_target_min_si",
+            "crusher_grade_target_max_si",
+            "crusher_actual_grade_al",
+            "crusher_grade_target_min_al",
+            "crusher_grade_target_max_al",
+            "crusher_actual_grade_p",
+            "crusher_grade_target_min_p",
+            "crusher_grade_target_max_p",
+            "crusher_actual_grade_mn",
+            "crusher_grade_target_min_mn",
+            "crusher_grade_target_max_mn",
+        ]
+
         stockpile_series = self.expand_interval_series(
             data,
             "stockpile_feed_rate_output",
             [
-                "end_datetime_display",
-                "steady_state_duration",
+                crusher_hover_columns[0],
+                crusher_hover_columns[1],
                 "stockpile_feed_tonnes",
-                "crusher_actual_tonnes",
-                "crusher_rate_output",
+                *crusher_hover_columns[3:],
             ],
         )
         direct_tip_series = self.expand_interval_series(
             data,
             "direct_tip_rate_output",
             [
-                "end_datetime_display",
-                "steady_state_duration",
+                crusher_hover_columns[0],
+                crusher_hover_columns[1],
                 "direct_tip_tonnes",
-                "crusher_actual_tonnes",
-                "crusher_rate_output",
+                *crusher_hover_columns[3:],
             ],
         )
         target_series = self.expand_interval_series(
             data,
             "crusher_rate_input",
             [
-                "end_datetime_display",
-                "steady_state_duration",
+                crusher_hover_columns[0],
+                crusher_hover_columns[1],
+                "crusher_actual_tonnes",
+                *crusher_hover_columns[4:],
             ],
         )
 
@@ -343,7 +729,13 @@ class DrawStockProfiles:
                 "Stockpile Feed Rate: %{y:,.1f} t/h<br>"
                 "Stockpile Feed Tonnes: %{customdata[2]:,.1f} WMT<br>"
                 "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
-                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<extra></extra>"
+                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
+                "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
+                "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
+                "Al: %{customdata[11]:.2f}% (target %{customdata[12]:.2f}-%{customdata[13]:.2f}%)<br>"
+                "P: %{customdata[14]:.2f}% (target %{customdata[15]:.2f}-%{customdata[16]:.2f}%)<br>"
+                "Mn: %{customdata[17]:.2f}% (target %{customdata[18]:.2f}-%{customdata[19]:.2f}%)"
+                "<extra></extra>"
             ),
         ))
         fig.add_trace(go.Scatter(
@@ -362,7 +754,13 @@ class DrawStockProfiles:
                 "Direct Tip Rate: %{y:,.1f} t/h<br>"
                 "Direct Tip Tonnes: %{customdata[2]:,.1f} WMT<br>"
                 "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
-                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<extra></extra>"
+                "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
+                "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
+                "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
+                "Al: %{customdata[11]:.2f}% (target %{customdata[12]:.2f}-%{customdata[13]:.2f}%)<br>"
+                "P: %{customdata[14]:.2f}% (target %{customdata[15]:.2f}-%{customdata[16]:.2f}%)<br>"
+                "Mn: %{customdata[17]:.2f}% (target %{customdata[18]:.2f}-%{customdata[19]:.2f}%)"
+                "<extra></extra>"
             ),
         ))
         fig.add_trace(go.Scatter(
@@ -376,7 +774,15 @@ class DrawStockProfiles:
                 "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
-                "Crusher Rate Input: %{y:,.1f} t/h<extra></extra>"
+                "Crusher Rate Input: %{y:,.1f} t/h<br>"
+                "Total Crusher Tonnes: %{customdata[2]:,.1f} WMT<br>"
+                "Actual Crusher Rate: %{customdata[3]:,.1f} t/h<br>"
+                "Fe: %{customdata[4]:.2f}% (target %{customdata[5]:.2f}-%{customdata[6]:.2f}%)<br>"
+                "Si: %{customdata[7]:.2f}% (target %{customdata[8]:.2f}-%{customdata[9]:.2f}%)<br>"
+                "Al: %{customdata[10]:.2f}% (target %{customdata[11]:.2f}-%{customdata[12]:.2f}%)<br>"
+                "P: %{customdata[13]:.2f}% (target %{customdata[14]:.2f}-%{customdata[15]:.2f}%)<br>"
+                "Mn: %{customdata[16]:.2f}% (target %{customdata[17]:.2f}-%{customdata[18]:.2f}%)"
+                "<extra></extra>"
             ),
         ))
         fig.update_layout(
@@ -394,9 +800,15 @@ class DrawStockProfiles:
                 x=1,
             ),
             font=dict(family="Segoe UI", size=12, color="#1f2937"),
-            hoverlabel=dict(bgcolor="#111827", font_size=12, font_family="Segoe UI"),
+            hoverlabel=self.readable_hoverlabel(),
+            hovermode="x unified",
         )
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.30)", zeroline=False)
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="rgba(148, 163, 184, 0.30)",
+            zeroline=False,
+            range=x_axis_range,
+        )
         fig.update_yaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.35)", zeroline=False)
 
         return html.Div(
@@ -446,7 +858,7 @@ class DrawStockProfiles:
             },
         )
 
-    def create_grade_block_destination_chart(self, stockpile_data, source_name):
+    def create_grade_block_destination_chart(self, stockpile_data, source_name, x_axis_range=None):
         destination_series = self.grade_block_destination_series(stockpile_data)
         if destination_series.empty:
             return None
@@ -510,9 +922,15 @@ class DrawStockProfiles:
                 bgcolor="rgba(255,255,255,0.72)",
             ),
             font=dict(family="Segoe UI", size=11, color="#1f2937"),
-            hoverlabel=dict(bgcolor="#111827", font_size=12, font_family="Segoe UI"),
+            hoverlabel=self.readable_hoverlabel(),
+            hovermode="x unified",
         )
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.28)", zeroline=False)
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="rgba(148, 163, 184, 0.28)",
+            zeroline=False,
+            range=x_axis_range,
+        )
         fig.update_yaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.32)", zeroline=False)
 
         return html.Div(
@@ -549,6 +967,10 @@ class DrawStockProfiles:
         data = data.dropna(subset=["time"])
         if data.empty:
             return pd.DataFrame()
+        for column in ["steady_state_start_datetime", "steady_state_end_datetime"]:
+            if column not in data:
+                data[column] = pd.NaT
+            data[column] = pd.to_datetime(data[column], errors="coerce")
 
         movement_destination = data.get(
             "movement_destination",
@@ -568,20 +990,20 @@ class DrawStockProfiles:
         )
 
         movement_records = []
-        last_arrival_time = None
         for _, row in data.sort_values("time").iterrows():
-            if bool(row.get("_is_arrival")):
-                last_arrival_time = row["time"]
             if not bool(row.get("_is_movement")):
                 continue
 
             movement_time = row["time"]
-            allocation_time = movement_time
-            if last_arrival_time is not None and last_arrival_time <= movement_time:
-                allocation_time = last_arrival_time
-
+            movement_start = row.get("steady_state_start_datetime")
+            movement_end = row.get("steady_state_end_datetime")
+            if pd.isna(movement_start):
+                movement_start = movement_time
+            if pd.isna(movement_end) or movement_end <= movement_start:
+                movement_end = movement_start + pd.Timedelta(minutes=1)
             movement_records.append({
-                "time": allocation_time,
+                "time": movement_start,
+                "end_time": movement_end,
                 "tonnes_to_stockpile": row["tonnes_to_stockpile"],
                 "tonnes_to_crusher": row["tonnes_to_crusher"],
             })
@@ -591,17 +1013,21 @@ class DrawStockProfiles:
 
         movements = (
             pd.DataFrame(movement_records)
-            .groupby("time", as_index=False)[["tonnes_to_stockpile", "tonnes_to_crusher"]]
-            .sum()
+            .groupby("time", as_index=False)
+            .agg({
+                "end_time": "max",
+                "tonnes_to_stockpile": "sum",
+                "tonnes_to_crusher": "sum",
+            })
             .sort_values("time")
         )
 
-        start_time = data["time"].min()
-        end_time = data["time"].max()
+        start_time = movements["time"].min()
+        end_time = movements["end_time"].max()
         if pd.isna(start_time):
             start_time = movements["time"].min()
-        if pd.isna(end_time) or end_time <= movements["time"].max():
-            end_time = movements["time"].max() + pd.Timedelta(minutes=1)
+        if pd.isna(end_time) or end_time <= start_time:
+            end_time = start_time + pd.Timedelta(minutes=1)
 
         rows = [{
             "time": start_time,
@@ -627,15 +1053,14 @@ class DrawStockProfiles:
                 "crusher_cumulative_tonnes": crusher_cumulative,
                 "total_destination_tonnes": stockpile_cumulative + crusher_cumulative,
             })
-
-        rows.append({
-            "time": end_time,
-            "event_stockpile_tonnes": 0.0,
-            "event_crusher_tonnes": 0.0,
-            "stockpile_cumulative_tonnes": stockpile_cumulative,
-            "crusher_cumulative_tonnes": crusher_cumulative,
-            "total_destination_tonnes": stockpile_cumulative + crusher_cumulative,
-        })
+            rows.append({
+                "time": row["end_time"],
+                "event_stockpile_tonnes": 0.0,
+                "event_crusher_tonnes": 0.0,
+                "stockpile_cumulative_tonnes": stockpile_cumulative,
+                "crusher_cumulative_tonnes": crusher_cumulative,
+                "total_destination_tonnes": stockpile_cumulative + crusher_cumulative,
+            })
 
         return pd.DataFrame(rows).dropna(subset=["time"]).sort_values("time")
 
@@ -790,7 +1215,7 @@ class DrawStockProfiles:
                         html.Div(
                             children=[
                                 html.Div(
-                                    "Depletion Profiles",
+                                    "Build and Depletion Profiles",
                                     style={
                                         "fontSize": "22px",
                                         "fontWeight": "750",
@@ -798,7 +1223,7 @@ class DrawStockProfiles:
                                     },
                                 ),
                                 html.Div(
-                                    "Optimised stockpile and grade-block balances through time",
+                                    "Product builds, crusher feed, stockpile balances and grade-block destinations through time",
                                     style={
                                         "fontSize": "13px",
                                         "color": "#64748b",
@@ -839,7 +1264,8 @@ class DrawStockProfiles:
                     data = data.copy()
                     data['time'] = pd.to_datetime(data['time'], errors='coerce')
                 crusher_data = self.fetch_crusher_data()
-                return self.create_charts(data, crusher_data)
+                product_build_data = self.fetch_product_build_data()
+                return self.create_charts(data, crusher_data, product_build_data)
             except Exception:
                 print(traceback.format_exc())
                 return html.Div(

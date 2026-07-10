@@ -45,6 +45,91 @@ class ExpitDataHandler:
         )
         return sorted(name for name in crusher_names.unique() if name)
 
+    @staticmethod
+    def normalize_brand_name(raw_brand, brand_labels):
+        raw_text = str(raw_brand or "").strip().upper()
+        brands = [
+            str(brand or "").strip().upper()
+            for brand in (brand_labels or [])
+            if str(brand or "").strip()
+        ]
+        if not raw_text:
+            return ""
+
+        # Prefer the longest configured brand first so a specific label wins
+        # when labels overlap.
+        for brand in sorted(set(brands), key=len, reverse=True):
+            if brand and brand in raw_text:
+                return brand
+        return raw_text
+
+    @staticmethod
+    def get_stockpile_brand_guidance(input_data, brand_labels):
+        """Map APS crusher guidance rows to ROM stockpile brand proportions."""
+        required_columns = {
+            "Destination.Type",
+            "Destination.Name",
+            "Agent.Name",
+            "Source.Type",
+            "OriginalSource.Name",
+            "Mining.wetTonnes",
+        }
+        data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in required_columns,
+        )
+        if data.empty or not required_columns.issubset(set(data.columns)):
+            return {}
+
+        filtered = data[
+            (data["Destination.Type"].astype("string").str.strip() == "Crusher")
+            & (data["Agent.Name"].astype("string").str.strip() == "PlantAgent")
+            & (data["Source.Type"].astype("string").str.strip() == "Flow")
+        ].copy()
+        if filtered.empty:
+            return {}
+
+        filtered["stockpile"] = filtered["OriginalSource.Name"].astype("string").str.strip()
+        filtered["brand"] = filtered["Destination.Name"].apply(
+            lambda value: ExpitDataHandler.normalize_brand_name(value, brand_labels)
+        )
+        filtered["tonnes"] = pd.to_numeric(filtered["Mining.wetTonnes"], errors="coerce").fillna(0)
+        filtered = filtered[
+            (filtered["stockpile"].notna())
+            & (filtered["stockpile"] != "")
+            & (filtered["brand"] != "")
+            & (filtered["tonnes"] > 0)
+        ]
+        if filtered.empty:
+            return {}
+
+        grouped = (
+            filtered
+            .groupby(["stockpile", "brand"], as_index=False)["tonnes"]
+            .sum()
+        )
+        guidance = {}
+        for stockpile, group in grouped.groupby("stockpile", sort=False):
+            total_tonnes = float(group["tonnes"].sum())
+            if total_tonnes <= 0:
+                continue
+            brand_tonnes = {
+                str(row["brand"]): float(row["tonnes"])
+                for _, row in group.sort_values("tonnes", ascending=False).iterrows()
+            }
+            brand_proportions = {
+                brand: tonnes / total_tonnes
+                for brand, tonnes in brand_tonnes.items()
+            }
+            primary_brand = max(brand_tonnes, key=brand_tonnes.get)
+            guidance[str(stockpile)] = {
+                "primary_brand": primary_brand,
+                "brand_tonnes": brand_tonnes,
+                "brand_proportions": brand_proportions,
+                "total_tonnes": total_tonnes,
+            }
+        return guidance
+
     def _preprocess_data(self):
         # Explicit datetime parsing with the correct format
         self.data["Time.StartTime"] = pd.to_datetime(

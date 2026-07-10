@@ -47,7 +47,9 @@ class EventPoolGenerator:
                             "state": stockpile_state,
                             "auto_turnover_datetime": stockpile.auto_turnover_datetime,
                             "is_amt": stockpile.is_AMT,
-                            "source_name": stockpile.name
+                            "source_name": stockpile.name,
+                            "aps_brand": stockpile.aps_brand,
+                            "aps_brand_proportions": stockpile.aps_brand_proportions
                         })
 
         for grade_block in self.grade_blocks:
@@ -200,7 +202,9 @@ class EventPoolGenerator:
                 auto_turnover_datetime=record.get("auto_turnover_datetime"),
                 is_amt=record.get("is_amt", False),
                 source_name=record.get("source_name"),
-                delivered_datetime=record.get("delivered_datetime")
+                delivered_datetime=record.get("delivered_datetime"),
+                aps_brand=record.get("aps_brand"),
+                aps_brand_proportions=record.get("aps_brand_proportions")
 
             )
             for record in event_data_dicts
