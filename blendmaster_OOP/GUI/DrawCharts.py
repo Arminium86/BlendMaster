@@ -15,6 +15,7 @@ import io
 import re
 from collections import defaultdict
 from math import sqrt
+from database.DatabaseContext import get_database_path
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -1899,7 +1900,7 @@ class DrawGanttChart:
 
     def push_results_to_database(self, dataframe):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 

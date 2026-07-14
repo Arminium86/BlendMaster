@@ -5,9 +5,18 @@ from datetime import datetime
 from pandas import DataFrame
 
 class ExpitDataHandler:
-    def __init__(self, input_data, include_crusher_destinations=False, selected_crusher_name=None):
+    def __init__(
+        self,
+        input_data,
+        include_crusher_destinations=False,
+        selected_crusher_name=None,
+        operational_mine=None,
+        operational_crusher=None,
+    ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
+        self.operational_mine = str(operational_mine or "").strip().upper()
+        self.operational_crusher = self._normalize_operational_crusher(operational_crusher)
         self.source_stockpile_fallbacks = {}
         self.data = pd.read_csv(input_data)
         if not self.data.empty:
@@ -26,6 +35,39 @@ class ExpitDataHandler:
             }
         selected_crusher_name = str(selected_crusher_name).strip()
         return {selected_crusher_name} if selected_crusher_name else set()
+
+    @staticmethod
+    def _normalize_operational_crusher(crusher):
+        value = str(crusher or "").strip().upper().replace("-", "_")
+        aliases = {
+            "OPF1": "OPF01",
+            "OPF2": "OPF02",
+            "OPF3": "OPF03",
+            "OPF4": "OPF04",
+            "OPF": "EW_OPF",
+        }
+        return aliases.get(value, value)
+
+    @classmethod
+    def crusher_destination_matches(cls, destination_name, mine, crusher):
+        """Match an APS crusher destination to a BlendMaster operational crusher."""
+        destination = str(destination_name or "").strip().upper().replace("-", "_")
+        mine = str(mine or "").strip().upper()
+        crusher = cls._normalize_operational_crusher(crusher)
+        compact = "".join(character for character in destination if character.isalnum())
+
+        if not mine or not crusher:
+            return True
+        if mine in {"CC", "CB"} and crusher.startswith("OPF0"):
+            number = crusher[-1]
+            return f"OPF{number}" in compact or f"OPF0{number}" in compact
+        aliases = {
+            ("EW", "EW_OPF"): ("EWOPF",),
+            ("KV", "VK_OPF"): ("VKOPF", "KVOPF"),
+            ("FT", "FT_OPF"): ("FTOPF",),
+            ("IB", "CRUSHER"): ("CRUSHER",),
+        }
+        return any(alias in compact for alias in aliases.get((mine, crusher), (crusher.replace("_", ""),)))
 
     @staticmethod
     def get_distinct_crusher_destinations(input_data):
@@ -64,7 +106,12 @@ class ExpitDataHandler:
         return raw_text
 
     @staticmethod
-    def get_stockpile_brand_guidance(input_data, brand_labels):
+    def get_stockpile_brand_guidance(
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+    ):
         """Map APS crusher guidance rows to ROM stockpile brand proportions."""
         required_columns = {
             "Destination.Type",
@@ -86,6 +133,16 @@ class ExpitDataHandler:
             & (data["Agent.Name"].astype("string").str.strip() == "PlantAgent")
             & (data["Source.Type"].astype("string").str.strip() == "Flow")
         ].copy()
+        if operational_mine and operational_crusher and not filtered.empty:
+            filtered = filtered[
+                filtered["Destination.Name"].apply(
+                    lambda value: ExpitDataHandler.crusher_destination_matches(
+                        value,
+                        operational_mine,
+                        operational_crusher,
+                    )
+                )
+            ].copy()
         if filtered.empty:
             return {}
 
@@ -171,6 +228,14 @@ class ExpitDataHandler:
                 (destination_type == "Crusher")
                 & destination_name.isin(self.selected_crusher_names)
             )
+            if self.operational_mine and self.operational_crusher:
+                crusher_destination_mask &= destination_name.apply(
+                    lambda value: self.crusher_destination_matches(
+                        value,
+                        self.operational_mine,
+                        self.operational_crusher,
+                    )
+                )
 
         # Filter and sort data. Stockpile destinations remain the planned APS builds.
         # Selected crusher destinations are added as re-evaluable direct-tip candidates.

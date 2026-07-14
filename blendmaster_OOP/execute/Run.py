@@ -73,6 +73,7 @@ class Run:
         solver_config=None,
         reevaluate_aps_direct_tip=False,
         selected_aps_crusher=None,
+        site_context=None,
     ):
         self.abort_requested = False
 
@@ -90,6 +91,8 @@ class Run:
                 file_path,
                 include_crusher_destinations=reevaluate_aps_direct_tip,
                 selected_crusher_name=selected_aps_crusher,
+                operational_mine=(site_context or {}).get("mine"),
+                operational_crusher=(site_context or {}).get("crusher"),
             )
             expit_payload_transactions = expit_data_handler.process_transactions()
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)

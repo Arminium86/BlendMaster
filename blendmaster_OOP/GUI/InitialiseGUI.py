@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback, json, subprocess
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen
@@ -15,12 +15,23 @@ from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
 from database.SQLiteDatabase import DatabaseManager
+from database.DatabaseContext import get_database_path, set_database_path
+from setup.PlanningPlanTargets import PlanningPlanTargets
 import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
+
+SITE_CRUSHER_OPTIONS = {
+    "CC": ["OPF01", "OPF02"],
+    "CB": ["OPF01", "OPF02", "OPF03", "OPF04"],
+    "EW": ["EW_OPF"],
+    "KV": ["VK_OPF"],
+    "FT": ["FT_OPF"],
+    "IB": ["Crusher"],
+}
 
 
 def set_windows_app_user_model_id():
@@ -143,6 +154,8 @@ class UserInputs(QMainWindow):
         self.central_widget.setObjectName("mainCentralWidget")
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
+
+        self.setup_scenario_toolbar()
 
         # Tabs
         self.tabs = QTabWidget()
@@ -442,6 +455,556 @@ class UserInputs(QMainWindow):
         # Initialise main optimisation program
         self.run_program = Run(self)
 
+    def setup_scenario_toolbar(self):
+        self.scenario_toolbar = QFrame()
+        self.scenario_toolbar.setObjectName("scenarioToolbar")
+        self.scenario_toolbar.setStyleSheet("""
+            QFrame#scenarioToolbar {
+                background-color: #eef4f8;
+                border: 1px solid #d5e0e8;
+                border-radius: 5px;
+            }
+            QLabel#scenarioToolbarTitle {
+                color: #172033;
+                font-weight: 700;
+            }
+        """)
+        toolbar_layout = QHBoxLayout(self.scenario_toolbar)
+        toolbar_layout.setContentsMargins(10, 5, 10, 5)
+        toolbar_layout.setSpacing(8)
+
+        title = QLabel("Active Site Scenario:")
+        title.setObjectName("scenarioToolbarTitle")
+        self.scenario_selector = QComboBox()
+        self.scenario_selector.setMinimumWidth(260)
+        self.scenario_selector.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.add_scenario_button = QPushButton("Add Site")
+        self.remove_scenario_button = QPushButton("Remove Site")
+        self.scenario_status_label = QLabel("")
+        self.scenario_status_label.setStyleSheet("color: #526777;")
+
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addWidget(self.scenario_selector)
+        toolbar_layout.addWidget(self.add_scenario_button)
+        toolbar_layout.addWidget(self.remove_scenario_button)
+        toolbar_layout.addWidget(self.scenario_status_label)
+        toolbar_layout.addStretch()
+        self.layout.addWidget(self.scenario_toolbar)
+
+        self.scenario_selector.currentIndexChanged.connect(self.handle_scenario_selection_changed)
+        self.add_scenario_button.clicked.connect(self.add_blank_site_scenario)
+        self.remove_scenario_button.clicked.connect(self.remove_active_site_scenario)
+        self.refresh_scenario_selector()
+
+    @staticmethod
+    def scenario_display_name(state, fallback="New Site"):
+        state = state or {}
+        hub = str(state.get("hub_input_choice") or "").strip()
+        mine = str(state.get("mine_input_choice") or "").strip()
+        crusher = str(state.get("crusher_input_choice") or "").strip()
+        parts = [value for value in (hub, mine, crusher) if value]
+        return " / ".join(parts) if parts else fallback
+
+    def scenario_database_path(self, scenario_id):
+        return os.path.join(self.scenario_session_directory, f"{scenario_id}.db")
+
+    @staticmethod
+    def database_contains_table(database_path, table_name):
+        if not database_path or not os.path.exists(database_path):
+            return False
+        connection = None
+        try:
+            connection = sqlite3.connect(database_path)
+            row = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            return row is not None
+        except sqlite3.Error:
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def seed_active_scenario_database(self, force=False):
+        """Recreate opening inventory tables when a scenario DB is new or restored."""
+        database_path = get_database_path()
+        if self.stockpile_data and (
+            force or not self.database_contains_table(database_path, "opening_stockpile_inventories")
+        ):
+            self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
+        if self.AMT_stockpile_data and (
+            force or not self.database_contains_table(database_path, "opening_AMT_stockpile_inventories")
+        ):
+            self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
+
+    @staticmethod
+    def snapshot_database(database_path):
+        if not database_path or not os.path.exists(database_path):
+            return None
+        snapshot_path = f"{database_path}.project_snapshot"
+        source = destination = None
+        try:
+            try:
+                os.remove(snapshot_path)
+            except FileNotFoundError:
+                pass
+            source = sqlite3.connect(database_path)
+            destination = sqlite3.connect(snapshot_path)
+            source.backup(destination)
+            destination.close()
+            destination = None
+            with open(snapshot_path, "rb") as snapshot_file:
+                return snapshot_file.read()
+        finally:
+            if destination is not None:
+                destination.close()
+            if source is not None:
+                source.close()
+            try:
+                os.remove(snapshot_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def restore_database_snapshot(database_path, database_bytes):
+        if not database_bytes:
+            return
+        os.makedirs(os.path.dirname(database_path), exist_ok=True)
+        with open(database_path, "wb") as database_file:
+            database_file.write(database_bytes)
+
+    def refresh_scenario_selector(self):
+        if not hasattr(self, "scenario_selector"):
+            return
+        self.scenario_switch_in_progress = True
+        try:
+            self.scenario_selector.clear()
+            for scenario_id, state in self.site_scenarios.items():
+                self.scenario_selector.addItem(
+                    self.scenario_display_name(state, f"Site {self.scenario_selector.count() + 1}"),
+                    scenario_id,
+                )
+            index = self.scenario_selector.findData(self.active_scenario_id)
+            if index >= 0:
+                self.scenario_selector.setCurrentIndex(index)
+            self.remove_scenario_button.setEnabled(len(self.site_scenarios) > 1)
+            active = self.site_scenarios.get(self.active_scenario_id, {})
+            self.scenario_status_label.setText(
+                "Configured" if active.get("stockpile_data") else "Awaiting Site Configuration"
+            )
+        finally:
+            self.scenario_switch_in_progress = False
+
+    def new_scenario_id(self):
+        return f"site_{uuid.uuid4().hex[:10]}"
+
+    def add_blank_site_scenario(self):
+        if getattr(self, "background_tasks", []):
+            QMessageBox.information(self, "BlendMaster", "Wait for the current background task before changing sites.")
+            return
+        self.save_active_scenario_state()
+        scenario_id = self.new_scenario_id()
+        self.site_scenarios[scenario_id] = {
+            "scenario_id": scenario_id,
+            "database_path": self.scenario_database_path(scenario_id),
+        }
+        self.active_scenario_id = scenario_id
+        self.refresh_scenario_selector()
+        self.restore_site_scenario(self.site_scenarios[scenario_id])
+
+    def remove_active_site_scenario(self):
+        if len(self.site_scenarios) <= 1:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Remove Site Scenario",
+            "Remove the active site scenario from this model?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        removed_id = self.active_scenario_id
+        remaining_ids = [key for key in self.site_scenarios if key != removed_id]
+        self.site_scenarios.pop(removed_id, None)
+        self.active_scenario_id = remaining_ids[0]
+        self.refresh_scenario_selector()
+        self.restore_site_scenario(self.site_scenarios[self.active_scenario_id])
+
+    def handle_scenario_selection_changed(self, index):
+        if self.scenario_switch_in_progress or index < 0:
+            return
+        scenario_id = self.scenario_selector.itemData(index)
+        if not scenario_id or scenario_id == self.active_scenario_id:
+            return
+        if getattr(self, "background_tasks", []):
+            QMessageBox.information(self, "BlendMaster", "Wait for the current background task before changing sites.")
+            self.refresh_scenario_selector()
+            return
+        self.save_active_scenario_state()
+        self.active_scenario_id = scenario_id
+        self.restore_site_scenario(self.site_scenarios.get(scenario_id, {}))
+
+    def capture_calendar_table_inputs(self):
+        if not hasattr(self, "main_table") or not hasattr(self, "calendar_headers"):
+            return copy.deepcopy(self.calendar_inputs or {})
+        captured = copy.deepcopy(self.calendar_inputs or {})
+        headers = self.calendar_headers[1:]
+        hierarchy = []
+        for row_idx in range(self.main_table.rowCount()):
+            caption_item = self.main_table.item(row_idx, 0)
+            if caption_item is None:
+                continue
+            caption = caption_item.text()
+            indent_level = int((len(caption) - len(caption.lstrip())) / 2)
+            while len(hierarchy) > indent_level:
+                hierarchy.pop()
+            hierarchy.append(caption.strip().replace(" ", "_").lower())
+            full_key = "_".join(hierarchy)
+            values = {}
+            for column, header in enumerate(headers, start=1):
+                value = self.get_main_table_cell_text(row_idx, column)
+                if value not in (None, "") and "state" not in full_key:
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        pass
+                values[header] = value
+            captured[full_key] = values
+        captured["solver_config"] = copy.deepcopy(self.solver_config or {})
+        captured["product_build_settings"] = copy.deepcopy(self.product_build_settings or [])
+        captured["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        captured["site_context"] = self.active_site_context()
+        return captured
+
+    def capture_stockpile_table_choices(self):
+        if not hasattr(self, "stockpile_table"):
+            return
+        for row in range(self.stockpile_table.rowCount()):
+            name_item = self.stockpile_table.item(row, 2)
+            if name_item is None:
+                continue
+            name = name_item.text()
+            for column, target in (
+                (0, self.stockpile_data_use_column),
+                (1, self.stockpile_data_AMT_column),
+            ):
+                wrapper = self.stockpile_table.cellWidget(row, column)
+                if wrapper and wrapper.layout() and wrapper.layout().count():
+                    checkbox = wrapper.layout().itemAt(0).widget()
+                    if isinstance(checkbox, QCheckBox):
+                        target[name] = checkbox.isChecked()
+
+    @staticmethod
+    def capture_table_snapshot(table):
+        if table is None:
+            return None
+        headers = []
+        for column in range(table.columnCount()):
+            item = table.horizontalHeaderItem(column)
+            headers.append(item.text() if item is not None else "")
+        rows = []
+        for row in range(table.rowCount()):
+            rows.append([
+                table.item(row, column).text() if table.item(row, column) is not None else ""
+                for column in range(table.columnCount())
+            ])
+        return {"headers": headers, "rows": rows}
+
+    @staticmethod
+    def restore_table_snapshot(table, snapshot):
+        if table is None:
+            return
+        snapshot = snapshot or {}
+        headers = snapshot.get("headers") or []
+        rows = snapshot.get("rows") or []
+        table.clearContents()
+        table.setColumnCount(len(headers))
+        table.setRowCount(len(rows))
+        if headers:
+            table.setHorizontalHeaderLabels(headers)
+        for row_index, values in enumerate(rows):
+            for column_index, value in enumerate(values[:len(headers)]):
+                table.setItem(row_index, column_index, QTableWidgetItem(str(value)))
+        if headers:
+            table.resizeColumnsToContents()
+
+    def active_site_context(self):
+        return {
+            "scenario_id": self.active_scenario_id,
+            "hub": getattr(self, "hub_input_choice", None),
+            "mine": getattr(self, "mine_input_choice", None),
+            "crusher": getattr(self, "crusher_input_choice", None),
+        }
+
+    def capture_scenario_state(self):
+        self.capture_stockpile_table_choices()
+        if hasattr(self, "auto_load_2wp_targets_checkbox"):
+            self.auto_load_2wp_targets_choice = (
+                self.auto_load_2wp_targets_checkbox.isChecked()
+            )
+        if hasattr(self, "solver_config_tab"):
+            self.store_solver_config_inputs(show_errors=False)
+        if hasattr(self, "product_build_table"):
+            self.store_product_build_settings(show_errors=False)
+        calendar_inputs = self.capture_calendar_table_inputs()
+        fields = [
+            "hub_input_choice", "mine_input_choice", "crusher_input_choice",
+            "selected_site_crushers", "time_mode_choice", "start_time_choice",
+            "expit_mode_choice", "file_path_choice", "blend_mode_choice",
+            "product_brand_labels_choice", "product_build_settings",
+            "auto_load_2wp_targets_choice",
+            "reevaluate_aps_direct_tip_choice", "aps_direct_tip_crusher_choice",
+            "aps_stockpile_brand_map", "stockpile_data", "stockpile_data_use_column",
+            "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
+            "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
+            "solver_config", "min_stockpiles", "max_stockpiles",
+            "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
+            "stored_blend_sequence_table_for_gantt",
+            "stored_blend_sequence_table_for_gantt_default", "default_start_datetime",
+            "default_end_datetime", "default_start_datetime_str", "default_end_datetime_str",
+            "crusher_rate", "crusher_rate_input_value", "blend_config_table_inputs",
+        ]
+        state = {"scenario_id": self.active_scenario_id, "calendar_inputs": calendar_inputs}
+        for field in fields:
+            state[field] = copy.deepcopy(getattr(self, field, None))
+        state["database_path"] = self.scenario_database_path(self.active_scenario_id)
+        state["decision_table_snapshot"] = self.capture_table_snapshot(
+            getattr(self, "decision_table", None)
+        )
+        state["decision_output_text"] = (
+            self.decision_output.toPlainText() if hasattr(self, "decision_output") else ""
+        )
+        state["decision_status_text"] = (
+            self.decision_status_label.text() if hasattr(self, "decision_status_label") else ""
+        )
+        if hasattr(self, "tabs"):
+            state["tab_states"] = {
+                index: self.tabs.isTabEnabled(index) for index in range(self.tabs.count())
+            }
+        return state
+
+    def save_active_scenario_state(self):
+        if not self.active_scenario_id:
+            return
+        self.site_scenarios[self.active_scenario_id] = self.capture_scenario_state()
+        self.refresh_scenario_selector()
+
+    def reset_workflow_tabs_for_scenario(self):
+        for tab_index in [
+            self.stockpile_tab_index, self.AMT_stockpile_tab_index,
+            self.solver_config_tab_index, self.product_build_tab_index,
+            self.calendar_tab_index, self.decision_point_tab_index,
+            self.results_tab_index, self.profiles_tab_index,
+            self.sqlite_reports_tab_index, self.optimised_grade_profile_tab_index,
+            self.blend_config_tab_index, self.blend_sequence_tab_index,
+            self.grade_profile_tab_index,
+        ]:
+            self.tabs.setTabEnabled(tab_index, False)
+
+    def update_chart_database_context(self):
+        database_path = get_database_path()
+        for attribute in (
+            "draw_gantt_chart",
+            "draw_stockpile_profile_chart",
+            "draw_optimised_grade_profile_chart",
+            "draw_AMT_map",
+        ):
+            chart = getattr(self, attribute, None)
+            if chart is not None and hasattr(chart, "db_path"):
+                chart.db_path = database_path
+
+        amt_chart = getattr(self, "draw_AMT_map", None)
+        if amt_chart is not None:
+            amt_chart.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
+            amt_chart.selected_points = copy.deepcopy(self.hex_sequence_table or [])
+            amt_chart.data = amt_chart.fetch_data()
+            amt_chart.unique_footprints = amt_chart.get_unique_footprints()
+            amt_chart.clean_up_hex_sequence_table()
+            amt_chart.update_sequence_counter()
+            try:
+                requests.post("http://localhost:8054/trigger-refresh", timeout=2)
+            except requests.exceptions.RequestException:
+                pass
+
+        for view_name in (
+            "gantt_chart_view",
+            "stockpile_profile_chart_view",
+            "optimised_grade_profile_chart_view",
+            "AMT_map_view",
+        ):
+            view = getattr(self, view_name, None)
+            if view is not None and not view.url().isEmpty():
+                view.reload()
+
+    def refresh_manual_scenario_views(self, tab_states):
+        def is_enabled(index):
+            return bool(tab_states.get(index, tab_states.get(str(index), False)))
+
+        previous_project_loaded = self.is_project_loaded
+        self.is_project_loaded = True
+        try:
+            blend_tab_enabled = is_enabled(self.blend_config_tab_index)
+            if blend_tab_enabled and self.updated_stockpile_data:
+                self.total_AMT_stockpile_balances = {}
+                self.populate_total_AMT_stockpile_balances()
+                if self.setup_blends_tab_first_call:
+                    self.setup_blends_tab()
+                else:
+                    self.populate_blend_config_table()
+                    self.setup_blends_tab()
+                if hasattr(self, "crusher_rate_input"):
+                    rate = self.crusher_rate_input_value or self.crusher_rate or 1000
+                    self.crusher_rate_input.setText(str(rate))
+                self.update_blend_results()
+
+            sequence_tab_enabled = is_enabled(self.blend_sequence_tab_index)
+            if (
+                sequence_tab_enabled
+                and self.default_start_datetime is not None
+                and self.default_end_datetime is not None
+            ):
+                self.setup_sequence_tab()
+        finally:
+            self.is_project_loaded = previous_project_loaded
+
+    def restore_site_scenario(self, state):
+        state = copy.deepcopy(state or {})
+        self.scenario_switch_in_progress = True
+        try:
+            set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
+            self.reset_workflow_tabs_for_scenario()
+            self.is_project_loaded = False
+
+            self.hub_input_choice = state.get("hub_input_choice")
+            self.mine_input_choice = state.get("mine_input_choice")
+            self.crusher_input_choice = state.get("crusher_input_choice")
+            self.selected_site_crushers = state.get("selected_site_crushers") or (
+                [self.crusher_input_choice] if self.crusher_input_choice else []
+            )
+            self.time_mode_choice = state.get("time_mode_choice") or 1
+            self.start_time_choice = state.get("start_time_choice") or datetime.now()
+            self.expit_mode_choice = state.get("expit_mode_choice") or 1
+            self.file_path_choice = state.get("file_path_choice") or ""
+            self.blend_mode_choice = state.get("blend_mode_choice") or 1
+            self.product_brand_labels_choice = self.parse_product_brand_labels(
+                state.get("product_brand_labels_choice") or self.default_product_brand_labels()
+            )
+            self.product_build_settings = copy.deepcopy(state.get("product_build_settings") or [])
+            self.auto_load_2wp_targets_choice = bool(
+                state.get("auto_load_2wp_targets_choice", True)
+            )
+            self.reevaluate_aps_direct_tip_choice = bool(state.get("reevaluate_aps_direct_tip_choice", False))
+            self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
+                state.get("aps_direct_tip_crusher_choice") or []
+            )
+            self.aps_stockpile_brand_map = copy.deepcopy(state.get("aps_stockpile_brand_map") or {})
+            self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
+            self.stockpile_data_use_column = copy.deepcopy(state.get("stockpile_data_use_column") or {})
+            self.stockpile_data_AMT_column = copy.deepcopy(state.get("stockpile_data_AMT_column") or {})
+            self.updated_stockpile_data = copy.deepcopy(state.get("updated_stockpile_data"))
+            self.updated_stockpile_data_keys = (self.updated_stockpile_data or {}).keys()
+            self.AMT_stockpile_data = copy.deepcopy(state.get("AMT_stockpile_data") or {})
+            self.AMT_chunk_settings = copy.deepcopy(state.get("AMT_chunk_settings") or {})
+            self.hex_sequence_table = copy.deepcopy(state.get("hex_sequence_table") or [])
+            self.hex_sequence_table_argument = copy.deepcopy(
+                state.get("hex_sequence_table_argument") or self.hex_sequence_table
+            )
+            self.calendar_inputs = copy.deepcopy(state.get("calendar_inputs") or {})
+            self.solver_config = self.normalized_solver_config(state.get("solver_config") or {})
+            self.min_stockpiles = state.get("min_stockpiles")
+            self.max_stockpiles = state.get("max_stockpiles")
+            self.min_stockpile_contribution_ratio = state.get(
+                "min_stockpile_contribution_ratio",
+                Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO,
+            )
+            self.saved_blends_for_schedule = copy.deepcopy(
+                state.get("saved_blends_for_schedule") or []
+            )
+            self.stored_blend_sequence_table_for_gantt = copy.deepcopy(
+                state.get("stored_blend_sequence_table_for_gantt") or []
+            )
+            self.stored_blend_sequence_table_for_gantt_default = copy.deepcopy(
+                state.get("stored_blend_sequence_table_for_gantt_default") or []
+            )
+            self.default_start_datetime = state.get("default_start_datetime")
+            self.default_end_datetime = state.get("default_end_datetime")
+            self.default_start_datetime_str = state.get("default_start_datetime_str")
+            self.default_end_datetime_str = state.get("default_end_datetime_str")
+            self.crusher_rate = state.get("crusher_rate")
+            self.crusher_rate_input_value = state.get("crusher_rate_input_value")
+            self.blend_config_table_inputs = copy.deepcopy(
+                state.get("blend_config_table_inputs") or {}
+            )
+            self.restore_table_snapshot(
+                self.decision_table,
+                state.get("decision_table_snapshot"),
+            )
+            self.decision_output.setPlainText(state.get("decision_output_text") or "")
+            self.decision_status_label.setText(
+                state.get("decision_status_text")
+                or "Run the optimiser to review feasible blend options."
+            )
+            self.seed_active_scenario_database()
+
+            self.hub_input.setCurrentText(self.hub_input_choice or self.hub_input.itemText(0))
+            self.update_mine_dropdown()
+            if self.mine_input_choice:
+                self.mine_input.setCurrentText(self.mine_input_choice)
+            self.update_site_crusher_options(self.selected_site_crushers)
+            self.time_mode.setCurrentIndex(max(self.time_mode_choice - 1, 0))
+            start_time = self.start_time_choice
+            self.start_time.setDateTime(QDateTime(
+                start_time.year,
+                start_time.month,
+                start_time.day,
+                start_time.hour,
+                start_time.minute,
+                start_time.second,
+            ))
+            self.expit_mode.setCurrentIndex(max(self.expit_mode_choice - 1, 0))
+            self.file_path.setText(self.file_path_choice)
+            self.blend_mode.setCurrentIndex(max(self.blend_mode_choice - 1, 0))
+            self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
+            self.auto_load_2wp_targets_checkbox.setChecked(
+                self.auto_load_2wp_targets_choice
+            )
+            self.reevaluate_aps_direct_tip_checkbox.setChecked(self.reevaluate_aps_direct_tip_choice)
+            self.set_aps_crusher_items(
+                self.aps_direct_tip_crusher_choice,
+                self.aps_direct_tip_crusher_choice,
+            )
+            self.populate_product_build_table()
+            self.load_solver_config_inputs()
+
+            if self.stockpile_data:
+                self.setup_stockpile_table()
+                self.tabs.setTabEnabled(self.stockpile_tab_index, True)
+            if self.updated_stockpile_data:
+                self.tabs.setTabEnabled(self.solver_config_tab_index, True)
+                self.tabs.setTabEnabled(self.product_build_tab_index, True)
+                self.setup_calendar()
+                self.tabs.setTabEnabled(self.calendar_tab_index, True)
+            if any((self.stockpile_data_AMT_column or {}).values()) and self.AMT_stockpile_data:
+                self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
+
+            tab_states = state.get("tab_states") or {}
+            for index, enabled in tab_states.items():
+                if isinstance(index, str) and index.isdigit():
+                    index = int(index)
+                if isinstance(index, int) and 0 <= index < self.tabs.count():
+                    self.tabs.setTabEnabled(index, bool(enabled))
+            self.refresh_manual_scenario_views(tab_states)
+            self.tabs.setTabEnabled(self.site_config_tab_index, True)
+            self.tabs.setCurrentIndex(self.site_config_tab_index)
+            self.validate_form()
+            self.refresh_sqlite_reports()
+            self.update_chart_database_context()
+        finally:
+            self.scenario_switch_in_progress = False
+            self.refresh_scenario_selector()
+
     def update_tab_tooltips(self):
         for index in range(self.tabs.count()):
             self.tabs.setTabToolTip(index, self.tabs.tabText(index))
@@ -728,9 +1291,15 @@ class UserInputs(QMainWindow):
         self.product_build_count_input.setValidator(QIntValidator(0, 50, self))
         self.product_build_count_button = QPushButton("Create")
         self.product_build_count_button.clicked.connect(self.set_product_build_count_from_input)
+        self.product_build_2wp_button = QPushButton("Load 2WP Targets")
+        self.product_build_2wp_button.setToolTip(
+            "Load tonnes and grade targets from the latest Wednesday 2WP scenario for the active mine and crusher."
+        )
+        self.product_build_2wp_button.clicked.connect(self.load_2wp_product_build_targets)
         top_layout.addWidget(QLabel("Number of builds"))
         top_layout.addWidget(self.product_build_count_input)
         top_layout.addWidget(self.product_build_count_button)
+        top_layout.addWidget(self.product_build_2wp_button)
         top_layout.addStretch()
         self.product_build_layout.addLayout(top_layout)
 
@@ -1011,6 +1580,13 @@ class UserInputs(QMainWindow):
         settings = self.read_product_build_settings_from_table(show_errors=show_errors)
         if settings is None:
             return False
+        previous_settings = getattr(self, "product_build_settings", []) or []
+        for index, setting in enumerate(settings):
+            if index >= len(previous_settings) or not isinstance(previous_settings[index], dict):
+                continue
+            for key, value in previous_settings[index].items():
+                if key.startswith("planning_"):
+                    setting[key] = copy.deepcopy(value)
         self.product_build_settings = settings
         if self.calendar_inputs is None:
             self.calendar_inputs = {}
@@ -1026,9 +1602,59 @@ class UserInputs(QMainWindow):
     def handle_product_build_settings_submit(self):
         if not self.store_product_build_settings():
             return
+        self.save_active_scenario_state()
         self.setup_calendar()
         self.tabs.setTabEnabled(self.calendar_tab_index, True)
         self.tabs.setCurrentIndex(self.calendar_tab_index)
+
+    def load_2wp_product_build_targets(self):
+        mine = getattr(self, "mine_input_choice", None)
+        crusher = getattr(self, "crusher_input_choice", None)
+        start_time = getattr(self, "start_time_choice", None)
+        if not mine or not crusher or not start_time:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Submit Site Configuration before loading 2WP product-build targets.",
+            )
+            return
+
+        def work():
+            return self.planning_plan_targets.fetch(
+                mine,
+                crusher,
+                start_time,
+                self.product_brand_options(),
+            )
+
+        def success(settings):
+            if not settings:
+                QMessageBox.information(
+                    self,
+                    "BlendMaster",
+                    f"No overlapping 2WP OPF Feed targets were found for {mine} / {crusher}.",
+                )
+                return
+            extra_brands = [setting.get("brand") for setting in settings if setting.get("brand")]
+            self.product_brand_labels_choice = self.parse_product_brand_labels(
+                self.product_brand_options() + extra_brands
+            )
+            self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
+            self.product_build_settings = settings
+            self.populate_product_build_table()
+            self.store_product_build_settings(show_errors=False)
+            self.save_active_scenario_state()
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                f"Loaded {len(settings)} product build target(s) for {mine} / {crusher}.",
+            )
+
+        self.run_background_task(
+            f"Loading 2WP build targets for {mine} / {crusher}...",
+            work,
+            success,
+        )
 
     def create_solver_threshold_input(self, default_value, validator):
         input_field = QLineEdit()
@@ -1314,10 +1940,14 @@ class UserInputs(QMainWindow):
         outer_layout.addWidget(form_card, 0, Qt.AlignTop)
         outer_layout.addWidget(logo_panel, 1)
 
-        # Dropdown lists for Hub and Mine
+        # Dropdown lists for Hub, Mine and one or more operational crushers
         self.hub_input = QComboBox()
         self.hub_input.addItems(["Chichester Hub", "Western Hub", "Solomon Hub", "Iron Bridge Hub"])
         self.mine_input = QComboBox()
+        self.site_crusher_input = QListWidget()
+        self.site_crusher_input.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.site_crusher_input.setFixedHeight(66)
+        self.site_crusher_input.setMinimumWidth(300)
 
         # Adjust size of dropdowns
         self.hub_input.setFixedWidth(150)
@@ -1328,12 +1958,16 @@ class UserInputs(QMainWindow):
         hub_label.setStyleSheet("font-weight: bold;")
         mine_label = QLabel("Mine:")
         mine_label.setStyleSheet("font-weight: bold;")
+        crusher_label = QLabel("Crusher(s):")
+        crusher_label.setStyleSheet("font-weight: bold;")
 
         layout.addRow(hub_label, self.hub_input)
         layout.addRow(mine_label, self.mine_input)
+        layout.addRow(crusher_label, self.site_crusher_input)
 
         # Connect hub dropdown change to update mine dropdown
         self.hub_input.currentIndexChanged.connect(self.update_mine_dropdown)
+        self.mine_input.currentIndexChanged.connect(self.update_site_crusher_options)
 
         # --- Input 1: Time Starts At ---
         time_label = QLabel("Time Starts At:")
@@ -1422,6 +2056,21 @@ class UserInputs(QMainWindow):
         )))
         layout.addRow(product_brand_label, self.product_brand_labels_input)
 
+        product_build_targets_label = QLabel("Product Build Targets:")
+        product_build_targets_label.setStyleSheet("font-weight: bold;")
+        self.auto_load_2wp_targets_checkbox = QCheckBox(
+            "Load automatically from the latest 2WP"
+        )
+        self.auto_load_2wp_targets_checkbox.setChecked(bool(getattr(
+            self,
+            "auto_load_2wp_targets_choice",
+            True,
+        )))
+        self.auto_load_2wp_targets_checkbox.setToolTip(
+            "Clear this option to skip the Snowflake 2WP target query and enter product builds manually."
+        )
+        layout.addRow(product_build_targets_label, self.auto_load_2wp_targets_checkbox)
+
         # --- Input 4: Optimised Blend Choices ---
         blend_label = QLabel("Optimised Blend Choices:")
         blend_label.setStyleSheet("font-weight: bold;")
@@ -1472,6 +2121,7 @@ class UserInputs(QMainWindow):
         # Connect input field changes to form validation
         self.hub_input.currentIndexChanged.connect(self.validate_form)
         self.mine_input.currentIndexChanged.connect(self.validate_form)
+        self.site_crusher_input.itemSelectionChanged.connect(self.validate_form)
         self.time_mode.currentIndexChanged.connect(self.validate_form)
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
@@ -1497,6 +2147,7 @@ class UserInputs(QMainWindow):
         all_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
+            and bool(self.selected_site_crusher_names())
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
             and aps_direct_tip_ready
@@ -1692,6 +2343,8 @@ class UserInputs(QMainWindow):
             self.aps_stockpile_brand_map = ExpitDataHandler.get_stockpile_brand_guidance(
                 file_path,
                 self.product_brand_options(),
+                getattr(self, "mine_input_choice", None),
+                getattr(self, "crusher_input_choice", None),
             )
         except Exception as exc:
             self.aps_stockpile_brand_map = {}
@@ -1733,6 +2386,7 @@ class UserInputs(QMainWindow):
     def update_mine_dropdown(self):
         """Update the Mine dropdown based on the selected Hub."""
         hub_selection = self.hub_input.currentText()
+        previous_mine = self.mine_input.currentText().strip()
 
         # Clear current items in the Mine dropdown
         self.mine_input.clear()
@@ -1749,6 +2403,37 @@ class UserInputs(QMainWindow):
         else:
             # Default: No selection or unknown hub
             self.mine_input.addItems([])
+
+        if previous_mine and self.mine_input.findText(previous_mine) >= 0:
+            self.mine_input.setCurrentText(previous_mine)
+        self.update_site_crusher_options()
+
+    def selected_site_crusher_names(self):
+        if not hasattr(self, "site_crusher_input"):
+            return []
+        return [
+            item.text().strip()
+            for item in self.site_crusher_input.selectedItems()
+            if item.text().strip()
+        ]
+
+    def update_site_crusher_options(self, selected_crushers=None):
+        if not hasattr(self, "site_crusher_input"):
+            return
+        if isinstance(selected_crushers, (int, bool)):
+            selected_crushers = None
+        if selected_crushers is None:
+            selected_crushers = self.selected_site_crusher_names()
+        selected = {str(value).strip().upper() for value in selected_crushers or []}
+        mine = self.mine_input.currentText().strip().upper() if hasattr(self, "mine_input") else ""
+        crushers = SITE_CRUSHER_OPTIONS.get(mine, [])
+        self.site_crusher_input.clear()
+        self.site_crusher_input.addItems(crushers)
+        for row in range(self.site_crusher_input.count()):
+            item = self.site_crusher_input.item(row)
+            item.setSelected(item.text().strip().upper() in selected)
+        if crushers and not self.site_crusher_input.selectedItems():
+            self.site_crusher_input.item(0).setSelected(True)
 
     def handle_site_config_submit(self):
         """Handle the submission of site configuration."""
@@ -1775,6 +2460,11 @@ class UserInputs(QMainWindow):
                 if hasattr(self, "product_brand_labels_input")
                 else self.default_product_brand_labels()
             )
+            self.auto_load_2wp_targets_choice = (
+                self.auto_load_2wp_targets_checkbox.isChecked()
+                if hasattr(self, "auto_load_2wp_targets_checkbox")
+                else True
+            )
             self.agent_enabled_choice = (
                 self.agent_enabled_checkbox.isChecked()
                 if hasattr(self, "agent_enabled_checkbox")
@@ -1783,6 +2473,12 @@ class UserInputs(QMainWindow):
             
             self.hub_input_choice = self.hub_input.currentText().strip()
             self.mine_input_choice = self.mine_input.currentText().strip()
+            self.selected_site_crushers = self.selected_site_crusher_names()
+            self.crusher_input_choice = (
+                self.crusher_input_choice
+                if self.crusher_input_choice in self.selected_site_crushers
+                else (self.selected_site_crushers[0] if self.selected_site_crushers else None)
+            )
 
             if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
                 QMessageBox.warning(
@@ -1792,11 +2488,16 @@ class UserInputs(QMainWindow):
                 )
                 return
 
-            if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
+            if self.hub_input_choice and self.mine_input_choice and self.crusher_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice:
                 self.submit_button.setEnabled(False)
+                progress_message = (
+                    "Fetching stockpile inventories and 2WP build targets from Snowflake..."
+                    if self.auto_load_2wp_targets_choice
+                    else "Fetching stockpile inventories from Snowflake..."
+                )
                 self.run_background_task(
-                    "Fetching stockpile inventories from Snowflake...",
-                    self.fetch_stockpile_data,
+                    progress_message,
+                    self.fetch_site_configuration_data,
                     self.finish_site_config_submit,
                     self.handle_site_config_error,
                 )
@@ -1839,8 +2540,18 @@ class UserInputs(QMainWindow):
                     self.product_brand_labels_input.setText(", ".join(
                         self.parse_product_brand_labels(getattr(self, "product_brand_labels_choice", []))
                     ))
+                if hasattr(self, "auto_load_2wp_targets_checkbox"):
+                    self.auto_load_2wp_targets_checkbox.setChecked(bool(getattr(
+                        self,
+                        "auto_load_2wp_targets_choice",
+                        True,
+                    )))
                 self.hub_input.setCurrentText(str(self.hub_input_choice))
                 self.mine_input.setCurrentText(str(self.mine_input_choice))
+                self.update_site_crusher_options(
+                    getattr(self, "selected_site_crushers", None)
+                    or [getattr(self, "crusher_input_choice", "")]
+                )
             else:
                 self.time_mode_choice = self.time_mode.currentIndex() + 1
                 if self.time_mode_choice == 2:
@@ -1862,6 +2573,11 @@ class UserInputs(QMainWindow):
                     if hasattr(self, "product_brand_labels_input")
                     else self.default_product_brand_labels()
                 )
+                self.auto_load_2wp_targets_choice = (
+                    self.auto_load_2wp_targets_checkbox.isChecked()
+                    if hasattr(self, "auto_load_2wp_targets_checkbox")
+                    else True
+                )
                 self.agent_enabled_choice = (
                     self.agent_enabled_checkbox.isChecked()
                     if hasattr(self, "agent_enabled_checkbox")
@@ -1869,6 +2585,12 @@ class UserInputs(QMainWindow):
                 )
                 self.hub_input_choice = self.hub_input.currentText().strip()
                 self.mine_input_choice = self.mine_input.currentText().strip()
+                self.selected_site_crushers = self.selected_site_crusher_names()
+                self.crusher_input_choice = (
+                    self.crusher_input_choice
+                    if self.crusher_input_choice in self.selected_site_crushers
+                    else (self.selected_site_crushers[0] if self.selected_site_crushers else None)
+                )
 
                 if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
                     QMessageBox.warning(
@@ -1878,7 +2600,7 @@ class UserInputs(QMainWindow):
                     )
                     return
 
-            if self.hub_input_choice and self.mine_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice: 
+            if self.hub_input_choice and self.mine_input_choice and self.crusher_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice:
                 if not self.stockpile_data:
                     QMessageBox.warning(self, "Missing Project Data", "The loaded project does not contain stockpile inventory data.")
                     return
@@ -1893,13 +2615,164 @@ class UserInputs(QMainWindow):
         mine_input = self.mine_input_choice
         return self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time_choice)
 
+    def fetch_site_configuration_data(self):
+        stockpile_data = self.fetch_stockpile_data()
+        build_targets = {crusher: [] for crusher in self.selected_site_crushers}
+        target_errors = {}
+        if self.auto_load_2wp_targets_choice:
+            for crusher in self.selected_site_crushers:
+                try:
+                    build_targets[crusher] = self.planning_plan_targets.fetch(
+                        self.mine_input_choice,
+                        crusher,
+                        self.start_time_choice,
+                        self.product_brand_labels_choice,
+                    )
+                except Exception as exc:
+                    target_errors[crusher] = str(exc)
+        return {
+            "stockpile_data": stockpile_data,
+            "build_targets": build_targets,
+            "target_errors": target_errors,
+            "automatic_2wp_targets": self.auto_load_2wp_targets_choice,
+        }
+
+    def reset_downstream_inputs_for_new_site_configuration(self):
+        """Clear workflow state that is owned by the submitted site context."""
+        self.stockpile_data_use_column = {}
+        self.stockpile_data_AMT_column = {}
+        self.updated_stockpile_data = None
+        self.updated_stockpile_data_keys = {}.keys()
+        self.AMT_stockpile_data = {}
+        self.AMT_chunk_settings = {}
+        self.hex_sequence_table = []
+        self.hex_sequence_table_argument = []
+        self.calendar_inputs = {}
+        self.solver_config = self.normalized_solver_config({})
+        self.min_stockpiles = None
+        self.max_stockpiles = None
+        self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+        self.saved_blends_for_schedule = []
+        self.stored_blend_sequence_table_for_gantt = []
+        self.stored_blend_sequence_table_for_gantt_default = []
+        self.default_start_datetime = None
+        self.default_end_datetime = None
+        self.default_start_datetime_str = None
+        self.default_end_datetime_str = None
+        self.crusher_rate = None
+        self.crusher_rate_input_value = None
+        self.blend_config_table_inputs = {}
+        self.total_AMT_stockpile_balances = {}
+        self.restore_table_snapshot(getattr(self, "decision_table", None), None)
+        if hasattr(self, "decision_output"):
+            self.decision_output.clear()
+        if hasattr(self, "decision_status_label"):
+            self.decision_status_label.setText(
+                "Run the optimiser to review feasible blend options."
+            )
+
+    def register_submitted_site_scenarios(self, build_targets):
+        selected_crushers = list(self.selected_site_crushers or [])
+        if not selected_crushers:
+            return
+
+        current_crusher = self.crusher_input_choice if self.crusher_input_choice in selected_crushers else selected_crushers[0]
+        self.crusher_input_choice = current_crusher
+        existing_by_context = {
+            (
+                str(state.get("hub_input_choice") or ""),
+                str(state.get("mine_input_choice") or ""),
+                str(state.get("crusher_input_choice") or ""),
+            ): scenario_id
+            for scenario_id, state in self.site_scenarios.items()
+        }
+
+        self.product_build_settings = copy.deepcopy(build_targets.get(current_crusher) or [])
+        self.populate_product_build_table()
+        self.saved_blends_for_schedule = []
+        self.stored_blend_sequence_table_for_gantt = []
+        self.stored_blend_sequence_table_for_gantt_default = []
+        self.reset_workflow_tabs_for_scenario()
+        DatabaseManager.clear_all_tables(get_database_path())
+        self.seed_active_scenario_database(force=True)
+        source_database_path = get_database_path()
+        current_state = self.capture_scenario_state()
+        current_state["crusher_input_choice"] = current_crusher
+        current_state["selected_site_crushers"] = [current_crusher]
+        self.site_scenarios[self.active_scenario_id] = current_state
+
+        for crusher in selected_crushers:
+            if crusher == current_crusher:
+                continue
+            context_key = (self.hub_input_choice, self.mine_input_choice, crusher)
+            scenario_id = existing_by_context.get(context_key) or self.new_scenario_id()
+            scenario_state = copy.deepcopy(current_state)
+            scenario_state["scenario_id"] = scenario_id
+            scenario_state["crusher_input_choice"] = crusher
+            scenario_state["selected_site_crushers"] = [crusher]
+            scenario_state["product_build_settings"] = copy.deepcopy(build_targets.get(crusher) or [])
+            scenario_state["saved_blends_for_schedule"] = []
+            scenario_state["stored_blend_sequence_table_for_gantt"] = []
+            scenario_state["stored_blend_sequence_table_for_gantt_default"] = []
+            scenario_state["calendar_inputs"] = copy.deepcopy(scenario_state.get("calendar_inputs") or {})
+            scenario_state["calendar_inputs"]["product_build_settings"] = copy.deepcopy(
+                scenario_state["product_build_settings"]
+            )
+            scenario_state["calendar_inputs"]["site_context"] = {
+                "scenario_id": scenario_id,
+                "hub": self.hub_input_choice,
+                "mine": self.mine_input_choice,
+                "crusher": crusher,
+            }
+            scenario_state["database_path"] = self.scenario_database_path(scenario_id)
+            target_database_path = scenario_state["database_path"]
+            if os.path.exists(source_database_path) and target_database_path != source_database_path:
+                os.makedirs(os.path.dirname(target_database_path), exist_ok=True)
+                shutil.copy2(source_database_path, target_database_path)
+            self.site_scenarios[scenario_id] = scenario_state
+        self.selected_site_crushers = [current_crusher]
+        self.update_site_crusher_options(self.selected_site_crushers)
+        self.refresh_scenario_selector()
+
     def finish_site_config_submit(self, stockpile_data):
         self.submit_button.setEnabled(True)
         self.save_button.setEnabled(True)
+        build_targets = {}
+        target_errors = {}
+        automatic_2wp_targets = True
+        fresh_site_configuration = (
+            isinstance(stockpile_data, dict) and "stockpile_data" in stockpile_data
+        )
+        if fresh_site_configuration:
+            build_targets = stockpile_data.get("build_targets") or {}
+            target_errors = stockpile_data.get("target_errors") or {}
+            automatic_2wp_targets = bool(
+                stockpile_data.get("automatic_2wp_targets", True)
+            )
+            stockpile_data = stockpile_data.get("stockpile_data") or {}
+            self.reset_downstream_inputs_for_new_site_configuration()
         self.stockpile_data = stockpile_data
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
-        QMessageBox.information(self, "BlendMaster", f"Configuration successfully submitted for Hub: {self.hub_input_choice}, Mine: {self.mine_input_choice}.")
+        if build_targets:
+            self.register_submitted_site_scenarios(build_targets)
+        else:
+            self.save_active_scenario_state()
+        message = (
+            f"Configuration successfully submitted for Hub: {self.hub_input_choice}, "
+            f"Mine: {self.mine_input_choice}, Crusher: {self.crusher_input_choice}.\n\n"
+            f"The model now contains {len(self.site_scenarios)} site scenario(s). "
+            "Use Active Site Scenario above the tabs to switch inputs and outputs."
+        )
+        if target_errors:
+            failed = ", ".join(sorted(target_errors))
+            message += f"\n\n2WP build targets could not be loaded for: {failed}. Manual build entry remains available."
+        elif not automatic_2wp_targets:
+            message += (
+                "\n\nAutomatic 2WP product-build targets were skipped. "
+                "Use Product Build Settings for manual entry or load them there later."
+            )
+        QMessageBox.information(self, "BlendMaster", message)
 
         self.setup_stockpile_table()
         self.tabs.setTabEnabled(self.stockpile_tab_index, True)
@@ -2356,6 +3229,11 @@ class UserInputs(QMainWindow):
                 "start_time": getattr(self, "start_time_choice", None),
                 "aps_mining_csv": getattr(self, "file_path_choice", ""),
                 "product_brands": getattr(self, "product_brand_labels_choice", self.default_product_brand_labels()),
+                "auto_load_2wp_targets": getattr(
+                    self,
+                    "auto_load_2wp_targets_choice",
+                    True,
+                ),
                 "reevaluate_aps_direct_tip": getattr(self, "reevaluate_aps_direct_tip_choice", False),
                 "selected_aps_crushers": getattr(self, "aps_direct_tip_crusher_choice", []),
                 "blend_mode": getattr(self, "blend_mode_choice", None),
@@ -3469,6 +4347,15 @@ class UserInputs(QMainWindow):
         if site_config.get("hub") is not None:
             self.update_mine_dropdown()
         set_combo(self.mine_input, site_config.get("mine"))
+        operational_crushers = (
+            site_config.get("crushers")
+            or site_config.get("operational_crushers")
+            or site_config.get("crusher")
+            or []
+        )
+        if isinstance(operational_crushers, str):
+            operational_crushers = [operational_crushers]
+        self.update_site_crusher_options(operational_crushers or None)
 
         start_time = self.parse_agent_datetime_value(
             site_config.get("start_time")
@@ -3505,12 +4392,19 @@ class UserInputs(QMainWindow):
             if hasattr(self, "product_brand_labels_input"):
                 self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
 
+        automatic_targets = site_config.get(
+            "auto_load_2wp_targets",
+            site_config.get("automatic_2wp_product_build_targets"),
+        )
+        if automatic_targets is not None and hasattr(self, "auto_load_2wp_targets_checkbox"):
+            self.auto_load_2wp_targets_checkbox.setChecked(bool(automatic_targets))
+
         direct_tip_enabled = (
             site_config.get("reevaluate_aps_direct_tip")
             if "reevaluate_aps_direct_tip" in site_config
             else site_config.get("re_evaluate_aps_direct_tip")
         )
-        crushers = (
+        aps_crushers = (
             site_config.get("selected_aps_crushers")
             or site_config.get("aps_direct_tip_crushers")
             or site_config.get("crusher_destinations")
@@ -3518,9 +4412,9 @@ class UserInputs(QMainWindow):
         )
         if direct_tip_enabled is not None:
             self.reevaluate_aps_direct_tip_checkbox.setChecked(bool(direct_tip_enabled))
-        if crushers:
+        if aps_crushers:
             self.reevaluate_aps_direct_tip_checkbox.setChecked(True)
-            self.set_aps_crusher_items(crushers, crushers)
+            self.set_aps_crusher_items(aps_crushers, aps_crushers)
 
         blend_mode = site_config.get("blend_mode") or site_config.get("optimised_blend_choices")
         if blend_mode is not None:
@@ -3841,6 +4735,20 @@ class UserInputs(QMainWindow):
         )
         if loaded_state.get("product_build_settings") is None:
             loaded_state["product_build_settings"] = []
+        if loaded_state.get("auto_load_2wp_targets_choice") is None:
+            loaded_state["auto_load_2wp_targets_choice"] = True
+        mine = str(loaded_state.get("mine_input_choice") or "").strip().upper()
+        crusher = str(loaded_state.get("crusher_input_choice") or "").strip()
+        if not crusher:
+            crusher_options = SITE_CRUSHER_OPTIONS.get(mine, [])
+            crusher = crusher_options[0] if crusher_options else ""
+        loaded_state["crusher_input_choice"] = crusher or None
+        selected_crushers = loaded_state.get("selected_site_crushers") or (
+            [crusher] if crusher else []
+        )
+        loaded_state["selected_site_crushers"] = [
+            str(value).strip() for value in selected_crushers if str(value).strip()
+        ]
         if loaded_state.get("aps_stockpile_brand_map") is None:
             loaded_state["aps_stockpile_brand_map"] = {}
         if loaded_state.get("solver_config") is None:
@@ -3869,6 +4777,16 @@ class UserInputs(QMainWindow):
             loaded_state["hub_input_choice"] = site_config.get("hub")
         if "mine" in site_config:
             loaded_state["mine_input_choice"] = site_config.get("mine")
+        crushers = (
+            site_config.get("crushers")
+            or site_config.get("operational_crushers")
+            or site_config.get("crusher")
+        )
+        if crushers:
+            if isinstance(crushers, str):
+                crushers = [crushers]
+            loaded_state["selected_site_crushers"] = list(crushers)
+            loaded_state["crusher_input_choice"] = list(crushers)[0]
         if "start_time" in site_config:
             loaded_state["start_time_choice"] = self.parse_agent_datetime_value(site_config.get("start_time"))
             loaded_state["time_mode_choice"] = 2
@@ -3883,6 +4801,10 @@ class UserInputs(QMainWindow):
         if "product_brands" in site_config:
             loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
                 site_config.get("product_brands")
+            )
+        if "auto_load_2wp_targets" in site_config:
+            loaded_state["auto_load_2wp_targets_choice"] = bool(
+                site_config.get("auto_load_2wp_targets")
             )
         if "blend_mode" in site_config:
             blend_mode = site_config.get("blend_mode")
@@ -4442,6 +5364,7 @@ class UserInputs(QMainWindow):
         }
 
         if self.updated_stockpile_data:
+            self.save_active_scenario_state()
             # Enable the next tab (Calendar Tab)
             self.setup_calendar()
             has_AMT_stockpiles = any(value.get("amt", False) for value in self.updated_stockpile_data.values())
@@ -4479,7 +5402,7 @@ class UserInputs(QMainWindow):
     def handle_solver_configuration_submit(self):
         if not self.store_solver_config_inputs():
             return
-
+        self.save_active_scenario_state()
         self.navigate_to_product_build_settings()
 
     def parse_float_from_table_item(self, item, default=0.0):
@@ -4781,6 +5704,7 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
+            self.save_active_scenario_state()
             self.activate_manual_setup_tab()
             self.navigate_to_solver_configuration()
         else:
@@ -5512,6 +6436,8 @@ class UserInputs(QMainWindow):
         self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        self.calendar_inputs["site_context"] = self.active_site_context()
+        self.save_active_scenario_state()
 
         self.update_decision_point_tab_state()
         self.run_background_task(
@@ -5560,6 +6486,7 @@ class UserInputs(QMainWindow):
             active_solver_config,
             getattr(self, "reevaluate_aps_direct_tip_choice", False),
             getattr(self, "aps_direct_tip_crusher_choice", []),
+            self.active_site_context(),
         )
 
     def finish_run_program(self, periods):
@@ -5568,6 +6495,7 @@ class UserInputs(QMainWindow):
         self.activate_manual_setup_tab()
         self.refresh_sqlite_reports()
         self.start_dash_optimised_charts_thread()
+        self.save_active_scenario_state()
 
         if self.project_load_continuation_pending:
             self.project_load_continuation_pending = False
@@ -5701,7 +6629,7 @@ class UserInputs(QMainWindow):
 
         conn = None
         try:
-            conn = sqlite3.connect("blendmaster.db")
+            conn = sqlite3.connect(get_database_path())
             data = pd.read_sql(
                 """
                 SELECT blend_ID, steady_state_number
@@ -5800,7 +6728,7 @@ class UserInputs(QMainWindow):
 
     def get_sqlite_report_tables(self):
         try:
-            conn = sqlite3.connect("blendmaster.db")
+            conn = sqlite3.connect(get_database_path())
             query = """
                 SELECT name
                 FROM sqlite_master
@@ -5838,7 +6766,7 @@ class UserInputs(QMainWindow):
             return
 
         try:
-            conn = sqlite3.connect("blendmaster.db")
+            conn = sqlite3.connect(get_database_path())
             row_count = pd.read_sql(f'SELECT COUNT(*) AS row_count FROM "{table_name}"', conn)["row_count"].iloc[0]
             preview_limit = 10000
             df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT {preview_limit}', conn)
@@ -5994,7 +6922,7 @@ class UserInputs(QMainWindow):
 
     def start_or_update_dash_optimised_grade_profile_thread(self):
         if self.start_dash_optimised_grade_profile_first_call:
-            self.draw_optimised_grade_profile_chart = DrawOptimisedGradeProfiles("blendmaster.db", 8055)
+            self.draw_optimised_grade_profile_chart = DrawOptimisedGradeProfiles(get_database_path(), 8055)
             self.dash_thread_optimised_grade_profile = threading.Thread(
                 target=self.draw_optimised_grade_profile_chart.run_app,
                 daemon=True
@@ -6004,21 +6932,33 @@ class UserInputs(QMainWindow):
 
     def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
-        db_path = "blendmaster.db"
-        self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
-        self.draw_stockpile_profile_chart = DrawStockProfiles(db_path, port=8051)
-        
-        # Use a thread to run the Dash app server
-        self.dash_thread_gantt = threading.Thread(target=self.draw_gantt_chart.run_app, daemon=True)
-        self.dash_thread_gantt.start()
+        db_path = get_database_path()
+        if hasattr(self, "draw_gantt_chart"):
+            self.draw_gantt_chart.db_path = db_path
+        else:
+            self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
+            self.dash_thread_gantt = threading.Thread(
+                target=self.draw_gantt_chart.run_app,
+                daemon=True,
+            )
+            self.dash_thread_gantt.start()
 
-        self.dash_thread_stockpile_profile = threading.Thread(target=self.draw_stockpile_profile_chart.run_app, daemon=True)
-        self.dash_thread_stockpile_profile.start()
+        if hasattr(self, "draw_stockpile_profile_chart"):
+            self.draw_stockpile_profile_chart.db_path = db_path
+        else:
+            self.draw_stockpile_profile_chart = DrawStockProfiles(db_path, port=8051)
+            self.dash_thread_stockpile_profile = threading.Thread(
+                target=self.draw_stockpile_profile_chart.run_app,
+                daemon=True,
+            )
+            self.dash_thread_stockpile_profile.start()
+
+        self.update_chart_database_context()
 
     def start_dash_AMT_map_thread(self):
         """Start the Dash app in a separate thread."""
         
-        db_path = "blendmaster.db"
+        db_path = get_database_path()
 
         if self.start_dash_AMT_map_thread_first_call:
 
@@ -6830,7 +7770,7 @@ class UserInputs(QMainWindow):
         """
         Fetch the build report from the database.
         """
-        conn = sqlite3.connect("blendmaster.db")
+        conn = sqlite3.connect(get_database_path())
         try:
             df = pd.read_sql("SELECT * FROM build_report", conn)
         except (sqlite3.Error, pd.errors.DatabaseError) as e:
@@ -7633,6 +8573,12 @@ class UserInputs(QMainWindow):
             self.hub_input_choice = self.hub_input.currentText().strip()
         if hasattr(self, "mine_input"):
             self.mine_input_choice = self.mine_input.currentText().strip()
+        if hasattr(self, "site_crusher_input"):
+            self.selected_site_crushers = self.selected_site_crusher_names()
+            if self.crusher_input_choice not in self.selected_site_crushers:
+                self.crusher_input_choice = (
+                    self.selected_site_crushers[0] if self.selected_site_crushers else None
+                )
         if hasattr(self, "time_mode"):
             self.time_mode_choice = self.time_mode.currentIndex() + 1
         if hasattr(self, "start_time") and self.time_mode_choice == 2:
@@ -7646,6 +8592,10 @@ class UserInputs(QMainWindow):
         if hasattr(self, "product_brand_labels_input"):
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 self.product_brand_labels_input.text()
+            )
+        if hasattr(self, "auto_load_2wp_targets_checkbox"):
+            self.auto_load_2wp_targets_choice = (
+                self.auto_load_2wp_targets_checkbox.isChecked()
             )
         if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
             self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
@@ -7677,14 +8627,23 @@ class UserInputs(QMainWindow):
             self.crusher_rate_input_value = self.crusher_rate_input.text()
 
         self.store_solver_config_inputs(show_errors=False)
+        self.save_active_scenario_state()
         
         try:
+            scenarios_to_save = copy.deepcopy(self.site_scenarios)
+            for scenario_id, scenario_state in scenarios_to_save.items():
+                database_path = scenario_state.get("database_path") or self.scenario_database_path(scenario_id)
+                scenario_state["database_snapshot"] = self.snapshot_database(database_path)
+                scenario_state.pop("database_path", None)
             
             # Save the enabled/disabled state of tabs
             tab_states = {index: self.tabs.isTabEnabled(index) for index in range(self.tabs.count())}
 
             # Combine all class variables into a dictionary
             state_to_save = {
+                "project_format_version": 2,
+                "active_scenario_id": self.active_scenario_id,
+                "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
                 "blend_mode_choice": self.blend_mode_choice,
                 "agent_enabled_choice": self.agent_enabled_choice,
@@ -7701,11 +8660,14 @@ class UserInputs(QMainWindow):
                 "file_path_choice": self.file_path_choice,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "product_build_settings": self.product_build_settings,
+                "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "aps_stockpile_brand_map": getattr(self, "aps_stockpile_brand_map", {}),
                 "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
                 "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
                 "hub_input_choice": self.hub_input_choice,
+                "crusher_input_choice": self.crusher_input_choice,
+                "selected_site_crushers": self.selected_site_crushers,
                 "opening_stockpile_inventories": self.opening_stockpile_inventories,
                 "saved_blends_for_schedule": self.saved_blends_for_schedule,
                 "start_time_choice": self.start_time_choice,
@@ -7772,10 +8734,55 @@ class UserInputs(QMainWindow):
             self.is_project_loaded = False
             return
 
+    def prepare_loaded_site_scenarios(self, loaded_state):
+        """Restore v2 multi-site projects and wrap legacy projects as one scenario."""
+        saved_scenarios = loaded_state.get("site_scenarios")
+        if not isinstance(saved_scenarios, dict) or not saved_scenarios:
+            legacy_state = copy.deepcopy(loaded_state)
+            legacy_state["scenario_id"] = self.active_scenario_id
+            legacy_state["database_path"] = self.scenario_database_path(self.active_scenario_id)
+            self.site_scenarios = {self.active_scenario_id: legacy_state}
+            set_database_path(legacy_state["database_path"])
+            return loaded_state
+
+        restored_scenarios = {}
+        for scenario_id, raw_state in saved_scenarios.items():
+            if not isinstance(raw_state, dict):
+                continue
+            scenario_state = copy.deepcopy(raw_state)
+            database_snapshot = scenario_state.pop("database_snapshot", None)
+            scenario_state.pop("site_scenarios", None)
+            scenario_state = self.normalized_agent_project_state(scenario_state)
+            scenario_state["scenario_id"] = scenario_id
+            scenario_state["database_path"] = self.scenario_database_path(scenario_id)
+            self.restore_database_snapshot(
+                scenario_state["database_path"],
+                database_snapshot,
+            )
+            restored_scenarios[scenario_id] = scenario_state
+
+        if not restored_scenarios:
+            raise ValueError("The project does not contain a valid site scenario.")
+
+        requested_active_id = loaded_state.get("active_scenario_id")
+        self.active_scenario_id = (
+            requested_active_id
+            if requested_active_id in restored_scenarios
+            else next(iter(restored_scenarios))
+        )
+        self.site_scenarios = restored_scenarios
+        active_state = copy.deepcopy(restored_scenarios[self.active_scenario_id])
+        global_state = copy.deepcopy(loaded_state)
+        global_state.pop("site_scenarios", None)
+        global_state.update(active_state)
+        set_database_path(active_state["database_path"])
+        return global_state
+
     def restore_loaded_state(self, loaded_state, source_label=None, show_success=False):
         """Restore app state using the same path as Load Project."""
         self.is_project_loaded = True
         loaded_state = self.normalized_agent_project_state(loaded_state)
+        loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
         # Unpack loaded state into variables
         self.blend_mode_choice = loaded_state.get("blend_mode_choice", None)
@@ -7806,6 +8813,9 @@ class UserInputs(QMainWindow):
         self.product_build_settings = self.normalized_agent_product_build_settings(
             loaded_state.get("product_build_settings", []) or []
         )
+        self.auto_load_2wp_targets_choice = bool(
+            loaded_state.get("auto_load_2wp_targets_choice", True)
+        )
         self.aps_stockpile_brand_map = loaded_state.get("aps_stockpile_brand_map", {}) or {}
         self.reevaluate_aps_direct_tip_choice = loaded_state.get(
             "reevaluate_aps_direct_tip_choice", False
@@ -7818,6 +8828,10 @@ class UserInputs(QMainWindow):
         )
         self.mine_input_choice = loaded_state.get("mine_input_choice", None)
         self.hub_input_choice = loaded_state.get("hub_input_choice", None)
+        self.crusher_input_choice = loaded_state.get("crusher_input_choice", None)
+        self.selected_site_crushers = loaded_state.get("selected_site_crushers") or (
+            [self.crusher_input_choice] if self.crusher_input_choice else []
+        )
         self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
         if self.opening_stockpile_inventories is None:
             self.opening_stockpile_inventories = OpeningStockpileInventories()
@@ -7840,11 +8854,15 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
         self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+        self.seed_active_scenario_database()
         self.solver_config = self.normalized_solver_config(
             loaded_state.get("solver_config", {})
         )
         if self.calendar_inputs is not None:
             self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
+            self.calendar_inputs["site_context"] = self.active_site_context()
+
+        self.refresh_scenario_selector()
 
         tab_states = loaded_state.get("tab_states", {})
         for index, enabled in tab_states.items():
@@ -7870,6 +8888,20 @@ class UserInputs(QMainWindow):
         self.store_calendar_inputs()
         
     def initialise_all_variables(self):
+        self.scenario_session_directory = tempfile.mkdtemp(prefix="blendmaster_sites_")
+        self.active_scenario_id = self.new_scenario_id()
+        initial_database_path = os.path.join(
+            self.scenario_session_directory,
+            f"{self.active_scenario_id}.db",
+        )
+        self.site_scenarios = {
+            self.active_scenario_id: {
+                "scenario_id": self.active_scenario_id,
+                "database_path": initial_database_path,
+            }
+        }
+        self.scenario_switch_in_progress = False
+        set_database_path(initial_database_path)
         self.blend_mode_choice = None
         self.calendar_inputs = None
         self.crusher_rate = None
@@ -7881,6 +8913,7 @@ class UserInputs(QMainWindow):
         self.file_path_choice = None
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.product_build_settings = []
+        self.auto_load_2wp_targets_choice = True
         self.aps_stockpile_brand_map = {}
         self.reevaluate_aps_direct_tip_choice = False
         self.aps_direct_tip_crusher_choice = []
@@ -7900,6 +8933,9 @@ class UserInputs(QMainWindow):
         self.agent_workflow_waiting_for_amt = False
         self.mine_input_choice = None
         self.hub_input_choice = None
+        self.crusher_input_choice = None
+        self.selected_site_crushers = []
+        self.planning_plan_targets = PlanningPlanTargets()
         self.opening_stockpile_inventories = None
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
@@ -7948,6 +8984,7 @@ class UserInputs(QMainWindow):
             event.ignore()
             return
         self.stop_agent_bridge(silent=True)
+        shutil.rmtree(getattr(self, "scenario_session_directory", ""), ignore_errors=True)
         super().closeEvent(event)
     
 class CustomTableWidget(QTableWidget):

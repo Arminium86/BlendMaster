@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from classes.PeriodManager import PeriodManager
+from database.DatabaseContext import get_database_path
 
 class DatabaseManager:
     @staticmethod
-    def clear_all_tables(database_name='blendmaster.db'):
+    def clear_all_tables(database_name=None):
+        database_name = database_name or get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
         try:
@@ -30,7 +32,7 @@ class DatabaseManager:
 
     def write_optimised_blend_report_to_database (self, results: pd.DataFrame, periods: PeriodManager):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -177,7 +179,7 @@ class DatabaseManager:
         StockpileProfileReport.write_optimised_stockpile_profile_report_to_database(periods)
 
     def write_product_build_report_to_database(self, results: pd.DataFrame):
-        database_name = "blendmaster.db"
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         try:
             if results is None:
@@ -194,7 +196,7 @@ class DatabaseManager:
 
     def write_build_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -259,7 +261,7 @@ class DatabaseManager:
 
     def write_expit_payload_transactions_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -364,7 +366,7 @@ class DatabaseManager:
 
     def write_optimised_stockpile_depletion_report_to_database(self, blend_report: pd.DataFrame):
         # Connect to the SQLite database or create it
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -857,7 +859,7 @@ class StockpileProfileReport:
         end_datetime = periods.get_periods()["period_2_end"]
         
         # Connect to the SQLite database
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
 
         try:

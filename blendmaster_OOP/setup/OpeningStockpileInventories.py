@@ -5,6 +5,7 @@ import os
 import snowflake.connector
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+from database.DatabaseContext import get_database_path
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
@@ -235,7 +236,7 @@ class OpeningStockpileInventories:
 
     def save_to_database(self, data_dict):
         # SQLite connection
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -287,7 +288,7 @@ class OpeningStockpileInventories:
     
     def save_AMT_to_database(self, data_dict):
         # SQLite connection
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -450,7 +451,7 @@ class OpeningStockpileInventories:
    
     def clear_AMT_stockpile_database(self):
         # SQLite connection
-        database_name = 'blendmaster.db'
+        database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
