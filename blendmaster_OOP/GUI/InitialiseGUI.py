@@ -1,11 +1,11 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
+    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence
-from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
+from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
+from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer, QSize
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from classes.ExpitDataHandler import ExpitDataHandler
@@ -20,6 +20,17 @@ from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
+APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
+
+
+def set_windows_app_user_model_id():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 def app_bundle_root():
@@ -40,8 +51,54 @@ def preferred_resource_path(*names):
     return resource_path(names[0]) if names else resource_path()
 
 
+def blendmaster_app_icon():
+    icon = QIcon()
+    for name in ("icon_2_v2.ico", "icon_1_v2.ico", "icon_v2.png", "icon_2.ico", "icon.png"):
+        path = preferred_resource_path(name)
+        if os.path.exists(path):
+            icon.addFile(path)
+    return icon
+
+
+class FullCaptionTabBar(QTabBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDrawBase(False)
+        self.setExpanding(False)
+        self.setElideMode(Qt.ElideNone)
+        self.setUsesScrollButtons(True)
+
+    def tabSizeHint(self, index):
+        caption_width = self.fontMetrics().horizontalAdvance(self.tabText(index))
+        return QSize(max(caption_width + 44, 128), 36)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        border = QColor("#d8e0ea")
+
+        for index in range(self.count()):
+            rect = self.tabRect(index)
+            if not rect.isValid():
+                continue
+
+            selected = index == self.currentIndex()
+            painter.fillRect(rect, QColor("#ffffff" if selected else "#f1f5f9"))
+            painter.setPen(QPen(border))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+
+            if selected:
+                painter.fillRect(rect.left(), rect.top(), rect.width(), 3, QColor("#0f766e"))
+
+            font = painter.font()
+            font.setWeight(QFont.DemiBold)
+            painter.setFont(font)
+            painter.setPen(QColor("#0f172a" if selected else "#334155"))
+            painter.drawText(rect.adjusted(16, 4, -16, -4), Qt.AlignCenter, self.tabText(index))
+
+
 def create_startup_splash():
-    image_path = preferred_resource_path("background_v2.PNG", "background.PNG")
+    image_path = preferred_resource_path("splash_v2.png", "background_v2.PNG", "background.PNG")
     pixmap = QPixmap(image_path)
     if pixmap.isNull():
         pixmap = QPixmap(720, 480)
@@ -50,19 +107,29 @@ def create_startup_splash():
         pixmap = pixmap.scaled(720, 520, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     splash = QSplashScreen(pixmap)
-    splash.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
-    splash.showMessage(
-        APP_TITLE,
-        Qt.AlignBottom | Qt.AlignHCenter,
-        QColor("#172033"),
-    )
+    splash.setWindowIcon(blendmaster_app_icon())
+    if os.path.basename(image_path).lower() != "splash_v2.png":
+        splash.showMessage(
+            APP_TITLE,
+            Qt.AlignBottom | Qt.AlignHCenter,
+            QColor("#172033"),
+        )
     return splash
+
+
+def close_bootloader_splash():
+    """Close the PyInstaller splash screen when running from the packaged exe."""
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
 
 class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
+        self.setWindowIcon(blendmaster_app_icon())
         self.setGeometry(100, 100, 800, 600)
 
         self.initialise_all_variables()
@@ -79,6 +146,12 @@ class UserInputs(QMainWindow):
 
         # Tabs
         self.tabs = QTabWidget()
+        self.tabs.setTabBar(FullCaptionTabBar())
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.ElideNone)
+        self.tabs.tabBar().setUsesScrollButtons(True)
+        self.tabs.tabBar().setElideMode(Qt.ElideNone)
+        self.tabs.tabBar().setExpanding(False)
         self.layout.addWidget(self.tabs)
         self.apply_app_theme()
 
@@ -327,6 +400,7 @@ class UserInputs(QMainWindow):
 
         self.setup_grade_profile_tab()
         self.setup_agent_instructions_tab()
+        self.update_tab_tooltips()
 
         # Workflow controls
         self.load_profiles_first_call = True
@@ -349,7 +423,6 @@ class UserInputs(QMainWindow):
         self.manual_gantt_poll_timer.timeout.connect(self.poll_manual_gantt_updates)
         self.manual_gantt_poll_timer.start()
 
-
         # Disable tabs initially
         self.tabs.setTabEnabled(self.stockpile_tab_index, False)
         self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, False)
@@ -368,6 +441,35 @@ class UserInputs(QMainWindow):
 
         # Initialise main optimisation program
         self.run_program = Run(self)
+
+    def update_tab_tooltips(self):
+        for index in range(self.tabs.count()):
+            self.tabs.setTabToolTip(index, self.tabs.tabText(index))
+
+    def apply_windows_taskbar_icon(self):
+        if sys.platform != "win32":
+            return
+        icon_path = preferred_resource_path("icon_2_v2.ico", "icon_1_v2.ico", "icon_2.ico")
+        if not os.path.exists(icon_path):
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            image_icon = 1
+            lr_load_from_file = 0x00000010
+            wm_seticon = 0x0080
+            icon_small = 0
+            icon_big = 1
+            user32 = ctypes.windll.user32
+            hicon_big = user32.LoadImageW(None, icon_path, image_icon, 256, 256, lr_load_from_file)
+            hicon_small = user32.LoadImageW(None, icon_path, image_icon, 32, 32, lr_load_from_file)
+            if hicon_big:
+                user32.SendMessageW(hwnd, wm_seticon, icon_big, hicon_big)
+            if hicon_small:
+                user32.SendMessageW(hwnd, wm_seticon, icon_small, hicon_small)
+            self._windows_icon_handles = [handle for handle in (hicon_big, hicon_small) if handle]
+        except Exception:
+            pass
 
     def setup_solver_configuration_tab(self):
         self.solver_config_tab = QWidget()
@@ -990,55 +1092,102 @@ class UserInputs(QMainWindow):
         return merged
 
     def apply_app_theme(self):
-        dark_mode = bool(getattr(self, "dark_mode_enabled_choice", False))
-        if dark_mode:
-            base_bg = "#343a40"
-            pane_bg = "#3f464f"
-            tab_bg = "#4b5563"
-            selected_bg = "#f8fafc"
-            tab_text = "#e5e7eb"
-            selected_text = "#0f172a"
-            border = "#64748b"
-        else:
-            base_bg = "#f8fafc"
-            pane_bg = "#ffffff"
-            tab_bg = "#f1f5f9"
-            selected_bg = "#ffffff"
-            tab_text = "#475569"
-            selected_text = "#0f172a"
-            border = "#d8e0ea"
-
         self.setStyleSheet(f"""
             QMainWindow,
             QWidget#mainCentralWidget {{
-                background-color: {base_bg};
+                background-color: #f8fafc;
+                color: #0f172a;
+            }}
+            QWidget {{
+                color: #0f172a;
+            }}
+            QLabel,
+            QCheckBox,
+            QRadioButton,
+            QGroupBox {{
+                color: #0f172a;
+                background: transparent;
+            }}
+            QFrame {{
+                color: #0f172a;
             }}
             QTabWidget::pane {{
-                background-color: {pane_bg};
-                border: 1px solid {border};
+                background-color: #ffffff;
+                border: 1px solid #d8e0ea;
             }}
-            QTabBar::tab {{
-                background-color: {tab_bg};
-                color: {tab_text};
-                border: 1px solid {border};
-                border-bottom: 0;
-                padding: 7px 14px;
-                min-width: 96px;
-                font-weight: 500;
+            QTabBar {{
+                background-color: #f8fafc;
             }}
-            QTabBar::tab:selected {{
-                background-color: {selected_bg};
-                color: {selected_text};
-                font-weight: 800;
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+            QComboBox,
+            QDateTimeEdit,
+            QSpinBox,
+            QDoubleSpinBox,
+            QListWidget {{
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #d8e0ea;
+                border-radius: 4px;
+                selection-background-color: #bfdbfe;
+                selection-color: #0f172a;
+            }}
+            QLineEdit:disabled,
+            QTextEdit:disabled,
+            QPlainTextEdit:disabled,
+            QComboBox:disabled,
+            QDateTimeEdit:disabled {{
+                background-color: #e5e7eb;
+                color: #64748b;
+            }}
+            QPushButton {{
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #d8e0ea;
+                border-radius: 4px;
+                padding: 5px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: #eef7f0;
+                color: #0f172a;
+                border-color: #98d4a6;
+            }}
+            QTableWidget {{
+                background-color: #ffffff;
+                color: #0f172a;
+                gridline-color: #e5e7eb;
+                selection-background-color: #bfdbfe;
+                selection-color: #0f172a;
+                alternate-background-color: #ffffff;
+            }}
+            QHeaderView::section {{
+                background-color: #f1f5f9;
+                color: #475569;
+                border: 0;
+                border-right: 1px solid #d8e0ea;
+                border-bottom: 1px solid #d8e0ea;
+                padding: 6px 8px;
+                font-weight: 700;
+            }}
+            QScrollArea,
+            QScrollBar {{
+                background-color: #f8fafc;
+            }}
+            QToolTip {{
+                background-color: #111827;
+                color: #f8fafc;
+                border: 1px solid #334155;
+            }}
+            QStatusBar {{
+                color: #475569;
             }}
         """)
 
-    def toggle_dark_mode(self, enabled):
-        self.dark_mode_enabled_choice = bool(enabled)
-        self.apply_app_theme()
-
     def style_green_action_button(self, button, minimum_width=200):
         button.setMinimumWidth(minimum_width)
+        button.setMaximumWidth(max(minimum_width + 80, minimum_width))
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         button.setStyleSheet("""
             QPushButton {
                 background-color: #0f766e;
@@ -1288,13 +1437,6 @@ class UserInputs(QMainWindow):
         self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
         layout.addRow(agent_label, self.agent_enabled_checkbox)
 
-        appearance_label = QLabel("Appearance:")
-        appearance_label.setStyleSheet("font-weight: bold;")
-        self.dark_mode_checkbox = QCheckBox("Dark mode")
-        self.dark_mode_checkbox.setChecked(bool(getattr(self, "dark_mode_enabled_choice", False)))
-        self.dark_mode_checkbox.toggled.connect(self.toggle_dark_mode)
-        layout.addRow(appearance_label, self.dark_mode_checkbox)
-
         # Save and load button
         self.save_button = QPushButton("Save Project")
         self.save_button.setMinimumWidth(125)
@@ -1379,7 +1521,7 @@ class UserInputs(QMainWindow):
         self.progress_dialog.setModal(False)
         self.progress_dialog.setWindowModality(Qt.NonModal)
         self.resize_progress_dialog_for_message(message)
-        self.progress_dialog.setWindowIcon(QIcon(preferred_resource_path("icon_v2.png", "icon.png")))
+        self.progress_dialog.setWindowIcon(blendmaster_app_icon())
         self.progress_dialog.show()
 
     def cancel_current_background_task(self):
@@ -7523,8 +7665,6 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_text = self.agent_run_instructions_input.toPlainText()
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port = self.agent_bridge_port_value()
-        if hasattr(self, "dark_mode_checkbox"):
-            self.dark_mode_enabled_choice = self.dark_mode_checkbox.isChecked()
         if hasattr(self, "product_build_table"):
             self.store_product_build_settings(show_errors=False)
 
@@ -7551,7 +7691,6 @@ class UserInputs(QMainWindow):
                 "agent_story_text": self.agent_story_text,
                 "agent_run_instructions_text": self.agent_run_instructions_text,
                 "agent_bridge_port": self.agent_bridge_port,
-                "dark_mode_enabled_choice": self.dark_mode_enabled_choice,
                 "calendar_inputs": self.calendar_inputs,
                 "crusher_rate": self.crusher_rate,
                 "default_end_datetime": self.default_end_datetime,
@@ -7644,7 +7783,6 @@ class UserInputs(QMainWindow):
         self.agent_story_text = loaded_state.get("agent_story_text", "")
         self.agent_run_instructions_text = loaded_state.get("agent_run_instructions_text", "")
         self.agent_bridge_port = loaded_state.get("agent_bridge_port", 8765)
-        self.dark_mode_enabled_choice = loaded_state.get("dark_mode_enabled_choice", False)
         if hasattr(self, "agent_enabled_checkbox"):
             self.agent_enabled_checkbox.setChecked(bool(self.agent_enabled_choice))
         if hasattr(self, "agent_story_input"):
@@ -7653,8 +7791,6 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_input.setPlainText(self.agent_run_instructions_text)
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port_input.setText(str(self.agent_bridge_port))
-        if hasattr(self, "dark_mode_checkbox"):
-            self.dark_mode_checkbox.setChecked(bool(self.dark_mode_enabled_choice))
         self.apply_app_theme()
         self.crusher_rate = loaded_state.get("crusher_rate", None)
         self.calendar_inputs = loaded_state.get("calendar_inputs", None)
@@ -7762,7 +7898,6 @@ class UserInputs(QMainWindow):
         self.agent_workflow_payload = {}
         self.agent_workflow_after_site_config = False
         self.agent_workflow_waiting_for_amt = False
-        self.dark_mode_enabled_choice = False
         self.mine_input_choice = None
         self.hub_input_choice = None
         self.opening_stockpile_inventories = None
@@ -7996,7 +8131,10 @@ class BackgroundWorker(QObject):
                 })
 
 if __name__ == "__main__":
+    set_windows_app_user_model_id()
+
     if "--agent-bridge-server" in sys.argv:
+        close_bootloader_splash()
         sys.argv = [arg for arg in sys.argv if arg != "--agent-bridge-server"]
         try:
             from GUI.AgentBridgeServer import main as run_agent_bridge_server
@@ -8010,13 +8148,20 @@ if __name__ == "__main__":
     # Set the global font to Segoe UI, size 12
     font = QFont("Segoe UI", 10)
     app.setFont(font)
-    app.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
-    splash = create_startup_splash()
-    splash.show()
-    app.processEvents()
+    app.setWindowIcon(blendmaster_app_icon())
+    splash = None
+    if not getattr(sys, "frozen", False):
+        splash = create_startup_splash()
+        splash.show()
+        app.processEvents()
     
     window = UserInputs()  # Create an instance of the imported class
     window.show()              # Show the GUI
-    splash.finish(window)
+    window.apply_windows_taskbar_icon()
+    QTimer.singleShot(500, window.apply_windows_taskbar_icon)
+    QTimer.singleShot(1500, window.apply_windows_taskbar_icon)
+    close_bootloader_splash()
+    if splash is not None:
+        splash.finish(window)
     sys.exit(app.exec_())      # Run the event loop
 
