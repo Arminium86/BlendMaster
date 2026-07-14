@@ -1843,13 +1843,29 @@ class UserInputs(QMainWindow):
         else:
             self.stop_agent_bridge(silent=True)
 
-    def agent_repo_dir(self):
+    def agent_app_root_dir(self):
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    def agent_repo_dir(self):
+        if getattr(sys, "frozen", False):
+            return getattr(sys, "_MEIPASS", self.agent_app_root_dir())
+        return self.agent_app_root_dir()
+
     def agent_bridge_dir(self):
-        bridge_dir = os.path.join(self.agent_repo_dir(), ".blendmaster_agent_bridge")
+        bridge_dir = os.path.join(self.agent_app_root_dir(), ".blendmaster_agent_bridge")
         os.makedirs(bridge_dir, exist_ok=True)
         return bridge_dir
+
+    def agent_bridge_server_command(self):
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--agent-bridge-server"], sys.executable
+
+        server_script = os.path.join(self.agent_repo_dir(), "GUI", "AgentBridgeServer.py")
+        if not os.path.exists(server_script):
+            return None, server_script
+        return [sys.executable, server_script], server_script
 
     def agent_bridge_port_value(self):
         if hasattr(self, "agent_bridge_port_input"):
@@ -1901,16 +1917,14 @@ class UserInputs(QMainWindow):
             self.append_agent_console(f"Bridge already running at {self.agent_bridge_mcp_url()}.")
             return
 
-        server_script = os.path.join(self.agent_repo_dir(), "GUI", "AgentBridgeServer.py")
-        if not os.path.exists(server_script):
+        command_prefix, server_script = self.agent_bridge_server_command()
+        if not command_prefix:
             self.append_agent_console(f"Bridge server script not found: {server_script}")
             self.update_agent_bridge_status("Bridge failed to start.")
             return
 
         log_path = os.path.join(self.agent_bridge_dir(), "bridge.log")
-        command = [
-            sys.executable,
-            server_script,
+        command = command_prefix + [
             "--host",
             "127.0.0.1",
             "--port",
@@ -1924,7 +1938,7 @@ class UserInputs(QMainWindow):
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             self.agent_bridge_process = subprocess.Popen(
                 command,
-                cwd=self.agent_repo_dir(),
+                cwd=self.agent_app_root_dir(),
                 stdout=self.agent_bridge_log_handle,
                 stderr=subprocess.STDOUT,
                 creationflags=creationflags,
@@ -7852,6 +7866,15 @@ class BackgroundWorker(QObject):
                 })
 
 if __name__ == "__main__":
+    if "--agent-bridge-server" in sys.argv:
+        sys.argv = [arg for arg in sys.argv if arg != "--agent-bridge-server"]
+        try:
+            from GUI.AgentBridgeServer import main as run_agent_bridge_server
+        except ImportError:
+            from AgentBridgeServer import main as run_agent_bridge_server
+        run_agent_bridge_server()
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     
     # Set the global font to Segoe UI, size 12
