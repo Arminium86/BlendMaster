@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen
@@ -1339,7 +1339,7 @@ class UserInputs(QMainWindow):
         self.populate_product_build_table()
 
     def default_product_brand_labels(self):
-        return ["FB", "SS", "FF", "KF"]
+        return ["FB", "SS", "SF", "FF", "KF"]
 
     def parse_product_brand_labels(self, value):
         if isinstance(value, (list, tuple, set)):
@@ -1455,6 +1455,11 @@ class UserInputs(QMainWindow):
         ]
         for col_idx, key in enumerate(keys, start=2):
             value = setting.get(key, defaults[key])
+            if key == "target_tonnes":
+                try:
+                    value = math.floor(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    value = 0
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
             self.product_build_table.setItem(row_idx, col_idx, item)
@@ -1505,6 +1510,7 @@ class UserInputs(QMainWindow):
                 if show_errors:
                     QMessageBox.warning(self, "Invalid Input", f"Target Tonnes in row {row_idx + 1} cannot be negative.")
                 return None
+            target_tonnes = math.floor(target_tonnes)
 
             setting = {
                 "build_id": row_idx + 1,
@@ -3122,8 +3128,52 @@ class UserInputs(QMainWindow):
         if hasattr(self, "agent_proposals_table"):
             self.agent_proposals_table.setRowCount(0)
         self.agent_latest_proposals = []
+        self.agent_latest_result = {}
         self.agent_current_request_id = None
         self.agent_seen_trace_count = 0
+
+    def capture_agent_proposals_table(self):
+        if not hasattr(self, "agent_proposals_table"):
+            return []
+        rows = []
+        for row in range(self.agent_proposals_table.rowCount()):
+            values = []
+            for column in range(self.agent_proposals_table.columnCount()):
+                item = self.agent_proposals_table.item(row, column)
+                values.append(item.text() if item is not None else "")
+            apply_item = self.agent_proposals_table.item(row, 0)
+            rows.append({
+                "values": values,
+                "checkable": bool(
+                    apply_item is not None
+                    and apply_item.flags() & Qt.ItemIsUserCheckable
+                ),
+                "check_state": int(apply_item.checkState()) if apply_item is not None else 0,
+            })
+        return rows
+
+    def restore_agent_proposals_table(self, rows):
+        if not hasattr(self, "agent_proposals_table"):
+            return
+        self.agent_proposals_table.setRowCount(0)
+        for row_state in rows or []:
+            if not isinstance(row_state, dict):
+                continue
+            row = self.agent_proposals_table.rowCount()
+            self.agent_proposals_table.insertRow(row)
+            values = row_state.get("values") or []
+            for column in range(self.agent_proposals_table.columnCount()):
+                item = QTableWidgetItem(str(values[column]) if column < len(values) else "")
+                if column == 0:
+                    item.setTextAlignment(Qt.AlignCenter)
+                    if row_state.get("checkable"):
+                        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                        item.setCheckState(Qt.CheckState(row_state.get("check_state", 0)))
+                    else:
+                        item.setFlags(Qt.ItemIsEnabled)
+                self.agent_proposals_table.setItem(row, column, item)
+        if rows:
+            self.agent_proposals_table.resizeColumnsToContents()
 
     def submit_agent_request(self):
         if not getattr(self, "agent_enabled_choice", False):
@@ -8615,6 +8665,12 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_text = self.agent_run_instructions_input.toPlainText()
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port = self.agent_bridge_port_value()
+        agent_console_text = (
+            self.agent_console_output.toPlainText()
+            if hasattr(self, "agent_console_output")
+            else ""
+        )
+        agent_proposals_table = self.capture_agent_proposals_table()
         if hasattr(self, "product_build_table"):
             self.store_product_build_settings(show_errors=False)
 
@@ -8650,6 +8706,10 @@ class UserInputs(QMainWindow):
                 "agent_story_text": self.agent_story_text,
                 "agent_run_instructions_text": self.agent_run_instructions_text,
                 "agent_bridge_port": self.agent_bridge_port,
+                "agent_console_text": agent_console_text,
+                "agent_latest_result": copy.deepcopy(getattr(self, "agent_latest_result", {})),
+                "agent_latest_proposals": copy.deepcopy(getattr(self, "agent_latest_proposals", [])),
+                "agent_proposals_table": agent_proposals_table,
                 "calendar_inputs": self.calendar_inputs,
                 "crusher_rate": self.crusher_rate,
                 "default_end_datetime": self.default_end_datetime,
@@ -8790,6 +8850,8 @@ class UserInputs(QMainWindow):
         self.agent_story_text = loaded_state.get("agent_story_text", "")
         self.agent_run_instructions_text = loaded_state.get("agent_run_instructions_text", "")
         self.agent_bridge_port = loaded_state.get("agent_bridge_port", 8765)
+        self.agent_latest_result = copy.deepcopy(loaded_state.get("agent_latest_result", {}) or {})
+        self.agent_latest_proposals = copy.deepcopy(loaded_state.get("agent_latest_proposals", []) or [])
         if hasattr(self, "agent_enabled_checkbox"):
             self.agent_enabled_checkbox.setChecked(bool(self.agent_enabled_choice))
         if hasattr(self, "agent_story_input"):
@@ -8798,6 +8860,9 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_input.setPlainText(self.agent_run_instructions_text)
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port_input.setText(str(self.agent_bridge_port))
+        if hasattr(self, "agent_console_output"):
+            self.agent_console_output.setPlainText(loaded_state.get("agent_console_text", "") or "")
+        self.restore_agent_proposals_table(loaded_state.get("agent_proposals_table", []) or [])
         self.apply_app_theme()
         self.crusher_rate = loaded_state.get("crusher_rate", None)
         self.calendar_inputs = loaded_state.get("calendar_inputs", None)

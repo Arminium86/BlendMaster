@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import pandas as pd
 import random
 import requests, time, traceback
@@ -14,6 +15,7 @@ import base64
 import io
 import re
 from collections import defaultdict
+from datetime import datetime
 from math import sqrt
 from database.DatabaseContext import get_database_path
 
@@ -1975,6 +1977,10 @@ class DrawAMTStockpile:
         "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
         "lat", "long", "northing", "easting", "last_update", "hex_updated"
     ]
+    SELECTED_TABLE_COLUMNS = [
+        "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
+        "grade_p", "grade_mn", "hex_count", "chunk_size"
+    ]
 
     def __init__(self, db_path, port, hex_sequence_table, chunk_settings=None):
         self.db_path = db_path
@@ -2016,6 +2022,33 @@ class DrawAMTStockpile:
         for entry in self.selected_points:
             if isinstance(entry, dict) and isinstance(entry.get("member_hexes"), list):
                 entry["member_hexes"] = ",".join(str(hex_id) for hex_id in entry["member_hexes"])
+
+    @staticmethod
+    def dash_table_scalar(value):
+        """Return a scalar accepted by Dash DataTable without altering source metadata."""
+        if value is None:
+            return ""
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, float) and not np.isfinite(value):
+            return ""
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (datetime, pd.Timestamp)):
+            return value.isoformat()
+        return json.dumps(value, default=str, separators=(",", ":"))
+
+    def selected_table_data(self, rows=None):
+        """Project rich chunk records onto the scalar-only columns shown in Dash."""
+        display_rows = []
+        for entry in rows if rows is not None else self.selected_points:
+            if not isinstance(entry, dict):
+                continue
+            display_rows.append({
+                column: self.dash_table_scalar(entry.get(column))
+                for column in self.SELECTED_TABLE_COLUMNS
+            })
+        return display_rows
 
     def empty_amt_dataframe(self):
         return pd.DataFrame(columns=self.AMT_COLUMNS)
@@ -2514,10 +2547,11 @@ class DrawAMTStockpile:
                         ),
                         dash_table.DataTable(
                             id="selected-table",
-                            columns=[{"name": col, "id": col} for col in
-                                    ['footprint', 'sequence', 'hex', 'balance', 'grade_fe', 'grade_si', 'grade_al', 'grade_p',
-                                    'grade_mn', 'hex_count', 'chunk_size']],
-                            data=self.selected_points or [],
+                            columns=[
+                                {"name": column, "id": column}
+                                for column in self.SELECTED_TABLE_COLUMNS
+                            ],
+                            data=self.selected_table_data(),
                             row_deletable=False,
                             editable=False,
                             style_table={'overflowX': 'auto', 'maxHeight': '580px', 'overflowY': 'auto'},

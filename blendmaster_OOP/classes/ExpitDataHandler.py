@@ -1,4 +1,6 @@
+import math
 import pandas as pd
+import re
 from datetime import timedelta
 import snowflake.connector
 from datetime import datetime
@@ -188,13 +190,14 @@ class ExpitDataHandler:
         return guidance
 
     def _preprocess_data(self):
-        # Explicit datetime parsing with the correct format
-        self.data["Time.StartTime"] = pd.to_datetime(
-            self.data["Time.StartTime"])
-        
-        
-        self.data["Time.EndTime"] = pd.to_datetime(
-            self.data["Time.EndTime"])
+        self.data["Time.StartTime"] = self._parse_datetime_column(
+            self.data["Time.StartTime"],
+            "Time.StartTime",
+        )
+        self.data["Time.EndTime"] = self._parse_datetime_column(
+            self.data["Time.EndTime"],
+            "Time.EndTime",
+        )
         
         # Continue with other preprocessing
         self.data = self.data.astype({
@@ -237,12 +240,60 @@ class ExpitDataHandler:
                     )
                 )
 
-        # Filter and sort data. Stockpile destinations remain the planned APS builds.
-        # Selected crusher destinations are added as re-evaluable direct-tip candidates.
+        # Stockpile destinations remain the planned APS builds. Selected crusher
+        # destinations are added as re-evaluable direct-tip candidates.
         self.data = self.data[
-            (self.data["Source.Type"] == "Reserve") &
-            (stockpile_destination_mask | crusher_destination_mask)
-        ].sort_values(by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"])
+            (self.data["Source.Type"] == "Reserve")
+            & (stockpile_destination_mask | crusher_destination_mask)
+        ].sort_values(
+            by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"]
+        )
+
+    @staticmethod
+    def _parse_datetime_column(values, column_name):
+        """Parse APS timestamps while respecting the dominant DMY/MDY convention."""
+        day_first_votes = 0
+        month_first_votes = 0
+        date_prefix = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-]\d{2,4}(?:\D|$)")
+
+        for value in values.dropna():
+            match = date_prefix.match(str(value))
+            if not match:
+                continue
+            first, second = (int(part) for part in match.groups())
+            if first > 12 and second <= 12:
+                day_first_votes += 1
+            elif second > 12 and first <= 12:
+                month_first_votes += 1
+
+        # Australian APS exports are day-first when the column provides no
+        # unambiguous evidence. ISO values are unaffected by this preference.
+        day_first = day_first_votes >= month_first_votes
+        try:
+            parsed = pd.to_datetime(
+                values,
+                format="mixed",
+                dayfirst=day_first,
+                errors="coerce",
+            )
+        except (TypeError, ValueError):
+            # Compatibility path for pandas versions without format="mixed".
+            parsed = values.apply(
+                lambda value: pd.to_datetime(value, dayfirst=day_first, errors="coerce")
+            )
+
+        text_values = values.astype("string").str.strip()
+        invalid = values.notna() & text_values.ne("") & parsed.isna()
+        if invalid.any():
+            examples = ", ".join(
+                f"row {index}: {values.loc[index]!r}"
+                for index in values.index[invalid][:5]
+            )
+            raise ValueError(
+                f"{column_name} contains {int(invalid.sum())} invalid timestamp(s). "
+                f"Examples: {examples}"
+            )
+        return parsed
 
     def _build_source_stockpile_fallbacks(self, data):
         stockpile_rows = data[
@@ -331,6 +382,32 @@ class ExpitDataHandler:
             by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"]
         )
 
+    @staticmethod
+    def _positive_finite(value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) and numeric > 0 else None
+
+    @classmethod
+    def _resolve_payload_and_load_time(cls, row, tonnes):
+        """Return finite payload tonnes and loading hours for one grouped APS row."""
+        tonnes = cls._positive_finite(tonnes)
+        if tonnes is None:
+            raise ValueError("APS transaction tonnes must be a positive finite number.")
+
+        payload = cls._positive_finite(row.get("HaulageResult.TruckPayload"))
+        if payload is None:
+            reported_trips = cls._positive_finite(row.get("HaulageResult.NumberOfTrips"))
+            payload = tonnes / reported_trips if reported_trips else tonnes
+
+        loader_rate = cls._positive_finite(
+            row.get("HaulageResult.LoaderProductionRate.Wtph")
+        )
+        load_time = payload / loader_rate if loader_rate else 0.0
+        return payload, load_time
+
     def process_transactions(self):
         if not self.data.empty:
             self.results = []
@@ -344,12 +421,11 @@ class ExpitDataHandler:
                     if tonnes <= 0:
                         continue  # Skip rows with no remaining tonnes
                     
-                    payload = row["HaulageResult.TruckPayload"]
+                    payload, load_time = self._resolve_payload_and_load_time(row, tonnes)
                     start_time = row["Time.StartTime"]
                     destination = row["Destination.FullName"]
                     source_name = row["Source.FullName"]
                     destination_metadata = self._payload_destination_metadata(row)
-                    load_time = payload / row["HaulageResult.LoaderProductionRate.Wtph"]
                     num_trips = tonnes / payload
                     int_trips = int(num_trips)
                     delivery_time = None
