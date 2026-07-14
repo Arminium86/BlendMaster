@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence
@@ -19,11 +19,50 @@ import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
+
+
+def app_bundle_root():
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resource_path(*parts):
+    return os.path.join(app_bundle_root(), "resources", *parts)
+
+
+def preferred_resource_path(*names):
+    for name in names:
+        path = resource_path(name)
+        if os.path.exists(path):
+            return path
+    return resource_path(names[0]) if names else resource_path()
+
+
+def create_startup_splash():
+    image_path = preferred_resource_path("background_v2.PNG", "background.PNG")
+    pixmap = QPixmap(image_path)
+    if pixmap.isNull():
+        pixmap = QPixmap(720, 480)
+        pixmap.fill(QColor("#ffffff"))
+    else:
+        pixmap = pixmap.scaled(720, 520, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    splash = QSplashScreen(pixmap)
+    splash.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
+    splash.showMessage(
+        APP_TITLE,
+        Qt.AlignBottom | Qt.AlignHCenter,
+        QColor("#172033"),
+    )
+    return splash
+
 class UserInputs(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP")
-        self.setWindowIcon(QIcon("C:/BlendMaster/blendmaster_OOP/resources/icon_2.ico")) 
+        self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
         self.setGeometry(100, 100, 800, 600)
 
         self.initialise_all_variables()
@@ -34,12 +73,14 @@ class UserInputs(QMainWindow):
 
         # Main Widget and Layout
         self.central_widget = QWidget()
+        self.central_widget.setObjectName("mainCentralWidget")
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
 
         # Tabs
         self.tabs = QTabWidget()
         self.layout.addWidget(self.tabs)
+        self.apply_app_theme()
 
         # Add Site Configuration Tab
         self.setup_site_configuration()
@@ -948,24 +989,84 @@ class UserInputs(QMainWindow):
             merged["contaminant_thresholds"].update(contaminant_thresholds)
         return merged
 
+    def apply_app_theme(self):
+        dark_mode = bool(getattr(self, "dark_mode_enabled_choice", False))
+        if dark_mode:
+            base_bg = "#343a40"
+            pane_bg = "#3f464f"
+            tab_bg = "#4b5563"
+            selected_bg = "#f8fafc"
+            tab_text = "#e5e7eb"
+            selected_text = "#0f172a"
+            border = "#64748b"
+        else:
+            base_bg = "#f8fafc"
+            pane_bg = "#ffffff"
+            tab_bg = "#f1f5f9"
+            selected_bg = "#ffffff"
+            tab_text = "#475569"
+            selected_text = "#0f172a"
+            border = "#d8e0ea"
+
+        self.setStyleSheet(f"""
+            QMainWindow,
+            QWidget#mainCentralWidget {{
+                background-color: {base_bg};
+            }}
+            QTabWidget::pane {{
+                background-color: {pane_bg};
+                border: 1px solid {border};
+            }}
+            QTabBar::tab {{
+                background-color: {tab_bg};
+                color: {tab_text};
+                border: 1px solid {border};
+                border-bottom: 0;
+                padding: 7px 14px;
+                min-width: 96px;
+                font-weight: 500;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {selected_bg};
+                color: {selected_text};
+                font-weight: 800;
+            }}
+        """)
+
+    def toggle_dark_mode(self, enabled):
+        self.dark_mode_enabled_choice = bool(enabled)
+        self.apply_app_theme()
+
+    def style_green_action_button(self, button, minimum_width=200):
+        button.setMinimumWidth(minimum_width)
+        button.setStyleSheet("""
+            QPushButton {
+                background-color: #0f766e;
+                color: white;
+                border: 1px solid #0f766e;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: 650;
+                padding: 8px 14px;
+            }
+            QPushButton:hover {
+                background-color: #115e59;
+                border-color: #115e59;
+            }
+            QPushButton:pressed {
+                background-color: #134e4a;
+                border-color: #134e4a;
+            }
+        """)
+
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
         self.site_config_tab_index = self.tabs.addTab(self.site_config_tab, "Site Configuration")
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
 
-        # Get base directory (handles running as a script OR an EXE)
-        if getattr(sys, 'frozen', False):  # Running as a PyInstaller EXE
-            base_dir = sys._MEIPASS
-        else:  # Running as a normal Python script
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Remove "GUI" if it's part of the base directory
-        if "GUI" in base_dir:
-            base_dir = base_dir.split("GUI")[0]  # Get the part before "GUI"
-
         # Construct path to the background image
-        background_path = os.path.join(base_dir, "resources", "background.PNG").replace("\\", "/")
+        background_path = preferred_resource_path("background_v2.PNG", "background.PNG").replace("\\", "/")
 
 
         self.site_config_tab.setStyleSheet(f"""
@@ -1142,7 +1243,7 @@ class UserInputs(QMainWindow):
         self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate 2WP direct tip tonnes")
         self.reevaluate_aps_direct_tip_checkbox.setChecked(False)
         self.aps_crusher_button = QPushButton("Get Crusher Names")
-        self.aps_crusher_button.setFixedWidth(140)
+        self.aps_crusher_button.setMinimumWidth(190)
         self.aps_crusher_button.setEnabled(False)
         self.aps_crusher_button.clicked.connect(self.load_aps_crusher_names)
         self.aps_crusher_input = QListWidget()
@@ -1187,14 +1288,21 @@ class UserInputs(QMainWindow):
         self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
         layout.addRow(agent_label, self.agent_enabled_checkbox)
 
+        appearance_label = QLabel("Appearance:")
+        appearance_label.setStyleSheet("font-weight: bold;")
+        self.dark_mode_checkbox = QCheckBox("Dark mode")
+        self.dark_mode_checkbox.setChecked(bool(getattr(self, "dark_mode_enabled_choice", False)))
+        self.dark_mode_checkbox.toggled.connect(self.toggle_dark_mode)
+        layout.addRow(appearance_label, self.dark_mode_checkbox)
+
         # Save and load button
         self.save_button = QPushButton("Save Project")
-        self.save_button.setFixedWidth(100)
+        self.save_button.setMinimumWidth(125)
         self.save_button.clicked.connect(self.save_state)
         self.save_button.setEnabled(False)
 
         self.load_button = QPushButton("Load Project")
-        self.load_button.setFixedWidth(100)
+        self.load_button.setMinimumWidth(125)
         self.load_button.clicked.connect(self.load_state)
 
         save_load_button_layout = QHBoxLayout()
@@ -1271,7 +1379,7 @@ class UserInputs(QMainWindow):
         self.progress_dialog.setModal(False)
         self.progress_dialog.setWindowModality(Qt.NonModal)
         self.resize_progress_dialog_for_message(message)
-        self.progress_dialog.setWindowIcon(QIcon(r"C:\BlendMaster\blendmaster_OOP\resources\icon.png"))
+        self.progress_dialog.setWindowIcon(QIcon(preferred_resource_path("icon_v2.png", "icon.png")))
         self.progress_dialog.show()
 
     def cancel_current_background_task(self):
@@ -4476,7 +4584,7 @@ class UserInputs(QMainWindow):
             # Add a button to load the chart
             self.load_AMT_button = QPushButton("Load or Update AMT Map")
             self.load_AMT_button.setObjectName("loadAMTMapButton")
-            self.load_AMT_button.setMinimumWidth(190)
+            self.style_green_action_button(self.load_AMT_button, 220)
             self.load_AMT_button.clicked.connect(self.load_AMT_map)  # Connect button to function
 
             # Add Submit Button at the Bottom
@@ -5419,7 +5527,7 @@ class UserInputs(QMainWindow):
         # Add a button to load the chart
         self.load_chart_button = QPushButton("Load or Update Chart")
         self.load_chart_button.setObjectName("loadResultsChartButton")
-        self.load_chart_button.setFixedWidth(200)
+        self.style_green_action_button(self.load_chart_button, 210)
         self.load_chart_button.clicked.connect(self.load_gantt_chart)  # Connect button to function
 
         controls_layout = QHBoxLayout()
@@ -5516,8 +5624,7 @@ class UserInputs(QMainWindow):
 
         # Add a button to load the chart
         self.load_profile_chart_button = QPushButton("Load or Update Build and Depletion Profiles")
-        self.load_profile_chart_button.setFixedWidth(340)
-        self.load_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
+        self.style_green_action_button(self.load_profile_chart_button, 360)
         self.load_profile_chart_button.clicked.connect(self.load_profiles)  # Connect button to function
 
         # Add the button to the layout at the bottom-left
@@ -5701,7 +5808,7 @@ class UserInputs(QMainWindow):
 
         self.load_optimised_grade_profile_chart_button = QPushButton("Load or Update Chart")
         self.load_optimised_grade_profile_chart_button.setObjectName("loadOptimisedGradeProfileButton")
-        self.load_optimised_grade_profile_chart_button.setFixedWidth(200)
+        self.style_green_action_button(self.load_optimised_grade_profile_chart_button, 210)
         self.load_optimised_grade_profile_chart_button.clicked.connect(self.load_optimised_grade_profiles)
         self.optimised_grade_profile_layout.addWidget(self.load_optimised_grade_profile_chart_button)
 
@@ -7355,8 +7462,7 @@ class UserInputs(QMainWindow):
 
         # Add a button to load the chart
         self.load_grade_profile_chart_button = QPushButton("Load or Update Chart")
-        self.load_grade_profile_chart_button.setFixedWidth(200)
-        self.load_grade_profile_chart_button.setStyleSheet("font-size: 16px; padding: 8px;")  # Smaller button
+        self.style_green_action_button(self.load_grade_profile_chart_button, 210)
         self.load_grade_profile_chart_button.clicked.connect(self.load_grade_profiles)  # Connect button to function
 
         # Add the button to the layout at the bottom-left
@@ -7378,7 +7484,7 @@ class UserInputs(QMainWindow):
             self.dash_thread_grade_profile.start()
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
 
-    def save_state(self):
+    def save_state(self, show_success=True):
         """Save the application state to a file using pickle."""
 
         if hasattr(self, "hub_input"):
@@ -7417,6 +7523,8 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_text = self.agent_run_instructions_input.toPlainText()
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port = self.agent_bridge_port_value()
+        if hasattr(self, "dark_mode_checkbox"):
+            self.dark_mode_enabled_choice = self.dark_mode_checkbox.isChecked()
         if hasattr(self, "product_build_table"):
             self.store_product_build_settings(show_errors=False)
 
@@ -7443,6 +7551,7 @@ class UserInputs(QMainWindow):
                 "agent_story_text": self.agent_story_text,
                 "agent_run_instructions_text": self.agent_run_instructions_text,
                 "agent_bridge_port": self.agent_bridge_port,
+                "dark_mode_enabled_choice": self.dark_mode_enabled_choice,
                 "calendar_inputs": self.calendar_inputs,
                 "crusher_rate": self.crusher_rate,
                 "default_end_datetime": self.default_end_datetime,
@@ -7485,9 +7594,12 @@ class UserInputs(QMainWindow):
             with open(filename, 'wb') as file:
                 pickle.dump(state_to_save, file)
 
-            QMessageBox.information(self, "BlendMaster", "Project saved successfully!")
+            if show_success:
+                QMessageBox.information(self, "BlendMaster", "Project saved successfully!")
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save project: {str(e)}")
+            return False
 
     def load_state(self):
         """Load the application state from a user-selected file."""
@@ -7532,6 +7644,7 @@ class UserInputs(QMainWindow):
         self.agent_story_text = loaded_state.get("agent_story_text", "")
         self.agent_run_instructions_text = loaded_state.get("agent_run_instructions_text", "")
         self.agent_bridge_port = loaded_state.get("agent_bridge_port", 8765)
+        self.dark_mode_enabled_choice = loaded_state.get("dark_mode_enabled_choice", False)
         if hasattr(self, "agent_enabled_checkbox"):
             self.agent_enabled_checkbox.setChecked(bool(self.agent_enabled_choice))
         if hasattr(self, "agent_story_input"):
@@ -7540,6 +7653,9 @@ class UserInputs(QMainWindow):
             self.agent_run_instructions_input.setPlainText(self.agent_run_instructions_text)
         if hasattr(self, "agent_bridge_port_input"):
             self.agent_bridge_port_input.setText(str(self.agent_bridge_port))
+        if hasattr(self, "dark_mode_checkbox"):
+            self.dark_mode_checkbox.setChecked(bool(self.dark_mode_enabled_choice))
+        self.apply_app_theme()
         self.crusher_rate = loaded_state.get("crusher_rate", None)
         self.calendar_inputs = loaded_state.get("calendar_inputs", None)
         self.default_end_datetime = loaded_state.get("default_end_datetime", None)
@@ -7646,6 +7762,7 @@ class UserInputs(QMainWindow):
         self.agent_workflow_payload = {}
         self.agent_workflow_after_site_config = False
         self.agent_workflow_waiting_for_amt = False
+        self.dark_mode_enabled_choice = False
         self.mine_input_choice = None
         self.hub_input_choice = None
         self.opening_stockpile_inventories = None
@@ -7682,6 +7799,19 @@ class UserInputs(QMainWindow):
             print(f"Warning: failed to clear SQLite session data: {e}")
 
     def closeEvent(self, event):
+        reply = QMessageBox.question(
+            self,
+            "Save Project?",
+            "Save project before closing?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Cancel:
+            event.ignore()
+            return
+        if reply == QMessageBox.Yes and not self.save_state(show_success=False):
+            event.ignore()
+            return
         self.stop_agent_bridge(silent=True)
         super().closeEvent(event)
     
@@ -7880,8 +8010,13 @@ if __name__ == "__main__":
     # Set the global font to Segoe UI, size 12
     font = QFont("Segoe UI", 10)
     app.setFont(font)
+    app.setWindowIcon(QIcon(preferred_resource_path("icon_2_v2.ico", "icon_2.ico")))
+    splash = create_startup_splash()
+    splash.show()
+    app.processEvents()
     
     window = UserInputs()  # Create an instance of the imported class
     window.show()              # Show the GUI
+    splash.finish(window)
     sys.exit(app.exec_())      # Run the event loop
 
