@@ -474,6 +474,7 @@ class UserInputs(QMainWindow):
         self.tabs.setTabEnabled(self.blend_sequence_tab_index, False)
         self.tabs.setTabEnabled(self.grade_profile_tab_index, False)
         self.tabs.setTabEnabled(self.agent_tab_index, bool(getattr(self, "agent_enabled_choice", False)))
+        self.tabs.currentChanged.connect(self.handle_main_tab_changed)
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -838,7 +839,8 @@ class UserInputs(QMainWindow):
         ]:
             self.tabs.setTabEnabled(tab_index, False)
 
-    def update_chart_database_context(self):
+    def update_chart_database_context(self, reload_views=True, refresh_amt_map=True):
+        """Point chart services at the active scenario without needless reloads."""
         database_path = get_database_path()
         for attribute in (
             "draw_gantt_chart",
@@ -851,7 +853,7 @@ class UserInputs(QMainWindow):
                 chart.db_path = database_path
 
         amt_chart = getattr(self, "draw_AMT_map", None)
-        if amt_chart is not None:
+        if amt_chart is not None and refresh_amt_map:
             amt_chart.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
             amt_chart.selected_points = copy.deepcopy(self.hex_sequence_table or [])
             amt_chart.data = amt_chart.fetch_data()
@@ -863,6 +865,9 @@ class UserInputs(QMainWindow):
             except requests.exceptions.RequestException:
                 pass
 
+        if not reload_views:
+            return
+
         for view_name in (
             "gantt_chart_view",
             "stockpile_profile_chart_view",
@@ -872,6 +877,18 @@ class UserInputs(QMainWindow):
             view = getattr(self, view_name, None)
             if view is not None and not view.url().isEmpty():
                 view.reload()
+
+    def handle_main_tab_changed(self, tab_index):
+        """Defer heavyweight report/chart work until the user opens that tab."""
+        if self.scenario_switch_in_progress:
+            return
+
+        if (
+            tab_index == self.sqlite_reports_tab_index
+            and getattr(self, "scenario_report_refresh_pending", False)
+        ):
+            self.scenario_report_refresh_pending = False
+            QTimer.singleShot(0, self.refresh_sqlite_reports)
 
     def refresh_manual_scenario_views(self, tab_states):
         def is_enabled(index):
@@ -1073,8 +1090,16 @@ class UserInputs(QMainWindow):
             self.tabs.setTabEnabled(self.site_config_tab_index, True)
             self.tabs.setCurrentIndex(self.site_config_tab_index)
             self.validate_form()
-            self.refresh_sqlite_reports()
-            self.update_chart_database_context()
+            # Reports and Dash views can be expensive (large SQLite previews,
+            # Dash reloads and AMT map data fetches). They refresh on demand
+            # when their tab is next opened or its Load/Update button is used.
+            self.scenario_report_refresh_pending = True
+            self.update_chart_database_context(
+                reload_views=False,
+                # The AMT map needs its saved sequence applied immediately;
+                # otherwise the table restores but the dig path is absent.
+                refresh_amt_map=True,
+            )
         finally:
             self.scenario_switch_in_progress = False
             self.refresh_scenario_selector()
@@ -2811,12 +2836,29 @@ class UserInputs(QMainWindow):
         if not file_path:
             return
         try:
+            file_stamp = os.path.getmtime(file_path)
+        except OSError:
+            file_stamp = None
+        cache_key = (
+            os.path.normcase(os.path.abspath(file_path)),
+            file_stamp,
+            str(getattr(self, "mine_input_choice", "") or "").strip().upper(),
+            tuple(self.product_brand_options()),
+        )
+        cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
+        if cached_map is not None:
+            self.aps_stockpile_brand_map = copy.deepcopy(cached_map)
+            return
+        try:
             self.aps_stockpile_brand_map = ExpitDataHandler.get_stockpile_brand_guidance(
                 file_path,
                 self.product_brand_options(),
                 getattr(self, "mine_input_choice", None),
                 getattr(self, "crusher_input_choice", None),
                 getattr(self, "opf_input_choice", None),
+            )
+            self.aps_brand_guidance_cache[cache_key] = copy.deepcopy(
+                self.aps_stockpile_brand_map
             )
         except Exception as exc:
             self.aps_stockpile_brand_map = {}
@@ -9894,6 +9936,8 @@ class UserInputs(QMainWindow):
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True
         self.aps_stockpile_brand_map = {}
+        self.aps_brand_guidance_cache = {}
+        self.scenario_report_refresh_pending = False
         self.reevaluate_aps_direct_tip_choice = False
         self.aps_direct_tip_crusher_choice = []
         self.agent_enabled_choice = False
