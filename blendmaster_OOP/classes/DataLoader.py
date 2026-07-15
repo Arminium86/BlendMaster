@@ -211,6 +211,17 @@ class DataLoader:
             return []
 
         payload_transactions = expit_payload_transactions.copy()
+        if "direct_tip_eligible" in payload_transactions.columns:
+            payload_transactions = payload_transactions[
+                payload_transactions["direct_tip_eligible"].map(
+                    lambda value: str(value).strip().lower() in {"true", "1", "yes"}
+                )
+            ].copy()
+        else:
+            # New runs require an explicit source-to-crusher movement rule.
+            return []
+        if payload_transactions.empty:
+            return []
         if "direct_tip_id" not in payload_transactions.columns:
             payload_transactions["direct_tip_id"] = [
                 f"GB_{index + 1:06d}" for index in range(len(payload_transactions))

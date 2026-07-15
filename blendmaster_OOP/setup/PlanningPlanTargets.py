@@ -22,6 +22,16 @@ class PlanningPlanTargets:
         ("KV", "VK_OPF"): {"KINGS"},
     }
 
+    OPERATION_BY_MINE_OPF = {
+        ("CC", "CC OPF01"): {"CHRISTMAS CREEK 1"},
+        ("CC", "CC OPF02"): {"CHRISTMAS CREEK 2"},
+        ("CB", "CB OPF"): {"CLOUDBREAK CENTRAL", "CLOUDBREAK WEST"},
+        ("EW", "EW OPF"): {"ELIWANA"},
+        ("FT", "FT OPF"): {"FIRETAIL"},
+        ("IB", "IB OPF"): {"IRON BRIDGE"},
+        ("KV", "KV OPF"): {"KINGS"},
+    }
+
     QUERY = """
         SELECT
             OPERATION,
@@ -66,9 +76,13 @@ class PlanningPlanTargets:
         return aliases.get(value, value)
 
     @classmethod
-    def operations_for(cls, mine, crusher):
+    def operations_for(cls, mine, crusher=None, opf=None):
+        mine = str(mine or "").strip().upper()
+        normalized_opf = " ".join(str(opf or "").strip().upper().split())
+        if normalized_opf:
+            return cls.OPERATION_BY_MINE_OPF.get((mine, normalized_opf), set())
         return cls.OPERATION_BY_MINE_CRUSHER.get(
-            (str(mine or "").strip().upper(), cls.normalize_crusher(crusher)),
+            (mine, cls.normalize_crusher(crusher)),
             set(),
         )
 
@@ -110,15 +124,31 @@ class PlanningPlanTargets:
             converted = converted.dt.tz_convert("Australia/Perth").dt.tz_localize(None)
         return converted
 
-    def fetch(self, mine, crusher, start_time, configured_brands=None):
+    def fetch(
+        self,
+        mine,
+        crusher,
+        start_time,
+        configured_brands=None,
+        opf=None,
+        crusher_contribution_ratio=1.0,
+    ):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
         if not isinstance(start_time, datetime):
             start_time = pd.to_datetime(start_time).to_pydatetime()
         start_time = self._perth_wall_clock(start_time)
-        operations = self.operations_for(mine, crusher)
+        operations = self.operations_for(mine, crusher, opf=opf)
         if not operations:
-            raise ValueError(f"No 2WP operation mapping exists for {mine} / {crusher}.")
+            context = f"{mine} / {opf} / {crusher}" if opf else f"{mine} / {crusher}"
+            raise ValueError(f"No 2WP operation mapping exists for {context}.")
+
+        try:
+            crusher_contribution_ratio = float(crusher_contribution_ratio)
+        except (TypeError, ValueError):
+            raise ValueError("Crusher contribution ratio must be numeric.")
+        if not 0 < crusher_contribution_ratio <= 1:
+            raise ValueError("Crusher contribution ratio must be greater than 0 and no more than 100%.")
 
         scenario = self.latest_wednesday_scenario(start_time)
         connection = self.inventory_loader.connect_snowflake_with_service_account()
@@ -159,7 +189,8 @@ class PlanningPlanTargets:
 
         builds = []
         for _, row in data.iterrows():
-            target_tonnes = self._number(row.get("VALUE"))
+            planning_target_tonnes = self._number(row.get("VALUE"))
+            target_tonnes = planning_target_tonnes * crusher_contribution_ratio
             if target_tonnes <= 0:
                 continue
             brand = self.normalize_brand(row.get("PRODUCT_TYPE"), mine, configured_brands)
@@ -174,6 +205,10 @@ class PlanningPlanTargets:
                 "build_id": len(builds) + 1,
                 "brand": brand,
                 "target_tonnes": target_tonnes,
+                "planning_target_tonnes": planning_target_tonnes,
+                "crusher_contribution_ratio": crusher_contribution_ratio,
+                "opf": str(opf or "").strip(),
+                "crusher": str(crusher or "").strip(),
                 "planning_operation": str(row.get("OPERATION") or "").strip(),
                 "planning_period_start": row["PERIOD_START"].to_pydatetime(),
                 "planning_period_end": row["PERIOD_END"].to_pydatetime(),

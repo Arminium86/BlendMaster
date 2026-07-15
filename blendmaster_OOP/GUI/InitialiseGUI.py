@@ -24,14 +24,37 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
 
-SITE_CRUSHER_OPTIONS = {
-    "CC": ["OPF01", "OPF02"],
-    "CB": ["OPF01", "OPF02", "OPF03", "OPF04"],
-    "EW": ["EW_OPF"],
-    "KV": ["VK_OPF"],
-    "FT": ["FT_OPF"],
-    "IB": ["Crusher"],
+SITE_OPF_OPTIONS = {
+    "CC": ["CC OPF01", "CC OPF02"],
+    "CB": ["CB OPF"],
+    "EW": ["EW OPF"],
+    "KV": ["KV OPF"],
+    "FT": ["FT OPF"],
+    "IB": ["IB OPF"],
 }
+
+SITE_CRUSHER_OPTIONS = {
+    ("CC", "CC OPF01"): ["OPF01_PC", "HAL_PC", "Total_Feed_PC"],
+    ("CC", "CC OPF02"): ["OPF02_PC"],
+    ("CB", "CB OPF"): ["OPF01", "OPF02", "OPF03", "OPF04", "Total_Feed_PC"],
+    ("EW", "EW OPF"): ["EW_PC"],
+    ("KV", "KV OPF"): ["VK_PC", "VQ_PC", "Total_Feed_PC"],
+    ("FT", "FT OPF"): ["FT_PC"],
+    ("IB", "IB OPF"): ["Crusher"],
+}
+
+
+def opf_options_for_mine(mine):
+    return SITE_OPF_OPTIONS.get(str(mine or "").strip().upper(), [])
+
+
+def crusher_options_for_site(mine, opf=None):
+    mine = str(mine or "").strip().upper()
+    normalized_opf = " ".join(str(opf or "").strip().upper().split())
+    if not normalized_opf:
+        options = opf_options_for_mine(mine)
+        normalized_opf = options[0] if options else ""
+    return SITE_CRUSHER_OPTIONS.get((mine, normalized_opf), [])
 
 
 def set_windows_app_user_model_id():
@@ -501,8 +524,9 @@ class UserInputs(QMainWindow):
         state = state or {}
         hub = str(state.get("hub_input_choice") or "").strip()
         mine = str(state.get("mine_input_choice") or "").strip()
+        opf = str(state.get("opf_input_choice") or "").strip()
         crusher = str(state.get("crusher_input_choice") or "").strip()
-        parts = [value for value in (hub, mine, crusher) if value]
+        parts = [value for value in (hub, mine, opf, crusher) if value]
         return " / ".join(parts) if parts else fallback
 
     def scenario_database_path(self, scenario_id):
@@ -735,7 +759,14 @@ class UserInputs(QMainWindow):
             "scenario_id": self.active_scenario_id,
             "hub": getattr(self, "hub_input_choice", None),
             "mine": getattr(self, "mine_input_choice", None),
+            "opf": getattr(self, "opf_input_choice", None),
             "crusher": getattr(self, "crusher_input_choice", None),
+            "crusher_contribution_ratio": getattr(
+                self, "crusher_contribution_ratio_choice", 1.0
+            ),
+            "direct_tip_movement_rules": copy.deepcopy(getattr(
+                self, "direct_tip_movement_rules", []
+            )),
         }
 
     def capture_scenario_state(self):
@@ -750,8 +781,12 @@ class UserInputs(QMainWindow):
             self.store_product_build_settings(show_errors=False)
         calendar_inputs = self.capture_calendar_table_inputs()
         fields = [
-            "hub_input_choice", "mine_input_choice", "crusher_input_choice",
-            "selected_site_crushers", "time_mode_choice", "start_time_choice",
+            "hub_input_choice", "mine_input_choice", "opf_input_choice",
+            "crusher_input_choice", "selected_site_crushers",
+            "crusher_ratio_mode_choice", "crusher_contribution_ratio_choice",
+            "crusher_ratio_configured", "aps_ratio_crusher_choices",
+            "direct_tip_grade_block_sources", "direct_tip_crusher_destinations",
+            "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
             "expit_mode_choice", "file_path_choice", "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "auto_load_2wp_targets_choice",
@@ -879,6 +914,10 @@ class UserInputs(QMainWindow):
 
             self.hub_input_choice = state.get("hub_input_choice")
             self.mine_input_choice = state.get("mine_input_choice")
+            self.opf_input_choice = state.get("opf_input_choice") or self.default_opf_for_site(
+                self.mine_input_choice,
+                state.get("crusher_input_choice"),
+            )
             self.crusher_input_choice = state.get("crusher_input_choice")
             self.selected_site_crushers = state.get("selected_site_crushers") or (
                 [self.crusher_input_choice] if self.crusher_input_choice else []
@@ -898,6 +937,28 @@ class UserInputs(QMainWindow):
             self.reevaluate_aps_direct_tip_choice = bool(state.get("reevaluate_aps_direct_tip_choice", False))
             self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
                 state.get("aps_direct_tip_crusher_choice") or []
+            )
+            self.crusher_ratio_mode_choice = self.normalized_crusher_ratio_mode(
+                state.get("crusher_ratio_mode_choice")
+            )
+            self.crusher_contribution_ratio_choice = self.normalized_crusher_ratio(
+                state.get("crusher_contribution_ratio_choice", 1.0),
+                default=1.0,
+            )
+            self.crusher_ratio_configured = bool(
+                state.get("crusher_ratio_configured", False)
+            )
+            self.aps_ratio_crusher_choices = self.normalized_aps_crusher_choice(
+                state.get("aps_ratio_crusher_choices") or []
+            )
+            self.direct_tip_grade_block_sources = list(
+                state.get("direct_tip_grade_block_sources") or []
+            )
+            self.direct_tip_crusher_destinations = list(
+                state.get("direct_tip_crusher_destinations") or []
+            )
+            self.direct_tip_movement_rules = ExpitDataHandler._normalize_movement_rules(
+                state.get("direct_tip_movement_rules") or []
             )
             self.aps_stockpile_brand_map = copy.deepcopy(state.get("aps_stockpile_brand_map") or {})
             self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
@@ -952,7 +1013,15 @@ class UserInputs(QMainWindow):
             self.update_mine_dropdown()
             if self.mine_input_choice:
                 self.mine_input.setCurrentText(self.mine_input_choice)
+            self.update_opf_dropdown(self.opf_input_choice)
             self.update_site_crusher_options(self.selected_site_crushers)
+            self.file_path.setText(self.file_path_choice)
+            self.load_ratio_controls_from_state()
+            self.set_direct_tip_movement_options(
+                self.direct_tip_grade_block_sources,
+                self.direct_tip_crusher_destinations,
+            )
+            self.refresh_direct_tip_rule_list()
             self.time_mode.setCurrentIndex(max(self.time_mode_choice - 1, 0))
             start_time = self.start_time_choice
             self.start_time.setDateTime(QDateTime(
@@ -964,7 +1033,6 @@ class UserInputs(QMainWindow):
                 start_time.second,
             ))
             self.expit_mode.setCurrentIndex(max(self.expit_mode_choice - 1, 0))
-            self.file_path.setText(self.file_path_choice)
             self.blend_mode.setCurrentIndex(max(self.blend_mode_choice - 1, 0))
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
             self.auto_load_2wp_targets_checkbox.setChecked(
@@ -979,6 +1047,12 @@ class UserInputs(QMainWindow):
             self.load_solver_config_inputs()
 
             if self.stockpile_data:
+                # Brand guidance depends on the active scenario's CSV, mine,
+                # OPF, crusher and configured product labels. Recalculate it
+                # after restoring a scenario instead of relying on a stale or
+                # legacy saved map.
+                self.refresh_aps_stockpile_brand_map()
+                self.apply_aps_brand_guidance_to_stockpile_data()
                 self.setup_stockpile_table()
                 self.tabs.setTabEnabled(self.stockpile_tab_index, True)
             if self.updated_stockpile_data:
@@ -1615,6 +1689,7 @@ class UserInputs(QMainWindow):
 
     def load_2wp_product_build_targets(self):
         mine = getattr(self, "mine_input_choice", None)
+        opf = getattr(self, "opf_input_choice", None)
         crusher = getattr(self, "crusher_input_choice", None)
         start_time = getattr(self, "start_time_choice", None)
         if not mine or not crusher or not start_time:
@@ -1631,6 +1706,10 @@ class UserInputs(QMainWindow):
                 crusher,
                 start_time,
                 self.product_brand_options(),
+                opf=opf,
+                crusher_contribution_ratio=getattr(
+                    self, "crusher_contribution_ratio_choice", 1.0
+                ),
             )
 
         def success(settings):
@@ -1638,7 +1717,7 @@ class UserInputs(QMainWindow):
                 QMessageBox.information(
                     self,
                     "BlendMaster",
-                    f"No overlapping 2WP OPF Feed targets were found for {mine} / {crusher}.",
+                f"No overlapping 2WP OPF Feed targets were found for {mine} / {opf} / {crusher}.",
                 )
                 return
             extra_brands = [setting.get("brand") for setting in settings if setting.get("brand")]
@@ -1653,11 +1732,11 @@ class UserInputs(QMainWindow):
             QMessageBox.information(
                 self,
                 "BlendMaster",
-                f"Loaded {len(settings)} product build target(s) for {mine} / {crusher}.",
+                f"Loaded {len(settings)} product build target(s) for {mine} / {opf} / {crusher}.",
             )
 
         self.run_background_task(
-            f"Loading 2WP build targets for {mine} / {crusher}...",
+            f"Loading 2WP build targets for {mine} / {opf} / {crusher}...",
             work,
             success,
         )
@@ -1911,12 +1990,12 @@ class UserInputs(QMainWindow):
 
         outer_layout = QHBoxLayout(self.site_config_tab)
         outer_layout.setContentsMargins(20, 18, 20, 20)
-        outer_layout.setSpacing(28)
+        outer_layout.setSpacing(20)
 
         form_card = QFrame()
         form_card.setObjectName("siteConfigCard")
-        form_card.setMinimumWidth(620)
-        form_card.setMaximumWidth(820)
+        form_card.setMinimumWidth(860)
+        form_card.setMaximumWidth(980)
         form_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         layout = QFormLayout(form_card)
         layout.setContentsMargins(18, 16, 18, 18)
@@ -1939,41 +2018,74 @@ class UserInputs(QMainWindow):
         logo_layout.setSpacing(0)
         self.site_config_logo = ScaledPixmapLabel(background_path)
         self.site_config_logo.setAlignment(Qt.AlignCenter)
-        self.site_config_logo.setMinimumSize(520, 420)
+        self.site_config_logo.setMinimumSize(280, 260)
+        self.site_config_logo.setMaximumWidth(760)
         self.site_config_logo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         logo_layout.addWidget(self.site_config_logo)
 
         outer_layout.addWidget(form_card, 0, Qt.AlignTop)
         outer_layout.addWidget(logo_panel, 1)
 
-        # Dropdown lists for Hub, Mine and one or more operational crushers
+        # Site hierarchy: one Hub / Mine / OPF / operating Crusher per scenario.
         self.hub_input = QComboBox()
         self.hub_input.addItems(["Chichester Hub", "Western Hub", "Solomon Hub", "Iron Bridge Hub"])
         self.mine_input = QComboBox()
-        self.site_crusher_input = QListWidget()
-        self.site_crusher_input.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.site_crusher_input.setFixedHeight(66)
-        self.site_crusher_input.setMinimumWidth(300)
+        self.opf_input = QComboBox()
+        self.site_crusher_input = QComboBox()
 
         # Adjust size of dropdowns
-        self.hub_input.setFixedWidth(150)
-        self.mine_input.setFixedWidth(150)
+        self.hub_input.setFixedWidth(180)
+        self.mine_input.setFixedWidth(180)
+        self.opf_input.setFixedWidth(240)
+        self.site_crusher_input.setFixedWidth(240)
 
         # Create bold labels for Hub and Mine
         hub_label = QLabel("Hub:")
         hub_label.setStyleSheet("font-weight: bold;")
         mine_label = QLabel("Mine:")
         mine_label.setStyleSheet("font-weight: bold;")
-        crusher_label = QLabel("Crusher(s):")
+        opf_label = QLabel("OPF:")
+        opf_label.setStyleSheet("font-weight: bold;")
+        crusher_label = QLabel("Operating Crusher:")
         crusher_label.setStyleSheet("font-weight: bold;")
 
         layout.addRow(hub_label, self.hub_input)
         layout.addRow(mine_label, self.mine_input)
+        layout.addRow(opf_label, self.opf_input)
         layout.addRow(crusher_label, self.site_crusher_input)
 
         # Connect hub dropdown change to update mine dropdown
         self.hub_input.currentIndexChanged.connect(self.update_mine_dropdown)
-        self.mine_input.currentIndexChanged.connect(self.update_site_crusher_options)
+        self.mine_input.currentIndexChanged.connect(self.update_opf_dropdown)
+        self.opf_input.currentIndexChanged.connect(self.update_site_crusher_options)
+
+        self.crusher_ratio_mode_input = QComboBox()
+        self.crusher_ratio_mode_input.addItem("Enter manually", "manual")
+        self.crusher_ratio_mode_input.addItem("Derive from APS Mining.csv", "aps")
+        self.crusher_ratio_mode_input.setMinimumWidth(220)
+        self.crusher_ratio_input = QLineEdit("100.00")
+        self.crusher_ratio_input.setValidator(QDoubleValidator(0.01, 100.0, 4))
+        self.crusher_ratio_input.setFixedWidth(90)
+        self.aps_ratio_crusher_button = QPushButton("Get APS Feed Crushers")
+        self.aps_ratio_crusher_button.setMinimumWidth(185)
+        self.aps_ratio_crusher_input = QListWidget()
+        self.aps_ratio_crusher_input.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.aps_ratio_crusher_input.setMinimumWidth(420)
+        self.aps_ratio_crusher_input.setFixedHeight(60)
+
+        crusher_ratio_layout = QVBoxLayout()
+        crusher_ratio_layout.setSpacing(5)
+        crusher_ratio_header = QHBoxLayout()
+        crusher_ratio_header.addWidget(self.crusher_ratio_mode_input)
+        crusher_ratio_header.addWidget(self.crusher_ratio_input)
+        crusher_ratio_header.addWidget(QLabel("%"))
+        crusher_ratio_header.addWidget(self.aps_ratio_crusher_button)
+        crusher_ratio_header.addStretch()
+        crusher_ratio_layout.addLayout(crusher_ratio_header)
+        crusher_ratio_layout.addWidget(self.aps_ratio_crusher_input)
+        crusher_ratio_label = QLabel("Crusher Contribution:")
+        crusher_ratio_label.setStyleSheet("font-weight: bold;")
+        layout.addRow(crusher_ratio_label, crusher_ratio_layout)
 
         # --- Input 1: Time Starts At ---
         time_label = QLabel("Time Starts At:")
@@ -1994,7 +2106,9 @@ class UserInputs(QMainWindow):
         )
 
         layout.addRow(time_label, self.time_mode)
-        layout.addRow(QLabel("Set Date & Time:"), self.start_time)
+        start_time_label = QLabel("Set Date & Time:")
+        start_time_label.setStyleSheet("font-weight: bold;")
+        layout.addRow(start_time_label, self.start_time)
 
         # --- Input 2: Expit Transactions ---
         expit_label = QLabel("Expit Transactions (optional):")
@@ -2029,6 +2143,51 @@ class UserInputs(QMainWindow):
 
         layout.addRow(file_label, file_layout)
 
+        self.direct_tip_movement_button = QPushButton("Load Movement Values")
+        self.direct_tip_movement_button.setMinimumWidth(170)
+        self.direct_tip_grade_block_source_input = QListWidget()
+        self.direct_tip_grade_block_source_input.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.direct_tip_crusher_destination_input = QListWidget()
+        self.direct_tip_crusher_destination_input.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.direct_tip_rule_input = QListWidget()
+        self.remove_direct_tip_rule_button = QPushButton("Remove Selected Rule")
+        self.remove_direct_tip_rule_button.setMinimumWidth(165)
+        for widget in (
+            self.direct_tip_grade_block_source_input,
+            self.direct_tip_crusher_destination_input,
+            self.direct_tip_rule_input,
+        ):
+            widget.setMinimumWidth(170)
+            widget.setFixedHeight(105)
+
+        movement_rules_layout = QVBoxLayout()
+        movement_rules_layout.setSpacing(5)
+        movement_header = QHBoxLayout()
+        movement_header.addWidget(self.direct_tip_movement_button)
+        movement_header.addWidget(QLabel(
+            "Select a grade-block source, then double-click a crusher destination."
+        ))
+        movement_header.addStretch()
+        movement_rules_layout.addLayout(movement_header)
+        movement_columns = QHBoxLayout()
+        for caption, widget in (
+            ("Grade Block Sources", self.direct_tip_grade_block_source_input),
+            ("Crusher Destinations", self.direct_tip_crusher_destination_input),
+            ("Movement Rules", self.direct_tip_rule_input),
+        ):
+            column = QVBoxLayout()
+            column.addWidget(QLabel(caption))
+            column.addWidget(widget)
+            movement_columns.addLayout(column)
+        movement_rules_layout.addLayout(movement_columns)
+        movement_footer = QHBoxLayout()
+        movement_footer.addStretch()
+        movement_footer.addWidget(self.remove_direct_tip_rule_button)
+        movement_rules_layout.addLayout(movement_footer)
+        movement_rules_label = QLabel("Direct Tip Movement Rules:")
+        movement_rules_label.setStyleSheet("font-weight: bold;")
+        layout.addRow(movement_rules_label, movement_rules_layout)
+
         self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate 2WP direct tip tonnes")
         self.reevaluate_aps_direct_tip_checkbox.setChecked(False)
         self.aps_crusher_button = QPushButton("Get Crusher Names")
@@ -2038,7 +2197,7 @@ class UserInputs(QMainWindow):
         self.aps_crusher_input = QListWidget()
         self.aps_crusher_input.setSelectionMode(QAbstractItemView.MultiSelection)
         self.aps_crusher_input.setMinimumWidth(420)
-        self.aps_crusher_input.setFixedHeight(74)
+        self.aps_crusher_input.setMaximumHeight(78)
         self.aps_crusher_input.setEnabled(False)
 
         aps_direct_tip_layout = QVBoxLayout()
@@ -2049,7 +2208,9 @@ class UserInputs(QMainWindow):
         aps_direct_tip_header_layout.addStretch()
         aps_direct_tip_layout.addLayout(aps_direct_tip_header_layout)
         aps_direct_tip_layout.addWidget(self.aps_crusher_input)
-        layout.addRow(QLabel("2WP Direct Tip:"), aps_direct_tip_layout)
+        direct_tip_label = QLabel("2WP Direct Tip:")
+        direct_tip_label.setStyleSheet("font-weight: bold;")
+        layout.addRow(direct_tip_label, aps_direct_tip_layout)
 
         product_brand_label = QLabel("Product Brands:")
         product_brand_label.setStyleSheet("font-weight: bold;")
@@ -2122,12 +2283,20 @@ class UserInputs(QMainWindow):
         layout.addRow(button_layout)
 
         self.update_mine_dropdown()
+        self.toggle_crusher_ratio_controls()
         self.validate_form()
 
         # Connect input field changes to form validation
         self.hub_input.currentIndexChanged.connect(self.validate_form)
         self.mine_input.currentIndexChanged.connect(self.validate_form)
-        self.site_crusher_input.itemSelectionChanged.connect(self.validate_form)
+        self.opf_input.currentIndexChanged.connect(self.validate_form)
+        self.site_crusher_input.currentIndexChanged.connect(self.handle_operating_crusher_changed)
+        self.crusher_ratio_mode_input.currentIndexChanged.connect(self.toggle_crusher_ratio_controls)
+        self.crusher_ratio_mode_input.currentIndexChanged.connect(self.validate_form)
+        self.crusher_ratio_input.textChanged.connect(self.validate_form)
+        self.aps_ratio_crusher_button.clicked.connect(self.load_aps_ratio_crusher_names)
+        self.aps_ratio_crusher_input.itemSelectionChanged.connect(self.derive_active_crusher_ratio)
+        self.aps_ratio_crusher_input.itemSelectionChanged.connect(self.validate_form)
         self.time_mode.currentIndexChanged.connect(self.validate_form)
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
@@ -2137,9 +2306,21 @@ class UserInputs(QMainWindow):
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.toggle_aps_direct_tip_controls)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.validate_form)
         self.aps_crusher_input.itemSelectionChanged.connect(self.validate_form)
+        self.direct_tip_movement_button.clicked.connect(self.load_direct_tip_movement_options)
+        self.direct_tip_crusher_destination_input.itemDoubleClicked.connect(
+            self.add_direct_tip_movement_rule
+        )
+        self.remove_direct_tip_rule_button.clicked.connect(self.remove_direct_tip_movement_rule)
 
     def validate_form(self):
         """Enable or disable the submit button based on form completion."""
+        ratio_ready = self.current_crusher_ratio() is not None
+        if self.crusher_ratio_mode() == "aps" and len(self.current_site_crusher_options()) > 1:
+            ratio_ready = (
+                ratio_ready
+                and bool(self.file_path.text().strip())
+                and bool(self.selected_aps_ratio_crusher_names())
+            )
         aps_direct_tip_ready = True
         if (
             hasattr(self, "reevaluate_aps_direct_tip_checkbox")
@@ -2153,7 +2334,9 @@ class UserInputs(QMainWindow):
         all_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
-            and bool(self.selected_site_crusher_names())
+            and self.opf_input.currentIndex() != -1
+            and len(self.selected_site_crusher_names()) == 1
+            and ratio_ready
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
             and aps_direct_tip_ready
@@ -2261,6 +2444,13 @@ class UserInputs(QMainWindow):
             self.file_path.setText(file_path)
             if hasattr(self, "aps_crusher_input"):
                 self.aps_crusher_input.clear()
+            if hasattr(self, "aps_ratio_crusher_input"):
+                self.aps_ratio_crusher_input.clear()
+            self.direct_tip_grade_block_sources = []
+            self.direct_tip_crusher_destinations = []
+            self.direct_tip_movement_rules = []
+            self.set_direct_tip_movement_options([], [])
+            self.refresh_direct_tip_rule_list()
 
     def toggle_aps_direct_tip_controls(self, enabled):
         if hasattr(self, "aps_crusher_button"):
@@ -2303,6 +2493,36 @@ class UserInputs(QMainWindow):
             for row in range(self.aps_crusher_input.count()):
                 item = self.aps_crusher_input.item(row)
                 item.setSelected(item.text().strip() in selected_crushers)
+        elif isinstance(self.aps_crusher_input, QComboBox):
+            selected = next(iter(selected_crushers), "")
+            selected_index = self.aps_crusher_input.findText(selected)
+            self.aps_crusher_input.setCurrentIndex(selected_index)
+
+    def selected_aps_crusher_matches_operating_crusher(self):
+        selected = self.selected_aps_crusher_names()
+        operating = self.selected_site_crusher_names()
+        if not selected or len(operating) != 1:
+            return False
+        return all(
+            ExpitDataHandler.crusher_destination_matches(
+                destination,
+                self.mine_input.currentText(),
+                operating[0],
+                self.opf_input.currentText() if hasattr(self, "opf_input") else None,
+            )
+            for destination in selected
+        )
+
+    def is_total_feed_operating_crusher(self):
+        return (
+            hasattr(self, "site_crusher_input")
+            and self.site_crusher_input.currentText().strip().upper() == "TOTAL_FEED_PC"
+        )
+
+    def current_site_start_time(self):
+        if hasattr(self, "time_mode") and self.time_mode.currentIndex() == 1:
+            return self.start_time.dateTime().toPyDateTime()
+        return datetime.now()
 
     def load_aps_crusher_names(self):
         file_path = self.file_path.text().strip() if hasattr(self, "file_path") else ""
@@ -2315,7 +2535,10 @@ class UserInputs(QMainWindow):
             return
 
         try:
-            crusher_names = ExpitDataHandler.get_distinct_crusher_destinations(file_path)
+            crusher_names = ExpitDataHandler.get_distinct_crusher_destinations(
+                file_path,
+                self.current_site_start_time(),
+            )
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -2325,12 +2548,35 @@ class UserInputs(QMainWindow):
             return
 
         previous_selection = self.selected_aps_crusher_names()
-        self.set_aps_crusher_items(crusher_names, previous_selection)
+        operating_crusher = self.site_crusher_input.currentText().strip()
+        mine = self.mine_input.currentText().strip()
+        matching_names = [
+            name for name in crusher_names
+            if ExpitDataHandler.crusher_destination_matches(
+                name, mine, operating_crusher,
+                self.opf_input.currentText() if hasattr(self, "opf_input") else None,
+            )
+        ]
+        retained_selection = [
+            name for name in previous_selection if name in crusher_names
+        ]
+        if retained_selection:
+            selected_names = retained_selection
+        elif self.is_total_feed_operating_crusher():
+            selected_names = matching_names
+        else:
+            selected_names = matching_names[:1]
+        self.set_aps_crusher_items(crusher_names, selected_names)
         if crusher_names:
+            selection_guidance = (
+                "All matching child crusher destinations were selected for this Total Feed scenario."
+                if self.is_total_feed_operating_crusher() and selected_names
+                else "Select the corresponding 2WP crusher."
+            )
             QMessageBox.information(
                 self,
                 "BlendMaster",
-                f"Found {len(crusher_names)} crusher destination(s). Select one or more crushers to re-evaluate.",
+                f"Found {len(crusher_names)} crusher destination(s). {selection_guidance}",
             )
         else:
             QMessageBox.information(
@@ -2339,6 +2585,225 @@ class UserInputs(QMainWindow):
                 "No crusher destinations were found in the selected APS Mining.csv file.",
             )
         self.validate_form()
+
+    @staticmethod
+    def normalized_crusher_ratio(value, default=None):
+        try:
+            ratio = float(value)
+        except (TypeError, ValueError):
+            return default
+        if ratio > 1:
+            ratio /= 100.0
+        return ratio if 0 < ratio <= 1 else default
+
+    @staticmethod
+    def normalized_crusher_ratio_mode(value):
+        text = str(value or "manual").strip().lower()
+        if text == "aps" or "derive" in text or "mining.csv" in text:
+            return "aps"
+        return "manual"
+
+    def crusher_ratio_mode(self):
+        if not hasattr(self, "crusher_ratio_mode_input"):
+            return self.normalized_crusher_ratio_mode(
+                getattr(self, "crusher_ratio_mode_choice", "manual")
+            )
+        return str(self.crusher_ratio_mode_input.currentData() or "manual")
+
+    def current_crusher_ratio(self):
+        if not hasattr(self, "crusher_ratio_input"):
+            return self.normalized_crusher_ratio(
+                getattr(self, "crusher_contribution_ratio_choice", 1.0),
+                default=None,
+            )
+        return self.normalized_crusher_ratio(
+            self.crusher_ratio_input.text(),
+            default=None,
+        )
+
+    def current_site_crusher_options(self):
+        return crusher_options_for_site(
+            self.mine_input.currentText() if hasattr(self, "mine_input") else "",
+            self.opf_input.currentText() if hasattr(self, "opf_input") else "",
+        )
+
+    def selected_aps_ratio_crusher_names(self):
+        if not hasattr(self, "aps_ratio_crusher_input"):
+            return []
+        return [
+            item.text().strip()
+            for item in self.aps_ratio_crusher_input.selectedItems()
+            if item.text().strip()
+        ]
+
+    def set_aps_ratio_crusher_items(self, names, selected=None):
+        if not hasattr(self, "aps_ratio_crusher_input"):
+            return
+        selected = {
+            str(value).strip() for value in selected or [] if str(value).strip()
+        }
+        self.aps_ratio_crusher_input.clear()
+        self.aps_ratio_crusher_input.addItems(names or [])
+        for row in range(self.aps_ratio_crusher_input.count()):
+            item = self.aps_ratio_crusher_input.item(row)
+            item.setSelected(item.text().strip() in selected)
+
+    def toggle_crusher_ratio_controls(self, *_args):
+        if not hasattr(self, "crusher_ratio_mode_input"):
+            return
+        multiple_crushers = len(self.current_site_crusher_options()) > 1
+        derive_from_aps = self.crusher_ratio_mode() == "aps"
+        self.crusher_ratio_mode_input.setEnabled(multiple_crushers)
+        self.crusher_ratio_input.setEnabled(multiple_crushers and not derive_from_aps)
+        self.aps_ratio_crusher_button.setEnabled(
+            multiple_crushers and derive_from_aps and bool(self.file_path.text().strip())
+        )
+        self.aps_ratio_crusher_input.setEnabled(multiple_crushers and derive_from_aps)
+        if not multiple_crushers:
+            self.crusher_ratio_mode_input.setCurrentIndex(0)
+            self.crusher_ratio_input.setText("100.00")
+        elif derive_from_aps:
+            self.derive_active_crusher_ratio()
+        self.validate_form()
+
+    def load_aps_ratio_crusher_names(self):
+        file_path = self.file_path.text().strip()
+        if not file_path:
+            QMessageBox.information(
+                self, "BlendMaster", "Select APS Mining.csv before deriving crusher ratios."
+            )
+            return
+        try:
+            names = ExpitDataHandler.get_distinct_crusher_destinations(
+                file_path,
+                self.current_site_start_time(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "BlendMaster", f"Unable to read APS crusher feed destinations: {exc}"
+            )
+            return
+        previous = self.selected_aps_ratio_crusher_names()
+        self.set_aps_ratio_crusher_items(names, previous)
+        self.derive_active_crusher_ratio()
+
+    def derive_active_crusher_ratio(self):
+        if self.crusher_ratio_mode() != "aps" or not hasattr(self, "crusher_ratio_input"):
+            return
+        file_path = self.file_path.text().strip()
+        selected = self.selected_aps_ratio_crusher_names()
+        if not file_path or not selected:
+            self.crusher_ratio_input.clear()
+            return
+        try:
+            ratios = ExpitDataHandler.calculate_crusher_feed_ratios(
+                file_path,
+                self.current_site_start_time(),
+                selected,
+            )
+        except Exception as exc:
+            self.crusher_ratio_input.clear()
+            print(f"Warning: unable to derive APS crusher contribution ratio: {exc}")
+            return
+        mine = self.mine_input.currentText().strip()
+        operating_crusher = self.site_crusher_input.currentText().strip()
+        ratio = sum(
+            value for destination, value in ratios.items()
+            if ExpitDataHandler.crusher_destination_matches(
+                destination, mine, operating_crusher,
+                self.opf_input.currentText() if hasattr(self, "opf_input") else None,
+            )
+        )
+        self.crusher_ratio_input.setText(f"{ratio * 100:.4f}" if ratio > 0 else "")
+
+    def load_ratio_controls_from_state(self):
+        if not hasattr(self, "crusher_ratio_mode_input"):
+            return
+        mode_index = self.crusher_ratio_mode_input.findData(
+            self.normalized_crusher_ratio_mode(
+                getattr(self, "crusher_ratio_mode_choice", "manual")
+            )
+        )
+        self.crusher_ratio_mode_input.setCurrentIndex(max(mode_index, 0))
+        ratio = self.normalized_crusher_ratio(
+            getattr(self, "crusher_contribution_ratio_choice", 1.0),
+            default=1.0,
+        )
+        self.crusher_ratio_input.setText(f"{ratio * 100:.4f}".rstrip("0").rstrip("."))
+        choices = getattr(self, "aps_ratio_crusher_choices", []) or []
+        self.set_aps_ratio_crusher_items(choices, choices)
+        self.toggle_crusher_ratio_controls()
+
+    def set_direct_tip_movement_options(self, sources, destinations):
+        if not hasattr(self, "direct_tip_grade_block_source_input"):
+            return
+        self.direct_tip_grade_block_source_input.clear()
+        self.direct_tip_grade_block_source_input.addItems(sorted(set(sources or [])))
+        self.direct_tip_crusher_destination_input.clear()
+        self.direct_tip_crusher_destination_input.addItems(sorted(set(destinations or [])))
+
+    def load_direct_tip_movement_options(self):
+        file_path = self.file_path.text().strip()
+        if not file_path:
+            QMessageBox.information(
+                self, "BlendMaster", "Select APS Mining.csv before loading movement values."
+            )
+            return
+        try:
+            options = ExpitDataHandler.get_direct_tip_movement_options(
+                file_path,
+                self.current_site_start_time(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "BlendMaster", f"Unable to read direct-tip movement values: {exc}"
+            )
+            return
+        self.direct_tip_grade_block_sources = options["grade_block_sources"]
+        self.direct_tip_crusher_destinations = options["crusher_destinations"]
+        self.set_direct_tip_movement_options(
+            self.direct_tip_grade_block_sources,
+            self.direct_tip_crusher_destinations,
+        )
+
+    def add_direct_tip_movement_rule(self, destination_item):
+        source_items = self.direct_tip_grade_block_source_input.selectedItems()
+        if not source_items or destination_item is None:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Select a grade-block source before double-clicking a crusher destination.",
+            )
+            return
+        rule = {
+            "grade_block_source": source_items[0].text().strip(),
+            "crusher_destination": destination_item.text().strip(),
+        }
+        if rule not in self.direct_tip_movement_rules:
+            self.direct_tip_movement_rules.append(rule)
+            self.refresh_direct_tip_rule_list()
+
+    def refresh_direct_tip_rule_list(self):
+        if not hasattr(self, "direct_tip_rule_input"):
+            return
+        self.direct_tip_movement_rules = ExpitDataHandler._normalize_movement_rules(
+            getattr(self, "direct_tip_movement_rules", [])
+        )
+        self.direct_tip_rule_input.clear()
+        for rule in self.direct_tip_movement_rules:
+            self.direct_tip_rule_input.addItem(
+                f"{rule['grade_block_source']}  ->  {rule['crusher_destination']}"
+            )
+
+    def remove_direct_tip_movement_rule(self):
+        rows = sorted(
+            {index.row() for index in self.direct_tip_rule_input.selectedIndexes()},
+            reverse=True,
+        )
+        for row in rows:
+            if 0 <= row < len(self.direct_tip_movement_rules):
+                self.direct_tip_movement_rules.pop(row)
+        self.refresh_direct_tip_rule_list()
 
     def refresh_aps_stockpile_brand_map(self):
         self.aps_stockpile_brand_map = {}
@@ -2351,6 +2816,7 @@ class UserInputs(QMainWindow):
                 self.product_brand_options(),
                 getattr(self, "mine_input_choice", None),
                 getattr(self, "crusher_input_choice", None),
+                getattr(self, "opf_input_choice", None),
             )
         except Exception as exc:
             self.aps_stockpile_brand_map = {}
@@ -2412,11 +2878,43 @@ class UserInputs(QMainWindow):
 
         if previous_mine and self.mine_input.findText(previous_mine) >= 0:
             self.mine_input.setCurrentText(previous_mine)
+        self.update_opf_dropdown()
+
+    @staticmethod
+    def default_opf_for_site(mine, crusher=None):
+        mine = str(mine or "").strip().upper()
+        crusher = str(crusher or "").strip().upper()
+        options = opf_options_for_mine(mine)
+        if crusher:
+            for opf in options:
+                if crusher in {
+                    value.upper() for value in crusher_options_for_site(mine, opf)
+                }:
+                    return opf
+        return options[0] if options else ""
+
+    def update_opf_dropdown(self, selected_opf=None):
+        if not hasattr(self, "opf_input"):
+            return
+        if isinstance(selected_opf, (int, bool)):
+            selected_opf = None
+        previous = str(selected_opf or self.opf_input.currentText() or "").strip()
+        mine = self.mine_input.currentText().strip().upper()
+        options = opf_options_for_mine(mine)
+        self.opf_input.blockSignals(True)
+        self.opf_input.clear()
+        self.opf_input.addItems(options)
+        if previous and self.opf_input.findText(previous) >= 0:
+            self.opf_input.setCurrentText(previous)
+        self.opf_input.blockSignals(False)
         self.update_site_crusher_options()
 
     def selected_site_crusher_names(self):
         if not hasattr(self, "site_crusher_input"):
             return []
+        if isinstance(self.site_crusher_input, QComboBox):
+            value = self.site_crusher_input.currentText().strip()
+            return [value] if value else []
         return [
             item.text().strip()
             for item in self.site_crusher_input.selectedItems()
@@ -2430,190 +2928,283 @@ class UserInputs(QMainWindow):
             selected_crushers = None
         if selected_crushers is None:
             selected_crushers = self.selected_site_crusher_names()
-        selected = {str(value).strip().upper() for value in selected_crushers or []}
+        selected = [str(value).strip() for value in selected_crushers or [] if str(value).strip()]
         mine = self.mine_input.currentText().strip().upper() if hasattr(self, "mine_input") else ""
-        crushers = SITE_CRUSHER_OPTIONS.get(mine, [])
+        opf = self.opf_input.currentText().strip() if hasattr(self, "opf_input") else ""
+        crushers = crusher_options_for_site(mine, opf)
+        self.site_crusher_input.blockSignals(True)
         self.site_crusher_input.clear()
         self.site_crusher_input.addItems(crushers)
-        for row in range(self.site_crusher_input.count()):
-            item = self.site_crusher_input.item(row)
-            item.setSelected(item.text().strip().upper() in selected)
-        if crushers and not self.site_crusher_input.selectedItems():
-            self.site_crusher_input.item(0).setSelected(True)
+        if selected:
+            index = self.site_crusher_input.findText(selected[0])
+            self.site_crusher_input.setCurrentIndex(index if index >= 0 else 0)
+        elif crushers:
+            self.site_crusher_input.setCurrentIndex(0)
+        self.site_crusher_input.blockSignals(False)
+        self.toggle_crusher_ratio_controls()
+        self.handle_operating_crusher_changed()
+
+    def handle_operating_crusher_changed(self, *_args):
+        self.toggle_crusher_ratio_controls()
+        if self.crusher_ratio_mode() == "aps":
+            self.derive_active_crusher_ratio()
+        self.validate_form()
+
+    def capture_site_ratio_and_movement_controls(self):
+        self.opf_input_choice = self.opf_input.currentText().strip()
+        self.selected_site_crushers = self.selected_site_crusher_names()
+        self.crusher_input_choice = (
+            self.selected_site_crushers[0] if self.selected_site_crushers else None
+        )
+        self.crusher_ratio_mode_choice = self.crusher_ratio_mode()
+        self.crusher_contribution_ratio_choice = self.current_crusher_ratio()
+        self.crusher_ratio_configured = True
+        self.aps_ratio_crusher_choices = self.selected_aps_ratio_crusher_names()
+        self.direct_tip_grade_block_sources = [
+            self.direct_tip_grade_block_source_input.item(row).text().strip()
+            for row in range(self.direct_tip_grade_block_source_input.count())
+        ]
+        self.direct_tip_crusher_destinations = [
+            self.direct_tip_crusher_destination_input.item(row).text().strip()
+            for row in range(self.direct_tip_crusher_destination_input.count())
+        ]
+        self.direct_tip_movement_rules = ExpitDataHandler._normalize_movement_rules(
+            self.direct_tip_movement_rules
+        )
+
+    def site_ratio_group_states(self, include_live=True):
+        hub = str(getattr(self, "hub_input_choice", "") or "").strip()
+        mine = str(getattr(self, "mine_input_choice", "") or "").strip()
+        opf = str(getattr(self, "opf_input_choice", "") or "").strip()
+        states = []
+        for scenario_id, state in self.site_scenarios.items():
+            if include_live and scenario_id == self.active_scenario_id:
+                continue
+            if (
+                str(state.get("hub_input_choice") or "").strip() == hub
+                and str(state.get("mine_input_choice") or "").strip() == mine
+                and str(state.get("opf_input_choice") or self.default_opf_for_site(
+                    state.get("mine_input_choice"), state.get("crusher_input_choice")
+                )).strip() == opf
+                and state.get("crusher_ratio_configured", False)
+            ):
+                states.append(state)
+        if include_live:
+            states.append({
+                "crusher_input_choice": self.crusher_input_choice,
+                "crusher_contribution_ratio_choice": self.crusher_contribution_ratio_choice,
+                "crusher_ratio_configured": self.crusher_ratio_configured,
+            })
+        return states
+
+    def validate_site_configuration_constraints(self):
+        if len(self.selected_site_crushers) != 1:
+            return False, "Select exactly one operating crusher for this site scenario."
+        ratio = self.crusher_contribution_ratio_choice
+        if ratio is None or not 0 < ratio <= 1:
+            return False, "Enter or derive a crusher contribution ratio greater than 0% and no more than 100%."
+        if self.reevaluate_aps_direct_tip_choice:
+            selected_destinations = self.aps_direct_tip_crusher_choice
+            if not selected_destinations:
+                return False, "Select at least one 2WP direct-tip crusher destination."
+            if not self.selected_aps_crusher_matches_operating_crusher():
+                return False, (
+                    "Each selected 2WP direct-tip crusher destination must map to the "
+                    "operating crusher for this scenario."
+                )
+            if not self.is_total_feed_operating_crusher() and len(selected_destinations) != 1:
+                return False, "Select exactly one 2WP direct-tip crusher destination for an individual crusher scenario."
+
+        group_states = self.site_ratio_group_states()
+        crushers = [
+            str(state.get("crusher_input_choice") or "").strip()
+            for state in group_states
+        ]
+        if len(crushers) != len(set(crushers)):
+            return False, (
+                "This Hub / Mine / OPF already contains a scenario for the selected operating crusher. "
+                "Update that scenario or choose another crusher."
+            )
+        crusher_options = crusher_options_for_site(
+            self.mine_input_choice, self.opf_input_choice
+        )
+        if len(crusher_options) <= 1:
+            self.crusher_contribution_ratio_choice = 1.0
+            return True, ""
+
+        ratio_total = sum(
+            self.normalized_crusher_ratio(
+                state.get("crusher_contribution_ratio_choice"), default=0.0
+            )
+            for state in group_states
+        )
+        if ratio_total > 1.000001:
+            return False, (
+                f"Crusher contribution ratios for {self.mine_input_choice} / {self.opf_input_choice} "
+                f"total {ratio_total * 100:.2f}%. They cannot exceed 100%."
+            )
+        configured = set(crushers)
+        if set(crusher_options).issubset(configured) and not math.isclose(
+            ratio_total, 1.0, abs_tol=1e-6
+        ):
+            return False, (
+                f"Crusher contribution ratios for {self.mine_input_choice} / {self.opf_input_choice} "
+                f"must total 100%; they currently total {ratio_total * 100:.2f}%."
+            )
+        return True, ""
+
+    def validate_active_ratio_group_for_run(self):
+        # Each operating-crusher scenario is independently optimisable.  The
+        # contribution ratio scales this scenario's product-build target; it is
+        # not a prerequisite that sibling crusher scenarios have been created.
+        ratio = self.normalized_crusher_ratio(
+            getattr(self, "crusher_contribution_ratio_choice", None), default=0.0
+        )
+        if not 0 < ratio <= 1:
+            return False, "Enter a crusher contribution ratio greater than 0% and no more than 100%."
+        return True, ""
+
+    def capture_site_configuration_controls(self):
+        """Capture the complete live Site Configuration form into scenario state."""
+        self.time_mode_choice = self.time_mode.currentIndex() + 1
+        self.start_time_choice = (
+            self.start_time.dateTime().toPyDateTime()
+            if self.time_mode_choice == 2
+            else datetime.now()
+        )
+        self.expit_mode_choice = (
+            self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+        )
+        self.file_path_choice = self.file_path.text().strip()
+        self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+        self.product_brand_labels_choice = self.parse_product_brand_labels(
+            self.product_brand_labels_input.text()
+        )
+        self.auto_load_2wp_targets_choice = (
+            self.auto_load_2wp_targets_checkbox.isChecked()
+        )
+        self.agent_enabled_choice = self.agent_enabled_checkbox.isChecked()
+        self.hub_input_choice = self.hub_input.currentText().strip()
+        self.mine_input_choice = self.mine_input.currentText().strip()
+        self.capture_site_ratio_and_movement_controls()
+        self.reevaluate_aps_direct_tip_choice = (
+            self.reevaluate_aps_direct_tip_checkbox.isChecked()
+        )
+        self.aps_direct_tip_crusher_choice = (
+            self.selected_aps_crusher_names()
+            if self.reevaluate_aps_direct_tip_choice
+            else []
+        )
+
+    def restore_site_configuration_controls(self):
+        """Restore Site Configuration widgets without discarding legacy project defaults."""
+        self.hub_input.setCurrentText(str(self.hub_input_choice or ""))
+        self.update_mine_dropdown()
+        self.mine_input.setCurrentText(str(self.mine_input_choice or ""))
+        self.update_opf_dropdown(getattr(self, "opf_input_choice", ""))
+        self.update_site_crusher_options(
+            getattr(self, "selected_site_crushers", None)
+            or [getattr(self, "crusher_input_choice", "")]
+        )
+        self.file_path.setText(str(self.file_path_choice or ""))
+        self.load_ratio_controls_from_state()
+        self.set_direct_tip_movement_options(
+            getattr(self, "direct_tip_grade_block_sources", []),
+            getattr(self, "direct_tip_crusher_destinations", []),
+        )
+        self.refresh_direct_tip_rule_list()
+
+        self.time_mode.setCurrentIndex(max(int(self.time_mode_choice or 1) - 1, 0))
+        start_time = self.start_time_choice or datetime.now()
+        self.start_time.setDateTime(QDateTime(
+            start_time.year,
+            start_time.month,
+            start_time.day,
+            start_time.hour,
+            start_time.minute,
+            start_time.second,
+        ))
+        self.expit_mode.setCurrentIndex(max(int(self.expit_mode_choice or 1) - 1, 0))
+        self.reevaluate_aps_direct_tip_checkbox.setChecked(
+            bool(getattr(self, "reevaluate_aps_direct_tip_choice", False))
+        )
+        saved_crushers = self.normalized_aps_crusher_choice(
+            getattr(self, "aps_direct_tip_crusher_choice", [])
+        )
+        self.set_aps_crusher_items(saved_crushers, saved_crushers)
+        self.toggle_aps_direct_tip_controls(self.reevaluate_aps_direct_tip_choice)
+        self.blend_mode.setCurrentIndex(max(int(self.blend_mode_choice or 1) - 1, 0))
+        self.agent_enabled_checkbox.setChecked(
+            bool(getattr(self, "agent_enabled_choice", False))
+        )
+        self.product_brand_labels_input.setText(", ".join(
+            self.parse_product_brand_labels(
+                getattr(self, "product_brand_labels_choice", [])
+            )
+        ))
+        self.auto_load_2wp_targets_checkbox.setChecked(
+            bool(getattr(self, "auto_load_2wp_targets_choice", True))
+        )
 
     def handle_site_config_submit(self):
-        """Handle the submission of site configuration."""
-        if not self.is_project_loaded:
-        
-            self.time_mode_choice = self.time_mode.currentIndex() + 1  # Translate to 1 or 2
-
-            if self.time_mode_choice == 2:  # If "Set Time" is selected
-                self.start_time_choice = self.start_time.dateTime().toPyDateTime()
-
-            else: self.start_time_choice = datetime.now()
-
-            self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
-            self.file_path_choice = self.file_path.text()
-            self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
-            self.aps_direct_tip_crusher_choice = (
-                self.selected_aps_crusher_names()
-                if self.reevaluate_aps_direct_tip_choice
-                else []
-            )
-            self.blend_mode_choice = self.blend_mode.currentIndex() + 1  # Translate to 1 or 2
-            self.product_brand_labels_choice = self.parse_product_brand_labels(
-                self.product_brand_labels_input.text()
-                if hasattr(self, "product_brand_labels_input")
-                else self.default_product_brand_labels()
-            )
-            self.auto_load_2wp_targets_choice = (
-                self.auto_load_2wp_targets_checkbox.isChecked()
-                if hasattr(self, "auto_load_2wp_targets_checkbox")
-                else True
-            )
-            self.agent_enabled_choice = (
-                self.agent_enabled_checkbox.isChecked()
-                if hasattr(self, "agent_enabled_checkbox")
-                else False
-            )
-            
-            self.hub_input_choice = self.hub_input.currentText().strip()
-            self.mine_input_choice = self.mine_input.currentText().strip()
-            self.selected_site_crushers = self.selected_site_crusher_names()
-            self.crusher_input_choice = (
-                self.crusher_input_choice
-                if self.crusher_input_choice in self.selected_site_crushers
-                else (self.selected_site_crushers[0] if self.selected_site_crushers else None)
-            )
-
-            if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
+        """Submit one explicit Hub / Mine / OPF / Crusher scenario."""
+        restoring_project = bool(
+            self.is_project_loaded and self.project_load_restore_in_progress
+        )
+        if restoring_project:
+            self.restore_site_configuration_controls()
+        else:
+            self.capture_site_configuration_controls()
+            valid, validation_message = self.validate_site_configuration_constraints()
+            if not valid:
                 QMessageBox.warning(
                     self,
-                    "Missing Information",
-                    "Load and select a crusher destination before re-evaluating APS direct tip tonnes.",
+                    "Site Configuration",
+                    validation_message,
                 )
                 return
 
-            if self.hub_input_choice and self.mine_input_choice and self.crusher_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice:
-                self.submit_button.setEnabled(False)
-                progress_message = (
-                    "Fetching stockpile inventories and 2WP build targets from Snowflake..."
-                    if self.auto_load_2wp_targets_choice
-                    else "Fetching stockpile inventories from Snowflake..."
-                )
-                self.run_background_task(
-                    progress_message,
-                    self.fetch_site_configuration_data,
-                    self.finish_site_config_submit,
-                    self.handle_site_config_error,
-                )
+        required_values = (
+            self.hub_input_choice,
+            self.mine_input_choice,
+            getattr(self, "opf_input_choice", None),
+            self.crusher_input_choice,
+            self.time_mode_choice,
+            self.start_time_choice,
+            self.expit_mode_choice,
+            self.blend_mode_choice,
+        )
+        if not all(required_values):
+            QMessageBox.warning(
+                self,
+                "Missing Information",
+                "Please complete Hub, Mine, OPF, Operating Crusher, and run timing.",
+            )
+            return
 
-            else:
-                QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")
-            
-        else:
-            if self.project_load_restore_in_progress:
-                self.time_mode.setCurrentIndex(self.time_mode_choice - 1)
-                self.start_time.setDateTime(QDateTime(
-                    self.start_time_choice.year,
-                    self.start_time_choice.month,
-                    self.start_time_choice.day,
-                    self.start_time_choice.hour,
-                    self.start_time_choice.minute,
-                    self.start_time_choice.second
-                ))
-                self.expit_mode.setCurrentText(str(self.expit_mode_choice))
-                self.file_path.setText(str(self.file_path_choice))
-                if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
-                    self.reevaluate_aps_direct_tip_checkbox.setChecked(
-                        bool(getattr(self, "reevaluate_aps_direct_tip_choice", False))
-                    )
-                if hasattr(self, "aps_crusher_input"):
-                    saved_crushers = self.normalized_aps_crusher_choice(
-                        getattr(self, "aps_direct_tip_crusher_choice", [])
-                    )
-                    self.set_aps_crusher_items(saved_crushers, saved_crushers)
-                self.blend_mode.setCurrentText(str(self.blend_mode_choice))
-                if hasattr(self, "agent_enabled_checkbox"):
-                    self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
-                if hasattr(self, "agent_story_input"):
-                    self.agent_story_input.setPlainText(getattr(self, "agent_story_text", ""))
-                if hasattr(self, "agent_run_instructions_input"):
-                    self.agent_run_instructions_input.setPlainText(getattr(self, "agent_run_instructions_text", ""))
-                if hasattr(self, "agent_bridge_port_input"):
-                    self.agent_bridge_port_input.setText(str(getattr(self, "agent_bridge_port", 8765)))
-                if hasattr(self, "product_brand_labels_input"):
-                    self.product_brand_labels_input.setText(", ".join(
-                        self.parse_product_brand_labels(getattr(self, "product_brand_labels_choice", []))
-                    ))
-                if hasattr(self, "auto_load_2wp_targets_checkbox"):
-                    self.auto_load_2wp_targets_checkbox.setChecked(bool(getattr(
-                        self,
-                        "auto_load_2wp_targets_choice",
-                        True,
-                    )))
-                self.hub_input.setCurrentText(str(self.hub_input_choice))
-                self.mine_input.setCurrentText(str(self.mine_input_choice))
-                self.update_site_crusher_options(
-                    getattr(self, "selected_site_crushers", None)
-                    or [getattr(self, "crusher_input_choice", "")]
+        if self.is_project_loaded:
+            if not self.stockpile_data:
+                QMessageBox.warning(
+                    self,
+                    "Missing Project Data",
+                    "The loaded project does not contain stockpile inventory data.",
                 )
-            else:
-                self.time_mode_choice = self.time_mode.currentIndex() + 1
-                if self.time_mode_choice == 2:
-                    self.start_time_choice = self.start_time.dateTime().toPyDateTime()
-                else:
-                    self.start_time_choice = datetime.now()
+                return
+            self.finish_site_config_submit(self.stockpile_data)
+            return
 
-                self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
-                self.file_path_choice = self.file_path.text()
-                self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
-                self.aps_direct_tip_crusher_choice = (
-                    self.selected_aps_crusher_names()
-                    if self.reevaluate_aps_direct_tip_choice
-                    else []
-                )
-                self.blend_mode_choice = self.blend_mode.currentIndex() + 1
-                self.product_brand_labels_choice = self.parse_product_brand_labels(
-                    self.product_brand_labels_input.text()
-                    if hasattr(self, "product_brand_labels_input")
-                    else self.default_product_brand_labels()
-                )
-                self.auto_load_2wp_targets_choice = (
-                    self.auto_load_2wp_targets_checkbox.isChecked()
-                    if hasattr(self, "auto_load_2wp_targets_checkbox")
-                    else True
-                )
-                self.agent_enabled_choice = (
-                    self.agent_enabled_checkbox.isChecked()
-                    if hasattr(self, "agent_enabled_checkbox")
-                    else False
-                )
-                self.hub_input_choice = self.hub_input.currentText().strip()
-                self.mine_input_choice = self.mine_input.currentText().strip()
-                self.selected_site_crushers = self.selected_site_crusher_names()
-                self.crusher_input_choice = (
-                    self.crusher_input_choice
-                    if self.crusher_input_choice in self.selected_site_crushers
-                    else (self.selected_site_crushers[0] if self.selected_site_crushers else None)
-                )
-
-                if self.reevaluate_aps_direct_tip_choice and not self.aps_direct_tip_crusher_choice:
-                    QMessageBox.warning(
-                        self,
-                        "Missing Information",
-                        "Load and select a crusher destination before re-evaluating APS direct tip tonnes.",
-                    )
-                    return
-
-            if self.hub_input_choice and self.mine_input_choice and self.crusher_input_choice and self.time_mode_choice and self.start_time_choice and self.expit_mode_choice and self.blend_mode_choice:
-                if not self.stockpile_data:
-                    QMessageBox.warning(self, "Missing Project Data", "The loaded project does not contain stockpile inventory data.")
-                    return
-                self.finish_site_config_submit(self.stockpile_data)
-
-            else:
-                QMessageBox.warning(self, "Missing Information", "Please fill in all fields.")   
+        self.submit_button.setEnabled(False)
+        progress_message = (
+            "Fetching stockpile inventories and ratio-adjusted 2WP build targets from Snowflake..."
+            if self.auto_load_2wp_targets_choice
+            else "Fetching stockpile inventories from Snowflake..."
+        )
+        self.run_background_task(
+            progress_message,
+            self.fetch_site_configuration_data,
+            self.finish_site_config_submit,
+            self.handle_site_config_error,
+        )
 
     def fetch_stockpile_data(self):
         """Fetch stockpile data from OpeningStockpileInventories."""
@@ -2633,6 +3224,8 @@ class UserInputs(QMainWindow):
                         crusher,
                         self.start_time_choice,
                         self.product_brand_labels_choice,
+                        opf=self.opf_input_choice,
+                        crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
                     )
                 except Exception as exc:
                     target_errors[crusher] = str(exc)
@@ -2682,17 +3275,8 @@ class UserInputs(QMainWindow):
         if not selected_crushers:
             return
 
-        current_crusher = self.crusher_input_choice if self.crusher_input_choice in selected_crushers else selected_crushers[0]
+        current_crusher = selected_crushers[0]
         self.crusher_input_choice = current_crusher
-        existing_by_context = {
-            (
-                str(state.get("hub_input_choice") or ""),
-                str(state.get("mine_input_choice") or ""),
-                str(state.get("crusher_input_choice") or ""),
-            ): scenario_id
-            for scenario_id, state in self.site_scenarios.items()
-        }
-
         self.product_build_settings = copy.deepcopy(build_targets.get(current_crusher) or [])
         self.populate_product_build_table()
         self.saved_blends_for_schedule = []
@@ -2701,41 +3285,17 @@ class UserInputs(QMainWindow):
         self.reset_workflow_tabs_for_scenario()
         DatabaseManager.clear_all_tables(get_database_path())
         self.seed_active_scenario_database(force=True)
-        source_database_path = get_database_path()
         current_state = self.capture_scenario_state()
         current_state["crusher_input_choice"] = current_crusher
         current_state["selected_site_crushers"] = [current_crusher]
+        current_state["opf_input_choice"] = self.opf_input_choice
+        current_state["crusher_contribution_ratio_choice"] = (
+            self.crusher_contribution_ratio_choice
+        )
+        current_state["direct_tip_movement_rules"] = copy.deepcopy(
+            self.direct_tip_movement_rules
+        )
         self.site_scenarios[self.active_scenario_id] = current_state
-
-        for crusher in selected_crushers:
-            if crusher == current_crusher:
-                continue
-            context_key = (self.hub_input_choice, self.mine_input_choice, crusher)
-            scenario_id = existing_by_context.get(context_key) or self.new_scenario_id()
-            scenario_state = copy.deepcopy(current_state)
-            scenario_state["scenario_id"] = scenario_id
-            scenario_state["crusher_input_choice"] = crusher
-            scenario_state["selected_site_crushers"] = [crusher]
-            scenario_state["product_build_settings"] = copy.deepcopy(build_targets.get(crusher) or [])
-            scenario_state["saved_blends_for_schedule"] = []
-            scenario_state["stored_blend_sequence_table_for_gantt"] = []
-            scenario_state["stored_blend_sequence_table_for_gantt_default"] = []
-            scenario_state["calendar_inputs"] = copy.deepcopy(scenario_state.get("calendar_inputs") or {})
-            scenario_state["calendar_inputs"]["product_build_settings"] = copy.deepcopy(
-                scenario_state["product_build_settings"]
-            )
-            scenario_state["calendar_inputs"]["site_context"] = {
-                "scenario_id": scenario_id,
-                "hub": self.hub_input_choice,
-                "mine": self.mine_input_choice,
-                "crusher": crusher,
-            }
-            scenario_state["database_path"] = self.scenario_database_path(scenario_id)
-            target_database_path = scenario_state["database_path"]
-            if os.path.exists(source_database_path) and target_database_path != source_database_path:
-                os.makedirs(os.path.dirname(target_database_path), exist_ok=True)
-                shutil.copy2(source_database_path, target_database_path)
-            self.site_scenarios[scenario_id] = scenario_state
         self.selected_site_crushers = [current_crusher]
         self.update_site_crusher_options(self.selected_site_crushers)
         self.refresh_scenario_selector()
@@ -2766,7 +3326,9 @@ class UserInputs(QMainWindow):
             self.save_active_scenario_state()
         message = (
             f"Configuration successfully submitted for Hub: {self.hub_input_choice}, "
-            f"Mine: {self.mine_input_choice}, Crusher: {self.crusher_input_choice}.\n\n"
+            f"Mine: {self.mine_input_choice}, OPF: {self.opf_input_choice}, "
+            f"Crusher: {self.crusher_input_choice} "
+            f"({self.crusher_contribution_ratio_choice * 100:.2f}% contribution).\n\n"
             f"The model now contains {len(self.site_scenarios)} site scenario(s). "
             "Use Active Site Scenario above the tabs to switch inputs and outputs."
         )
@@ -3132,6 +3694,52 @@ class UserInputs(QMainWindow):
         self.agent_current_request_id = None
         self.agent_seen_trace_count = 0
 
+    def capture_agent_panel_state(self):
+        """Keep the active agent conversation when it applies a project result."""
+        return {
+            "story": (
+                self.agent_story_input.toPlainText()
+                if hasattr(self, "agent_story_input")
+                else getattr(self, "agent_story_text", "")
+            ),
+            "instructions": (
+                self.agent_run_instructions_input.toPlainText()
+                if hasattr(self, "agent_run_instructions_input")
+                else getattr(self, "agent_run_instructions_text", "")
+            ),
+            "console": (
+                self.agent_console_output.toPlainText()
+                if hasattr(self, "agent_console_output")
+                else ""
+            ),
+            "proposals": self.capture_agent_proposals_table(),
+            "latest_proposals": copy.deepcopy(
+                getattr(self, "agent_latest_proposals", [])
+            ),
+            "latest_result": copy.deepcopy(
+                getattr(self, "agent_latest_result", {})
+            ),
+        }
+
+    def restore_agent_panel_state(self, state):
+        """Restore the agent conversation without affecting the loaded model."""
+        state = state or {}
+        self.agent_story_text = state.get("story", "")
+        self.agent_run_instructions_text = state.get("instructions", "")
+        self.agent_latest_proposals = copy.deepcopy(
+            state.get("latest_proposals", []) or []
+        )
+        self.agent_latest_result = copy.deepcopy(state.get("latest_result", {}) or {})
+        if hasattr(self, "agent_story_input"):
+            self.agent_story_input.setPlainText(self.agent_story_text)
+        if hasattr(self, "agent_run_instructions_input"):
+            self.agent_run_instructions_input.setPlainText(
+                self.agent_run_instructions_text
+            )
+        if hasattr(self, "agent_console_output"):
+            self.agent_console_output.setPlainText(state.get("console", "") or "")
+        self.restore_agent_proposals_table(state.get("proposals", []) or [])
+
     def capture_agent_proposals_table(self):
         if not hasattr(self, "agent_proposals_table"):
             return []
@@ -3250,7 +3858,15 @@ class UserInputs(QMainWindow):
                     "site_configuration, selected_stockpiles, selected_amt_stockpiles, amt_chunking, "
                     "solver_config, product_build_settings, and calendar_rates. If any stockpile is selected as AMT, "
                     "hex_sequence_table is required. The app cannot submit AMT stockpiles from agent output "
-                    "without the generated chunk rows."
+                    "without the generated chunk rows. site_configuration must identify one explicit "
+                    "hub / mine / opf / crusher scenario. When that OPF has multiple crushers it must also "
+                    "provide crusher_contribution_ratio (0 to 1) or crusher_contribution_ratio_percent (0 to 100)."
+                ),
+                "direct_tip_movement_rule_contract": (
+                    "Direct-tip permission is explicit. Return direct_tip_movement_rules as a list of objects "
+                    "with grade_block_source (the Source.NamePart2 substring) and crusher_destination "
+                    "(the APS Destination.Name). A grade block is not eligible for direct tip unless a rule "
+                    "matches both its full source name and this scenario's operating crusher."
                 ),
                 "product_build_settings_contract": (
                     "For product build targeting, include product_build_settings as a list of rows with brand, "
@@ -3276,6 +3892,17 @@ class UserInputs(QMainWindow):
             "site_configuration": {
                 "hub": getattr(self, "hub_input_choice", None),
                 "mine": getattr(self, "mine_input_choice", None),
+                "opf": getattr(self, "opf_input_choice", None),
+                "crusher": getattr(self, "crusher_input_choice", None),
+                "crusher_contribution_ratio": getattr(
+                    self, "crusher_contribution_ratio_choice", 1.0
+                ),
+                "crusher_ratio_mode": getattr(
+                    self, "crusher_ratio_mode_choice", "manual"
+                ),
+                "aps_ratio_crushers": getattr(
+                    self, "aps_ratio_crusher_choices", []
+                ),
                 "start_time": getattr(self, "start_time_choice", None),
                 "aps_mining_csv": getattr(self, "file_path_choice", ""),
                 "product_brands": getattr(self, "product_brand_labels_choice", self.default_product_brand_labels()),
@@ -3286,6 +3913,15 @@ class UserInputs(QMainWindow):
                 ),
                 "reevaluate_aps_direct_tip": getattr(self, "reevaluate_aps_direct_tip_choice", False),
                 "selected_aps_crushers": getattr(self, "aps_direct_tip_crusher_choice", []),
+                "direct_tip_grade_block_sources": getattr(
+                    self, "direct_tip_grade_block_sources", []
+                ),
+                "direct_tip_crusher_destinations": getattr(
+                    self, "direct_tip_crusher_destinations", []
+                ),
+                "direct_tip_movement_rules": getattr(
+                    self, "direct_tip_movement_rules", []
+                ),
                 "blend_mode": getattr(self, "blend_mode_choice", None),
             },
             "blend_settings": {
@@ -4397,6 +5033,10 @@ class UserInputs(QMainWindow):
         if site_config.get("hub") is not None:
             self.update_mine_dropdown()
         set_combo(self.mine_input, site_config.get("mine"))
+        self.update_opf_dropdown(site_config.get("opf"))
+        if site_config.get("opf") is not None:
+            set_combo(self.opf_input, site_config.get("opf"))
+        self.update_site_crusher_options()
         operational_crushers = (
             site_config.get("crushers")
             or site_config.get("operational_crushers")
@@ -4405,6 +5045,7 @@ class UserInputs(QMainWindow):
         )
         if isinstance(operational_crushers, str):
             operational_crushers = [operational_crushers]
+        operational_crushers = list(operational_crushers)[:1]
         self.update_site_crusher_options(operational_crushers or None)
 
         start_time = self.parse_agent_datetime_value(
@@ -4432,6 +5073,47 @@ class UserInputs(QMainWindow):
         if file_path:
             self.file_path.setText(str(file_path))
 
+        ratio_mode_value = (
+            site_config.get("crusher_ratio_mode")
+            or site_config.get("crusher_contribution_mode")
+        )
+        if ratio_mode_value is not None:
+            ratio_mode_text = str(ratio_mode_value).strip().lower()
+            ratio_mode = (
+                "aps"
+                if ratio_mode_text in {"aps", "derived", "mining.csv"}
+                or "derive" in ratio_mode_text
+                else "manual"
+            )
+            ratio_mode_index = self.crusher_ratio_mode_input.findData(ratio_mode)
+            self.crusher_ratio_mode_input.setCurrentIndex(max(ratio_mode_index, 0))
+
+        if "aps_ratio_crushers" in site_config or "aps_feed_crushers" in site_config:
+            aps_ratio_crushers = (
+                site_config.get("aps_ratio_crushers")
+                or site_config.get("aps_feed_crushers")
+                or []
+            )
+            if isinstance(aps_ratio_crushers, str):
+                aps_ratio_crushers = [aps_ratio_crushers]
+            self.set_aps_ratio_crusher_items(aps_ratio_crushers, aps_ratio_crushers)
+
+        ratio = None
+        if site_config.get("crusher_contribution_ratio_percent") is not None:
+            try:
+                ratio = float(site_config.get("crusher_contribution_ratio_percent")) / 100.0
+            except (TypeError, ValueError):
+                ratio = None
+        elif site_config.get("crusher_contribution_ratio") is not None:
+            ratio = self.normalized_crusher_ratio(
+                site_config.get("crusher_contribution_ratio"), default=None
+            )
+        if ratio is not None:
+            self.crusher_ratio_input.setText(
+                f"{ratio * 100:.4f}".rstrip("0").rstrip(".")
+            )
+        self.toggle_crusher_ratio_controls()
+
         product_brands = (
             site_config.get("product_brands")
             or site_config.get("brand_labels")
@@ -4457,14 +5139,51 @@ class UserInputs(QMainWindow):
         aps_crushers = (
             site_config.get("selected_aps_crushers")
             or site_config.get("aps_direct_tip_crushers")
-            or site_config.get("crusher_destinations")
+            or site_config.get("aps_direct_tip_crusher")
             or []
         )
+        if isinstance(aps_crushers, str):
+            aps_crushers = [aps_crushers]
+        aps_crushers = list(aps_crushers)[:1]
         if direct_tip_enabled is not None:
             self.reevaluate_aps_direct_tip_checkbox.setChecked(bool(direct_tip_enabled))
         if aps_crushers:
             self.reevaluate_aps_direct_tip_checkbox.setChecked(True)
             self.set_aps_crusher_items(aps_crushers, aps_crushers)
+        elif direct_tip_enabled is not None:
+            self.set_aps_crusher_items([], [])
+
+        movement_fields_present = any(key in site_config for key in (
+            "direct_tip_movement_rules",
+            "direct_tip_grade_block_sources",
+            "direct_tip_crusher_destinations",
+        ))
+        if movement_fields_present:
+            movement_rules = ExpitDataHandler._normalize_movement_rules(
+                site_config.get("direct_tip_movement_rules") or []
+            )
+            movement_sources = site_config.get("direct_tip_grade_block_sources")
+            movement_destinations = site_config.get("direct_tip_crusher_destinations")
+            if movement_sources is None:
+                movement_sources = [
+                    rule["grade_block_source"] for rule in movement_rules
+                ]
+            if movement_destinations is None:
+                movement_destinations = [
+                    rule["crusher_destination"] for rule in movement_rules
+                ]
+            if isinstance(movement_sources, str):
+                movement_sources = [movement_sources]
+            if isinstance(movement_destinations, str):
+                movement_destinations = [movement_destinations]
+            self.direct_tip_grade_block_sources = list(movement_sources or [])
+            self.direct_tip_crusher_destinations = list(movement_destinations or [])
+            self.direct_tip_movement_rules = movement_rules
+            self.set_direct_tip_movement_options(
+                self.direct_tip_grade_block_sources,
+                self.direct_tip_crusher_destinations,
+            )
+            self.refresh_direct_tip_rule_list()
 
         blend_mode = site_config.get("blend_mode") or site_config.get("optimised_blend_choices")
         if blend_mode is not None:
@@ -4710,6 +5429,7 @@ class UserInputs(QMainWindow):
         source_payload = proposal.get("source_payload")
 
         try:
+            agent_panel_state = self.capture_agent_panel_state()
             if source_kind == "project_file":
                 project_path = str(source_payload)
                 loaded_state = self.load_project_state_from_path(project_path)
@@ -4723,6 +5443,11 @@ class UserInputs(QMainWindow):
 
             loaded_state = self.normalized_agent_project_state(loaded_state)
             self.restore_loaded_state(loaded_state, source_label=source_label, show_success=False)
+            # The project result changes the modelling state, not the active
+            # conversation which led to it. Only Clear Agent Output should
+            # remove Story, Instructions, Console, or proposal rows.
+            self.restore_agent_panel_state(agent_panel_state)
+            self.append_agent_console("Agent result restored through the project-load path.")
             return True
         except Exception as exc:
             QMessageBox.warning(self, "BlendMaster Agent", f"Unable to load agent project result: {exc}")
@@ -4788,17 +5513,38 @@ class UserInputs(QMainWindow):
         if loaded_state.get("auto_load_2wp_targets_choice") is None:
             loaded_state["auto_load_2wp_targets_choice"] = True
         mine = str(loaded_state.get("mine_input_choice") or "").strip().upper()
+        opf = str(loaded_state.get("opf_input_choice") or "").strip()
         crusher = str(loaded_state.get("crusher_input_choice") or "").strip()
+        if not opf:
+            opf = self.default_opf_for_site(mine, crusher)
+        loaded_state["opf_input_choice"] = opf or None
         if not crusher:
-            crusher_options = SITE_CRUSHER_OPTIONS.get(mine, [])
+            crusher_options = crusher_options_for_site(mine, opf)
             crusher = crusher_options[0] if crusher_options else ""
         loaded_state["crusher_input_choice"] = crusher or None
-        selected_crushers = loaded_state.get("selected_site_crushers") or (
-            [crusher] if crusher else []
+        loaded_state["selected_site_crushers"] = [crusher] if crusher else []
+        loaded_state["crusher_ratio_mode_choice"] = self.normalized_crusher_ratio_mode(
+            loaded_state.get("crusher_ratio_mode_choice")
         )
-        loaded_state["selected_site_crushers"] = [
-            str(value).strip() for value in selected_crushers if str(value).strip()
-        ]
+        loaded_state["crusher_contribution_ratio_choice"] = self.normalized_crusher_ratio(
+            loaded_state.get("crusher_contribution_ratio_choice", 1.0),
+            default=1.0,
+        )
+        loaded_state["crusher_ratio_configured"] = bool(
+            loaded_state.get("crusher_ratio_configured", False)
+        )
+        loaded_state["aps_ratio_crusher_choices"] = self.normalized_aps_crusher_choice(
+            loaded_state.get("aps_ratio_crusher_choices") or []
+        )
+        loaded_state["direct_tip_grade_block_sources"] = list(
+            loaded_state.get("direct_tip_grade_block_sources") or []
+        )
+        loaded_state["direct_tip_crusher_destinations"] = list(
+            loaded_state.get("direct_tip_crusher_destinations") or []
+        )
+        loaded_state["direct_tip_movement_rules"] = ExpitDataHandler._normalize_movement_rules(
+            loaded_state.get("direct_tip_movement_rules") or []
+        )
         if loaded_state.get("aps_stockpile_brand_map") is None:
             loaded_state["aps_stockpile_brand_map"] = {}
         if loaded_state.get("solver_config") is None:
@@ -4827,6 +5573,10 @@ class UserInputs(QMainWindow):
             loaded_state["hub_input_choice"] = site_config.get("hub")
         if "mine" in site_config:
             loaded_state["mine_input_choice"] = site_config.get("mine")
+        if "opf" in site_config or "operating_opf" in site_config:
+            loaded_state["opf_input_choice"] = (
+                site_config.get("opf") or site_config.get("operating_opf")
+            )
         crushers = (
             site_config.get("crushers")
             or site_config.get("operational_crushers")
@@ -4835,8 +5585,30 @@ class UserInputs(QMainWindow):
         if crushers:
             if isinstance(crushers, str):
                 crushers = [crushers]
-            loaded_state["selected_site_crushers"] = list(crushers)
+            loaded_state["selected_site_crushers"] = list(crushers)[:1]
             loaded_state["crusher_input_choice"] = list(crushers)[0]
+        ratio = site_config.get("crusher_contribution_ratio")
+        if site_config.get("crusher_contribution_ratio_percent") is not None:
+            try:
+                ratio = float(
+                    site_config.get("crusher_contribution_ratio_percent")
+                ) / 100.0
+            except (TypeError, ValueError):
+                ratio = None
+        if ratio is not None:
+            loaded_state["crusher_contribution_ratio_choice"] = ratio
+            loaded_state["crusher_ratio_configured"] = True
+        if "crusher_ratio_mode" in site_config or "crusher_contribution_mode" in site_config:
+            loaded_state["crusher_ratio_mode_choice"] = self.normalized_crusher_ratio_mode(
+                site_config.get("crusher_ratio_mode")
+                or site_config.get("crusher_contribution_mode")
+            )
+        if "aps_ratio_crushers" in site_config or "aps_feed_crushers" in site_config:
+            loaded_state["aps_ratio_crusher_choices"] = (
+                site_config.get("aps_ratio_crushers")
+                or site_config.get("aps_feed_crushers")
+                or []
+            )
         if "start_time" in site_config:
             loaded_state["start_time_choice"] = self.parse_agent_datetime_value(site_config.get("start_time"))
             loaded_state["time_mode_choice"] = 2
@@ -4846,8 +5618,39 @@ class UserInputs(QMainWindow):
             loaded_state["file_path_choice"] = site_config.get("file_path")
         if "reevaluate_aps_direct_tip" in site_config:
             loaded_state["reevaluate_aps_direct_tip_choice"] = bool(site_config.get("reevaluate_aps_direct_tip"))
-        if "selected_aps_crushers" in site_config:
-            loaded_state["aps_direct_tip_crusher_choice"] = site_config.get("selected_aps_crushers") or []
+        if any(key in site_config for key in (
+            "selected_aps_crushers", "aps_direct_tip_crushers", "aps_direct_tip_crusher"
+        )):
+            selected = (
+                site_config.get("selected_aps_crushers")
+                or site_config.get("aps_direct_tip_crushers")
+                or site_config.get("aps_direct_tip_crusher")
+                or []
+            )
+            if isinstance(selected, str):
+                selected = [selected]
+            loaded_state["aps_direct_tip_crusher_choice"] = list(selected)
+        if "direct_tip_grade_block_sources" in site_config:
+            loaded_state["direct_tip_grade_block_sources"] = copy.deepcopy(
+                site_config.get("direct_tip_grade_block_sources") or []
+            )
+        if "direct_tip_crusher_destinations" in site_config:
+            loaded_state["direct_tip_crusher_destinations"] = copy.deepcopy(
+                site_config.get("direct_tip_crusher_destinations") or []
+            )
+        if "direct_tip_movement_rules" in site_config:
+            rules = ExpitDataHandler._normalize_movement_rules(
+                site_config.get("direct_tip_movement_rules") or []
+            )
+            loaded_state["direct_tip_movement_rules"] = rules
+            if "direct_tip_grade_block_sources" not in site_config:
+                loaded_state["direct_tip_grade_block_sources"] = sorted({
+                    rule["grade_block_source"] for rule in rules
+                })
+            if "direct_tip_crusher_destinations" not in site_config:
+                loaded_state["direct_tip_crusher_destinations"] = sorted({
+                    rule["crusher_destination"] for rule in rules
+                })
         if "product_brands" in site_config:
             loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
                 site_config.get("product_brands")
@@ -5819,9 +6622,36 @@ class UserInputs(QMainWindow):
         # Dynamically Add Stockpile Rows with default values
         self.calendar_rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
 
-        for stockpile in self.updated_stockpile_data_keys:
+        selected_stockpiles = list(getattr(self, "updated_stockpile_data_keys", []) or [])
+        selected_stockpile_keys = {str(stockpile).strip().upper() for stockpile in selected_stockpiles}
+        aps_destination_stockpiles = []
+        if getattr(self, "file_path_choice", None):
+            try:
+                aps_destination_stockpiles = ExpitDataHandler.get_distinct_stockpile_destinations(
+                    self.file_path_choice
+                )
+            except Exception as error:
+                print(f"Unable to read APS destination stockpiles for Calendar: {error}")
+
+        self.calendar_build_only_stockpiles = {
+            str(stockpile).strip().upper()
+            for stockpile in aps_destination_stockpiles
+            if str(stockpile).strip().upper() not in selected_stockpile_keys
+        }
+        self.calendar_stockpile_names = selected_stockpiles + [
+            stockpile
+            for stockpile in aps_destination_stockpiles
+            if str(stockpile).strip().upper() not in selected_stockpile_keys
+        ]
+
+        for stockpile in self.calendar_stockpile_names:
+            default_state = (
+                "Build"
+                if str(stockpile).strip().upper() in self.calendar_build_only_stockpiles
+                else "Auto"
+            )
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", [default_state, default_state, default_state])})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
@@ -6021,41 +6851,45 @@ class UserInputs(QMainWindow):
             start_index = 24
             calendar_index = start_index  # Start populating calendar_rows after the static crusher rows
 
-            for stockpile in self.updated_stockpile_data_keys:
+            for stockpile in getattr(self, "calendar_stockpile_names", self.updated_stockpile_data_keys):
+                default_state = (
+                    "Build"
+                    if str(stockpile).strip().upper() in getattr(self, "calendar_build_only_stockpiles", set())
+                    else "Auto"
+                )
                 # Populate the rows using calendar_index
                 self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
                     f"  {stockpile}", [False, False, False], "red", ["", "", ""]
                 )
-                try:
-                    self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
-                        f"    State", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_state"].values())
+                self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
+                    f"    State", [True, True, True], "red",
+                    calendar_values(
+                        f"stockpiles_{stockpile.lower()}_state",
+                        {header: default_state for header in self.calendar_headers[1:]},
                     )
-                    self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
-                        f"    Maximum Quantity", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_maximum_quantity"].values())
+                )
+                self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
+                    f"    Maximum Quantity", [True, True, True], "red",
+                    calendar_values(
+                        f"stockpiles_{stockpile.lower()}_maximum_quantity",
+                        {header: 100000 for header in self.calendar_headers[1:]},
                     )
-                    self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
-                        f"    Cost", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cost"].values())
+                )
+                self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
+                    f"    Cost", [True, True, True], "red",
+                    calendar_values(
+                        f"stockpiles_{stockpile.lower()}_cost",
+                        {header: 0 for header in self.calendar_headers[1:]},
                     )
-                    self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
-                        f"    Cash", [True, True, True], "red",
-                        list(self.calendar_inputs[f"stockpiles_{stockpile.lower()}_cash"].values())
+                )
+                self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
+                    f"    Cash", [True, True, True], "red",
+                    calendar_values(
+                        f"stockpiles_{stockpile.lower()}_cash",
+                        {header: 10 for header in self.calendar_headers[1:]},
                     )
-
-                    # Increment calendar_index by 5 for the next stockpile
-                    calendar_index += 5
-
-                except: 
-
-                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
-                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", ["Auto", "Auto", "Auto"])})
-                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
-                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
-                    self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
-
-                    QMessageBox.information(self, "BlendMaster", f"{stockpile} added to calendar")
+                )
+                calendar_index += 5
                     
             self.populate_calendar()
             self.store_calendar_inputs_no_run()
@@ -6423,6 +7257,15 @@ class UserInputs(QMainWindow):
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
+
+        valid_ratio_group, ratio_message = self.validate_active_ratio_group_for_run()
+        if not valid_ratio_group:
+            QMessageBox.information(
+                self,
+                "Crusher Contribution Ratios",
+                ratio_message,
+            )
+            return
 
         self.submit_calendar_first_call = False
         self.clear_decision_point_output()
@@ -8624,11 +9467,7 @@ class UserInputs(QMainWindow):
         if hasattr(self, "mine_input"):
             self.mine_input_choice = self.mine_input.currentText().strip()
         if hasattr(self, "site_crusher_input"):
-            self.selected_site_crushers = self.selected_site_crusher_names()
-            if self.crusher_input_choice not in self.selected_site_crushers:
-                self.crusher_input_choice = (
-                    self.selected_site_crushers[0] if self.selected_site_crushers else None
-                )
+            self.capture_site_ratio_and_movement_controls()
         if hasattr(self, "time_mode"):
             self.time_mode_choice = self.time_mode.currentIndex() + 1
         if hasattr(self, "start_time") and self.time_mode_choice == 2:
@@ -8726,8 +9565,16 @@ class UserInputs(QMainWindow):
                 "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
                 "hub_input_choice": self.hub_input_choice,
+                "opf_input_choice": self.opf_input_choice,
                 "crusher_input_choice": self.crusher_input_choice,
                 "selected_site_crushers": self.selected_site_crushers,
+                "crusher_ratio_mode_choice": self.crusher_ratio_mode_choice,
+                "crusher_contribution_ratio_choice": self.crusher_contribution_ratio_choice,
+                "crusher_ratio_configured": self.crusher_ratio_configured,
+                "aps_ratio_crusher_choices": self.aps_ratio_crusher_choices,
+                "direct_tip_grade_block_sources": self.direct_tip_grade_block_sources,
+                "direct_tip_crusher_destinations": self.direct_tip_crusher_destinations,
+                "direct_tip_movement_rules": self.direct_tip_movement_rules,
                 "opening_stockpile_inventories": self.opening_stockpile_inventories,
                 "saved_blends_for_schedule": self.saved_blends_for_schedule,
                 "start_time_choice": self.start_time_choice,
@@ -8794,6 +9641,39 @@ class UserInputs(QMainWindow):
             self.is_project_loaded = False
             return
 
+    def normalize_loaded_scenario_ratio_groups(self, scenarios):
+        """Give pre-ratio multi-site projects a valid, deterministic split."""
+        grouped = {}
+        for scenario_id, state in scenarios.items():
+            key = (
+                str(state.get("hub_input_choice") or "").strip(),
+                str(state.get("mine_input_choice") or "").strip(),
+                str(state.get("opf_input_choice") or "").strip(),
+            )
+            grouped.setdefault(key, []).append((scenario_id, state))
+
+        for group in grouped.values():
+            missing = [
+                state for _, state in group
+                if not state.get("crusher_ratio_configured", False)
+            ]
+            if not missing:
+                continue
+            configured_total = sum(
+                self.normalized_crusher_ratio(
+                    state.get("crusher_contribution_ratio_choice"),
+                    default=0.0,
+                )
+                for _, state in group
+                if state.get("crusher_ratio_configured", False)
+            )
+            remaining = max(0.0, 1.0 - configured_total)
+            fallback_ratio = remaining / len(missing) if remaining > 0 else 1.0 / len(group)
+            for state in missing:
+                state["crusher_ratio_mode_choice"] = "manual"
+                state["crusher_contribution_ratio_choice"] = fallback_ratio
+                state["crusher_ratio_configured"] = True
+
     def prepare_loaded_site_scenarios(self, loaded_state):
         """Restore v2 multi-site projects and wrap legacy projects as one scenario."""
         saved_scenarios = loaded_state.get("site_scenarios")
@@ -8823,6 +9703,7 @@ class UserInputs(QMainWindow):
 
         if not restored_scenarios:
             raise ValueError("The project does not contain a valid site scenario.")
+        self.normalize_loaded_scenario_ratio_groups(restored_scenarios)
 
         requested_active_id = loaded_state.get("active_scenario_id")
         self.active_scenario_id = (
@@ -8893,9 +9774,36 @@ class UserInputs(QMainWindow):
         )
         self.mine_input_choice = loaded_state.get("mine_input_choice", None)
         self.hub_input_choice = loaded_state.get("hub_input_choice", None)
+        self.opf_input_choice = loaded_state.get("opf_input_choice") or self.default_opf_for_site(
+            self.mine_input_choice,
+            loaded_state.get("crusher_input_choice"),
+        )
         self.crusher_input_choice = loaded_state.get("crusher_input_choice", None)
         self.selected_site_crushers = loaded_state.get("selected_site_crushers") or (
             [self.crusher_input_choice] if self.crusher_input_choice else []
+        )
+        self.selected_site_crushers = self.selected_site_crushers[:1]
+        self.crusher_ratio_mode_choice = self.normalized_crusher_ratio_mode(
+            loaded_state.get("crusher_ratio_mode_choice")
+        )
+        self.crusher_contribution_ratio_choice = self.normalized_crusher_ratio(
+            loaded_state.get("crusher_contribution_ratio_choice", 1.0),
+            default=1.0,
+        )
+        self.crusher_ratio_configured = bool(
+            loaded_state.get("crusher_ratio_configured", False)
+        )
+        self.aps_ratio_crusher_choices = self.normalized_aps_crusher_choice(
+            loaded_state.get("aps_ratio_crusher_choices") or []
+        )
+        self.direct_tip_grade_block_sources = list(
+            loaded_state.get("direct_tip_grade_block_sources") or []
+        )
+        self.direct_tip_crusher_destinations = list(
+            loaded_state.get("direct_tip_crusher_destinations") or []
+        )
+        self.direct_tip_movement_rules = ExpitDataHandler._normalize_movement_rules(
+            loaded_state.get("direct_tip_movement_rules") or []
         )
         self.opening_stockpile_inventories = loaded_state.get("opening_stockpile_inventories", None)
         if self.opening_stockpile_inventories is None:
@@ -8935,6 +9843,12 @@ class UserInputs(QMainWindow):
                 index = int(index)
             if isinstance(index, int) and 0 <= index < self.tabs.count():
                 self.tabs.setTabEnabled(index, enabled)
+
+        # Hydrate these widgets before Site Configuration saves the restored
+        # scenario. Otherwise that save reads the empty/default widgets and
+        # overwrites the loaded product-build and solver settings.
+        self.populate_product_build_table()
+        self.load_solver_config_inputs()
 
         self.project_load_restore_in_progress = True
         self.handle_site_config_submit()
@@ -8998,8 +9912,16 @@ class UserInputs(QMainWindow):
         self.agent_workflow_waiting_for_amt = False
         self.mine_input_choice = None
         self.hub_input_choice = None
+        self.opf_input_choice = None
         self.crusher_input_choice = None
         self.selected_site_crushers = []
+        self.crusher_ratio_mode_choice = "manual"
+        self.crusher_contribution_ratio_choice = 1.0
+        self.crusher_ratio_configured = False
+        self.aps_ratio_crusher_choices = []
+        self.direct_tip_grade_block_sources = []
+        self.direct_tip_crusher_destinations = []
+        self.direct_tip_movement_rules = []
         self.planning_plan_targets = PlanningPlanTargets()
         self.opening_stockpile_inventories = None
         self.saved_blends_for_schedule = None

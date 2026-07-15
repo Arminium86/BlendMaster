@@ -1,6 +1,6 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
 from PyQt5.QtCore import QObject, pyqtSignal, QEventLoop
-import builtins, pandas as pd, traceback
+import builtins, pandas as pd, traceback, copy
 from classes.CaseModeller import CaseModeller
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
@@ -93,6 +93,10 @@ class Run:
                 selected_crusher_name=selected_aps_crusher,
                 operational_mine=(site_context or {}).get("mine"),
                 operational_crusher=(site_context or {}).get("crusher"),
+                operational_opf=(site_context or {}).get("opf"),
+                direct_tip_movement_rules=(site_context or {}).get(
+                    "direct_tip_movement_rules", []
+                ),
             )
             expit_payload_transactions = expit_data_handler.process_transactions()
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
@@ -126,6 +130,12 @@ class Run:
 
         else: 
             print("No APS schedule imported.")
+
+        stockpile_data = self._include_aps_destination_stockpiles(
+            stockpile_data,
+            calendar_inputs,
+            expit_payload_transactions,
+        )
 
         # Load input data (this is combined user input and opening inventories)
         input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table, periods)
@@ -202,6 +212,113 @@ class Run:
         self.case_bridge.print("Database tables written successfully.")
 
         return periods
+
+    def _include_aps_destination_stockpiles(
+        self, stockpile_data, calendar_inputs, expit_payload_transactions
+    ):
+        """Add APS build destinations as build-only stockpile model objects."""
+        if not isinstance(stockpile_data, dict) or expit_payload_transactions is None:
+            return stockpile_data
+        if expit_payload_transactions.empty or "destination" not in expit_payload_transactions:
+            return stockpile_data
+
+        destination_names = set()
+        for value in expit_payload_transactions["destination"].tolist():
+            if value is None or pd.isna(value):
+                continue
+            name = str(value).strip()
+            if name.lower().startswith("stockpiles/"):
+                name = name.split("/", 1)[1].strip()
+            if name:
+                destination_names.add(name)
+        if not destination_names:
+            return stockpile_data
+
+        opening_data = getattr(self.gui, "stockpile_data", {}) or {}
+        opening_by_name = {}
+        if isinstance(opening_data, dict):
+            for key, value in opening_data.items():
+                if not isinstance(value, dict):
+                    continue
+                attrs = {str(attr).lower(): item for attr, item in value.items()}
+                opening_name = str(attrs.get("name") or key).strip()
+                if opening_name:
+                    opening_by_name[opening_name.upper()] = (opening_name, attrs)
+
+        def ensure_build_only_calendar_defaults(stockpile_name):
+            """Ensure APS build destinations always have a complete calendar record."""
+            calendar_name = str(stockpile_name).strip().lower()
+            calendar_inputs.setdefault(
+                f"stockpiles_{calendar_name}_state",
+                {"Preplan": "Build", "Period_1": "Build", "Period_2": "Build"},
+            )
+            calendar_inputs.setdefault(
+                f"stockpiles_{calendar_name}_maximum_quantity",
+                {"Preplan": 100000, "Period_1": 100000, "Period_2": 100000},
+            )
+            calendar_inputs.setdefault(
+                f"stockpiles_{calendar_name}_cost",
+                {"Preplan": 0, "Period_1": 0, "Period_2": 0},
+            )
+            calendar_inputs.setdefault(
+                f"stockpiles_{calendar_name}_cash",
+                {"Preplan": 0, "Period_1": 0, "Period_2": 0},
+            )
+
+        existing_names = {str(key).strip().upper() for key in stockpile_data}
+        added = []
+        for destination_name in sorted(destination_names):
+            if destination_name.upper() in existing_names:
+                # The destination can already be present from an earlier run
+                # or a restored project. It still needs its hidden build-only
+                # calendar defaults before DataLoader creates its model object.
+                ensure_build_only_calendar_defaults(destination_name)
+                continue
+            source = opening_by_name.get(destination_name.upper())
+            if source is None:
+                # Some APS destination stockpiles are not returned by the
+                # opening-inventory query. They still need to exist as model
+                # outputs, so initialise them at zero using the first payload
+                # grades rather than stopping the run.
+                matching_rows = expit_payload_transactions.loc[
+                    expit_payload_transactions["destination"].astype("string").str.replace(
+                        "Stockpiles/", "", regex=False
+                    ).str.strip().str.upper() == destination_name.upper()
+                ]
+                first_row = matching_rows.iloc[0] if not matching_rows.empty else None
+                opening_name = destination_name
+                attrs = {
+                    "name": opening_name.lower(),
+                    "balance": 0.0,
+                    "grade_fe": float(first_row.get("source_grade_fe", 0) or 0) if first_row is not None else 0.0,
+                    "grade_si": float(first_row.get("source_grade_si", 0) or 0) if first_row is not None else 0.0,
+                    "grade_al": float(first_row.get("source_grade_al", 0) or 0) if first_row is not None else 0.0,
+                    "grade_p": float(first_row.get("source_grade_p", 0) or 0) if first_row is not None else 0.0,
+                    "grade_mn": float(first_row.get("source_grade_mn", 0) or 0) if first_row is not None else 0.0,
+                    "amt": False,
+                    "reclaim_threshold": 0.0,
+                }
+            else:
+                opening_name, attrs = source
+            build_only = copy.deepcopy(attrs)
+            # Selected inventory rows use a lowercase nested name for the
+            # calendar key, while the outer dictionary key remains the model
+            # stockpile identifier.
+            build_only["name"] = opening_name.lower()
+            build_only["amt"] = False
+            build_only["reclaim_threshold"] = float(build_only.get("reclaim_threshold") or 0)
+            stockpile_data[opening_name] = build_only
+            existing_names.add(opening_name.upper())
+            added.append(opening_name)
+
+            ensure_build_only_calendar_defaults(opening_name)
+
+        if added:
+            self.case_bridge.print(
+                "Automatically included APS destination stockpiles as build-only outputs: "
+                + ", ".join(added)
+            )
+        return stockpile_data
 
     @staticmethod
     def _ensure_direct_tip_ids(expit_payload_transactions):

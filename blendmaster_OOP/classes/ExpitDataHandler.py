@@ -5,6 +5,7 @@ from datetime import timedelta
 import snowflake.connector
 from datetime import datetime
 from pandas import DataFrame
+from classes.PeriodManager import PeriodManager
 
 class ExpitDataHandler:
     def __init__(
@@ -14,11 +15,17 @@ class ExpitDataHandler:
         selected_crusher_name=None,
         operational_mine=None,
         operational_crusher=None,
+        operational_opf=None,
+        direct_tip_movement_rules=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
         self.operational_mine = str(operational_mine or "").strip().upper()
         self.operational_crusher = self._normalize_operational_crusher(operational_crusher)
+        self.operational_opf = str(operational_opf or "").strip().upper()
+        self.direct_tip_movement_rules = self._normalize_movement_rules(
+            direct_tip_movement_rules
+        )
         self.source_stockpile_fallbacks = {}
         self.data = pd.read_csv(input_data)
         if not self.data.empty:
@@ -39,6 +46,26 @@ class ExpitDataHandler:
         return {selected_crusher_name} if selected_crusher_name else set()
 
     @staticmethod
+    def _normalize_movement_rules(rules):
+        normalized = []
+        for rule in rules or []:
+            if isinstance(rule, dict):
+                source = rule.get("grade_block_source") or rule.get("source_pattern")
+                destination = rule.get("crusher_destination") or rule.get("destination")
+            elif isinstance(rule, (list, tuple)) and len(rule) >= 2:
+                source, destination = rule[0], rule[1]
+            else:
+                continue
+            source = str(source or "").strip()
+            destination = str(destination or "").strip()
+            if source and destination:
+                normalized.append({
+                    "grade_block_source": source,
+                    "crusher_destination": destination,
+                })
+        return normalized
+
+    @staticmethod
     def _normalize_operational_crusher(crusher):
         value = str(crusher or "").strip().upper().replace("-", "_")
         aliases = {
@@ -51,43 +78,231 @@ class ExpitDataHandler:
         return aliases.get(value, value)
 
     @classmethod
-    def crusher_destination_matches(cls, destination_name, mine, crusher):
+    def crusher_destination_matches(cls, destination_name, mine, crusher, opf=None):
         """Match an APS crusher destination to a BlendMaster operational crusher."""
         destination = str(destination_name or "").strip().upper().replace("-", "_")
         mine = str(mine or "").strip().upper()
         crusher = cls._normalize_operational_crusher(crusher)
+        opf = " ".join(str(opf or "").strip().upper().split())
         compact = "".join(character for character in destination if character.isalnum())
 
         if not mine or not crusher:
             return True
-        if mine in {"CC", "CB"} and crusher.startswith("OPF0"):
-            number = crusher[-1]
-            return f"OPF{number}" in compact or f"OPF0{number}" in compact
+        if crusher == "TOTAL_FEED_PC":
+            # Synthetic operating crusher representing the total feed to one OPF.
+            # Keep the OPF boundary where it is available; CB OPF covers OPF1-4.
+            if mine == "CB":
+                return any(f"OPF{number}" in compact or f"OPF0{number}" in compact for number in range(1, 5))
+            if mine == "CC" and opf == "CC OPF01":
+                # CC OPF01 receives both OPF1 Crusher and Hal Crusher in APS.
+                return "OPF1" in compact or "OPF01" in compact or "HAL" in compact
+            if mine == "KV" and opf == "KV OPF":
+                # Total KV OPF combines the VK and VQ feed points.
+                return any(alias in compact for alias in ("VKOPF", "KVOPF", "VKPC", "VQOPF", "VQPC"))
+            opf_match = re.search(r"OPF0?([1-4])$", opf)
+            if opf_match:
+                number = opf_match.group(1)
+                return f"OPF{number}" in compact or f"OPF0{number}" in compact
+            return False
+        if mine == "CC" and crusher == "OPF02_PC":
+            # Christmas Creek OPF02 is represented by RCH in APS Mining.csv.
+            return "RCH" in compact or "OPF2" in compact or "OPF02" in compact
+        if mine in {"CC", "CB"}:
+            opf_match = re.search(r"OPF0?([1-4])(?:_?PC)?$", crusher)
+            if opf_match:
+                number = opf_match.group(1)
+                return f"OPF{number}" in compact or f"OPF0{number}" in compact
         aliases = {
-            ("EW", "EW_OPF"): ("EWOPF",),
-            ("KV", "VK_OPF"): ("VKOPF", "KVOPF"),
-            ("FT", "FT_OPF"): ("FTOPF",),
+            ("EW", "EW_OPF"): ("EWOPF", "EWPC", "EW01"),
+            ("EW", "EW_PC"): ("EWOPF", "EWPC", "EW01"),
+            ("KV", "VK_OPF"): ("VKOPF", "KVOPF", "VKPC"),
+            ("KV", "VK_PC"): ("VKOPF", "KVOPF", "VKPC"),
+            ("KV", "VQ_PC"): ("VQOPF", "VQPC"),
+            ("CC", "HAL_PC"): ("HALOPF", "HALPC", "HAL"),
+            ("FT", "FT_OPF"): ("FTOPF", "FTPC"),
+            ("FT", "FT_PC"): ("FTOPF", "FTPC"),
             ("IB", "CRUSHER"): ("CRUSHER",),
         }
         return any(alias in compact for alias in aliases.get((mine, crusher), (crusher.replace("_", ""),)))
 
     @staticmethod
-    def get_distinct_crusher_destinations(input_data):
+    def crusher_destination_names_match(left, right):
+        """Compare APS crusher names whether supplied as short or full paths."""
+        def normalized(value):
+            value = str(value or "").strip().upper().replace("\\", "/")
+            return value.rsplit("/", 1)[-1]
+
+        return normalized(left) == normalized(right)
+
+    @staticmethod
+    def _planning_window(start_time):
+        if hasattr(start_time, "toPyDateTime"):
+            start_time = start_time.toPyDateTime()
+        if not isinstance(start_time, datetime):
+            start_time = pd.to_datetime(start_time).to_pydatetime()
+        periods = PeriodManager()
+        periods.calculate_periods(start_time)
+        return start_time, periods.get_periods()["period_2_end"]
+
+    @classmethod
+    def _read_planning_window_rows(cls, input_data, columns, start_time=None):
+        requested_columns = set(columns) | {"Time.StartTime", "Time.EndTime"}
         data = pd.read_csv(
             input_data,
-            usecols=lambda column: column in {"Destination.Type", "Destination.FullName"}
+            usecols=lambda column: column in requested_columns,
         )
-        if data.empty or "Destination.Type" not in data or "Destination.FullName" not in data:
+        if data.empty or start_time is None:
+            return data
+        if not {"Time.StartTime", "Time.EndTime"}.issubset(data.columns):
+            raise ValueError(
+                "APS Mining.csv must contain Time.StartTime and Time.EndTime to filter the BlendMaster planning period."
+            )
+        data = data.copy()
+        data["Time.StartTime"] = cls._parse_datetime_column(
+            data["Time.StartTime"], "Time.StartTime"
+        )
+        data["Time.EndTime"] = cls._parse_datetime_column(
+            data["Time.EndTime"], "Time.EndTime"
+        )
+        window_start, window_end = cls._planning_window(start_time)
+        return data[
+            data["Time.StartTime"].notna()
+            & data["Time.EndTime"].notna()
+            & (data["Time.StartTime"] < pd.Timestamp(window_end))
+            & (data["Time.EndTime"] > pd.Timestamp(window_start))
+        ].copy()
+
+    @staticmethod
+    def _destination_name_column(data):
+        if "Destination.Name" in data.columns:
+            return "Destination.Name"
+        if "Destination.FullName" in data.columns:
+            return "Destination.FullName"
+        return None
+
+    @classmethod
+    def get_distinct_crusher_destinations(cls, input_data, start_time=None):
+        data = cls._read_planning_window_rows(
+            input_data,
+            {"Destination.Type", "Destination.Name", "Destination.FullName"},
+            None,
+        )
+        destination_column = cls._destination_name_column(data)
+        if data.empty or "Destination.Type" not in data or destination_column is None:
             return []
 
-        destination_type = data["Destination.Type"].astype("string").str.strip()
+        destination_type = data["Destination.Type"].astype("string").str.strip().str.lower()
         crusher_names = (
-            data.loc[destination_type == "Crusher", "Destination.FullName"]
+            data.loc[destination_type == "crusher", destination_column]
             .astype("string")
             .str.strip()
             .dropna()
         )
         return sorted(name for name in crusher_names.unique() if name)
+
+    @classmethod
+    def get_distinct_stockpile_destinations(cls, input_data):
+        """Return APS stockpile destinations without limiting them to a planning window."""
+        data = cls._read_planning_window_rows(
+            input_data,
+            {"Destination.Type", "Destination.Name", "Destination.FullName"},
+            None,
+        )
+        destination_column = cls._destination_name_column(data)
+        if data.empty or "Destination.Type" not in data or destination_column is None:
+            return []
+
+        destination_type = data["Destination.Type"].astype("string").str.strip().str.lower()
+        stockpile_names = (
+            data.loc[destination_type == "stockpile", destination_column]
+            .astype("string")
+            .str.strip()
+            .str.replace(r"^Stockpiles/", "", regex=True)
+            .dropna()
+        )
+        return sorted(name for name in stockpile_names.unique() if name)
+
+    @classmethod
+    def get_direct_tip_movement_options(cls, input_data, start_time):
+        data = cls._read_planning_window_rows(
+            input_data,
+            {
+                "Source.Type", "Source.NamePart2", "Destination.Type",
+                "Destination.Name", "Destination.FullName",
+            },
+            None,
+        )
+        if data.empty:
+            return {"grade_block_sources": [], "crusher_destinations": []}
+
+        source_type = data.get("Source.Type", pd.Series("", index=data.index)).astype("string").str.strip().str.lower()
+        if "Source.NamePart2" in data.columns:
+            sources = (
+                data.loc[source_type == "reserve", "Source.NamePart2"]
+                .astype("string").str.strip().dropna()
+            )
+            sources = sorted(value for value in sources.unique() if value)
+        else:
+            sources = []
+
+        destination_column = cls._destination_name_column(data)
+        if destination_column and "Destination.Type" in data.columns:
+            destination_type = data["Destination.Type"].astype("string").str.strip().str.lower()
+            destinations = (
+                data.loc[destination_type == "crusher", destination_column]
+                .astype("string").str.strip().dropna()
+            )
+            destinations = sorted(value for value in destinations.unique() if value)
+        else:
+            destinations = []
+        return {
+            "grade_block_sources": sources,
+            "crusher_destinations": destinations,
+        }
+
+    @classmethod
+    def calculate_crusher_feed_ratios(
+        cls,
+        input_data,
+        start_time,
+        selected_crusher_destinations,
+    ):
+        data = cls._read_planning_window_rows(
+            input_data,
+            {
+                "Destination.Type", "Destination.Name", "Destination.FullName",
+                "Mining.wetTonnes",
+            },
+            start_time,
+        )
+        destination_column = cls._destination_name_column(data)
+        selected = {
+            str(value).strip() for value in selected_crusher_destinations or []
+            if str(value).strip()
+        }
+        if (
+            data.empty
+            or destination_column is None
+            or "Destination.Type" not in data.columns
+            or "Mining.wetTonnes" not in data.columns
+            or not selected
+        ):
+            return {}
+
+        destination_type = data["Destination.Type"].astype("string").str.strip().str.lower()
+        names = data[destination_column].astype("string").str.strip()
+        tonnes = pd.to_numeric(data["Mining.wetTonnes"], errors="coerce").fillna(0.0)
+        filtered = pd.DataFrame({"destination": names, "tonnes": tonnes})[
+            (destination_type == "crusher") & names.isin(selected) & (tonnes > 0)
+        ]
+        totals = filtered.groupby("destination")["tonnes"].sum()
+        total_feed = float(totals.sum())
+        if total_feed <= 0:
+            return {}
+        return {
+            str(destination): float(value) / total_feed
+            for destination, value in totals.items()
+        }
 
     @staticmethod
     def normalize_brand_name(raw_brand, brand_labels):
@@ -107,14 +322,23 @@ class ExpitDataHandler:
                 return brand
         return raw_text
 
-    @staticmethod
+    @classmethod
     def get_stockpile_brand_guidance(
+        cls,
         input_data,
         brand_labels,
         operational_mine=None,
         operational_crusher=None,
+        operational_opf=None,
     ):
-        """Map APS crusher guidance rows to ROM stockpile brand proportions."""
+        """Map APS plan rows to ROM stockpile brand proportions.
+
+        Stockpile Inventories is a hub/mine-level view.  Therefore guidance is
+        deliberately derived across all qualifying crusher destinations in the
+        APS file, rather than being filtered by the active OPF or operating
+        crusher.  The optional scenario arguments remain in the signature for
+        compatibility with older callers.
+        """
         required_columns = {
             "Destination.Type",
             "Destination.Name",
@@ -135,16 +359,6 @@ class ExpitDataHandler:
             & (data["Agent.Name"].astype("string").str.strip() == "PlantAgent")
             & (data["Source.Type"].astype("string").str.strip() == "Flow")
         ].copy()
-        if operational_mine and operational_crusher and not filtered.empty:
-            filtered = filtered[
-                filtered["Destination.Name"].apply(
-                    lambda value: ExpitDataHandler.crusher_destination_matches(
-                        value,
-                        operational_mine,
-                        operational_crusher,
-                    )
-                )
-            ].copy()
         if filtered.empty:
             return {}
 
@@ -190,6 +404,8 @@ class ExpitDataHandler:
         return guidance
 
     def _preprocess_data(self):
+        if "Destination.Name" not in self.data.columns:
+            self.data["Destination.Name"] = self.data.get("Destination.FullName", "")
         self.data["Time.StartTime"] = self._parse_datetime_column(
             self.data["Time.StartTime"],
             "Time.StartTime",
@@ -211,6 +427,7 @@ class ExpitDataHandler:
             "Mining.grades_mn": "float64",
             "Mining.grades_p": "float64",
             "Destination.Type": "string",
+            "Destination.Name": "string",
             "Destination.FullName": "string",
             "HaulageResult.Times.Dumping": "float64",
             "HaulageResult.Times.LoadedTravel": "float64",
@@ -223,13 +440,17 @@ class ExpitDataHandler:
         self.source_stockpile_fallbacks = self._build_source_stockpile_fallbacks(self.data)
 
         destination_type = self.data["Destination.Type"].str.strip()
-        destination_name = self.data["Destination.FullName"].str.strip()
+        destination_name = self.data["Destination.Name"].str.strip()
+        destination_full_name = self.data["Destination.FullName"].str.strip()
         stockpile_destination_mask = destination_type == "Stockpile"
         crusher_destination_mask = pd.Series(False, index=self.data.index)
         if self.include_crusher_destinations and self.selected_crusher_names:
             crusher_destination_mask = (
                 (destination_type == "Crusher")
-                & destination_name.isin(self.selected_crusher_names)
+                & (
+                    destination_name.isin(self.selected_crusher_names)
+                    | destination_full_name.isin(self.selected_crusher_names)
+                )
             )
             if self.operational_mine and self.operational_crusher:
                 crusher_destination_mask &= destination_name.apply(
@@ -237,6 +458,7 @@ class ExpitDataHandler:
                         value,
                         self.operational_mine,
                         self.operational_crusher,
+                        self.operational_opf,
                     )
                 )
 
@@ -327,6 +549,9 @@ class ExpitDataHandler:
         planned_destination = str(row.get("Destination.FullName", "") or "").strip()
         source_name = str(row.get("Source.FullName", "") or "").strip()
         is_crusher_destination = destination_type == "Crusher"
+        crusher_destination = str(
+            row.get("Destination.Name", row.get("Destination.FullName", "")) or ""
+        ).strip()
         fallback_destination = (
             self.source_stockpile_fallbacks.get(source_name, "")
             if is_crusher_destination
@@ -338,7 +563,27 @@ class ExpitDataHandler:
             "planned_destination": planned_destination,
             "fallback_destination": fallback_destination,
             "aps_direct_tip_candidate": bool(is_crusher_destination),
+            "crusher_destination": crusher_destination,
+            "direct_tip_eligible": self._direct_tip_rule_matches(source_name),
         }
+
+    def _direct_tip_rule_matches(self, source_name):
+        source_key = str(source_name or "").strip().upper()
+        if not source_key or not self.direct_tip_movement_rules:
+            return False
+        selected_destinations = list(self.selected_crusher_names)
+        for rule in self.direct_tip_movement_rules:
+            source_pattern = str(rule["grade_block_source"]).strip().upper()
+            destination = str(rule["crusher_destination"]).strip()
+            if source_pattern not in source_key:
+                continue
+            if selected_destinations and not any(
+                self.crusher_destination_names_match(destination, selected)
+                for selected in selected_destinations
+            ):
+                continue
+            return True
+        return False
 
     def _group_data(self):
         # Create WeightedRate column without directly inserting into the fragmented DataFrame
@@ -349,7 +594,10 @@ class ExpitDataHandler:
 
         # Perform basic aggregation
         aggregated_data = self.data.groupby(
-            ["Agent.Name", "Source.Type", "Source.FullName", "Destination.Type", "Destination.FullName"],
+            [
+                "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
+                "Destination.Name", "Destination.FullName",
+            ],
             as_index=False
         ).agg({
             "Time.StartTime": "first",  # First row's start time
