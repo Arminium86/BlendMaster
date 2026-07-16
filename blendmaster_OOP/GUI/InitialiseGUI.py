@@ -9683,6 +9683,53 @@ class UserInputs(QMainWindow):
             self.is_project_loaded = False
             return
 
+    def resolve_missing_aps_mining_csv_paths(self, loaded_state):
+        """Prompt once per missing APS file path before restoring project state."""
+        if not isinstance(loaded_state, dict):
+            return True
+
+        state_records = [loaded_state]
+        scenarios = loaded_state.get("site_scenarios")
+        if isinstance(scenarios, dict):
+            state_records.extend(
+                state for state in scenarios.values() if isinstance(state, dict)
+            )
+
+        path_keys = ("file_path_choice", "aps_mining_csv", "mining_csv", "file_path")
+        replacements = {}
+        for state in state_records:
+            for key in path_keys:
+                saved_path = str(state.get(key) or "").strip()
+                if not saved_path:
+                    continue
+                normalized_path = os.path.normcase(os.path.abspath(os.path.expanduser(saved_path)))
+                if os.path.isfile(normalized_path):
+                    continue
+                if normalized_path not in replacements:
+                    start_directory = os.path.dirname(normalized_path)
+                    if not os.path.isdir(start_directory):
+                        start_directory = ""
+                    replacement, _ = QFileDialog.getOpenFileName(
+                        self,
+                        "Locate APS Mining.csv",
+                        start_directory,
+                        "APS Mining.csv (*.csv);;All Files (*)",
+                    )
+                    if not replacement:
+                        QMessageBox.information(
+                            self,
+                            "Project Load Cancelled",
+                            "The project was not loaded because its APS Mining.csv file was not located.",
+                        )
+                        return False
+                    replacements[normalized_path] = replacement
+
+                replacement = replacements[normalized_path]
+                for path_key in path_keys:
+                    if str(state.get(path_key) or "").strip() == saved_path:
+                        state[path_key] = replacement
+        return True
+
     def normalize_loaded_scenario_ratio_groups(self, scenarios):
         """Give pre-ratio multi-site projects a valid, deterministic split."""
         grouped = {}
@@ -9765,6 +9812,9 @@ class UserInputs(QMainWindow):
         """Restore app state using the same path as Load Project."""
         self.is_project_loaded = True
         loaded_state = self.normalized_agent_project_state(loaded_state)
+        if not self.resolve_missing_aps_mining_csv_paths(loaded_state):
+            self.is_project_loaded = False
+            return False
         loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
         # Unpack loaded state into variables
