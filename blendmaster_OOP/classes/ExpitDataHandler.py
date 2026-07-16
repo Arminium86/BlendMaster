@@ -549,6 +549,7 @@ class ExpitDataHandler:
         planned_destination = str(row.get("Destination.FullName", "") or "").strip()
         source_name = str(row.get("Source.FullName", "") or "").strip()
         is_crusher_destination = destination_type == "Crusher"
+        direct_tip_eligible = self._direct_tip_rule_matches(source_name)
         crusher_destination = str(
             row.get("Destination.Name", row.get("Destination.FullName", "")) or ""
         ).strip()
@@ -562,9 +563,24 @@ class ExpitDataHandler:
             "destination_type": destination_type,
             "planned_destination": planned_destination,
             "fallback_destination": fallback_destination,
-            "aps_direct_tip_candidate": bool(is_crusher_destination),
+            # Stockpile-bound payloads are always available for direct-tip
+            # consideration when their source has a rule. Crusher-bound rows
+            # enter the same pool only when APS direct-tip re-evaluation is on.
+            "aps_direct_tip_candidate": bool(
+                direct_tip_eligible
+                and (
+                    not is_crusher_destination
+                    or self.include_crusher_destinations
+                )
+            ),
             "crusher_destination": crusher_destination,
-            "direct_tip_eligible": self._direct_tip_rule_matches(source_name),
+            "direct_tip_eligible": bool(
+                direct_tip_eligible
+                and (
+                    not is_crusher_destination
+                    or self.include_crusher_destinations
+                )
+            ),
         }
 
     def _direct_tip_rule_matches(self, source_name):
