@@ -438,7 +438,130 @@ class Optimizer:
 
         target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
         brand_guidance_mode = solver_config.get("brand_guidance_mode", "ignore")
+        brand_guidance_enabled = bool(
+            solver_config.get(
+                "brand_guidance_enabled",
+                brand_guidance_mode != "ignore",
+            )
+        )
         brand_guidance_incentive = safe_float(solver_config.get("brand_guidance_incentive", 0.0), 0.0)
+        timing_guidance_enabled = bool(
+            solver_config.get("timing_guidance_enabled", False)
+        )
+        timing_guidance_incentive = safe_float(
+            solver_config.get("timing_guidance_incentive", 0.0),
+            0.0,
+        )
+        timing_guidance_tolerance_hours = max(
+            safe_float(
+                solver_config.get("timing_guidance_tolerance_hours", 0.0),
+                0.0,
+            ),
+            0.0,
+        )
+        active_blend_guidance_enabled = bool(
+            solver_config.get("active_blend_guidance_enabled", False)
+        )
+        active_blend_guidance_incentive = safe_float(
+            solver_config.get("active_blend_guidance_incentive", 0.0),
+            0.0,
+        )
+        current_steady_state_datetime = pd.to_datetime(
+            solver_config.get("current_steady_state_datetime"),
+            errors="coerce",
+        )
+
+        def normalized_stockpile_name(value):
+            return (
+                str(value or "")
+                .strip()
+                .upper()
+                .replace("\\", "/")
+                .replace("STOCKPILES/", "")
+            )
+
+        stockpile_timing_guidance = {
+            normalized_stockpile_name(stockpile): guidance
+            for stockpile, guidance in (
+                solver_config.get("stockpile_timing_guidance", {}) or {}
+            ).items()
+        }
+
+        def event_timing_compliance(event):
+            if (
+                not timing_guidance_enabled
+                or not event.is_stockpile
+                or pd.isna(current_steady_state_datetime)
+            ):
+                return 0.0
+            guidance = stockpile_timing_guidance.get(
+                normalized_stockpile_name(event.stockpile),
+                {},
+            )
+            windows = guidance.get("windows", []) if isinstance(guidance, dict) else []
+            nearest_distance_hours = None
+            tolerance = pd.Timedelta(hours=timing_guidance_tolerance_hours)
+            for window in windows:
+                start = pd.to_datetime(
+                    window.get("start_datetime"), errors="coerce"
+                )
+                end = pd.to_datetime(
+                    window.get("end_datetime"), errors="coerce"
+                )
+                if pd.isna(start) or pd.isna(end):
+                    continue
+                expanded_start = start - tolerance
+                expanded_end = end + tolerance
+                if expanded_start <= current_steady_state_datetime <= expanded_end:
+                    return 1.0
+                if current_steady_state_datetime < expanded_start:
+                    distance = (
+                        expanded_start - current_steady_state_datetime
+                    ).total_seconds() / 3600
+                else:
+                    distance = (
+                        current_steady_state_datetime - expanded_end
+                    ).total_seconds() / 3600
+                nearest_distance_hours = (
+                    distance
+                    if nearest_distance_hours is None
+                    else min(nearest_distance_hours, distance)
+                )
+            if nearest_distance_hours is None:
+                return 0.0
+            return 1.0 / (1.0 + max(nearest_distance_hours, 0.0))
+
+        expected_active_blend = set()
+        if (
+            active_blend_guidance_enabled
+            and target_product_brand
+            and not pd.isna(current_steady_state_datetime)
+        ):
+            for window in solver_config.get("active_blend_guidance", []) or []:
+                brand = str(window.get("product_brand") or "").strip().upper()
+                start = pd.to_datetime(
+                    window.get("start_datetime"), errors="coerce"
+                )
+                end = pd.to_datetime(
+                    window.get("end_datetime"), errors="coerce"
+                )
+                if (
+                    brand == target_product_brand
+                    and not pd.isna(start)
+                    and not pd.isna(end)
+                    and start <= current_steady_state_datetime < end
+                ):
+                    expected_active_blend = {
+                        normalized_stockpile_name(stockpile)
+                        for stockpile in window.get("stockpiles", [])
+                    }
+                    break
+
+        def signed_guidance_cost(value, compliance):
+            compliance = max(0.0, min(1.0, safe_float(compliance)))
+            if value >= 0:
+                return -value * compliance
+            return abs(value) * (1.0 - compliance)
 
         def event_brand_match_proportion(event):
             if not target_product_brand or not event.is_stockpile:
@@ -527,15 +650,33 @@ class Optimizer:
                 ):
                     grade_block_pair_reward = stay_on_same_grade_block_pair_incentive
             brand_match_proportion = event_brand_match_proportion(event)
-            brand_guidance_reward = 0
-            brand_guidance_penalty = 0
-            if target_product_brand and brand_guidance_incentive and event.is_stockpile:
-                if brand_guidance_mode == "prefer_match":
-                    brand_guidance_reward = brand_guidance_incentive * brand_match_proportion
-                elif brand_guidance_mode == "penalize_mismatch":
-                    brand_guidance_penalty = brand_guidance_incentive * (1 - brand_match_proportion)
+            brand_guidance_cost = 0
+            if (
+                brand_guidance_enabled
+                and target_product_brand
+                and brand_guidance_incentive
+                and event.is_stockpile
+            ):
+                if brand_guidance_mode == "penalize_mismatch":
+                    brand_guidance_cost = abs(brand_guidance_incentive) * (
+                        1 - brand_match_proportion
+                    )
+                else:
+                    brand_guidance_cost = signed_guidance_cost(
+                        brand_guidance_incentive,
+                        brand_match_proportion,
+                    )
+            timing_guidance_cost = 0
+            if timing_guidance_incentive and event.is_stockpile:
+                timing_guidance_cost = signed_guidance_cost(
+                    timing_guidance_incentive,
+                    event_timing_compliance(event),
+                )
             base_costs.append(
-                dmc + event.cost + event.cash + brand_guidance_penalty - preference_reward - direct_tip_reward - continuity_reward - grade_block_pair_reward - brand_guidance_reward
+                dmc + event.cost + event.cash + brand_guidance_cost
+                + timing_guidance_cost
+                - preference_reward - direct_tip_reward - continuity_reward
+                - grade_block_pair_reward
             )
 
         throughput_reward = max(
@@ -855,6 +996,11 @@ class Optimizer:
             or max_stockpiles is not None
             or solver_config.get("prefer_fewer_stockpiles", False)
             or bool(excluded_source_sets)
+            or bool(
+                active_blend_guidance_enabled
+                and active_blend_guidance_incentive
+                and expected_active_blend
+            )
         )
         if source_event_indices and use_binary_selection:
             y_vars = {}
@@ -869,6 +1015,15 @@ class Optimizer:
                 source_feed_upper_bound = sum(bounds[i][1] for i in indices)
 
                 prob += source_feed <= source_feed_upper_bound * y_var
+                if (
+                    active_blend_guidance_enabled
+                    and active_blend_guidance_incentive
+                    and expected_active_blend
+                ):
+                    prob += (
+                        source_feed
+                        >= min(1.0, source_feed_upper_bound) * y_var
+                    )
 
             for stockpile_name, indices in stockpile_event_indices.items():
                 stockpile_feed = lpSum(x_vars[i] for i in indices)
@@ -900,6 +1055,60 @@ class Optimizer:
                 objective += Optimizer.FEWER_STOCKPILE_PENALTY * lpSum(
                     y_vars[name] for name in stockpile_event_indices
                 )
+            if (
+                active_blend_guidance_enabled
+                and active_blend_guidance_incentive
+                and expected_active_blend
+                and stockpile_event_indices
+            ):
+                available_stockpile_names = {
+                    stockpile_name
+                    for stockpile_name, indices in stockpile_event_indices.items()
+                    if sum(bounds[index][1] for index in indices)
+                    > Optimizer.SOLUTION_TOLERANCE
+                }
+                expected_names = {
+                    stockpile_name
+                    for stockpile_name in available_stockpile_names
+                    if normalized_stockpile_name(stockpile_name)
+                    in expected_active_blend
+                }
+                outside_names = available_stockpile_names - expected_names
+                exact_match = LpVariable(
+                    "two_wp_active_blend_exact_match",
+                    cat=LpBinary,
+                )
+                if {
+                    normalized_stockpile_name(name)
+                    for name in expected_names
+                } != expected_active_blend:
+                    prob += exact_match == 0
+                else:
+                    match_terms = (
+                        [y_vars[name] for name in expected_names]
+                        + [1 - y_vars[name] for name in outside_names]
+                    )
+                    for name in expected_names:
+                        prob += exact_match <= y_vars[name]
+                    for name in outside_names:
+                        prob += exact_match <= 1 - y_vars[name]
+                    prob += exact_match >= lpSum(match_terms) - (
+                        len(match_terms) - 1
+                    )
+                guidance_value = abs(active_blend_guidance_incentive)
+                # CBC solves against a deliberately dominant throughput term.
+                # Scale this binary tie-break enough to remain numerically
+                # visible while keeping it below the value of one lost tonne.
+                active_blend_tie_break = (
+                    min(
+                        guidance_value * max_total_feed * 1000.0,
+                        Optimizer.THROUGHPUT_REWARD_PER_TONNE * 0.5,
+                    )
+                )
+                if active_blend_guidance_incentive >= 0:
+                    objective -= active_blend_tie_break * exact_match
+                else:
+                    objective += active_blend_tie_break * (1 - exact_match)
 
         # Objective function
         prob += objective

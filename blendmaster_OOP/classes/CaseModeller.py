@@ -656,6 +656,7 @@ class CaseModeller:
 
     def solver_config_for_current_step(self):
         solver_config = dict(self.solver_config or {})
+        solver_config["current_steady_state_datetime"] = self.current_time
         current_product_build_index = self.current_product_build_index()
         if current_product_build_index is not None:
             current_product_build = self.product_build_settings[current_product_build_index]

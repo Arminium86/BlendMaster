@@ -8,6 +8,31 @@ from pandas import DataFrame
 from classes.PeriodManager import PeriodManager
 
 class ExpitDataHandler:
+    TRANSACTION_COLUMNS = {
+        "Agent.Name",
+        "Source.Type",
+        "Source.FullName",
+        "Source.Pit",
+        "Time.StartTime",
+        "Time.EndTime",
+        "Mining.wetTonnes",
+        "Mining.grades_fe",
+        "Mining.grades_si",
+        "Mining.grades_al",
+        "Mining.grades_mn",
+        "Mining.grades_p",
+        "Destination.Type",
+        "Destination.Name",
+        "Destination.FullName",
+        "HaulageResult.Times.Dumping",
+        "HaulageResult.Times.LoadedTravel",
+        "HaulageResult.LoaderProductionRate.Wtph",
+        "HaulageResult.Times.SpotAtDump",
+        "HaulageResult.Times.SpotAtLoader",
+        "HaulageResult.TruckPayload",
+        "HaulageResult.NumberOfTrips",
+    }
+
     def __init__(
         self,
         input_data,
@@ -17,17 +42,39 @@ class ExpitDataHandler:
         operational_crusher=None,
         operational_opf=None,
         direct_tip_movement_rules=None,
+        destination_guidance=None,
+        selected_agent_names=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
+        self.selected_agent_names = self._normalize_selected_agent_names(
+            selected_agent_names
+        )
         self.operational_mine = str(operational_mine or "").strip().upper()
         self.operational_crusher = self._normalize_operational_crusher(operational_crusher)
         self.operational_opf = str(operational_opf or "").strip().upper()
         self.direct_tip_movement_rules = self._normalize_movement_rules(
             direct_tip_movement_rules
         )
+        self.use_destination_guidance = destination_guidance is not None
+        self.destination_guidance = destination_guidance or {}
+        self._source_destination_lookup = {
+            str(key).strip().upper(): value
+            for key, value in (
+                self.destination_guidance.get("source_destinations", {}) or {}
+            ).items()
+        }
+        self._pit_destination_lookup = {
+            str(key).strip().upper(): value
+            for key, value in (
+                self.destination_guidance.get("pit_destinations", {}) or {}
+            ).items()
+        }
         self.source_stockpile_fallbacks = {}
-        self.data = pd.read_csv(input_data)
+        self.data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in self.TRANSACTION_COLUMNS,
+        )
         if not self.data.empty:
             self._preprocess_data()
             self._group_data()
@@ -44,6 +91,19 @@ class ExpitDataHandler:
             }
         selected_crusher_name = str(selected_crusher_name).strip()
         return {selected_crusher_name} if selected_crusher_name else set()
+
+    @staticmethod
+    def _normalize_selected_agent_names(selected_agent_names):
+        if selected_agent_names is None:
+            return set()
+        if isinstance(selected_agent_names, (list, tuple, set)):
+            return {
+                str(name).strip()
+                for name in selected_agent_names
+                if str(name).strip()
+            }
+        selected_agent_names = str(selected_agent_names).strip()
+        return {selected_agent_names} if selected_agent_names else set()
 
     @staticmethod
     def _normalize_movement_rules(rules):
@@ -223,6 +283,30 @@ class ExpitDataHandler:
         return sorted(name for name in stockpile_names.unique() if name)
 
     @classmethod
+    def get_distinct_expit_agent_names(cls, input_data):
+        """Return distinct 24HR agents that can produce expit transactions."""
+        agent_names = set()
+        chunks = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in {"Agent.Name", "Source.Type"},
+            chunksize=250_000,
+        )
+        for data in chunks:
+            if "Agent.Name" not in data or "Source.Type" not in data:
+                return []
+            source_type = (
+                data["Source.Type"].astype("string").str.strip().str.lower()
+            )
+            names = (
+                data.loc[source_type == "reserve", "Agent.Name"]
+                .astype("string")
+                .str.strip()
+                .dropna()
+            )
+            agent_names.update(name for name in names.unique() if name)
+        return sorted(agent_names)
+
+    @classmethod
     def get_direct_tip_movement_options(cls, input_data, start_time):
         data = cls._read_planning_window_rows(
             input_data,
@@ -322,29 +406,198 @@ class ExpitDataHandler:
                 return brand
         return raw_text
 
-    @classmethod
-    def get_stockpile_brand_guidance(
-        cls,
-        input_data,
-        brand_labels,
-        operational_mine=None,
-        operational_crusher=None,
-        operational_opf=None,
-    ):
-        """Map APS plan rows to ROM stockpile brand proportions.
+    @staticmethod
+    def _source_pit(source_pit, source_full_name):
+        pit = str(source_pit or "").strip().upper()
+        if pit and pit not in {"<NA>", "NAN", "NONE"}:
+            return pit
+        parts = [
+            part.strip().upper()
+            for part in str(source_full_name or "").replace("\\", "/").split("/")
+            if part.strip()
+        ]
+        if len(parts) >= 3 and parts[0] == "RESERVES":
+            return parts[2]
+        return ""
 
-        Stockpile Inventories is a hub/mine-level view.  Therefore guidance is
-        deliberately derived across all qualifying crusher destinations in the
-        APS file, rather than being filtered by the active OPF or operating
-        crusher.  The optional scenario arguments remain in the signature for
-        compatibility with older callers.
-        """
+    @classmethod
+    def build_2wp_destination_guidance(cls, input_data):
+        """Build full-horizon grade-block destination ratios and fallbacks."""
+        required_columns = {
+            "Source.Type",
+            "Source.FullName",
+            "Source.Pit",
+            "Destination.Type",
+            "Destination.Name",
+            "Destination.FullName",
+            "Time.StartTime",
+            "Time.EndTime",
+            "Mining.wetTonnes",
+        }
+        data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in required_columns,
+        )
+        if data.empty:
+            return {
+                "source_destinations": {},
+                "pit_destinations": {},
+                "last_destination": {},
+            }
+
+        if "Destination.Name" not in data.columns:
+            data["Destination.Name"] = data.get("Destination.FullName", "")
+        if "Source.Pit" not in data.columns:
+            data["Source.Pit"] = ""
+        missing = required_columns - {"Source.Pit"} - set(data.columns)
+        if missing:
+            raise ValueError(
+                "2WP Mining.csv is missing destination-guidance column(s): "
+                + ", ".join(sorted(missing))
+            )
+
+        source_type = data["Source.Type"].astype("string").str.strip().str.lower()
+        destination_type = (
+            data["Destination.Type"].astype("string").str.strip().str.lower()
+        )
+        stockpile_rows = data[
+            (source_type == "reserve") & (destination_type == "stockpile")
+        ].copy()
+        if stockpile_rows.empty:
+            return {
+                "source_destinations": {},
+                "pit_destinations": {},
+                "last_destination": {},
+            }
+
+        stockpile_rows["_row_order"] = range(len(stockpile_rows))
+        stockpile_rows["source"] = (
+            stockpile_rows["Source.FullName"].astype("string").str.strip()
+        )
+        stockpile_rows["pit"] = [
+            cls._source_pit(pit, source)
+            for pit, source in zip(
+                stockpile_rows["Source.Pit"],
+                stockpile_rows["Source.FullName"],
+            )
+        ]
+        stockpile_rows["destination"] = (
+            stockpile_rows["Destination.FullName"].astype("string").str.strip()
+        )
+        stockpile_rows["destination_name"] = (
+            stockpile_rows["Destination.Name"].astype("string").str.strip()
+        )
+        stockpile_rows["tonnes"] = pd.to_numeric(
+            stockpile_rows["Mining.wetTonnes"], errors="coerce"
+        ).fillna(0.0)
+        stockpile_rows = stockpile_rows[
+            stockpile_rows["source"].notna()
+            & stockpile_rows["source"].ne("")
+            & stockpile_rows["destination"].notna()
+            & stockpile_rows["destination"].ne("")
+            & (stockpile_rows["tonnes"] > 0)
+        ].copy()
+        if stockpile_rows.empty:
+            return {
+                "source_destinations": {},
+                "pit_destinations": {},
+                "last_destination": {},
+            }
+
+        source_totals = (
+            stockpile_rows
+            .groupby(
+                ["source", "pit", "destination", "destination_name"],
+                as_index=False,
+                dropna=False,
+            )["tonnes"]
+            .sum()
+        )
+        source_destinations = {}
+        for source, group in source_totals.groupby("source", sort=False):
+            total_tonnes = float(group["tonnes"].sum())
+            if total_tonnes <= 0:
+                continue
+            source_destinations[str(source)] = [
+                {
+                    "destination": str(row["destination"]),
+                    "destination_name": str(row["destination_name"]),
+                    "ratio": float(row["tonnes"]) / total_tonnes,
+                    "two_wp_tonnes": float(row["tonnes"]),
+                    "pit": str(row["pit"]),
+                }
+                for _, row in group.sort_values(
+                    ["tonnes", "destination"],
+                    ascending=[False, True],
+                ).iterrows()
+            ]
+
+        pit_destinations = {}
+        pit_rows = stockpile_rows[stockpile_rows["pit"].ne("")]
+        if not pit_rows.empty:
+            pit_totals = (
+                pit_rows
+                .groupby(
+                    ["pit", "destination", "destination_name"],
+                    as_index=False,
+                    dropna=False,
+                )["tonnes"]
+                .sum()
+                .sort_values(
+                    ["pit", "tonnes", "destination"],
+                    ascending=[True, False, True],
+                )
+            )
+            for pit, group in pit_totals.groupby("pit", sort=False):
+                row = group.iloc[0]
+                pit_destinations[str(pit)] = {
+                    "destination": str(row["destination"]),
+                    "destination_name": str(row["destination_name"]),
+                    "ratio": 1.0,
+                    "two_wp_tonnes": float(row["tonnes"]),
+                    "pit": str(pit),
+                }
+
+        end_times = cls._parse_datetime_column(
+            stockpile_rows["Time.EndTime"],
+            "Time.EndTime",
+        )
+        start_times = cls._parse_datetime_column(
+            stockpile_rows["Time.StartTime"],
+            "Time.StartTime",
+        )
+        ordered = stockpile_rows.assign(
+            _end_time=end_times,
+            _start_time=start_times,
+        ).sort_values(
+            ["_end_time", "_start_time", "_row_order"],
+            ascending=[True, True, True],
+            na_position="first",
+        )
+        last_row = ordered.iloc[-1]
+        last_destination = {
+            "destination": str(last_row["destination"]),
+            "destination_name": str(last_row["destination_name"]),
+            "ratio": 1.0,
+            "two_wp_tonnes": float(last_row["tonnes"]),
+            "pit": str(last_row["pit"]),
+        }
+        return {
+            "source_destinations": source_destinations,
+            "pit_destinations": pit_destinations,
+            "last_destination": last_destination,
+        }
+
+    @classmethod
+    def _read_2wp_feed_guidance_rows(cls, input_data, brand_labels):
         required_columns = {
             "Destination.Type",
             "Destination.Name",
             "Agent.Name",
             "Source.Type",
             "OriginalSource.Name",
+            "Time.StartTime",
+            "Time.EndTime",
             "Mining.wetTonnes",
         }
         data = pd.read_csv(
@@ -352,30 +605,175 @@ class ExpitDataHandler:
             usecols=lambda column: column in required_columns,
         )
         if data.empty or not required_columns.issubset(set(data.columns)):
-            return {}
+            return pd.DataFrame()
 
         filtered = data[
-            (data["Destination.Type"].astype("string").str.strip() == "Crusher")
-            & (data["Agent.Name"].astype("string").str.strip() == "PlantAgent")
-            & (data["Source.Type"].astype("string").str.strip() == "Flow")
+            (
+                data["Destination.Type"]
+                .astype("string").str.strip().str.lower()
+                == "crusher"
+            )
+            & (
+                data["Agent.Name"].astype("string").str.strip().str.lower()
+                == "plantagent"
+            )
+            & (
+                data["Source.Type"].astype("string").str.strip().str.lower()
+                == "flow"
+            )
         ].copy()
         if filtered.empty:
+            return filtered
+
+        filtered["stockpile"] = (
+            filtered["OriginalSource.Name"]
+            .astype("string")
+            .str.strip()
+            .str.replace(r"^Stockpiles/", "", regex=True)
+        )
+        filtered["brand"] = filtered["Destination.Name"].apply(
+            lambda value: cls.normalize_brand_name(value, brand_labels)
+        )
+        filtered["tonnes"] = pd.to_numeric(
+            filtered["Mining.wetTonnes"], errors="coerce"
+        ).fillna(0.0)
+        filtered["start_datetime"] = cls._parse_datetime_column(
+            filtered["Time.StartTime"],
+            "Time.StartTime",
+        )
+        filtered["end_datetime"] = cls._parse_datetime_column(
+            filtered["Time.EndTime"],
+            "Time.EndTime",
+        )
+        return filtered[
+            filtered["stockpile"].notna()
+            & filtered["stockpile"].ne("")
+            & filtered["brand"].ne("")
+            & (filtered["tonnes"] > 0)
+            & filtered["start_datetime"].notna()
+            & filtered["end_datetime"].notna()
+        ].copy()
+
+    @staticmethod
+    def _merge_guidance_windows(rows):
+        windows = []
+        for row in rows:
+            start = pd.Timestamp(row["start_datetime"])
+            end = pd.Timestamp(row["end_datetime"])
+            if end <= start:
+                continue
+            brands = set(row.get("brands") or [])
+            tonnes = float(row.get("tonnes") or 0.0)
+            if windows and start <= windows[-1]["end_datetime"]:
+                windows[-1]["end_datetime"] = max(
+                    windows[-1]["end_datetime"], end
+                )
+                windows[-1]["brands"].update(brands)
+                windows[-1]["two_wp_tonnes"] += tonnes
+            else:
+                windows.append({
+                    "start_datetime": start,
+                    "end_datetime": end,
+                    "brands": brands,
+                    "two_wp_tonnes": tonnes,
+                })
+        for window in windows:
+            window["duration_hours"] = (
+                window["end_datetime"] - window["start_datetime"]
+            ).total_seconds() / 3600
+            window["brands"] = sorted(window["brands"])
+        return windows
+
+    @classmethod
+    def _stockpile_timing_guidance_from_rows(cls, rows):
+        if rows.empty:
             return {}
 
-        filtered["stockpile"] = filtered["OriginalSource.Name"].astype("string").str.strip()
-        filtered["brand"] = filtered["Destination.Name"].apply(
-            lambda value: ExpitDataHandler.normalize_brand_name(value, brand_labels)
+        guidance = {}
+        for stockpile, group in rows.groupby("stockpile", sort=False):
+            interval_rows = [
+                {
+                    "start_datetime": row["start_datetime"],
+                    "end_datetime": row["end_datetime"],
+                    "brands": [row["brand"]],
+                    "tonnes": row["tonnes"],
+                }
+                for _, row in group.sort_values(
+                    ["start_datetime", "end_datetime"]
+                ).iterrows()
+            ]
+            windows = cls._merge_guidance_windows(interval_rows)
+            if windows:
+                guidance[str(stockpile)] = {"windows": windows}
+        return guidance
+
+    @classmethod
+    def get_stockpile_timing_guidance(cls, input_data, brand_labels):
+        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+        return cls._stockpile_timing_guidance_from_rows(rows)
+
+    @classmethod
+    def _active_blend_guidance_from_rows(cls, rows):
+        if rows.empty:
+            return []
+
+        active_windows = []
+        for brand, brand_rows in rows.groupby("brand", sort=False):
+            boundaries = sorted(set(
+                pd.Timestamp(value)
+                for value in pd.concat([
+                    brand_rows["start_datetime"],
+                    brand_rows["end_datetime"],
+                ])
+                if pd.notna(value)
+            ))
+            brand_windows = []
+            for start, end in zip(boundaries, boundaries[1:]):
+                if end <= start:
+                    continue
+                active = brand_rows[
+                    (brand_rows["start_datetime"] < end)
+                    & (brand_rows["end_datetime"] > start)
+                ]
+                stockpiles = sorted(set(active["stockpile"].astype(str)))
+                if not stockpiles:
+                    continue
+                if (
+                    brand_windows
+                    and brand_windows[-1]["stockpiles"] == stockpiles
+                    and brand_windows[-1]["end_datetime"] == start
+                ):
+                    brand_windows[-1]["end_datetime"] = end
+                else:
+                    brand_windows.append({
+                        "product_brand": str(brand),
+                        "stockpiles": stockpiles,
+                        "start_datetime": start,
+                        "end_datetime": end,
+                    })
+            for window in brand_windows:
+                window["duration_hours"] = (
+                    window["end_datetime"] - window["start_datetime"]
+                ).total_seconds() / 3600
+            active_windows.extend(brand_windows)
+        return sorted(
+            active_windows,
+            key=lambda window: (
+                window["start_datetime"],
+                window["product_brand"],
+                tuple(window["stockpiles"]),
+            ),
         )
-        filtered["tonnes"] = pd.to_numeric(filtered["Mining.wetTonnes"], errors="coerce").fillna(0)
-        filtered = filtered[
-            (filtered["stockpile"].notna())
-            & (filtered["stockpile"] != "")
-            & (filtered["brand"] != "")
-            & (filtered["tonnes"] > 0)
-        ]
+
+    @classmethod
+    def get_active_blend_guidance(cls, input_data, brand_labels):
+        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+        return cls._active_blend_guidance_from_rows(rows)
+
+    @staticmethod
+    def _stockpile_brand_guidance_from_rows(filtered):
         if filtered.empty:
             return {}
-
         grouped = (
             filtered
             .groupby(["stockpile", "brand"], as_index=False)["tonnes"]
@@ -403,9 +801,143 @@ class ExpitDataHandler:
             }
         return guidance
 
+    @classmethod
+    def get_2wp_schedule_guidance(cls, input_data, brand_labels):
+        """Read the 2WP feed rows once for all three independent guidance layers."""
+        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+        return {
+            "brand_guidance": cls._stockpile_brand_guidance_from_rows(rows),
+            "stockpile_timing_guidance": cls._stockpile_timing_guidance_from_rows(
+                rows
+            ),
+            "active_blend_guidance": cls._active_blend_guidance_from_rows(rows),
+        }
+
+    @classmethod
+    def get_stockpile_brand_guidance(
+        cls,
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+        operational_opf=None,
+    ):
+        """Map APS plan rows to ROM stockpile brand proportions.
+
+        Stockpile Inventories is a hub/mine-level view.  Therefore guidance is
+        deliberately derived across all qualifying crusher destinations in the
+        APS file, rather than being filtered by the active OPF or operating
+        crusher.  The optional scenario arguments remain in the signature for
+        compatibility with older callers.
+        """
+        filtered = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+        return cls._stockpile_brand_guidance_from_rows(filtered)
+
+    def _destination_allocations_for_row(self, row):
+        source = str(row.get("Source.FullName", "") or "").strip()
+        pit = self._source_pit(row.get("Source.Pit", ""), source)
+        exact = getattr(self, "_source_destination_lookup", {}).get(
+            source.upper()
+        )
+        if exact:
+            return exact, "exact_2wp"
+        pit_destination = getattr(self, "_pit_destination_lookup", {}).get(
+            pit.upper()
+        )
+        if pit_destination:
+            return [pit_destination], "pit_fallback"
+        last_destination = self.destination_guidance.get("last_destination") or {}
+        if last_destination.get("destination"):
+            return [last_destination], "last_destination_fallback"
+        raise ValueError(
+            f"24HR grade block '{source}' has no 2WP destination, no destination "
+            f"for pit '{pit or 'unknown'}', and no last 2WP stockpile destination."
+        )
+
+    def _apply_2wp_destination_guidance(self, data):
+        """Replace 24HR destinations and split tonnes using 2WP ratios."""
+        if data.empty:
+            return data
+        source_type = data["Source.Type"].astype("string").str.strip().str.lower()
+        destination_type = (
+            data["Destination.Type"].astype("string").str.strip().str.lower()
+        )
+        movements = data[
+            (source_type == "reserve")
+            & destination_type.isin({"stockpile", "crusher"})
+        ].copy()
+        if movements.empty:
+            return movements
+        if "Source.Pit" not in movements.columns:
+            movements["Source.Pit"] = ""
+
+        expanded_rows = []
+        for _, row in movements.iterrows():
+            allocations, resolution = self._destination_allocations_for_row(row)
+            ratio_total = sum(
+                max(float(allocation.get("ratio", 0.0) or 0.0), 0.0)
+                for allocation in allocations
+            )
+            if ratio_total <= 0:
+                raise ValueError(
+                    f"2WP destination ratios for '{row.get('Source.FullName', '')}' "
+                    "do not contain a positive allocation."
+                )
+            for allocation in allocations:
+                ratio = (
+                    max(float(allocation.get("ratio", 0.0) or 0.0), 0.0)
+                    / ratio_total
+                )
+                if ratio <= 0:
+                    continue
+                split_row = row.copy()
+                destination = str(allocation.get("destination", "") or "").strip()
+                destination_name = str(
+                    allocation.get("destination_name", "") or ""
+                ).strip()
+                if not destination_name:
+                    destination_name = destination.replace("\\", "/").rsplit("/", 1)[-1]
+                split_row["Destination.Type"] = "Stockpile"
+                split_row["Destination.Name"] = destination_name
+                split_row["Destination.FullName"] = destination
+                split_row["Mining.wetTonnes"] = (
+                    pd.to_numeric(
+                        pd.Series([row.get("Mining.wetTonnes")]),
+                        errors="coerce",
+                    ).fillna(0.0).iloc[0]
+                    * ratio
+                )
+                reported_trips = pd.to_numeric(
+                    pd.Series([row.get("HaulageResult.NumberOfTrips")]),
+                    errors="coerce",
+                ).iloc[0]
+                if pd.notna(reported_trips):
+                    split_row["HaulageResult.NumberOfTrips"] = reported_trips * ratio
+                split_row["two_wp_destination_resolution"] = resolution
+                split_row["two_wp_destination_ratio"] = ratio
+                expanded_rows.append(split_row)
+        if not expanded_rows:
+            return movements.iloc[0:0].copy()
+        return pd.DataFrame(expanded_rows).reset_index(drop=True)
+
     def _preprocess_data(self):
         if "Destination.Name" not in self.data.columns:
             self.data["Destination.Name"] = self.data.get("Destination.FullName", "")
+        if "Source.Pit" not in self.data.columns:
+            self.data["Source.Pit"] = ""
+        selected_agent_names = getattr(self, "selected_agent_names", set())
+        if selected_agent_names:
+            self.data = self.data[
+                self.data["Agent.Name"].astype("string").str.strip().isin(
+                    selected_agent_names
+                )
+            ].copy()
+        if getattr(self, "use_destination_guidance", False):
+            self.data = self._apply_2wp_destination_guidance(self.data)
+        if "two_wp_destination_resolution" not in self.data.columns:
+            self.data["two_wp_destination_resolution"] = "schedule_destination"
+        if "two_wp_destination_ratio" not in self.data.columns:
+            self.data["two_wp_destination_ratio"] = 1.0
         self.data["Time.StartTime"] = self._parse_datetime_column(
             self.data["Time.StartTime"],
             "Time.StartTime",
@@ -464,10 +996,11 @@ class ExpitDataHandler:
 
         # Stockpile destinations remain the planned APS builds. Selected crusher
         # destinations are added as re-evaluable direct-tip candidates.
-        self.data = self.data[
+        transaction_mask = (
             (self.data["Source.Type"] == "Reserve")
             & (stockpile_destination_mask | crusher_destination_mask)
-        ].sort_values(
+        )
+        self.data = self.data[transaction_mask].sort_values(
             by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"]
         )
 
@@ -581,6 +1114,12 @@ class ExpitDataHandler:
                     or self.include_crusher_destinations
                 )
             ),
+            "two_wp_destination_resolution": str(
+                row.get("two_wp_destination_resolution", "") or ""
+            ),
+            "two_wp_destination_ratio": float(
+                row.get("two_wp_destination_ratio", 1.0) or 1.0
+            ),
         }
 
     def _direct_tip_rule_matches(self, source_name):
@@ -613,6 +1152,7 @@ class ExpitDataHandler:
             [
                 "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
                 "Destination.Name", "Destination.FullName",
+                "two_wp_destination_resolution", "two_wp_destination_ratio",
             ],
             as_index=False
         ).agg({

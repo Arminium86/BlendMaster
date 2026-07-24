@@ -283,7 +283,9 @@ class DatabaseManager:
             destination_type TEXT,
             planned_destination TEXT,
             fallback_destination TEXT,
-            aps_direct_tip_candidate INTEGER
+            aps_direct_tip_candidate INTEGER,
+            two_wp_destination_resolution TEXT,
+            two_wp_destination_ratio REAL
         )
         ''')
 
@@ -295,6 +297,8 @@ class DatabaseManager:
             "planned_destination": "TEXT",
             "fallback_destination": "TEXT",
             "aps_direct_tip_candidate": "INTEGER",
+            "two_wp_destination_resolution": "TEXT",
+            "two_wp_destination_ratio": "REAL",
         }
         for column_name, column_type in optional_columns.items():
             if column_name not in existing_columns:
@@ -310,7 +314,13 @@ class DatabaseManager:
             ]
         for column_name in optional_columns:
             if column_name not in results.columns:
-                results[column_name] = "" if column_name != "aps_direct_tip_candidate" else 0
+                results[column_name] = (
+                    0
+                    if column_name == "aps_direct_tip_candidate"
+                    else 1.0
+                    if column_name == "two_wp_destination_ratio"
+                    else ""
+                )
         results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
@@ -337,7 +347,9 @@ class DatabaseManager:
                 destination_type,
                 planned_destination,
                 fallback_destination,
-                aps_direct_tip_candidate
+                aps_direct_tip_candidate,
+                two_wp_destination_resolution,
+                two_wp_destination_ratio
             ) VALUES (
                 :agent, 
                 :source, 
@@ -354,7 +366,9 @@ class DatabaseManager:
                 :destination_type,
                 :planned_destination,
                 :fallback_destination,
-                :aps_direct_tip_candidate
+                :aps_direct_tip_candidate,
+                :two_wp_destination_resolution,
+                :two_wp_destination_ratio
             )
             ''', row.to_dict())
 

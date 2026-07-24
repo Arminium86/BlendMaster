@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -190,13 +190,19 @@ class UserInputs(QMainWindow):
         self.tabs.tabBar().setExpanding(False)
         self.layout.addWidget(self.tabs)
         self.apply_app_theme()
+        self.setup_navigation()
 
         # Add Site Configuration Tab
         self.setup_site_configuration()
 
         # Add Stockpile Tab
         self.stockpile_tab = QWidget()
-        self.stockpile_tab_index = self.tabs.addTab(self.stockpile_tab, "Stockpile Inventories")
+        self.stockpile_tab_index = self.register_page(
+            "stockpile_inventories",
+            self.setup_tabs,
+            self.stockpile_tab,
+            "Stockpile Inventories",
+        )
         self.stockpile_tab_layout = QVBoxLayout(self.stockpile_tab)
 
         # Stockpile Table
@@ -206,7 +212,13 @@ class UserInputs(QMainWindow):
         # Add AMT Stockpile Tab
         self.AMT_stockpile_tab = QWidget()
         self.AMT_stockpile_tab.setObjectName("amtStockpileTab")
-        self.AMT_stockpile_tab_index = self.tabs.addTab(self.AMT_stockpile_tab, "AMT Stockpiles")
+        self.AMT_stockpile_tab_index = self.register_page(
+            "amt_stockpiles",
+            self.workspace_tabs,
+            self.AMT_stockpile_tab,
+            "AMT Stockpiles",
+            position=0,
+        )
         self.AMT_stockpile_tab_layout = QHBoxLayout(self.AMT_stockpile_tab)
         self.AMT_stockpile_tab_layout.setContentsMargins(12, 10, 12, 10)
         self.AMT_stockpile_tab_layout.setSpacing(10)
@@ -306,9 +318,18 @@ class UserInputs(QMainWindow):
         # Add Product Build Settings tab
         self.setup_product_build_settings_tab()
 
+        # Decision Levers is the user-facing home for the simplified solver
+        # controls introduced in the dedicated Decision Levers task.
+        self.setup_decision_levers_tab()
+
         # Add calendar Tab
         self.main_tab = QWidget()
-        self.calendar_tab_index = self.tabs.addTab(self.main_tab, "Calendar")
+        self.calendar_tab_index = self.register_page(
+            "calendar",
+            self.auto_blend_tabs,
+            self.main_tab,
+            "Calendar",
+        )
         self.main_tab_layout = QVBoxLayout(self.main_tab)
         self.main_tab_layout.setContentsMargins(14, 12, 14, 12)
         self.main_tab_layout.setSpacing(8)
@@ -327,7 +348,12 @@ class UserInputs(QMainWindow):
 
         # Add Decision Point Tab
         self.decision_point_tab = QWidget()
-        self.decision_point_tab_index = self.tabs.addTab(self.decision_point_tab, "Decision Point")
+        self.decision_point_tab_index = self.register_page(
+            "decision_point",
+            self.auto_blend_tabs,
+            self.decision_point_tab,
+            "Decision Point",
+        )
         self.decision_point_tab_layout = QVBoxLayout(self.decision_point_tab)
 
         self.decision_status_label = QLabel("Run the optimiser to review feasible blend options.")
@@ -382,12 +408,22 @@ class UserInputs(QMainWindow):
 
         # Add Setup Blends tab
         self.blend_config_tab = QWidget()
-        self.blend_config_tab_index = self.tabs.addTab(self.blend_config_tab, "Setup Blends (Manual)")
+        self.blend_config_tab_index = self.register_page(
+            "setup_blends",
+            self.manual_blend_tabs,
+            self.blend_config_tab,
+            "Setup Blends",
+        )
         self.setup_blends_tab_layout = QVBoxLayout(self.blend_config_tab)
 
         # Add Sequence tab
         self.blend_sequence_tab = QWidget()
-        self.blend_sequence_tab_index = self.tabs.addTab(self.blend_sequence_tab, "Blend Sequence (Manual Gantt)")
+        self.blend_sequence_tab_index = self.register_page(
+            "blend_sequence",
+            self.manual_blend_tabs,
+            self.blend_sequence_tab,
+            "Blend Sequence",
+        )
         self.blend_sequence_tab_layout = QVBoxLayout(self.blend_sequence_tab)
 
         # Add the CustomWebEngineView at the top to display the Dash app
@@ -460,24 +496,221 @@ class UserInputs(QMainWindow):
         self.manual_gantt_poll_timer.start()
 
         # Disable tabs initially
-        self.tabs.setTabEnabled(self.stockpile_tab_index, False)
-        self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, False)
-        self.tabs.setTabEnabled(self.solver_config_tab_index, False)
-        self.tabs.setTabEnabled(self.product_build_tab_index, False)
-        self.tabs.setTabEnabled(self.calendar_tab_index, False)
-        self.tabs.setTabEnabled(self.decision_point_tab_index, False)
-        self.tabs.setTabEnabled(self.results_tab_index, False)
-        self.tabs.setTabEnabled(self.profiles_tab_index, False)
-        self.tabs.setTabEnabled(self.sqlite_reports_tab_index, False)
-        self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, False)
-        self.tabs.setTabEnabled(self.blend_config_tab_index, False)
-        self.tabs.setTabEnabled(self.blend_sequence_tab_index, False)
-        self.tabs.setTabEnabled(self.grade_profile_tab_index, False)
-        self.tabs.setTabEnabled(self.agent_tab_index, bool(getattr(self, "agent_enabled_choice", False)))
-        self.tabs.currentChanged.connect(self.handle_main_tab_changed)
+        for page_id in (
+            self.stockpile_tab_index,
+            self.AMT_stockpile_tab_index,
+            self.solver_config_tab_index,
+            self.product_build_tab_index,
+            self.decision_levers_tab_index,
+            self.calendar_tab_index,
+            self.decision_point_tab_index,
+            self.results_tab_index,
+            self.profiles_tab_index,
+            self.sqlite_reports_tab_index,
+            self.optimised_grade_profile_tab_index,
+            self.blend_config_tab_index,
+            self.blend_sequence_tab_index,
+            self.grade_profile_tab_index,
+        ):
+            self.set_page_enabled(page_id, False)
+        self.set_page_enabled(
+            self.agent_tab_index,
+            bool(getattr(self, "agent_enabled_choice", False)),
+        )
 
         # Initialise main optimisation program
         self.run_program = Run(self)
+
+    def new_navigation_tabs(self):
+        tabs = QTabWidget()
+        tabs.setTabBar(FullCaptionTabBar())
+        tabs.setUsesScrollButtons(True)
+        tabs.setElideMode(Qt.ElideNone)
+        tabs.tabBar().setUsesScrollButtons(True)
+        tabs.tabBar().setElideMode(Qt.ElideNone)
+        tabs.tabBar().setExpanding(False)
+        tabs.currentChanged.connect(
+            lambda index, tab_widget=tabs: self.handle_navigation_tab_changed(
+                tab_widget, index
+            )
+        )
+        self.navigation_tab_widgets.append(tabs)
+        return tabs
+
+    def navigation_container(self, child_tabs):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(child_tabs)
+        return container
+
+    def setup_navigation(self):
+        """Create the task-oriented parent/sub-tab navigation hierarchy."""
+        self.page_locations = {}
+        self.page_widgets = {}
+        self.navigation_parents = {}
+        self.navigation_tab_widgets = [self.tabs]
+        self.tabs.currentChanged.connect(
+            lambda index: self.handle_navigation_tab_changed(self.tabs, index)
+        )
+
+        self.setup_tabs = self.new_navigation_tabs()
+        self.setup_navigation_page = self.navigation_container(self.setup_tabs)
+        self.tabs.addTab(self.setup_navigation_page, "Setup")
+        self.navigation_parents[self.setup_tabs] = (
+            self.tabs,
+            self.setup_navigation_page,
+        )
+
+        self.workspace_tabs = self.new_navigation_tabs()
+        self.workspace_navigation_page = self.navigation_container(self.workspace_tabs)
+        self.tabs.addTab(self.workspace_navigation_page, "Workspace")
+        self.navigation_parents[self.workspace_tabs] = (
+            self.tabs,
+            self.workspace_navigation_page,
+        )
+
+        self.auto_blend_tabs = self.new_navigation_tabs()
+        self.auto_blend_navigation_page = self.navigation_container(self.auto_blend_tabs)
+        self.workspace_tabs.addTab(
+            self.auto_blend_navigation_page,
+            "Auto Blending Dashboard",
+        )
+        self.navigation_parents[self.auto_blend_tabs] = (
+            self.workspace_tabs,
+            self.auto_blend_navigation_page,
+        )
+
+        self.manual_blend_tabs = self.new_navigation_tabs()
+        self.manual_blend_navigation_page = self.navigation_container(self.manual_blend_tabs)
+        self.workspace_tabs.addTab(
+            self.manual_blend_navigation_page,
+            "Manual Blending Dashboard",
+        )
+        self.navigation_parents[self.manual_blend_tabs] = (
+            self.workspace_tabs,
+            self.manual_blend_navigation_page,
+        )
+
+        self.results_tabs = self.new_navigation_tabs()
+        self.results_navigation_page = self.navigation_container(self.results_tabs)
+        self.tabs.addTab(self.results_navigation_page, "Results")
+        self.navigation_parents[self.results_tabs] = (
+            self.tabs,
+            self.results_navigation_page,
+        )
+
+        self.grade_profiles_tabs = self.new_navigation_tabs()
+        self.grade_profiles_navigation_page = self.navigation_container(
+            self.grade_profiles_tabs
+        )
+        self.results_tabs.addTab(
+            self.grade_profiles_navigation_page,
+            "Grade Profiles",
+        )
+        self.navigation_parents[self.grade_profiles_tabs] = (
+            self.results_tabs,
+            self.grade_profiles_navigation_page,
+        )
+
+        # Old project files stored enabled state by the former flat-tab index.
+        self.legacy_tab_page_ids = [
+            "site_configuration",
+            "stockpile_inventories",
+            "amt_stockpiles",
+            "solver_configuration",
+            "product_build_settings",
+            "calendar",
+            "decision_point",
+            "optimised_blend_sequence",
+            "build_depletion_profiles",
+            "optimised_grade_profiles",
+            "reports",
+            "setup_blends",
+            "blend_sequence",
+            "manual_grade_profiles",
+            "agent",
+        ]
+
+    def register_page(self, page_id, tab_widget, page, caption, position=None):
+        if position is None:
+            tab_index = tab_widget.addTab(page, caption)
+        else:
+            tab_index = tab_widget.insertTab(position, page, caption)
+            for existing_page_id, (existing_tabs, existing_index) in list(
+                self.page_locations.items()
+            ):
+                if existing_tabs is tab_widget and existing_index >= tab_index:
+                    self.page_locations[existing_page_id] = (
+                        existing_tabs,
+                        existing_index + 1,
+                    )
+        self.page_locations[page_id] = (tab_widget, tab_index)
+        self.page_widgets[page_id] = page
+        return page_id
+
+    def set_page_enabled(self, page_id, enabled):
+        location = self.page_locations.get(page_id)
+        if location is None:
+            return
+        tab_widget, tab_index = location
+        tab_widget.setTabEnabled(tab_index, bool(enabled))
+
+    def is_page_enabled(self, page_id):
+        location = self.page_locations.get(page_id)
+        if location is None:
+            return False
+        tab_widget, tab_index = location
+        return tab_widget.isTabEnabled(tab_index)
+
+    def show_page(self, page_id):
+        location = self.page_locations.get(page_id)
+        if location is None:
+            return
+        page = self.page_widgets[page_id]
+        tab_widget, tab_index = location
+        current_tabs = tab_widget
+        while current_tabs in self.navigation_parents:
+            parent_tabs, parent_page = self.navigation_parents[current_tabs]
+            parent_tabs.setCurrentWidget(parent_page)
+            current_tabs = parent_tabs
+        tab_widget.setCurrentIndex(tab_index)
+        page.setFocus(Qt.OtherFocusReason)
+
+    def capture_page_states(self):
+        return {
+            page_id: self.is_page_enabled(page_id)
+            for page_id in self.page_locations
+        }
+
+    def normalized_page_states(self, raw_states):
+        if not isinstance(raw_states, dict):
+            return {}
+        normalized = {}
+        for key, enabled in raw_states.items():
+            if key in self.page_locations:
+                normalized[key] = bool(enabled)
+                continue
+            try:
+                legacy_index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= legacy_index < len(self.legacy_tab_page_ids):
+                normalized[self.legacy_tab_page_ids[legacy_index]] = bool(enabled)
+        return normalized
+
+    def restore_page_states(self, raw_states):
+        states = self.normalized_page_states(raw_states)
+        for page_id, enabled in states.items():
+            self.set_page_enabled(page_id, enabled)
+        return states
+
+    def handle_navigation_tab_changed(self, tab_widget, tab_index):
+        page = tab_widget.widget(tab_index)
+        for page_id, registered_page in self.page_widgets.items():
+            if page is registered_page:
+                self.handle_main_tab_changed(page_id)
+                return
 
     def setup_scenario_toolbar(self):
         self.scenario_toolbar = QFrame()
@@ -768,6 +1001,18 @@ class UserInputs(QMainWindow):
             "direct_tip_movement_rules": copy.deepcopy(getattr(
                 self, "direct_tip_movement_rules", []
             )),
+            "aps_destination_guidance": copy.deepcopy(getattr(
+                self, "aps_destination_guidance", {}
+            )),
+            "aps_stockpile_timing_guidance": copy.deepcopy(getattr(
+                self, "aps_stockpile_timing_guidance", {}
+            )),
+            "aps_active_blend_guidance": copy.deepcopy(getattr(
+                self, "aps_active_blend_guidance", []
+            )),
+            "selected_24hr_expit_agents": copy.deepcopy(getattr(
+                self, "selected_24hr_expit_agents", []
+            )),
         }
 
     def capture_scenario_state(self):
@@ -788,11 +1033,15 @@ class UserInputs(QMainWindow):
             "crusher_ratio_configured", "aps_ratio_crusher_choices",
             "direct_tip_grade_block_sources", "direct_tip_crusher_destinations",
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
-            "expit_mode_choice", "file_path_choice", "blend_mode_choice",
+            "expit_mode_choice", "file_path_choice", "file_path_24hr_choice",
+            "available_24hr_expit_agents", "selected_24hr_expit_agents",
+            "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "auto_load_2wp_targets_choice",
             "reevaluate_aps_direct_tip_choice", "aps_direct_tip_crusher_choice",
-            "aps_stockpile_brand_map", "stockpile_data", "stockpile_data_use_column",
+            "aps_stockpile_brand_map", "aps_stockpile_timing_guidance",
+            "aps_active_blend_guidance", "aps_destination_guidance",
+            "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
             "solver_config", "min_stockpiles", "max_stockpiles",
@@ -816,9 +1065,7 @@ class UserInputs(QMainWindow):
             self.decision_status_label.text() if hasattr(self, "decision_status_label") else ""
         )
         if hasattr(self, "tabs"):
-            state["tab_states"] = {
-                index: self.tabs.isTabEnabled(index) for index in range(self.tabs.count())
-            }
+            state["tab_states"] = self.capture_page_states()
         return state
 
     def save_active_scenario_state(self):
@@ -831,13 +1078,14 @@ class UserInputs(QMainWindow):
         for tab_index in [
             self.stockpile_tab_index, self.AMT_stockpile_tab_index,
             self.solver_config_tab_index, self.product_build_tab_index,
+            self.decision_levers_tab_index,
             self.calendar_tab_index, self.decision_point_tab_index,
             self.results_tab_index, self.profiles_tab_index,
             self.sqlite_reports_tab_index, self.optimised_grade_profile_tab_index,
             self.blend_config_tab_index, self.blend_sequence_tab_index,
             self.grade_profile_tab_index,
         ]:
-            self.tabs.setTabEnabled(tab_index, False)
+            self.set_page_enabled(tab_index, False)
 
     def update_chart_database_context(self, reload_views=True, refresh_amt_map=True):
         """Point chart services at the active scenario without needless reloads."""
@@ -892,7 +1140,7 @@ class UserInputs(QMainWindow):
 
     def refresh_manual_scenario_views(self, tab_states):
         def is_enabled(index):
-            return bool(tab_states.get(index, tab_states.get(str(index), False)))
+            return bool(self.normalized_page_states(tab_states).get(index, False))
 
         previous_project_loaded = self.is_project_loaded
         self.is_project_loaded = True
@@ -943,6 +1191,17 @@ class UserInputs(QMainWindow):
             self.start_time_choice = state.get("start_time_choice") or datetime.now()
             self.expit_mode_choice = state.get("expit_mode_choice") or 1
             self.file_path_choice = state.get("file_path_choice") or ""
+            self.file_path_24hr_choice = (
+                state.get("file_path_24hr_choice")
+                or state.get("twenty_four_hour_file_path_choice")
+                or ""
+            )
+            self.available_24hr_expit_agents = self.normalized_expit_agent_names(
+                state.get("available_24hr_expit_agents") or []
+            )
+            self.selected_24hr_expit_agents = self.normalized_expit_agent_names(
+                state.get("selected_24hr_expit_agents") or []
+            )
             self.blend_mode_choice = state.get("blend_mode_choice") or 1
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 state.get("product_brand_labels_choice") or self.default_product_brand_labels()
@@ -978,6 +1237,15 @@ class UserInputs(QMainWindow):
                 state.get("direct_tip_movement_rules") or []
             )
             self.aps_stockpile_brand_map = copy.deepcopy(state.get("aps_stockpile_brand_map") or {})
+            self.aps_stockpile_timing_guidance = copy.deepcopy(
+                state.get("aps_stockpile_timing_guidance") or {}
+            )
+            self.aps_active_blend_guidance = copy.deepcopy(
+                state.get("aps_active_blend_guidance") or []
+            )
+            self.aps_destination_guidance = copy.deepcopy(
+                state.get("aps_destination_guidance") or {}
+            )
             self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
             self.stockpile_data_use_column = copy.deepcopy(state.get("stockpile_data_use_column") or {})
             self.stockpile_data_AMT_column = copy.deepcopy(state.get("stockpile_data_AMT_column") or {})
@@ -1033,6 +1301,11 @@ class UserInputs(QMainWindow):
             self.update_opf_dropdown(self.opf_input_choice)
             self.update_site_crusher_options(self.selected_site_crushers)
             self.file_path.setText(self.file_path_choice)
+            self.file_path_24hr.setText(self.file_path_24hr_choice)
+            self.set_24hr_expit_agent_items(
+                self.available_24hr_expit_agents,
+                self.selected_24hr_expit_agents,
+            )
             self.load_ratio_controls_from_state()
             self.set_direct_tip_movement_options(
                 self.direct_tip_grade_block_sources,
@@ -1071,24 +1344,21 @@ class UserInputs(QMainWindow):
                 self.refresh_aps_stockpile_brand_map()
                 self.apply_aps_brand_guidance_to_stockpile_data()
                 self.setup_stockpile_table()
-                self.tabs.setTabEnabled(self.stockpile_tab_index, True)
+                self.set_page_enabled(self.stockpile_tab_index, True)
             if self.updated_stockpile_data:
-                self.tabs.setTabEnabled(self.solver_config_tab_index, True)
-                self.tabs.setTabEnabled(self.product_build_tab_index, True)
+                self.set_page_enabled(self.solver_config_tab_index, True)
+                self.set_page_enabled(self.product_build_tab_index, True)
+                self.set_page_enabled(self.decision_levers_tab_index, True)
                 self.setup_calendar()
-                self.tabs.setTabEnabled(self.calendar_tab_index, True)
+                self.set_page_enabled(self.calendar_tab_index, True)
             if any((self.stockpile_data_AMT_column or {}).values()) and self.AMT_stockpile_data:
-                self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
+                self.set_page_enabled(self.AMT_stockpile_tab_index, True)
 
             tab_states = state.get("tab_states") or {}
-            for index, enabled in tab_states.items():
-                if isinstance(index, str) and index.isdigit():
-                    index = int(index)
-                if isinstance(index, int) and 0 <= index < self.tabs.count():
-                    self.tabs.setTabEnabled(index, bool(enabled))
+            self.restore_page_states(tab_states)
             self.refresh_manual_scenario_views(tab_states)
-            self.tabs.setTabEnabled(self.site_config_tab_index, True)
-            self.tabs.setCurrentIndex(self.site_config_tab_index)
+            self.set_page_enabled(self.site_config_tab_index, True)
+            self.show_page(self.site_config_tab_index)
             self.validate_form()
             # Reports and Dash views can be expensive (large SQLite previews,
             # Dash reloads and AMT map data fetches). They refresh on demand
@@ -1105,8 +1375,9 @@ class UserInputs(QMainWindow):
             self.refresh_scenario_selector()
 
     def update_tab_tooltips(self):
-        for index in range(self.tabs.count()):
-            self.tabs.setTabToolTip(index, self.tabs.tabText(index))
+        for tab_widget in self.navigation_tab_widgets:
+            for index in range(tab_widget.count()):
+                tab_widget.setTabToolTip(index, tab_widget.tabText(index))
 
     def apply_windows_taskbar_icon(self):
         if sys.platform != "win32":
@@ -1135,13 +1406,20 @@ class UserInputs(QMainWindow):
 
     def setup_solver_configuration_tab(self):
         self.solver_config_tab = QWidget()
-        self.solver_config_tab_index = self.tabs.addTab(self.solver_config_tab, "Solver Configuration")
+        self.solver_config_tab_index = self.register_page(
+            "solver_configuration",
+            self.setup_tabs,
+            self.solver_config_tab,
+            "Solver Configuration",
+        )
         self.solver_config_layout = QVBoxLayout(self.solver_config_tab)
 
         contribution_ratio_validator = QDoubleValidator(0.01, 1.0, 4, self)
         contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
         threshold_validator = QDoubleValidator(0.0, 1000.0, 4, self)
         threshold_validator.setNotation(QDoubleValidator.StandardNotation)
+        signed_incentive_validator = QDoubleValidator(-1000.0, 1000.0, 4, self)
+        signed_incentive_validator.setNotation(QDoubleValidator.StandardNotation)
         positive_integer_validator = QIntValidator(1, 1000, self)
 
         limits_label = QLabel("Blend Settings")
@@ -1216,7 +1494,7 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addWidget(self.allow_offspec_steady_states_checkbox)
 
         brand_guidance_layout = QHBoxLayout()
-        brand_guidance_layout.addWidget(QLabel("2WP Product Guidance:"))
+        brand_guidance_layout.addWidget(QLabel("2WP Product Guidance Reward/Penalty:"))
         self.brand_guidance_mode_combo = QComboBox()
         self.brand_guidance_mode_combo.addItems([
             "Ignore 2WP brand guidance",
@@ -1225,13 +1503,56 @@ class UserInputs(QMainWindow):
             "Force matching product brand",
         ])
         self.brand_guidance_mode_combo.setFixedWidth(240)
-        self.brand_guidance_incentive_input = self.create_solver_threshold_input("0.0", threshold_validator)
-        brand_guidance_layout.addWidget(self.brand_guidance_mode_combo)
-        brand_guidance_layout.addWidget(QLabel("Incentive/Penalty:"))
+        self.brand_guidance_incentive_input = self.create_solver_threshold_input(
+            "0.0", signed_incentive_validator
+        )
+        self.brand_guidance_incentive_input.setToolTip(
+            "Positive values reward compliance; negative values penalise non-compliance."
+        )
         brand_guidance_layout.addWidget(self.brand_guidance_incentive_input)
         brand_guidance_layout.addWidget(QLabel("$/t"))
         brand_guidance_layout.addStretch()
         self.solver_config_layout.addLayout(brand_guidance_layout)
+
+        timing_guidance_layout = QHBoxLayout()
+        timing_guidance_layout.addWidget(
+            QLabel("2WP Source Timing Reward/Penalty:")
+        )
+        self.timing_guidance_incentive_input = self.create_solver_threshold_input(
+            "0.0", signed_incentive_validator
+        )
+        self.timing_guidance_incentive_input.setToolTip(
+            "Positive values reward compliance; negative values penalise non-compliance."
+        )
+        timing_guidance_layout.addWidget(self.timing_guidance_incentive_input)
+        timing_guidance_layout.addWidget(QLabel("$/t"))
+        timing_guidance_layout.addWidget(QLabel("Tolerance:"))
+        self.timing_guidance_tolerance_input = self.create_solver_threshold_input(
+            "0.0", threshold_validator
+        )
+        timing_guidance_layout.addWidget(self.timing_guidance_tolerance_input)
+        timing_guidance_layout.addWidget(QLabel("hrs"))
+        timing_guidance_layout.addStretch()
+        self.solver_config_layout.addLayout(timing_guidance_layout)
+
+        active_blend_guidance_layout = QHBoxLayout()
+        active_blend_guidance_layout.addWidget(
+            QLabel("2WP Active Blend Reward/Penalty:")
+        )
+        self.active_blend_guidance_incentive_input = (
+            self.create_solver_threshold_input(
+                "0.0", signed_incentive_validator
+            )
+        )
+        self.active_blend_guidance_incentive_input.setToolTip(
+            "Positive values reward an exact stockpile-set match; negative values penalise a mismatch."
+        )
+        active_blend_guidance_layout.addWidget(
+            self.active_blend_guidance_incentive_input
+        )
+        active_blend_guidance_layout.addWidget(QLabel("$/t"))
+        active_blend_guidance_layout.addStretch()
+        self.solver_config_layout.addLayout(active_blend_guidance_layout)
 
         direct_tip_layout = QHBoxLayout()
         self.direct_tip_enabled_checkbox = QCheckBox("Enable Direct Tip")
@@ -1341,9 +1662,54 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addLayout(submit_layout)
         self.solver_config_layout.addStretch()
 
+    def setup_decision_levers_tab(self):
+        self.decision_levers_tab = QWidget()
+        self.decision_levers_tab.setObjectName("decisionLeversTab")
+        self.decision_levers_tab_index = self.register_page(
+            "decision_levers",
+            self.auto_blend_tabs,
+            self.decision_levers_tab,
+            "Decision Levers",
+        )
+        layout = QVBoxLayout(self.decision_levers_tab)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
+
+        title = QLabel("Decision Levers")
+        title.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
+        layout.addWidget(title)
+
+        description = QLabel(
+            "Choose which planning guidance influences blend selection. "
+            "Signed reward/penalty values remain under Setup > Solver Configuration."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("font-size: 12px; color: #64748b;")
+        layout.addWidget(description)
+
+        self.brand_guidance_enabled_checkbox = QCheckBox(
+            "Use 2WP Product Guidance"
+        )
+        self.timing_guidance_enabled_checkbox = QCheckBox(
+            "Use 2WP Source Stockpile Timing Compliance"
+        )
+        self.active_blend_guidance_enabled_checkbox = QCheckBox(
+            "Use 2WP Active Blend Guidance"
+        )
+        layout.addWidget(self.brand_guidance_enabled_checkbox)
+        layout.addWidget(self.timing_guidance_enabled_checkbox)
+        layout.addWidget(self.active_blend_guidance_enabled_checkbox)
+        layout.addStretch()
+
     def setup_product_build_settings_tab(self):
         self.product_build_tab = QWidget()
-        self.product_build_tab_index = self.tabs.addTab(self.product_build_tab, "Product Build Settings")
+        self.product_build_tab_index = self.register_page(
+            "product_build_settings",
+            self.workspace_tabs,
+            self.product_build_tab,
+            "Product Build Settings",
+            position=1,
+        )
         self.product_build_layout = QVBoxLayout(self.product_build_tab)
         self.product_build_layout.setContentsMargins(14, 12, 14, 12)
         self.product_build_layout.setSpacing(8)
@@ -1701,16 +2067,17 @@ class UserInputs(QMainWindow):
 
     def navigate_to_product_build_settings(self):
         self.populate_product_build_table()
-        self.tabs.setTabEnabled(self.product_build_tab_index, True)
-        self.tabs.setCurrentIndex(self.product_build_tab_index)
+        self.set_page_enabled(self.product_build_tab_index, True)
+        self.set_page_enabled(self.decision_levers_tab_index, True)
+        self.show_page(self.product_build_tab_index)
 
     def handle_product_build_settings_submit(self):
         if not self.store_product_build_settings():
             return
         self.save_active_scenario_state()
         self.setup_calendar()
-        self.tabs.setTabEnabled(self.calendar_tab_index, True)
-        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        self.set_page_enabled(self.calendar_tab_index, True)
+        self.show_page(self.calendar_tab_index)
 
     def load_2wp_product_build_targets(self):
         mine = getattr(self, "mine_input_choice", None)
@@ -1813,7 +2180,13 @@ class UserInputs(QMainWindow):
             "low_fe_threshold": 58.0,
             "allow_offspec_steady_states_for_product_build": False,
             "brand_guidance_mode": "ignore",
+            "brand_guidance_enabled": False,
             "brand_guidance_incentive": 0.0,
+            "timing_guidance_enabled": False,
+            "timing_guidance_incentive": 0.0,
+            "timing_guidance_tolerance_hours": 0.0,
+            "active_blend_guidance_enabled": False,
+            "active_blend_guidance_incentive": 0.0,
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -1825,6 +2198,10 @@ class UserInputs(QMainWindow):
         merged.update(incoming)
         if isinstance(contaminant_thresholds, dict):
             merged["contaminant_thresholds"].update(contaminant_thresholds)
+        if "brand_guidance_enabled" not in incoming:
+            merged["brand_guidance_enabled"] = (
+                merged.get("brand_guidance_mode", "ignore") != "ignore"
+            )
         return merged
 
     def apply_app_theme(self):
@@ -1947,7 +2324,12 @@ class UserInputs(QMainWindow):
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
         self.site_config_tab = QWidget()
-        self.site_config_tab_index = self.tabs.addTab(self.site_config_tab, "Site Configuration")
+        self.site_config_tab_index = self.register_page(
+            "site_configuration",
+            self.setup_tabs,
+            self.site_config_tab,
+            "Site Configuration",
+        )
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
 
         # Construct path to the background image
@@ -2051,6 +2433,101 @@ class UserInputs(QMainWindow):
         outer_layout.addWidget(form_card, 0, Qt.AlignTop)
         outer_layout.addWidget(logo_panel, 1)
 
+        self.guidance_schedules_tab = QWidget()
+        self.guidance_schedules_tab.setObjectName("guidanceSchedulesTab")
+        self.guidance_schedules_tab_index = self.register_page(
+            "guidance_schedules",
+            self.setup_tabs,
+            self.guidance_schedules_tab,
+            "Guidance Schedules",
+        )
+        self.guidance_schedules_tab.setStyleSheet("""
+            QWidget#guidanceSchedulesTab {
+                background-color: #f8fafc;
+            }
+            QWidget#guidanceSchedulesContent {
+                background-color: #f8fafc;
+            }
+            QFrame#guidanceSchedulesCard {
+                background-color: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+            }
+            QLabel#guidanceSchedulesTitle {
+                color: #1f2933;
+                font-size: 22px;
+                font-weight: 700;
+                padding-bottom: 2px;
+            }
+            QLabel#guidanceSchedulesSubtitle {
+                color: #607080;
+                font-size: 12px;
+                padding-bottom: 14px;
+            }
+            QWidget#guidanceSchedulesTab QLineEdit,
+            QWidget#guidanceSchedulesTab QComboBox,
+            QWidget#guidanceSchedulesTab QListWidget {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 4px 6px;
+                min-height: 20px;
+            }
+            QWidget#guidanceSchedulesTab QLineEdit:disabled,
+            QWidget#guidanceSchedulesTab QComboBox:disabled,
+            QWidget#guidanceSchedulesTab QListWidget:disabled {
+                color: #7b8794;
+                background-color: #f5f7fa;
+            }
+            QWidget#guidanceSchedulesTab QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #b8c4d2;
+                border-radius: 4px;
+                padding: 5px 12px;
+            }
+            QWidget#guidanceSchedulesTab QPushButton:hover {
+                background-color: #eef7f0;
+                border-color: #98d4a6;
+            }
+        """)
+
+        guidance_root_layout = QVBoxLayout(self.guidance_schedules_tab)
+        guidance_root_layout.setContentsMargins(12, 10, 12, 12)
+        guidance_scroll = QScrollArea()
+        guidance_scroll.setWidgetResizable(True)
+        guidance_scroll.setFrameShape(QFrame.NoFrame)
+        guidance_content = QWidget()
+        guidance_content.setObjectName("guidanceSchedulesContent")
+        guidance_content_layout = QHBoxLayout(guidance_content)
+        guidance_content_layout.setContentsMargins(8, 8, 8, 8)
+        guidance_content_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        guidance_card = QFrame()
+        guidance_card.setObjectName("guidanceSchedulesCard")
+        guidance_card.setMinimumWidth(760)
+        guidance_card.setMaximumWidth(1080)
+        guidance_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        guidance_layout = QFormLayout(guidance_card)
+        guidance_layout.setContentsMargins(18, 16, 18, 18)
+        guidance_layout.setHorizontalSpacing(16)
+        guidance_layout.setVerticalSpacing(10)
+        guidance_layout.setLabelAlignment(Qt.AlignLeft)
+        guidance_layout.setFormAlignment(Qt.AlignTop)
+
+        guidance_title = QLabel("Guidance Schedules")
+        guidance_title.setObjectName("guidanceSchedulesTitle")
+        guidance_subtitle = QLabel(
+            "Configure expit transaction handling and the 2WP/24HR schedule guidance."
+        )
+        guidance_subtitle.setObjectName("guidanceSchedulesSubtitle")
+        guidance_layout.addRow(guidance_title)
+        guidance_layout.addRow(guidance_subtitle)
+
+        guidance_content_layout.addWidget(guidance_card, 1, Qt.AlignTop)
+        guidance_content_layout.addStretch()
+        guidance_scroll.setWidget(guidance_content)
+        guidance_root_layout.addWidget(guidance_scroll)
+
         # Site hierarchy: one Hub / Mine / OPF / operating Crusher per scenario.
         self.hub_input = QComboBox()
         self.hub_input.addItems(["Chichester Hub", "Western Hub", "Solomon Hub", "Iron Bridge Hub"])
@@ -2086,7 +2563,7 @@ class UserInputs(QMainWindow):
 
         self.crusher_ratio_mode_input = QComboBox()
         self.crusher_ratio_mode_input.addItem("Enter manually", "manual")
-        self.crusher_ratio_mode_input.addItem("Derive from APS Mining.csv", "aps")
+        self.crusher_ratio_mode_input.addItem("Derive from 2WP Mining.csv", "aps")
         self.crusher_ratio_mode_input.setMinimumWidth(220)
         self.crusher_ratio_input = QLineEdit("100.00")
         self.crusher_ratio_input.setValidator(QDoubleValidator(0.01, 100.0, 4))
@@ -2148,10 +2625,10 @@ class UserInputs(QMainWindow):
             lambda: self.expit_mode.setEnabled(self.time_mode.currentIndex() == 0)
         )
 
-        layout.addRow(expit_label, self.expit_mode)
+        guidance_layout.addRow(expit_label, self.expit_mode)
 
-        # --- Input 3: Select File ---
-        file_label = QLabel("Select APS Mining.csv (optional):")
+        # --- Input 3: Select 2WP and 24HR schedules ---
+        file_label = QLabel("Select 2WP Mining.csv (optional):")
         file_label.setStyleSheet("font-weight: bold;")
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
@@ -2166,7 +2643,44 @@ class UserInputs(QMainWindow):
         file_layout.addWidget(self.file_path)
         file_layout.addWidget(self.file_button)
 
-        layout.addRow(file_label, file_layout)
+        guidance_layout.addRow(file_label, file_layout)
+
+        file_24hr_label = QLabel("Select 24HR Mining.csv (optional):")
+        file_24hr_label.setStyleSheet("font-weight: bold;")
+        self.file_path_24hr = QLineEdit()
+        self.file_path_24hr.setReadOnly(True)
+        self.file_path_24hr.setFixedWidth(400)
+
+        self.file_24hr_button = QPushButton("Browse")
+        self.file_24hr_button.setFixedWidth(100)
+        self.file_24hr_button.clicked.connect(self.browse_24hr_file)
+
+        file_24hr_layout = QHBoxLayout()
+        file_24hr_layout.addWidget(self.file_path_24hr)
+        file_24hr_layout.addWidget(self.file_24hr_button)
+        guidance_layout.addRow(file_24hr_label, file_24hr_layout)
+
+        self.expit_agent_button = QPushButton("Get Agent Names")
+        self.expit_agent_button.setMinimumWidth(150)
+        self.expit_agent_button.clicked.connect(self.load_24hr_expit_agent_names)
+        self.expit_agent_input = QListWidget()
+        self.expit_agent_input.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.expit_agent_input.setMinimumWidth(420)
+        self.expit_agent_input.setMaximumHeight(105)
+
+        expit_agent_layout = QVBoxLayout()
+        expit_agent_layout.setSpacing(6)
+        expit_agent_header = QHBoxLayout()
+        expit_agent_header.addWidget(self.expit_agent_button)
+        expit_agent_header.addWidget(QLabel(
+            "Select the 24HR dig circuits to import as expit payload transactions."
+        ))
+        expit_agent_header.addStretch()
+        expit_agent_layout.addLayout(expit_agent_header)
+        expit_agent_layout.addWidget(self.expit_agent_input)
+        expit_agent_label = QLabel("24HR Expit Dig Circuits:")
+        expit_agent_label.setStyleSheet("font-weight: bold;")
+        guidance_layout.addRow(expit_agent_label, expit_agent_layout)
 
         self.direct_tip_movement_button = QPushButton("Load Movement Values")
         self.direct_tip_movement_button.setMinimumWidth(170)
@@ -2211,7 +2725,7 @@ class UserInputs(QMainWindow):
         movement_rules_layout.addLayout(movement_footer)
         movement_rules_label = QLabel("Direct Tip Movement Rules:")
         movement_rules_label.setStyleSheet("font-weight: bold;")
-        layout.addRow(movement_rules_label, movement_rules_layout)
+        guidance_layout.addRow(movement_rules_label, movement_rules_layout)
 
         self.reevaluate_aps_direct_tip_checkbox = QCheckBox("Re-evaluate 2WP direct tip tonnes")
         self.reevaluate_aps_direct_tip_checkbox.setChecked(False)
@@ -2235,7 +2749,7 @@ class UserInputs(QMainWindow):
         aps_direct_tip_layout.addWidget(self.aps_crusher_input)
         direct_tip_label = QLabel("2WP Direct Tip:")
         direct_tip_label.setStyleSheet("font-weight: bold;")
-        layout.addRow(direct_tip_label, aps_direct_tip_layout)
+        guidance_layout.addRow(direct_tip_label, aps_direct_tip_layout)
 
         product_brand_label = QLabel("Product Brands:")
         product_brand_label.setStyleSheet("font-weight: bold;")
@@ -2325,6 +2839,8 @@ class UserInputs(QMainWindow):
         self.time_mode.currentIndexChanged.connect(self.validate_form)
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.validate_form)
+        self.file_path_24hr.textChanged.connect(self.validate_form)
+        self.expit_agent_input.itemSelectionChanged.connect(self.validate_form)
         self.product_brand_labels_input.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
         self.agent_enabled_checkbox.toggled.connect(self.toggle_agent_enabled)
@@ -2356,6 +2872,14 @@ class UserInputs(QMainWindow):
                 and hasattr(self, "aps_crusher_input")
                 and bool(self.selected_aps_crusher_names())
             )
+        schedule_paths_ready = (
+            not self.file_path_24hr.text().strip()
+            or bool(self.file_path.text().strip())
+        )
+        expit_agents_ready = (
+            not self.file_path_24hr.text().strip()
+            or bool(self.selected_24hr_expit_agent_names())
+        )
         all_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
@@ -2365,6 +2889,8 @@ class UserInputs(QMainWindow):
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
             and aps_direct_tip_ready
+            and schedule_paths_ready
+            and expit_agents_ready
         )
         self.submit_button.setEnabled(all_fields_populated)
         self.save_button.setEnabled(all_fields_populated)
@@ -2463,8 +2989,13 @@ class UserInputs(QMainWindow):
         thread.start()
 
     def browse_file(self):
-        """Browse to select a file."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "CSV Files (*.csv);;All Files (*)")
+        """Browse for the 2WP reference schedule."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select 2WP Mining.csv",
+            "",
+            "APS Mining.csv (*.csv);;All Files (*)",
+        )
         if file_path:
             self.file_path.setText(file_path)
             if hasattr(self, "aps_crusher_input"):
@@ -2476,6 +3007,109 @@ class UserInputs(QMainWindow):
             self.direct_tip_movement_rules = []
             self.set_direct_tip_movement_options([], [])
             self.refresh_direct_tip_rule_list()
+
+    def browse_24hr_file(self):
+        """Browse for the 24HR movement schedule."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select 24HR Mining.csv",
+            "",
+            "APS Mining.csv (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.file_path_24hr.setText(file_path)
+            self.set_24hr_expit_agent_items([], [])
+
+    @staticmethod
+    def normalized_expit_agent_names(agent_names):
+        if agent_names is None:
+            return []
+        if isinstance(agent_names, (list, tuple, set)):
+            return sorted({
+                str(name).strip()
+                for name in agent_names
+                if str(name).strip()
+            })
+        agent_name = str(agent_names).strip()
+        return [agent_name] if agent_name else []
+
+    def selected_24hr_expit_agent_names(self):
+        if not hasattr(self, "expit_agent_input"):
+            return []
+        return sorted(
+            item.text().strip()
+            for item in self.expit_agent_input.selectedItems()
+            if item.text().strip()
+        )
+
+    def available_24hr_expit_agent_names(self):
+        if not hasattr(self, "expit_agent_input"):
+            return []
+        return sorted(
+            self.expit_agent_input.item(row).text().strip()
+            for row in range(self.expit_agent_input.count())
+            if self.expit_agent_input.item(row).text().strip()
+        )
+
+    def set_24hr_expit_agent_items(self, agent_names, selected_agents=None):
+        if not hasattr(self, "expit_agent_input"):
+            return
+        agent_names = self.normalized_expit_agent_names(agent_names)
+        selected_agents = set(
+            self.normalized_expit_agent_names(selected_agents)
+        )
+        self.expit_agent_input.clear()
+        self.expit_agent_input.addItems(agent_names)
+        for row in range(self.expit_agent_input.count()):
+            item = self.expit_agent_input.item(row)
+            item.setSelected(item.text().strip() in selected_agents)
+
+    def load_24hr_expit_agent_names(self):
+        file_path = (
+            self.file_path_24hr.text().strip()
+            if hasattr(self, "file_path_24hr")
+            else ""
+        )
+        if not file_path:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Select a 24HR Mining.csv file before loading agent names.",
+            )
+            return
+
+        try:
+            agent_names = ExpitDataHandler.get_distinct_expit_agent_names(
+                file_path
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "BlendMaster",
+                f"Unable to read agent names from 24HR Mining.csv: {exc}",
+            )
+            return
+
+        previous_selection = self.selected_24hr_expit_agent_names()
+        retained_selection = [
+            name for name in previous_selection if name in agent_names
+        ]
+        selected_agents = retained_selection or agent_names
+        self.set_24hr_expit_agent_items(agent_names, selected_agents)
+        if agent_names:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                f"Found {len(agent_names)} expit dig circuit(s). "
+                "All circuits are selected by default; deselect any circuits to exclude.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "No reserve-movement agents were found in the selected 24HR Mining.csv file.",
+            )
+        self.validate_form()
 
     def toggle_aps_direct_tip_controls(self, enabled):
         if hasattr(self, "aps_crusher_button"):
@@ -2555,7 +3189,7 @@ class UserInputs(QMainWindow):
             QMessageBox.information(
                 self,
                 "BlendMaster",
-                "Select an APS Mining.csv file before loading crusher names.",
+                "Select a 2WP Mining.csv file before loading crusher names.",
             )
             return
 
@@ -2568,7 +3202,7 @@ class UserInputs(QMainWindow):
             QMessageBox.warning(
                 self,
                 "BlendMaster",
-                f"Unable to read crusher names from APS Mining.csv: {exc}",
+                f"Unable to read crusher names from 2WP Mining.csv: {exc}",
             )
             return
 
@@ -2607,7 +3241,7 @@ class UserInputs(QMainWindow):
             QMessageBox.information(
                 self,
                 "BlendMaster",
-                "No crusher destinations were found in the selected APS Mining.csv file.",
+                "No crusher destinations were found in the selected 2WP Mining.csv file.",
             )
         self.validate_form()
 
@@ -2695,7 +3329,7 @@ class UserInputs(QMainWindow):
         file_path = self.file_path.text().strip()
         if not file_path:
             QMessageBox.information(
-                self, "BlendMaster", "Select APS Mining.csv before deriving crusher ratios."
+                self, "BlendMaster", "Select 2WP Mining.csv before deriving crusher ratios."
             )
             return
         try:
@@ -2771,7 +3405,7 @@ class UserInputs(QMainWindow):
         file_path = self.file_path.text().strip()
         if not file_path:
             QMessageBox.information(
-                self, "BlendMaster", "Select APS Mining.csv before loading movement values."
+                self, "BlendMaster", "Select 2WP Mining.csv before loading movement values."
             )
             return
         try:
@@ -2832,6 +3466,9 @@ class UserInputs(QMainWindow):
 
     def refresh_aps_stockpile_brand_map(self):
         self.aps_stockpile_brand_map = {}
+        self.aps_stockpile_timing_guidance = {}
+        self.aps_active_blend_guidance = []
+        self.aps_destination_guidance = {}
         file_path = getattr(self, "file_path_choice", "") or ""
         if not file_path:
             return
@@ -2847,22 +3484,45 @@ class UserInputs(QMainWindow):
         )
         cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
         if cached_map is not None:
-            self.aps_stockpile_brand_map = copy.deepcopy(cached_map)
+            cached_guidance = copy.deepcopy(cached_map)
+            if "brand_guidance" in cached_guidance:
+                self.aps_stockpile_brand_map = cached_guidance.get(
+                    "brand_guidance", {}
+                )
+                self.aps_stockpile_timing_guidance = cached_guidance.get(
+                    "stockpile_timing_guidance", {}
+                )
+                self.aps_active_blend_guidance = cached_guidance.get(
+                    "active_blend_guidance", []
+                )
+                self.aps_destination_guidance = cached_guidance.get(
+                    "destination_guidance", {}
+                )
+            else:
+                # Compatibility with caches created before dual ingestion.
+                self.aps_stockpile_brand_map = cached_guidance
             return
         try:
-            self.aps_stockpile_brand_map = ExpitDataHandler.get_stockpile_brand_guidance(
+            guidance = ExpitDataHandler.get_2wp_schedule_guidance(
                 file_path,
                 self.product_brand_options(),
-                getattr(self, "mine_input_choice", None),
-                getattr(self, "crusher_input_choice", None),
-                getattr(self, "opf_input_choice", None),
             )
-            self.aps_brand_guidance_cache[cache_key] = copy.deepcopy(
-                self.aps_stockpile_brand_map
+            guidance["destination_guidance"] = (
+                ExpitDataHandler.build_2wp_destination_guidance(file_path)
             )
+            self.aps_stockpile_brand_map = guidance["brand_guidance"]
+            self.aps_stockpile_timing_guidance = guidance[
+                "stockpile_timing_guidance"
+            ]
+            self.aps_active_blend_guidance = guidance["active_blend_guidance"]
+            self.aps_destination_guidance = guidance["destination_guidance"]
+            self.aps_brand_guidance_cache[cache_key] = copy.deepcopy(guidance)
         except Exception as exc:
             self.aps_stockpile_brand_map = {}
-            print(f"Warning: unable to derive APS stockpile brand guidance: {exc}")
+            self.aps_stockpile_timing_guidance = {}
+            self.aps_active_blend_guidance = []
+            self.aps_destination_guidance = {}
+            print(f"Warning: unable to derive 2WP schedule guidance: {exc}")
 
     def aps_brand_info_for_stockpile(self, stockpile_name):
         brand_map = getattr(self, "aps_stockpile_brand_map", {}) or {}
@@ -2872,6 +3532,17 @@ class UserInputs(QMainWindow):
         lookup = {
             str(name or "").strip().upper().replace("STOCKPILES/", ""): value
             for name, value in brand_map.items()
+        }
+        return lookup.get(normalized_name, {})
+
+    def aps_timing_info_for_stockpile(self, stockpile_name):
+        timing_map = getattr(self, "aps_stockpile_timing_guidance", {}) or {}
+        normalized_name = (
+            str(stockpile_name or "").strip().upper().replace("STOCKPILES/", "")
+        )
+        lookup = {
+            str(name or "").strip().upper().replace("STOCKPILES/", ""): value
+            for name, value in timing_map.items()
         }
         return lookup.get(normalized_name, {})
 
@@ -2896,6 +3567,9 @@ class UserInputs(QMainWindow):
             attributes["aps_brand_tonnes"] = brand_info.get("brand_tonnes", {})
             attributes["aps_brand_total_tonnes"] = brand_info.get("total_tonnes", 0)
             attributes["aps_brand_summary"] = self.format_aps_brand_summary(brand_info)
+            attributes["aps_timing_guidance"] = copy.deepcopy(
+                self.aps_timing_info_for_stockpile(stockpile_name)
+            )
 
     def update_mine_dropdown(self):
         """Update the Mine dropdown based on the selected Hub."""
@@ -3042,6 +3716,17 @@ class UserInputs(QMainWindow):
     def validate_site_configuration_constraints(self):
         if len(self.selected_site_crushers) != 1:
             return False, "Select exactly one operating crusher for this site scenario."
+        if self.file_path_24hr_choice and not self.file_path_choice:
+            return False, (
+                "Select a 2WP Mining.csv reference before importing a 24HR Mining.csv schedule."
+            )
+        if (
+            self.file_path_24hr_choice
+            and not self.selected_24hr_expit_agents
+        ):
+            return False, (
+                "Load and select at least one 24HR expit dig circuit."
+            )
         ratio = self.crusher_contribution_ratio_choice
         if ratio is None or not 0 < ratio <= 1:
             return False, "Enter or derive a crusher contribution ratio greater than 0% and no more than 100%."
@@ -3118,6 +3803,13 @@ class UserInputs(QMainWindow):
             self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         )
         self.file_path_choice = self.file_path.text().strip()
+        self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.available_24hr_expit_agents = (
+            self.available_24hr_expit_agent_names()
+        )
+        self.selected_24hr_expit_agents = (
+            self.selected_24hr_expit_agent_names()
+        )
         self.blend_mode_choice = self.blend_mode.currentIndex() + 1
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             self.product_brand_labels_input.text()
@@ -3149,6 +3841,11 @@ class UserInputs(QMainWindow):
             or [getattr(self, "crusher_input_choice", "")]
         )
         self.file_path.setText(str(self.file_path_choice or ""))
+        self.file_path_24hr.setText(str(self.file_path_24hr_choice or ""))
+        self.set_24hr_expit_agent_items(
+            getattr(self, "available_24hr_expit_agents", []),
+            getattr(self, "selected_24hr_expit_agents", []),
+        )
         self.load_ratio_controls_from_state()
         self.set_direct_tip_movement_options(
             getattr(self, "direct_tip_grade_block_sources", []),
@@ -3385,8 +4082,8 @@ class UserInputs(QMainWindow):
         QMessageBox.information(self, "BlendMaster", message)
 
         self.setup_stockpile_table()
-        self.tabs.setTabEnabled(self.stockpile_tab_index, True)
-        self.tabs.setCurrentIndex(self.stockpile_tab_index)  # Switch to the next tab
+        self.set_page_enabled(self.stockpile_tab_index, True)
+        self.show_page(self.stockpile_tab_index)  # Switch to the next tab
 
         if getattr(self, "agent_workflow_after_site_config", False):
             self.agent_workflow_after_site_config = False
@@ -3402,7 +4099,12 @@ class UserInputs(QMainWindow):
     def setup_agent_instructions_tab(self):
         self.agent_tab = QWidget()
         self.agent_tab.setObjectName("agentInstructionsTab")
-        self.agent_tab_index = self.tabs.addTab(self.agent_tab, "Agent Instructions")
+        self.agent_tab_index = self.register_page(
+            "agent",
+            self.tabs,
+            self.agent_tab,
+            "Agent",
+        )
         self.agent_layout = QVBoxLayout(self.agent_tab)
         self.agent_layout.setContentsMargins(14, 12, 14, 12)
         self.agent_layout.setSpacing(10)
@@ -3570,7 +4272,7 @@ class UserInputs(QMainWindow):
     def toggle_agent_enabled(self, enabled):
         self.agent_enabled_choice = bool(enabled)
         if hasattr(self, "agent_tab_index"):
-            self.tabs.setTabEnabled(self.agent_tab_index, self.agent_enabled_choice)
+            self.set_page_enabled(self.agent_tab_index, self.agent_enabled_choice)
         if self.agent_enabled_choice:
             self.start_agent_bridge()
         else:
@@ -3947,6 +4649,13 @@ class UserInputs(QMainWindow):
                 ),
                 "start_time": getattr(self, "start_time_choice", None),
                 "aps_mining_csv": getattr(self, "file_path_choice", ""),
+                "two_wp_mining_csv": getattr(self, "file_path_choice", ""),
+                "twenty_four_hour_mining_csv": getattr(
+                    self, "file_path_24hr_choice", ""
+                ),
+                "selected_24hr_expit_agents": getattr(
+                    self, "selected_24hr_expit_agents", []
+                ),
                 "product_brands": getattr(self, "product_brand_labels_choice", self.default_product_brand_labels()),
                 "auto_load_2wp_targets": getattr(
                     self,
@@ -4912,7 +5621,13 @@ class UserInputs(QMainWindow):
             "stockpile_feasibility_mode",
             "allow_offspec_steady_states_for_product_build",
             "brand_guidance_mode",
+            "brand_guidance_enabled",
             "brand_guidance_incentive",
+            "timing_guidance_enabled",
+            "timing_guidance_incentive",
+            "timing_guidance_tolerance_hours",
+            "active_blend_guidance_enabled",
+            "active_blend_guidance_incentive",
             "min_feed_duration_hours",
             "direct_tip_enabled",
             "direct_tip_cash_incentive",
@@ -5039,7 +5754,7 @@ class UserInputs(QMainWindow):
     def agent_workflow_apply_site_configuration(self):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
         site_config = payload.get("site_configuration") or {}
-        self.tabs.setCurrentIndex(self.site_config_tab_index)
+        self.show_page(self.site_config_tab_index)
         self.apply_agent_site_configuration_payload(site_config)
         if not self.submit_button.isEnabled():
             self.stop_agent_workflow_apply(
@@ -5108,12 +5823,29 @@ class UserInputs(QMainWindow):
             ))
 
         file_path = (
-            site_config.get("aps_mining_csv")
+            site_config.get("two_wp_mining_csv")
+            or site_config.get("aps_mining_csv")
             or site_config.get("mining_csv")
             or site_config.get("file_path")
         )
         if file_path:
             self.file_path.setText(str(file_path))
+        twenty_four_hour_path = (
+            site_config.get("twenty_four_hour_mining_csv")
+            or site_config.get("24hr_mining_csv")
+        )
+        if twenty_four_hour_path:
+            self.file_path_24hr.setText(str(twenty_four_hour_path))
+        if any(key in site_config for key in (
+            "selected_24hr_expit_agents",
+            "expit_dig_circuits",
+        )):
+            selected_agents = self.normalized_expit_agent_names(
+                site_config.get("selected_24hr_expit_agents")
+                or site_config.get("expit_dig_circuits")
+                or []
+            )
+            self.set_24hr_expit_agent_items(selected_agents, selected_agents)
 
         ratio_mode_value = (
             site_config.get("crusher_ratio_mode")
@@ -5257,7 +5989,7 @@ class UserInputs(QMainWindow):
     def agent_workflow_apply_stockpiles(self):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
         selected_payload = payload.get("selected_stockpiles")
-        self.tabs.setCurrentIndex(self.stockpile_tab_index)
+        self.show_page(self.stockpile_tab_index)
 
         if selected_payload:
             if self.apply_agent_selected_stockpiles(selected_payload):
@@ -5298,7 +6030,7 @@ class UserInputs(QMainWindow):
 
     def agent_workflow_apply_amt_stockpiles(self):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
-        self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)
+        self.show_page(self.AMT_stockpile_tab_index)
 
         amt_chunking = payload.get("amt_chunking") or {}
         if amt_chunking:
@@ -5402,7 +6134,7 @@ class UserInputs(QMainWindow):
             self.stop_agent_workflow_apply("Agent workflow stopped: Solver Configuration tab is not ready.")
             return
 
-        self.tabs.setCurrentIndex(self.solver_config_tab_index)
+        self.show_page(self.solver_config_tab_index)
         applied = 0
         blend_settings = payload.get("blend_settings") or {}
         for proposal in self.expand_agent_proposals([{"target": "blend_settings", "value": blend_settings}]):
@@ -5445,14 +6177,14 @@ class UserInputs(QMainWindow):
             return
 
         self.setup_calendar()
-        self.tabs.setTabEnabled(self.calendar_tab_index, True)
-        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        self.set_page_enabled(self.calendar_tab_index, True)
+        self.show_page(self.calendar_tab_index)
         QTimer.singleShot(250, self.agent_workflow_apply_calendar)
 
     def agent_workflow_apply_calendar(self):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
         calendar_rates = payload.get("calendar_rates") or {}
-        self.tabs.setCurrentIndex(self.calendar_tab_index)
+        self.show_page(self.calendar_tab_index)
 
         applied = 0
         if calendar_rates:
@@ -5589,6 +6321,35 @@ class UserInputs(QMainWindow):
         )
         if loaded_state.get("aps_stockpile_brand_map") is None:
             loaded_state["aps_stockpile_brand_map"] = {}
+        if loaded_state.get("aps_stockpile_timing_guidance") is None:
+            loaded_state["aps_stockpile_timing_guidance"] = {}
+        if loaded_state.get("aps_active_blend_guidance") is None:
+            loaded_state["aps_active_blend_guidance"] = []
+        if loaded_state.get("aps_destination_guidance") is None:
+            loaded_state["aps_destination_guidance"] = {}
+        loaded_state["available_24hr_expit_agents"] = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("available_24hr_expit_agents") or []
+            )
+        )
+        loaded_state["selected_24hr_expit_agents"] = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("selected_24hr_expit_agents") or []
+            )
+        )
+        if (
+            not loaded_state["available_24hr_expit_agents"]
+            and loaded_state["selected_24hr_expit_agents"]
+        ):
+            loaded_state["available_24hr_expit_agents"] = list(
+                loaded_state["selected_24hr_expit_agents"]
+            )
+        if (
+            "file_path_24hr_choice" not in loaded_state
+            and loaded_state.get("file_path_choice")
+        ):
+            # Flat/single-schedule projects used the one file for both roles.
+            loaded_state["file_path_24hr_choice"] = loaded_state["file_path_choice"]
         if loaded_state.get("solver_config") is None:
             loaded_state["solver_config"] = {}
         if loaded_state.get("time_mode_choice") is None:
@@ -5656,6 +6417,28 @@ class UserInputs(QMainWindow):
             loaded_state["time_mode_choice"] = 2
         if "aps_mining_csv" in site_config:
             loaded_state["file_path_choice"] = site_config.get("aps_mining_csv")
+        if "two_wp_mining_csv" in site_config:
+            loaded_state["file_path_choice"] = site_config.get("two_wp_mining_csv")
+        if "twenty_four_hour_mining_csv" in site_config or "24hr_mining_csv" in site_config:
+            loaded_state["file_path_24hr_choice"] = (
+                site_config.get("twenty_four_hour_mining_csv")
+                or site_config.get("24hr_mining_csv")
+            )
+        if (
+            "selected_24hr_expit_agents" in site_config
+            or "expit_dig_circuits" in site_config
+        ):
+            selected_agents = (
+                site_config.get("selected_24hr_expit_agents")
+                or site_config.get("expit_dig_circuits")
+                or []
+            )
+            loaded_state["selected_24hr_expit_agents"] = (
+                self.normalized_expit_agent_names(selected_agents)
+            )
+            loaded_state["available_24hr_expit_agents"] = list(
+                loaded_state["selected_24hr_expit_agents"]
+            )
         if "file_path" in site_config:
             loaded_state["file_path_choice"] = site_config.get("file_path")
         if "reevaluate_aps_direct_tip" in site_config:
@@ -5795,9 +6578,35 @@ class UserInputs(QMainWindow):
                 "force_matching_product_brand": "Force matching product brand",
             }.get(normalized, str(value))
             self.brand_guidance_mode_combo.setCurrentText(label)
+            self.brand_guidance_enabled_checkbox.setChecked(
+                normalized not in {
+                    "ignore",
+                    "none",
+                    "ignore_aps_brand_guidance",
+                    "ignore_2wp_brand_guidance",
+                }
+            )
+            return True
+        if key == "brand_guidance_enabled":
+            self.brand_guidance_enabled_checkbox.setChecked(to_bool(value))
             return True
         if key == "brand_guidance_incentive":
             set_line_edit(self.brand_guidance_incentive_input, value)
+            return True
+        if key == "timing_guidance_enabled":
+            self.timing_guidance_enabled_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "timing_guidance_incentive":
+            set_line_edit(self.timing_guidance_incentive_input, value)
+            return True
+        if key == "timing_guidance_tolerance_hours":
+            set_line_edit(self.timing_guidance_tolerance_input, value)
+            return True
+        if key == "active_blend_guidance_enabled":
+            self.active_blend_guidance_enabled_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "active_blend_guidance_incentive":
+            set_line_edit(self.active_blend_guidance_incentive_input, value)
             return True
         if key == "min_feed_duration_hours":
             set_line_edit(self.min_feed_duration_input, value)
@@ -6266,8 +7075,8 @@ class UserInputs(QMainWindow):
 
             if has_AMT_stockpiles:
                 self.setup_AMT_stockpile_table()
-                self.tabs.setTabEnabled(self.AMT_stockpile_tab_index, True)
-                self.tabs.setCurrentIndex(self.AMT_stockpile_tab_index)  # Switch to AMT tab
+                self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+                self.show_page(self.AMT_stockpile_tab_index)  # Switch to AMT tab
             else:
                 self.hex_sequence_table = []
                 self.hex_sequence_table_argument = []
@@ -6287,12 +7096,13 @@ class UserInputs(QMainWindow):
     def activate_manual_setup_tab(self):
         self.set_default_manual_schedule_periods()
         self.setup_blends_tab()
-        self.tabs.setTabEnabled(self.blend_config_tab_index, True)
+        self.set_page_enabled(self.blend_config_tab_index, True)
 
     def navigate_to_solver_configuration(self):
         self.load_solver_config_inputs()
-        self.tabs.setTabEnabled(self.solver_config_tab_index, True)
-        self.tabs.setCurrentIndex(self.solver_config_tab_index)
+        self.set_page_enabled(self.solver_config_tab_index, True)
+        self.set_page_enabled(self.decision_levers_tab_index, True)
+        self.show_page(self.solver_config_tab_index)
 
     def handle_solver_configuration_submit(self):
         if not self.store_solver_config_inputs():
@@ -7043,7 +7853,25 @@ class UserInputs(QMainWindow):
             "force_match": "Force matching product brand",
         }.get(solver_config.get("brand_guidance_mode", "ignore"), "Ignore 2WP brand guidance")
         self.brand_guidance_mode_combo.setCurrentText(brand_guidance_label)
+        self.brand_guidance_enabled_checkbox.setChecked(
+            bool(solver_config.get("brand_guidance_enabled", False))
+        )
         self.brand_guidance_incentive_input.setText(str(solver_config.get("brand_guidance_incentive", 0.0)))
+        self.timing_guidance_enabled_checkbox.setChecked(
+            bool(solver_config.get("timing_guidance_enabled", False))
+        )
+        self.timing_guidance_incentive_input.setText(
+            str(solver_config.get("timing_guidance_incentive", 0.0))
+        )
+        self.timing_guidance_tolerance_input.setText(
+            str(solver_config.get("timing_guidance_tolerance_hours", 0.0))
+        )
+        self.active_blend_guidance_enabled_checkbox.setChecked(
+            bool(solver_config.get("active_blend_guidance_enabled", False))
+        )
+        self.active_blend_guidance_incentive_input.setText(
+            str(solver_config.get("active_blend_guidance_incentive", 0.0))
+        )
         min_feed_duration = solver_config.get("min_feed_duration_hours")
         self.min_feed_duration_input.setText(
             "" if min_feed_duration in (None, "") else str(min_feed_duration)
@@ -7155,6 +7983,19 @@ class UserInputs(QMainWindow):
                 return None
             return value
 
+        def parse_signed_input(input_widget, label, default=0.0):
+            text = input_widget.text().strip()
+            if not text:
+                return default
+            try:
+                return float(text)
+            except ValueError:
+                if show_errors:
+                    QMessageBox.warning(
+                        self, "Invalid Input", f"{label} must be a number."
+                    )
+                return None
+
         def parse_optional_non_negative(text, label):
             if not text:
                 return None
@@ -7223,9 +8064,24 @@ class UserInputs(QMainWindow):
             "Stay With Same Grade Block Pair Incentive",
             0.0,
         )
-        brand_guidance_incentive = parse_non_negative_input(
+        brand_guidance_incentive = parse_signed_input(
             self.brand_guidance_incentive_input,
-            "2WP Product Guidance Incentive/Penalty",
+            "2WP Product Guidance Reward/Penalty",
+            0.0,
+        )
+        timing_guidance_incentive = parse_signed_input(
+            self.timing_guidance_incentive_input,
+            "2WP Source Timing Reward/Penalty",
+            0.0,
+        )
+        timing_guidance_tolerance_hours = parse_non_negative_input(
+            self.timing_guidance_tolerance_input,
+            "2WP Source Timing Tolerance",
+            0.0,
+        )
+        active_blend_guidance_incentive = parse_signed_input(
+            self.active_blend_guidance_incentive_input,
+            "2WP Active Blend Reward/Penalty",
             0.0,
         )
         min_feed_duration_hours = parse_optional_non_negative(
@@ -7243,6 +8099,9 @@ class UserInputs(QMainWindow):
             or min_grade_block_pair_duration_hours is None
             or stay_on_same_grade_block_pair_incentive is None
             or brand_guidance_incentive is None
+            or timing_guidance_incentive is None
+            or timing_guidance_tolerance_hours is None
+            or active_blend_guidance_incentive is None
             or (min_feed_duration_text and min_feed_duration_hours is None)
         ):
             return False
@@ -7256,18 +8115,20 @@ class UserInputs(QMainWindow):
             "Stockpile blend must be feasible": "stockpile_must_be_feasible",
             "Stockpile blend can rely on grade blocks": "stockpile_can_rely_on_grade_blocks"
         }.get(self.stockpile_feasibility_combo.currentText(), "stockpile_must_be_feasible")
-        brand_guidance_mode = {
-            "Ignore 2WP brand guidance": "ignore",
-            "Prefer matching product brand": "prefer_match",
-            "Penalize mismatched product brand": "penalize_mismatch",
-            "Force matching product brand": "force_match",
-        }.get(self.brand_guidance_mode_combo.currentText(), "ignore")
+        brand_guidance_enabled = self.brand_guidance_enabled_checkbox.isChecked()
+        brand_guidance_mode = "prefer_match" if brand_guidance_enabled else "ignore"
 
         self.solver_config = {
             "stockpile_feasibility_mode": stockpile_feasibility_mode,
             "allow_offspec_steady_states_for_product_build": self.allow_offspec_steady_states_checkbox.isChecked(),
             "brand_guidance_mode": brand_guidance_mode,
+            "brand_guidance_enabled": brand_guidance_enabled,
             "brand_guidance_incentive": brand_guidance_incentive,
+            "timing_guidance_enabled": self.timing_guidance_enabled_checkbox.isChecked(),
+            "timing_guidance_incentive": timing_guidance_incentive,
+            "timing_guidance_tolerance_hours": timing_guidance_tolerance_hours,
+            "active_blend_guidance_enabled": self.active_blend_guidance_enabled_checkbox.isChecked(),
+            "active_blend_guidance_incentive": active_blend_guidance_incentive,
             "min_feed_duration_hours": min_feed_duration_hours,
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
@@ -7410,7 +8271,7 @@ class UserInputs(QMainWindow):
         return self.run_program.execute(
             self.start_time_choice,
             self.expit_mode_choice,
-            self.file_path_choice,
+            self.file_path_24hr_choice,
             self.blend_mode_choice,
             self.updated_stockpile_data,
             self.calendar_inputs,
@@ -7422,6 +8283,8 @@ class UserInputs(QMainWindow):
             getattr(self, "reevaluate_aps_direct_tip_choice", False),
             getattr(self, "aps_direct_tip_crusher_choice", []),
             self.active_site_context(),
+            self.file_path_choice,
+            getattr(self, "selected_24hr_expit_agents", []),
         )
 
     def finish_run_program(self, periods):
@@ -7452,25 +8315,31 @@ class UserInputs(QMainWindow):
         if hasattr(self, "decision_output"):
             self.display_decision_output(f"\n--- {error_title} ---\n{error_text}")
 
-        self.tabs.setTabEnabled(self.calendar_tab_index, True)
-        self.tabs.setTabEnabled(self.decision_point_tab_index, True)
+        self.set_page_enabled(self.calendar_tab_index, True)
+        self.set_page_enabled(self.decision_point_tab_index, True)
         for tab_index in [
             self.results_tab_index,
             self.profiles_tab_index,
             self.sqlite_reports_tab_index,
             self.optimised_grade_profile_tab_index,
         ]:
-            self.tabs.setTabEnabled(tab_index, False)
+            self.set_page_enabled(tab_index, False)
         self.decision_input.setEnabled(False)
         self.enter_button.setEnabled(False)
         self.decision_select_button.setEnabled(False)
-        self.tabs.setCurrentIndex(self.decision_point_tab_index)
+        self.show_page(self.decision_point_tab_index)
         self.show_error_popup(error_message)
 
     def setup_results_tab(self):
         self.results_tab = QWidget()
         self.results_tab.setObjectName("resultsTab")
-        self.results_tab_index = self.tabs.addTab(self.results_tab, "Results")
+        self.results_tab_index = self.register_page(
+            "optimised_blend_sequence",
+            self.results_tabs,
+            self.results_tab,
+            "Optimised Blend Sequence",
+            position=0,
+        )
         self.results_layout = QVBoxLayout(self.results_tab)
         self.results_layout.setContentsMargins(12, 10, 12, 10)
         self.results_layout.setSpacing(10)
@@ -7598,7 +8467,12 @@ class UserInputs(QMainWindow):
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
-        self.profiles_tab_index = self.tabs.addTab(self.profiles_tab, "Build and Depletion Profiles")
+        self.profiles_tab_index = self.register_page(
+            "build_depletion_profiles",
+            self.results_tabs,
+            self.profiles_tab,
+            "Build and Depletion Profiles",
+        )
         self.profiles_layout = QVBoxLayout(self.profiles_tab)
         self.profiles_layout.setContentsMargins(12, 10, 12, 10)
         self.profiles_layout.setSpacing(8)
@@ -7637,22 +8511,46 @@ class UserInputs(QMainWindow):
 
     def setup_sqlite_reports_tab(self):
         self.sqlite_reports_tab = QWidget()
-        self.sqlite_reports_tab_index = self.tabs.addTab(self.sqlite_reports_tab, "Reports")
+        self.sqlite_reports_tab_index = self.register_page(
+            "reports",
+            self.results_tabs,
+            self.sqlite_reports_tab,
+            "Reports",
+            position=2,
+        )
         self.sqlite_reports_layout = QVBoxLayout(self.sqlite_reports_tab)
 
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Report Table:"))
 
         self.sqlite_report_selector = QComboBox()
-        self.sqlite_report_selector.currentIndexChanged.connect(self.load_selected_sqlite_report)
+        self.sqlite_report_selector.currentIndexChanged.connect(
+            self.handle_sqlite_report_selection
+        )
         controls_layout.addWidget(self.sqlite_report_selector)
 
-        refresh_button = QPushButton("Refresh Reports")
+        refresh_button = QPushButton("Refresh Tables")
         refresh_button.clicked.connect(self.refresh_sqlite_reports)
         controls_layout.addWidget(refresh_button)
         controls_layout.addStretch()
 
         self.sqlite_reports_layout.addLayout(controls_layout)
+
+        query_layout = QHBoxLayout()
+        query_layout.addWidget(QLabel("SQL Query:"))
+        self.sqlite_report_query = QLineEdit()
+        self.sqlite_report_query.setPlaceholderText(
+            'SELECT * FROM "table_name" LIMIT 100'
+        )
+        self.sqlite_report_query.returnPressed.connect(
+            self.execute_sqlite_report_query
+        )
+        query_layout.addWidget(self.sqlite_report_query, stretch=1)
+
+        run_query_button = QPushButton("Run Query")
+        run_query_button.clicked.connect(self.execute_sqlite_report_query)
+        query_layout.addWidget(run_query_button)
+        self.sqlite_reports_layout.addLayout(query_layout)
 
         self.sqlite_report_status = QLabel("")
         self.sqlite_reports_layout.addWidget(self.sqlite_report_status)
@@ -7680,6 +8578,7 @@ class UserInputs(QMainWindow):
 
     def refresh_sqlite_reports(self):
         current_table = self.sqlite_report_selector.currentText()
+        current_query = self.sqlite_report_query.text().strip()
         tables = self.get_sqlite_report_tables()
 
         self.sqlite_report_selector.blockSignals(True)
@@ -7689,34 +8588,120 @@ class UserInputs(QMainWindow):
             self.sqlite_report_selector.setCurrentText(current_table)
         self.sqlite_report_selector.blockSignals(False)
 
-        self.load_selected_sqlite_report()
+        selected_table = self.sqlite_report_selector.currentText()
+        if not selected_table:
+            self.clear_sqlite_report_preview()
+            return
+        if current_table == selected_table and current_query:
+            self.sqlite_report_query.setText(current_query)
+        else:
+            self.sqlite_report_query.setText(
+                self.default_sqlite_report_query(selected_table)
+            )
+        self.execute_sqlite_report_query()
 
-    def load_selected_sqlite_report(self):
+    @staticmethod
+    def default_sqlite_report_query(table_name):
+        escaped_table_name = str(table_name).replace('"', '""')
+        return f'SELECT * FROM "{escaped_table_name}" LIMIT 100'
+
+    def handle_sqlite_report_selection(self):
         table_name = self.sqlite_report_selector.currentText()
         if not table_name:
-            self.sqlite_report_table.clearContents()
-            self.sqlite_report_table.setRowCount(0)
-            self.sqlite_report_table.setColumnCount(0)
-            self.sqlite_report_status.setText("")
+            self.clear_sqlite_report_preview()
+            return
+        self.sqlite_report_query.setText(
+            self.default_sqlite_report_query(table_name)
+        )
+        self.execute_sqlite_report_query()
+
+    def clear_sqlite_report_preview(self):
+        self.sqlite_report_table.clearContents()
+        self.sqlite_report_table.setRowCount(0)
+        self.sqlite_report_table.setColumnCount(0)
+        self.sqlite_report_status.setText("")
+
+    @staticmethod
+    def is_read_only_report_query(query):
+        normalized = str(query or "").strip()
+        if normalized.endswith(";"):
+            normalized = normalized[:-1].rstrip()
+        if not normalized or ";" in normalized:
+            return False
+        first_word = normalized.split(None, 1)[0].lower()
+        return first_word in {"select", "with"}
+
+    @staticmethod
+    def configure_read_only_sqlite_connection(conn):
+        conn.execute("PRAGMA query_only = ON")
+
+        denied_actions = {
+            getattr(sqlite3, name)
+            for name in (
+                "SQLITE_INSERT",
+                "SQLITE_UPDATE",
+                "SQLITE_DELETE",
+                "SQLITE_CREATE_INDEX",
+                "SQLITE_CREATE_TABLE",
+                "SQLITE_CREATE_TEMP_INDEX",
+                "SQLITE_CREATE_TEMP_TABLE",
+                "SQLITE_CREATE_TEMP_TRIGGER",
+                "SQLITE_CREATE_TEMP_VIEW",
+                "SQLITE_CREATE_TRIGGER",
+                "SQLITE_CREATE_VIEW",
+                "SQLITE_DROP_INDEX",
+                "SQLITE_DROP_TABLE",
+                "SQLITE_DROP_TEMP_INDEX",
+                "SQLITE_DROP_TEMP_TABLE",
+                "SQLITE_DROP_TEMP_TRIGGER",
+                "SQLITE_DROP_TEMP_VIEW",
+                "SQLITE_DROP_TRIGGER",
+                "SQLITE_DROP_VIEW",
+                "SQLITE_ALTER_TABLE",
+                "SQLITE_REINDEX",
+                "SQLITE_ANALYZE",
+                "SQLITE_ATTACH",
+                "SQLITE_DETACH",
+            )
+            if hasattr(sqlite3, name)
+        }
+
+        def authorize(action_code, _arg1, _arg2, _database_name, _trigger_name):
+            if action_code in denied_actions:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+
+    def load_selected_sqlite_report(self):
+        """Compatibility alias for callers that previously loaded by table."""
+        self.handle_sqlite_report_selection()
+
+    def execute_sqlite_report_query(self):
+        query = self.sqlite_report_query.text().strip()
+        if not self.is_read_only_report_query(query):
+            QMessageBox.warning(
+                self,
+                "Reports",
+                "Reports accepts one read-only SELECT or WITH query at a time.",
+            )
             return
 
         try:
             conn = sqlite3.connect(get_database_path())
-            row_count = pd.read_sql(f'SELECT COUNT(*) AS row_count FROM "{table_name}"', conn)["row_count"].iloc[0]
-            preview_limit = 10000
-            df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT {preview_limit}', conn)
-            conn.close()
+            try:
+                self.configure_read_only_sqlite_connection(conn)
+                df = pd.read_sql_query(query, conn)
+            finally:
+                conn.close()
         except Exception as e:
-            QMessageBox.warning(self, "Reports", f"Unable to load '{table_name}': {e}")
+            self.sqlite_report_status.setText(f"Query failed: {e}")
+            QMessageBox.warning(self, "Reports", f"Unable to run query: {e}")
             return
 
-        if row_count > len(df):
-            self.sqlite_report_status.setText(
-                f"{table_name}: showing first {len(df):,} of {row_count:,} rows."
-            )
-        else:
-            self.sqlite_report_status.setText(f"{table_name}: {row_count:,} rows.")
-
+        self.sqlite_report_status.setText(
+            f"Query returned {len(df):,} row{'s' if len(df) != 1 else ''}."
+        )
         self.populate_dataframe_table(self.sqlite_report_table, df)
 
     def format_table_display_value(self, value):
@@ -7771,7 +8756,12 @@ class UserInputs(QMainWindow):
     def setup_optimised_grade_profile_tab(self):
         self.optimised_grade_profile_tab = QWidget()
         self.optimised_grade_profile_tab.setObjectName("optimisedGradeProfileTab")
-        self.optimised_grade_profile_tab_index = self.tabs.addTab(self.optimised_grade_profile_tab, "Grade Profiles")
+        self.optimised_grade_profile_tab_index = self.register_page(
+            "optimised_grade_profiles",
+            self.grade_profiles_tabs,
+            self.optimised_grade_profile_tab,
+            "Optimised",
+        )
         self.optimised_grade_profile_layout = QVBoxLayout(self.optimised_grade_profile_tab)
         self.optimised_grade_profile_layout.setContentsMargins(12, 10, 12, 10)
         self.optimised_grade_profile_layout.setSpacing(8)
@@ -7913,26 +8903,26 @@ class UserInputs(QMainWindow):
     def update_decision_point_tab_state(self):
         """Enable or disable the Decision Point tab based on blend_mode."""
         if self.blend_mode_choice == 2:
-            self.tabs.setTabEnabled(self.decision_point_tab_index, True)
-            self.tabs.setCurrentIndex(self.decision_point_tab_index)
+            self.set_page_enabled(self.decision_point_tab_index, True)
+            self.show_page(self.decision_point_tab_index)
             self.decision_input.setEnabled(True) # Enable the input
             self.enter_button.setEnabled(True) # Enable the button
             self.decision_select_button.setEnabled(True)
-            self.tabs.setTabEnabled(self.results_tab_index, True)
-            self.tabs.setTabEnabled(self.profiles_tab_index, True)
-            self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
-            self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, True)
+            self.set_page_enabled(self.results_tab_index, True)
+            self.set_page_enabled(self.profiles_tab_index, True)
+            self.set_page_enabled(self.sqlite_reports_tab_index, True)
+            self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
 
         else:
-            self.tabs.setTabEnabled(self.decision_point_tab_index, True)
+            self.set_page_enabled(self.decision_point_tab_index, True)
             self.decision_input.setEnabled(False) # Disable the input
             self.enter_button.setEnabled(False) # Disable the button
             self.decision_select_button.setEnabled(False)
-            self.tabs.setTabEnabled(self.results_tab_index, True)
-            self.tabs.setTabEnabled(self.profiles_tab_index, True)
-            self.tabs.setTabEnabled(self.sqlite_reports_tab_index, True)
-            self.tabs.setTabEnabled(self.optimised_grade_profile_tab_index, True)
-            self.tabs.setCurrentIndex(self.results_tab_index)  # Switch to Results (optimised) tab
+            self.set_page_enabled(self.results_tab_index, True)
+            self.set_page_enabled(self.profiles_tab_index, True)
+            self.set_page_enabled(self.sqlite_reports_tab_index, True)
+            self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
+            self.show_page(self.results_tab_index)  # Switch to Results (optimised) tab
 
     def handle_decision_input(self):
         """Send input from the Decision Point tab to the CaseModellerBridge."""
@@ -8696,8 +9686,8 @@ class UserInputs(QMainWindow):
                 self.saved_blends_for_schedule.append(blend_data)
 
         self.setup_sequence_tab()
-        self.tabs.setTabEnabled(self.blend_sequence_tab_index, True)
-        self.tabs.setCurrentIndex(self.blend_sequence_tab_index)
+        self.set_page_enabled(self.blend_sequence_tab_index, True)
+        self.show_page(self.blend_sequence_tab_index)
         self.save_button.setEnabled(True)
         QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
 
@@ -9264,7 +10254,7 @@ class UserInputs(QMainWindow):
 
         self.load_manual_gantt_chart()  
 
-        self.tabs.setTabEnabled(self.grade_profile_tab_index, True)  # Enable Grade Profile tab
+        self.set_page_enabled(self.grade_profile_tab_index, True)  # Enable Grade Profile tab
 
         QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
 
@@ -9455,7 +10445,12 @@ class UserInputs(QMainWindow):
     def setup_grade_profile_tab(self):
         # Create a tab for Grade Profiles (Manual)
         self.grade_profile_tab = QWidget()
-        self.grade_profile_tab_index = self.tabs.addTab(self.grade_profile_tab, "Grade Profiles (Manual)")
+        self.grade_profile_tab_index = self.register_page(
+            "manual_grade_profiles",
+            self.grade_profiles_tabs,
+            self.grade_profile_tab,
+            "Manual",
+        )
 
         # Create the main layout for the tab
         self.grade_profile_layout = QVBoxLayout(self.grade_profile_tab)
@@ -9520,6 +10515,14 @@ class UserInputs(QMainWindow):
             self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
+            self.file_path_24hr_choice = self.file_path_24hr.text()
+        if hasattr(self, "expit_agent_input"):
+            self.available_24hr_expit_agents = (
+                self.available_24hr_expit_agent_names()
+            )
+            self.selected_24hr_expit_agents = (
+                self.selected_24hr_expit_agent_names()
+            )
         if hasattr(self, "product_brand_labels_input"):
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 self.product_brand_labels_input.text()
@@ -9574,11 +10577,11 @@ class UserInputs(QMainWindow):
                 scenario_state.pop("database_path", None)
             
             # Save the enabled/disabled state of tabs
-            tab_states = {index: self.tabs.isTabEnabled(index) for index in range(self.tabs.count())}
+            tab_states = self.capture_page_states()
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 2,
+                "project_format_version": 5,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -9599,10 +10602,22 @@ class UserInputs(QMainWindow):
                 "default_start_datetime_str": self.default_start_datetime_str,
                 "expit_mode_choice": self.expit_mode_choice,
                 "file_path_choice": self.file_path_choice,
+                "file_path_24hr_choice": self.file_path_24hr_choice,
+                "available_24hr_expit_agents": self.available_24hr_expit_agents,
+                "selected_24hr_expit_agents": self.selected_24hr_expit_agents,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "product_build_settings": self.product_build_settings,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "aps_stockpile_brand_map": getattr(self, "aps_stockpile_brand_map", {}),
+                "aps_stockpile_timing_guidance": getattr(
+                    self, "aps_stockpile_timing_guidance", {}
+                ),
+                "aps_active_blend_guidance": getattr(
+                    self, "aps_active_blend_guidance", []
+                ),
+                "aps_destination_guidance": getattr(
+                    self, "aps_destination_guidance", {}
+                ),
                 "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
                 "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
@@ -9695,7 +10710,14 @@ class UserInputs(QMainWindow):
                 state for state in scenarios.values() if isinstance(state, dict)
             )
 
-        path_keys = ("file_path_choice", "aps_mining_csv", "mining_csv", "file_path")
+        path_keys = (
+            "file_path_choice",
+            "file_path_24hr_choice",
+            "twenty_four_hour_file_path_choice",
+            "aps_mining_csv",
+            "mining_csv",
+            "file_path",
+        )
         replacements = {}
         for state in state_records:
             for key in path_keys:
@@ -9711,7 +10733,11 @@ class UserInputs(QMainWindow):
                         start_directory = ""
                     replacement, _ = QFileDialog.getOpenFileName(
                         self,
-                        "Locate APS Mining.csv",
+                        (
+                            "Locate 24HR Mining.csv"
+                            if "24hr" in key.lower() or "twenty_four" in key.lower()
+                            else "Locate 2WP Mining.csv"
+                        ),
                         start_directory,
                         "APS Mining.csv (*.csv);;All Files (*)",
                     )
@@ -9719,7 +10745,7 @@ class UserInputs(QMainWindow):
                         QMessageBox.information(
                             self,
                             "Project Load Cancelled",
-                            "The project was not loaded because its APS Mining.csv file was not located.",
+                            "The project was not loaded because a referenced APS Mining.csv file was not located.",
                         )
                         return False
                     replacements[normalized_path] = replacement
@@ -9845,6 +10871,17 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
         self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
         self.file_path_choice = loaded_state.get("file_path_choice", "")
+        self.file_path_24hr_choice = (
+            loaded_state.get("file_path_24hr_choice")
+            or loaded_state.get("twenty_four_hour_file_path_choice")
+            or ""
+        )
+        self.available_24hr_expit_agents = self.normalized_expit_agent_names(
+            loaded_state.get("available_24hr_expit_agents") or []
+        )
+        self.selected_24hr_expit_agents = self.normalized_expit_agent_names(
+            loaded_state.get("selected_24hr_expit_agents") or []
+        )
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             loaded_state.get("product_brand_labels_choice", self.default_product_brand_labels())
         )
@@ -9855,6 +10892,15 @@ class UserInputs(QMainWindow):
             loaded_state.get("auto_load_2wp_targets_choice", True)
         )
         self.aps_stockpile_brand_map = loaded_state.get("aps_stockpile_brand_map", {}) or {}
+        self.aps_stockpile_timing_guidance = (
+            loaded_state.get("aps_stockpile_timing_guidance", {}) or {}
+        )
+        self.aps_active_blend_guidance = (
+            loaded_state.get("aps_active_blend_guidance", []) or []
+        )
+        self.aps_destination_guidance = (
+            loaded_state.get("aps_destination_guidance", {}) or {}
+        )
         self.reevaluate_aps_direct_tip_choice = loaded_state.get(
             "reevaluate_aps_direct_tip_choice", False
         )
@@ -9930,11 +10976,7 @@ class UserInputs(QMainWindow):
         self.refresh_scenario_selector()
 
         tab_states = loaded_state.get("tab_states", {})
-        for index, enabled in tab_states.items():
-            if isinstance(index, str) and index.isdigit():
-                index = int(index)
-            if isinstance(index, int) and 0 <= index < self.tabs.count():
-                self.tabs.setTabEnabled(index, enabled)
+        self.restore_page_states(tab_states)
 
         # Hydrate these widgets before Site Configuration saves the restored
         # scenario. Otherwise that save reads the empty/default widgets and
@@ -9982,10 +11024,16 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = None
         self.expit_mode_choice = None
         self.file_path_choice = None
+        self.file_path_24hr_choice = None
+        self.available_24hr_expit_agents = []
+        self.selected_24hr_expit_agents = []
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True
         self.aps_stockpile_brand_map = {}
+        self.aps_stockpile_timing_guidance = {}
+        self.aps_active_blend_guidance = []
+        self.aps_destination_guidance = {}
         self.aps_brand_guidance_cache = {}
         self.scenario_report_refresh_pending = False
         self.reevaluate_aps_direct_tip_choice = False

@@ -74,6 +74,8 @@ class Run:
         reevaluate_aps_direct_tip=False,
         selected_aps_crusher=None,
         site_context=None,
+        two_wp_file_path=None,
+        selected_24hr_agents=None,
     ):
         self.abort_requested = False
 
@@ -85,8 +87,17 @@ class Run:
         periods = PeriodManager()
         periods.calculate_periods(start_time)
 
-        # Process APS expit data (mining.csv)
+        # 24HR supplies movement timing/tonnes/grades. The 2WP supplies every
+        # stockpile destination, including full-horizon split ratios.
         if file_path:
+            reference_path = two_wp_file_path or file_path
+            destination_guidance = (site_context or {}).get(
+                "aps_destination_guidance"
+            )
+            if not destination_guidance:
+                destination_guidance = (
+                    ExpitDataHandler.build_2wp_destination_guidance(reference_path)
+                )
             expit_data_handler = ExpitDataHandler(
                 file_path,
                 include_crusher_destinations=reevaluate_aps_direct_tip,
@@ -97,6 +108,8 @@ class Run:
                 direct_tip_movement_rules=(site_context or {}).get(
                     "direct_tip_movement_rules", []
                 ),
+                destination_guidance=destination_guidance,
+                selected_agent_names=selected_24hr_agents,
             )
             expit_payload_transactions = expit_data_handler.process_transactions()
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
@@ -115,6 +128,12 @@ class Run:
         database_manager = DatabaseManager()
         expit_payload_transactions_to_save = None
         solver_config = dict(solver_config or {})
+        solver_config["stockpile_timing_guidance"] = (
+            (site_context or {}).get("aps_stockpile_timing_guidance", {}) or {}
+        )
+        solver_config["active_blend_guidance"] = (
+            (site_context or {}).get("aps_active_blend_guidance", []) or []
+        )
         solver_config["product_builds_configured"] = bool(
             (calendar_inputs or {}).get("product_build_settings")
         )
@@ -129,7 +148,7 @@ class Run:
             expit_payload_transactions_to_save = expit_payload_transactions.copy()
 
         else: 
-            print("No APS schedule imported.")
+            print("No 24HR APS schedule imported.")
 
         stockpile_data = self._include_aps_destination_stockpiles(
             stockpile_data,
