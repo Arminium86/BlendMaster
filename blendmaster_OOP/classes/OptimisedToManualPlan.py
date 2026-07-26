@@ -145,19 +145,29 @@ class OptimisedToManualPlan:
                 result[str(blend_id)].append(pattern)
         return result
 
+    @staticmethod
+    def _period_name(value):
+        text = str(value or "").strip().lower().replace(" ", "_")
+        if text in {"0", "preplan", "pre_plan"}:
+            return "Preplan"
+        if text in {"1", "period_1", "period1"}:
+            return "Period_1"
+        if text in {"2", "period_2", "period2"}:
+            return "Period_2"
+        return "Preplan"
+
     def build(self):
         data = self._prepared_report()
         data["_source_name"] = (
             data["source"].astype(str).str.strip().str.upper()
         )
-        patterns_by_original_blend = self._patterns_by_optimised_blend(
-            data
-        )
-
         states = []
         pattern_ids = {}
-        pattern_durations = defaultdict(float)
         direct_tip_rows = []
+        blend_groups = defaultdict(list)
+        period_totals = defaultdict(
+            lambda: {"tonnes": 0.0, "hours": 0.0}
+        )
 
         grouped = data.groupby(
             self._state_group_columns(data),
@@ -172,25 +182,20 @@ class OptimisedToManualPlan:
             crusher_tonnes = self._number(
                 first.get("crusher_actual_tonnes")
             )
-            state_crusher_rate = (
-                crusher_tonnes / duration
-                if duration > self.TOLERANCE
-                and crusher_tonnes > self.TOLERANCE
-                else self._number(first.get("crusher_rate_output"))
+            state_crusher_rate = self._number(
+                first.get("crusher_rate_output")
             )
+            if state_crusher_rate <= self.TOLERANCE:
+                state_crusher_rate = (
+                    crusher_tonnes / duration
+                    if duration > self.TOLERANCE
+                    and crusher_tonnes > self.TOLERANCE
+                    else 0
+                )
             stockpile_rows = group[
                 group["_source_type"] == "stockpile"
-            ]
+            ].copy()
             pattern = self._stockpile_pattern(stockpile_rows)
-
-            if pattern is None:
-                original_blend_id = str(
-                    first.get("blend_ID", "")
-                )
-                alternatives = patterns_by_original_blend.get(
-                    original_blend_id, []
-                )
-                pattern = alternatives[0] if alternatives else None
             if pattern is None:
                 pattern = {
                     "sources": (),
@@ -198,17 +203,62 @@ class OptimisedToManualPlan:
                     "signature": (),
                 }
 
-            signature = pattern["signature"]
-            if signature not in pattern_ids:
-                pattern_ids[signature] = str(len(pattern_ids) + 1)
-            manual_blend_id = pattern_ids[signature]
-            pattern_durations[signature] += round(duration, 1)
             grade_blocks = group[
                 group["_source_type"] == "grade_block"
             ]
             direct_tip_state_tonnes = float(
                 grade_blocks["_tonnes"].sum()
             )
+            original_blend_id = str(
+                first.get("blend_ID") or ""
+            ).strip()
+            if original_blend_id:
+                blend_key = ("optimised_blend", original_blend_id)
+                manual_blend_id = original_blend_id
+            else:
+                direct_tip_sources = tuple(sorted(
+                    grade_blocks["_source_name"].unique().tolist()
+                ))
+                blend_key = (
+                    "derived",
+                    pattern["signature"],
+                    direct_tip_sources,
+                )
+                if blend_key not in pattern_ids:
+                    pattern_ids[blend_key] = str(len(pattern_ids) + 1)
+                manual_blend_id = pattern_ids[blend_key]
+
+            if crusher_tonnes <= self.TOLERANCE:
+                crusher_tonnes = float(group["_tonnes"].sum())
+            if state_crusher_rate <= self.TOLERANCE:
+                state_crusher_rate = (
+                    crusher_tonnes / duration
+                    if duration > self.TOLERANCE else 0
+                )
+            stockpile_rows["_state_duration"] = duration
+            if "equipment_rate_output" in stockpile_rows:
+                stockpile_rows["_reported_reclaim_rate"] = pd.to_numeric(
+                    stockpile_rows["equipment_rate_output"],
+                    errors="coerce",
+                ).fillna(0)
+            else:
+                stockpile_rows["_reported_reclaim_rate"] = (
+                    stockpile_rows["_tonnes"] / duration
+                    if duration > self.TOLERANCE else 0
+                )
+
+            period_name = self._period_name(first.get("period"))
+            period_totals[period_name]["tonnes"] += (
+                state_crusher_rate * duration
+            )
+            period_totals[period_name]["hours"] += duration
+            blend_groups[manual_blend_id].append({
+                "duration": duration,
+                "crusher_tonnes": crusher_tonnes,
+                "crusher_rate": state_crusher_rate,
+                "period": period_name,
+                "stockpile_rows": stockpile_rows,
+            })
 
             states.append({
                 "Blend ID": manual_blend_id,
@@ -223,6 +273,7 @@ class OptimisedToManualPlan:
                 ],
                 "_fixed_steady_state": True,
                 "_crusher_rate": state_crusher_rate,
+                "_period_name": period_name,
                 "_exact_start": start.strftime("%Y-%m-%d %H:%M:%S"),
                 "_exact_end": end.strftime("%Y-%m-%d %H:%M:%S"),
                 "Direct Tip Tonnes": direct_tip_state_tonnes,
@@ -248,15 +299,63 @@ class OptimisedToManualPlan:
 
         definitions = []
         config_inputs = {}
-        for signature, blend_id in sorted(
-            pattern_ids.items(), key=lambda item: int(item[1])
-        ):
-            sources = [item[0] for item in signature]
-            ratios = [item[1] for item in signature]
-            total_duration = pattern_durations[signature]
-            source_rows = data[
-                (data["_source_type"] == "stockpile")
-                & data["_source_name"].isin(sources)
+
+        def blend_sort_key(value):
+            try:
+                return (0, int(value))
+            except (TypeError, ValueError):
+                return (1, str(value))
+
+        for blend_id in sorted(blend_groups, key=blend_sort_key):
+            state_groups = blend_groups[blend_id]
+            total_duration = sum(
+                item["duration"] for item in state_groups
+            )
+            source_rows = pd.concat(
+                [item["stockpile_rows"] for item in state_groups],
+                ignore_index=True,
+            )
+            tonnes_by_source = (
+                source_rows.groupby("_source_name", sort=True)["_tonnes"]
+                .sum()
+            )
+            sources = tonnes_by_source.index.tolist()
+            blend_crusher_rate = (
+                sum(
+                    item["crusher_rate"] * item["duration"]
+                    for item in state_groups
+                ) / total_duration
+                if total_duration > self.TOLERANCE else 0
+            )
+            reclaim_rates = []
+            for source in sources:
+                rows = source_rows[
+                    source_rows["_source_name"] == source
+                ]
+                source_hours = float(rows["_state_duration"].sum())
+                reclaim_rates.append(
+                    float(
+                        (
+                            rows["_reported_reclaim_rate"]
+                            * rows["_state_duration"]
+                        ).sum() / source_hours
+                    )
+                    if source_hours > self.TOLERANCE else 0
+                )
+            source_ratios = [
+                (
+                    rate / blend_crusher_rate
+                    if blend_crusher_rate > self.TOLERANCE else 0
+                )
+                for rate in reclaim_rates
+            ]
+            stockpile_rate = sum(reclaim_rates)
+            stockpile_mix = [
+                (
+                    rate / stockpile_rate
+                    if stockpile_rate > self.TOLERANCE else 0
+                )
+                for rate in reclaim_rates
             ]
             grades = {}
             for grade in self.GRADES:
@@ -305,14 +404,29 @@ class OptimisedToManualPlan:
                 "Available": "Now",
                 "Sources": ", ".join(sources),
                 "Source Ratios": ", ".join(
-                    f"{ratio:.6f}" for ratio in ratios
+                    f"{ratio:.6f}" for ratio in source_ratios
                 ),
             })
             config_inputs[blend_id] = {
-                "weights": list(ratios),
+                "weights": list(stockpile_mix),
                 "sources": list(sources),
+                "source_ratios": list(source_ratios),
+                "reclaim_rates": list(reclaim_rates),
+                "crusher_rate": blend_crusher_rate,
+                "max_duration": total_duration,
+                "periods": sorted({
+                    item["period"] for item in state_groups
+                }),
+                "rate_mode": "optimised",
             }
 
+        period_crusher_rates = {
+            period: (
+                values["tonnes"] / values["hours"]
+                if values["hours"] > self.TOLERANCE else 0
+            )
+            for period, values in period_totals.items()
+        }
         return {
             "blend_definitions": definitions,
             "blend_config_table_inputs": config_inputs,
@@ -323,6 +437,7 @@ class OptimisedToManualPlan:
             "direct_tip_tonnes": sum(
                 row["selected_tonnes"] for row in direct_tip_rows
             ),
+            "period_crusher_rates": period_crusher_rates,
         }
 
     @classmethod

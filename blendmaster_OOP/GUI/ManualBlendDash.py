@@ -69,7 +69,13 @@ class ManualBlendDash:
 
         # Calculate the new column 'Feed Tonnes'
         crusher_rate = float(self.crusher_rate or 0)
-        df["Feed Tonnes"] = df["Duration (hrs)"] * crusher_rate
+        if "_crusher_rate" in df.columns:
+            row_rates = pd.to_numeric(
+                df["_crusher_rate"], errors="coerce"
+            ).fillna(crusher_rate)
+        else:
+            row_rates = crusher_rate
+        df["Feed Tonnes"] = df["Duration (hrs)"] * row_rates
 
         self.grade_profile_data = df
         return self.grade_profile_data

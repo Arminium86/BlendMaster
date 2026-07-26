@@ -1156,7 +1156,8 @@ class UserInputs(QMainWindow):
             "manual_direct_tip_allocations", "manual_steady_states",
             "default_start_datetime",
             "default_end_datetime", "default_start_datetime_str", "default_end_datetime_str",
-            "crusher_rate", "crusher_rate_input_value", "blend_config_table_inputs",
+            "crusher_rate", "crusher_rate_input_value",
+            "crusher_rate_input_values", "blend_config_table_inputs",
         ]
         state = {"scenario_id": self.active_scenario_id, "calendar_inputs": calendar_inputs}
         for field in fields:
@@ -1262,8 +1263,10 @@ class UserInputs(QMainWindow):
                     self.populate_blend_config_table()
                     self.setup_blends_tab()
                 if hasattr(self, "crusher_rate_input"):
-                    rate = self.crusher_rate_input_value or self.crusher_rate or 1000
-                    self.crusher_rate_input.setText(str(rate))
+                    self.set_manual_crusher_rate_inputs(
+                        self.crusher_rate_input_values
+                        or self.calendar_crusher_rate_values()
+                    )
                 self.update_blend_results()
 
             sequence_tab_enabled = is_enabled(self.blend_sequence_tab_index)
@@ -1410,6 +1413,9 @@ class UserInputs(QMainWindow):
             self.default_end_datetime_str = state.get("default_end_datetime_str")
             self.crusher_rate = state.get("crusher_rate")
             self.crusher_rate_input_value = state.get("crusher_rate_input_value")
+            self.crusher_rate_input_values = copy.deepcopy(
+                state.get("crusher_rate_input_values") or {}
+            )
             self.blend_config_table_inputs = copy.deepcopy(
                 state.get("blend_config_table_inputs") or {}
             )
@@ -4757,6 +4763,7 @@ class UserInputs(QMainWindow):
         self.default_end_datetime_str = None
         self.crusher_rate = None
         self.crusher_rate_input_value = None
+        self.crusher_rate_input_values = {}
         self.blend_config_table_inputs = {}
         self.total_AMT_stockpile_balances = {}
         self.restore_table_snapshot(getattr(self, "decision_table", None), None)
@@ -8164,6 +8171,9 @@ class UserInputs(QMainWindow):
                 "manual_direct_tip_allocations",
                 "manual_steady_states",
                 "manual_blend_report",
+                "crusher_rate",
+                "crusher_rate_input_value",
+                "crusher_rate_input_values",
             )
         }
         try:
@@ -8175,6 +8185,15 @@ class UserInputs(QMainWindow):
             self.blend_config_table_inputs = copy.deepcopy(
                 transfer["blend_config_table_inputs"]
             )
+            transferred_rates = self.calendar_crusher_rate_values()
+            transferred_rates.update({
+                period: rate
+                for period, rate in (
+                    transfer.get("period_crusher_rates", {}) or {}
+                ).items()
+                if float(rate or 0) > 0
+            })
+            self.set_manual_crusher_rate_inputs(transferred_rates)
             self.saved_blends_for_schedule = copy.deepcopy(
                 transfer["blend_definitions"]
             )
@@ -10475,28 +10494,107 @@ class UserInputs(QMainWindow):
             return
         QMessageBox.critical(self, title or "Error", str(error_message))
     
+    def calendar_crusher_rate_values(self):
+        saved = (
+            (getattr(self, "calendar_inputs", {}) or {})
+            .get("crusher_rate", {})
+        )
+        if not isinstance(saved, dict):
+            saved = {}
+        legacy = (
+            getattr(self, "crusher_rate_input_value", None)
+            or getattr(self, "crusher_rate", None)
+            or 1000
+        )
+        result = {}
+        for period in ("Preplan", "Period_1", "Period_2"):
+            try:
+                rate = float(saved.get(period, legacy) or legacy)
+            except (TypeError, ValueError):
+                rate = 1000.0
+            result[period] = rate if rate > 0 else 1000.0
+        return result
+
+    def manual_crusher_rate_values(self):
+        inputs = getattr(self, "crusher_rate_inputs", {}) or {}
+        fallback = self.calendar_crusher_rate_values()
+        values = {}
+        for period in ("Preplan", "Period_1", "Period_2"):
+            try:
+                value = float(inputs[period].text())
+            except (KeyError, TypeError, ValueError, AttributeError):
+                value = float(
+                    (getattr(self, "crusher_rate_input_values", {}) or {})
+                    .get(period, fallback[period])
+                )
+            values[period] = value if value > 0 else fallback[period]
+        return values
+
+    def set_manual_crusher_rate_inputs(self, values=None):
+        values = values or {}
+        defaults = self.calendar_crusher_rate_values()
+        normalized = {}
+        for period in ("Preplan", "Period_1", "Period_2"):
+            try:
+                rate = float(values.get(period, defaults[period]))
+            except (TypeError, ValueError):
+                rate = defaults[period]
+            normalized[period] = (
+                rate if rate > 0 else defaults[period]
+            )
+        self.crusher_rate_input_values = normalized
+        self.crusher_rate = normalized["Preplan"]
+        self.crusher_rate_input_value = str(normalized["Preplan"])
+        for period, widget in (
+            getattr(self, "crusher_rate_inputs", {}) or {}
+        ).items():
+            blocked = widget.blockSignals(True)
+            try:
+                widget.setText(f"{normalized[period]:g}")
+            finally:
+                widget.blockSignals(blocked)
+
     def setup_blends_tab(self):
         
         if self.setup_blends_tab_first_call:
         
-            self.crusher_rate = 1000  # Default crusher rate
+            initial_crusher_rates = (
+                getattr(self, "crusher_rate_input_values", {}) or {}
+            ) or self.calendar_crusher_rate_values()
 
-            # Crusher rate input
-            self.crusher_rate_input = QLineEdit()
-            self.crusher_rate_input.setText("1000")
-            self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
-
-            # Set a fixed width for the input field
-            self.crusher_rate_input.setFixedWidth(100)  # Adjust the width as needed
-
-            crusher_label = QLabel("Crusher Rate:")
+            crusher_label = QLabel("Crusher Rates (t/h):")
             crusher_font = crusher_label.font()
             crusher_font.setBold(True)
             crusher_label.setFont(crusher_font)
             
             crusher_layout = QHBoxLayout()
             crusher_layout.addWidget(crusher_label)
-            crusher_layout.addWidget(self.crusher_rate_input)
+            self.crusher_rate_inputs = {}
+            for period, caption in (
+                ("Preplan", "Preplan"),
+                ("Period_1", "Period 1"),
+                ("Period_2", "Period 2"),
+            ):
+                crusher_layout.addWidget(QLabel(caption))
+                rate_input = QLineEdit()
+                rate_input.setFixedWidth(100)
+                rate_input.setText(
+                    f"{float(initial_crusher_rates.get(period, 1000)):g}"
+                )
+                rate_input.setToolTip(
+                    "Defaults from Calendar. Optimised prepopulation uses "
+                    "the time-weighted crusher output rate for this period; "
+                    "each imported sequence state still retains its exact "
+                    "output rate."
+                )
+                rate_input.textChanged.connect(
+                    self.on_blend_data_change
+                )
+                self.crusher_rate_inputs[period] = rate_input
+                crusher_layout.addWidget(rate_input)
+            # Legacy alias retained for project compatibility.
+            self.crusher_rate_input = self.crusher_rate_inputs["Preplan"]
+            self.set_manual_crusher_rate_inputs(initial_crusher_rates)
             crusher_layout.addStretch()  # Add stretch to align inputs neatly
 
             self.setup_blends_tab_layout.addLayout(crusher_layout)
@@ -10555,7 +10653,9 @@ class UserInputs(QMainWindow):
         headers = [
             "Stockpile Name", "Balance (WMT)", "Projected Balance (WMT)", "Projected Last Payload Delivered",
             "Use Projected Balance", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
-            "Blend IDs", "Weights by Blend ID", "Reclaim Rate", "Source Ratio"
+            "Blend IDs", "Weights by Blend ID",
+            "Reclaim Rate (t/h) by Blend ID",
+            "Source Ratio of Total Feed"
         ]
         self.blend_config_table.setColumnCount(len(headers))
         self.blend_config_table.setHorizontalHeaderLabels(headers)
@@ -10694,12 +10794,21 @@ class UserInputs(QMainWindow):
             reclaim_item = QTableWidgetItem("0")
             reclaim_item.setFlags(Qt.ItemIsEnabled)  # Make it uneditable
             reclaim_item.setTextAlignment(Qt.AlignCenter)
+            reclaim_item.setToolTip(
+                "Manual blends derive this rate from the period crusher "
+                "rates. Optimised prepopulation preserves each footprint's "
+                "actual output reclaim rate."
+            )
             self.blend_config_table.setItem(row_idx, len(keys) + 6, reclaim_item)  
 
             # Source Ratio (Auto-calculated)
             ratio_item = QTableWidgetItem("0")
             ratio_item.setFlags(Qt.ItemIsEnabled)  # Make it uneditable
             ratio_item.setTextAlignment(Qt.AlignCenter)
+            ratio_item.setToolTip(
+                "Stockpile reclaim rate divided by total crusher rate. "
+                "Optimised blends may sum below 1; direct tip fills the gap."
+            )
             self.blend_config_table.setItem(row_idx, len(keys) + 7, ratio_item)  
 
 
@@ -10902,10 +11011,10 @@ class UserInputs(QMainWindow):
         A configuration row may belong to several Blend IDs. Each configured
         weight is normalized independently inside its selected blend.
         """
-        try:
-            self.crusher_rate = float(self.crusher_rate_input.text())
-        except ValueError:
-            self.crusher_rate = 1000  # Default crusher rate
+        period_rates = self.manual_crusher_rate_values()
+        self.crusher_rate_input_values = period_rates
+        self.crusher_rate = period_rates["Preplan"]
+        self.crusher_rate_input_value = str(self.crusher_rate)
 
         # Temporarily disconnect the signal to prevent recursion
         self.blend_config_table.blockSignals(True)
@@ -10944,19 +11053,69 @@ class UserInputs(QMainWindow):
                         continue
 
                     row_weights = self.manual_blend_weights_for_row(row_idx)
-                    ratios = {
-                        blend_id: (
-                            row_weights.get(blend_id, 0.0)
-                            / blend_weights[blend_id]
-                            if blend_weights.get(blend_id, 0) > 0
-                            else 0
+                    source_item = self.blend_config_table.item(
+                        row_idx, 0
+                    )
+                    source_name = (
+                        source_item.text().strip()
+                        if source_item else ""
+                    )
+                    ratios = {}
+                    reclaim_rates = {}
+                    for blend_id in selected_blend_ids:
+                        config = (
+                            getattr(
+                                self, "blend_config_table_inputs", {}
+                            ) or {}
+                        ).get(blend_id, {})
+                        sources = [
+                            str(value).strip().upper()
+                            for value in config.get("sources", [])
+                        ]
+                        try:
+                            source_index = sources.index(
+                                source_name.upper()
+                            )
+                        except ValueError:
+                            source_index = -1
+                        is_optimised_rate = (
+                            config.get("rate_mode") == "optimised"
+                            and source_index >= 0
                         )
-                        for blend_id in selected_blend_ids
-                    }
-                    reclaim_rates = {
-                        blend_id: ratios[blend_id] * self.crusher_rate
-                        for blend_id in selected_blend_ids
-                    }
+                        if is_optimised_rate:
+                            configured_ratios = config.get(
+                                "source_ratios", []
+                            )
+                            configured_rates = config.get(
+                                "reclaim_rates", []
+                            )
+                            ratios[blend_id] = (
+                                float(configured_ratios[source_index])
+                                if source_index < len(configured_ratios)
+                                else 0
+                            )
+                            reclaim_rates[blend_id] = {
+                                "Optimised": (
+                                    float(
+                                        configured_rates[source_index]
+                                    )
+                                    if source_index
+                                    < len(configured_rates)
+                                    else 0
+                                )
+                            }
+                        else:
+                            ratio = (
+                                row_weights.get(blend_id, 0.0)
+                                / blend_weights[blend_id]
+                                if blend_weights.get(blend_id, 0) > 0
+                                else 0
+                            )
+                            ratios[blend_id] = ratio
+                            reclaim_rates[blend_id] = {
+                                period: ratio * rate
+                                for period, rate in period_rates.items()
+                            }
 
                     # Update the reclaim rate cell
                     if not reclaim_item:
@@ -10965,15 +11124,29 @@ class UserInputs(QMainWindow):
                         self.blend_config_table.setItem(row_idx, 13, ratio_item)
 
 
-                    reclaim_item.setText("; ".join(
-                        f"{blend_id}: {reclaim_rates[blend_id]:.0f}"
-                        for blend_id in selected_blend_ids
-                    ))
+                    reclaim_parts = []
+                    for blend_id in selected_blend_ids:
+                        rates = reclaim_rates[blend_id]
+                        if "Optimised" in rates:
+                            text = f"{rates['Optimised']:.1f}"
+                        elif len({
+                            round(value, 6)
+                            for value in rates.values()
+                        }) == 1:
+                            text = f"{next(iter(rates.values())):.1f}"
+                        else:
+                            text = (
+                                f"P0 {rates['Preplan']:.1f} / "
+                                f"P1 {rates['Period_1']:.1f} / "
+                                f"P2 {rates['Period_2']:.1f}"
+                            )
+                        reclaim_parts.append(f"{blend_id}: {text}")
+                    reclaim_item.setText("; ".join(reclaim_parts))
                     reclaim_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
                     reclaim_item.setTextAlignment(Qt.AlignCenter)  # Center-align the text
 
                     ratio_item.setText("; ".join(
-                        f"{blend_id}: {ratios[blend_id]:.2f}"
+                        f"{blend_id}: {ratios[blend_id]:.4f}"
                         for blend_id in selected_blend_ids
                     ))
                     ratio_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
@@ -11081,10 +11254,18 @@ class UserInputs(QMainWindow):
                         table_row, 11, weights_item
                     )
 
-            if self.is_project_loaded and self.crusher_rate_input_value:
-                self.crusher_rate_input.setText(
-                    self.crusher_rate_input_value
+            if self.is_project_loaded:
+                saved_rates = (
+                    getattr(self, "crusher_rate_input_values", {}) or {}
                 )
+                if not saved_rates and self.crusher_rate_input_value:
+                    saved_rates = {
+                        period: self.crusher_rate_input_value
+                        for period in (
+                            "Preplan", "Period_1", "Period_2"
+                        )
+                    }
+                self.set_manual_crusher_rate_inputs(saved_rates)
         finally:
             self.blend_config_table.blockSignals(table_blocked)
             self.crusher_rate_input.blockSignals(crusher_blocked)
@@ -11097,10 +11278,24 @@ class UserInputs(QMainWindow):
         """
         # Initialize a dictionary to aggregate data for each blend ID
         blend_id_options = self.manual_blend_id_options()
+        existing_configs = copy.deepcopy(
+            getattr(self, "blend_config_table_inputs", {}) or {}
+        )
         self.blend_data_from_config_table_inputs = {
             blend_id: {
                 "weights": [], "grades": [], "balances": [],
                 "available": [], "sources": [], "source_ratios": [],
+                "reclaim_rates": [],
+                **{
+                    key: copy.deepcopy(value)
+                    for key, value in (
+                        existing_configs.get(blend_id, {}) or {}
+                    ).items()
+                    if key in {
+                        "rate_mode", "crusher_rate", "max_duration",
+                        "periods",
+                    }
+                },
             }
             for blend_id in blend_id_options
         }
@@ -11147,11 +11342,40 @@ class UserInputs(QMainWindow):
                 sources = self.blend_config_table.item(row_idx, 0).text()
                 for blend_id in blend_ids:
                     weight = row_weights.get(blend_id, 0.0)
-                    source_ratio = (
-                        weight / blend_weights[blend_id]
-                        if blend_weights.get(blend_id, 0) > 0
-                        else 0
-                    )
+                    config = existing_configs.get(blend_id, {}) or {}
+                    configured_sources = [
+                        str(value).strip().upper()
+                        for value in config.get("sources", [])
+                    ]
+                    source_ratio = None
+                    configured_reclaim_rate = None
+                    if config.get("rate_mode") == "optimised":
+                        try:
+                            configured_index = (
+                                configured_sources.index(
+                                    sources.strip().upper()
+                                )
+                            )
+                            source_ratio = float(
+                                config.get(
+                                    "source_ratios", []
+                                )[configured_index]
+                            )
+                            configured_reclaim_rate = float(
+                                config.get(
+                                    "reclaim_rates", []
+                                )[configured_index]
+                            )
+                        except (
+                            ValueError, IndexError, TypeError, KeyError
+                        ):
+                            source_ratio = None
+                    if source_ratio is None:
+                        source_ratio = (
+                            weight / blend_weights[blend_id]
+                            if blend_weights.get(blend_id, 0) > 0
+                            else 0
+                        )
                     blend_data = self.blend_data_from_config_table_inputs[
                         blend_id
                     ]
@@ -11164,7 +11388,12 @@ class UserInputs(QMainWindow):
                     blend_data["available"].append(available)
                     blend_data["sources"].append(sources)
                     blend_data["source_ratios"].append(
-                        f"{source_ratio:.2f}"
+                        f"{source_ratio:.6f}"
+                    )
+                    blend_data["reclaim_rates"].append(
+                        configured_reclaim_rate
+                        if configured_reclaim_rate is not None
+                        else 0
                     )
 
             except (ValueError, AttributeError):
@@ -11184,7 +11413,16 @@ class UserInputs(QMainWindow):
                     avg_grades = ["AMT" for grades in zip(*data["grades"])]
 
                 balance = min(data["balances"])
-                max_duration = balance / self.crusher_rate if self.crusher_rate > 0 else 0
+                if (
+                    data.get("rate_mode") == "optimised"
+                    and float(data.get("max_duration") or 0) > 0
+                ):
+                    max_duration = float(data["max_duration"])
+                else:
+                    max_duration = (
+                        balance / self.crusher_rate
+                        if self.crusher_rate > 0 else 0
+                    )
                 available_status = "Now"
                 if any(avail != "Now" for avail in data["available"]):
                     datetime_values = [avail for avail in data["available"] if avail != "Now"]
@@ -11765,6 +12003,37 @@ class UserInputs(QMainWindow):
             rows.append(row_data)
         return rows
 
+    def preserve_optimised_sequence_metadata(self, rows):
+        existing_rows = (
+            getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            ) or []
+        )
+        metadata_keys = {
+            "_optimised_steady_state", "_fixed_steady_state",
+            "_crusher_rate", "_period_name", "_exact_start", "_exact_end",
+            "Direct Tip Tonnes", "Direct Tip Ratio",
+        }
+        for index, row in enumerate(rows or []):
+            if index >= len(existing_rows):
+                continue
+            existing = existing_rows[index]
+            if not existing.get("_fixed_steady_state"):
+                continue
+            unchanged = all(
+                str(row.get(key) or "") == str(existing.get(key) or "")
+                for key in (
+                    "Blend ID", "Start Datetime",
+                    "Duration (hrs)", "End Datetime",
+                )
+            )
+            if not unchanged:
+                continue
+            for key in metadata_keys:
+                if key in existing:
+                    row[key] = copy.deepcopy(existing[key])
+        return rows
+
     def poll_manual_gantt_updates(self):
         manual_gantt = getattr(self, "draw_manual_gantt_chart", None)
         if manual_gantt is None or not hasattr(manual_gantt, "consume_pending_table_update"):
@@ -11871,6 +12140,9 @@ class UserInputs(QMainWindow):
             for row in self.collect_blend_sequence_table_rows()
             if str(row.get("Blend ID")) in defined_blend_ids
         ]
+        candidate_rows = self.preserve_optimised_sequence_metadata(
+            candidate_rows
+        )
         if not candidate_rows:
             QMessageBox.warning(
                 self,
@@ -12055,6 +12327,12 @@ class UserInputs(QMainWindow):
             getattr(self, "crusher_rate", None)
             or getattr(self, "crusher_rate_input_value", None)
         )
+        manual_calendar_inputs = copy.deepcopy(
+            getattr(self, "calendar_inputs", {}) or {}
+        )
+        manual_calendar_inputs["crusher_rate"] = (
+            self.manual_crusher_rate_values()
+        )
         return ManualBlendPlanner(
             getattr(
                 self, "stored_blend_sequence_table_for_gantt", []
@@ -12066,7 +12344,7 @@ class UserInputs(QMainWindow):
             periods.get_periods(),
             getattr(self, "product_build_settings", []),
             rate,
-            calendar_inputs=getattr(self, "calendar_inputs", {}),
+            calendar_inputs=manual_calendar_inputs,
         )
 
     def generate_manual_blend_plan(
@@ -12101,6 +12379,12 @@ class UserInputs(QMainWindow):
             try:
                 report = planner.build_report(states, allocations)
             except ManualBlendPlanningError:
+                if allocations and any(
+                    state.get("trigger")
+                    == "Optimised decision point"
+                    for state in states
+                ):
+                    raise
                 # A schedule edit can reduce availability. Reset stale
                 # allocations and still create a valid stockpile-only report.
                 allocations = {}
@@ -12596,7 +12880,12 @@ class UserInputs(QMainWindow):
             self.blend_config_table_inputs = {}
 
         if hasattr(self, "crusher_rate_input"):
-            self.crusher_rate_input_value = self.crusher_rate_input.text()
+            self.crusher_rate_input_values = (
+                self.manual_crusher_rate_values()
+            )
+            self.crusher_rate_input_value = str(
+                self.crusher_rate_input_values["Preplan"]
+            )
 
         self.store_solver_config_inputs(show_errors=False)
         self.save_active_scenario_state()
@@ -12613,7 +12902,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 9,
+                "project_format_version": 10,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -12681,6 +12970,9 @@ class UserInputs(QMainWindow):
                 "updated_stockpile_data": self.updated_stockpile_data,
                 "blend_config_table_inputs":  self.blend_config_table_inputs,
                 "crusher_rate_input_value": self.crusher_rate_input_value,
+                "crusher_rate_input_values": (
+                    self.crusher_rate_input_values
+                ),
                 'hex_sequence_table': self.hex_sequence_table,
                 'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
                 'AMT_stockpile_data': getattr(self, "AMT_stockpile_data", {}),
@@ -13042,6 +13334,9 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
         self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
         self.crusher_rate_input_value = loaded_state.get("crusher_rate_input_value", None)
+        self.crusher_rate_input_values = copy.deepcopy(
+            loaded_state.get("crusher_rate_input_values") or {}
+        )
         self.hex_sequence_table = loaded_state.get("hex_sequence_table", [])
         self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
@@ -13166,6 +13461,7 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data = None
         self.blend_config_table_inputs = None
         self.crusher_rate_input_value = None
+        self.crusher_rate_input_values = {}
         self.hex_sequence_table = []
         self.hex_sequence_table_argument = []
         self.stockpile_data_AMT_column = {}

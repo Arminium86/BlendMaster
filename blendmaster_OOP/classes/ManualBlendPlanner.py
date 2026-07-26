@@ -72,6 +72,16 @@ class ManualBlendPlanner:
         self.crusher_rate = self._positive_number(
             crusher_rate, "Crusher rate"
         )
+        configured_rates = self.calendar_inputs.get("crusher_rate", {})
+        if not isinstance(configured_rates, Mapping):
+            configured_rates = {}
+        self.crusher_rates = {
+            period: self._positive_number(
+                configured_rates.get(period, self.crusher_rate),
+                f"{period.replace('_', ' ')} crusher rate",
+            )
+            for period in ("Preplan", "Period_1", "Period_2")
+        }
         self._inventory_template = self._build_inventory()
 
     @staticmethod
@@ -227,6 +237,12 @@ class ManualBlendPlanner:
             return 1
         return 0
 
+    def _crusher_rate_for(self, at_time):
+        period = {
+            0: "Preplan", 1: "Period_1", 2: "Period_2"
+        }[self._period_number(at_time)]
+        return self.crusher_rates.get(period, self.crusher_rate)
+
     @staticmethod
     def state_key(start, end, blend_id):
         return (
@@ -271,10 +287,10 @@ class ManualBlendPlanner:
                 ).total_seconds() / 3600
                 state_crusher_rate = self._number(
                     sequence_row.get("_crusher_rate"),
-                    self.crusher_rate,
+                    self._crusher_rate_for(current),
                 )
                 if state_crusher_rate <= 0:
-                    state_crusher_rate = self.crusher_rate
+                    state_crusher_rate = self._crusher_rate_for(current)
                 feed_tonnes = duration_hours * state_crusher_rate
                 states.append({
                     "steady_state_number": len(states) + 1,
@@ -297,6 +313,7 @@ class ManualBlendPlanner:
                 continue
 
             while current < blend_end - timedelta(microseconds=1):
+                current_crusher_rate = self._crusher_rate_for(current)
                 candidates = [(blend_end, "Blend completion")]
                 for boundary in period_boundaries:
                     if current < boundary < blend_end:
@@ -307,7 +324,7 @@ class ManualBlendPlanner:
                 )
                 if remaining_build is not None:
                     build_end = current + timedelta(
-                        hours=remaining_build / self.crusher_rate
+                        hours=remaining_build / current_crusher_rate
                     )
                     if current < build_end < blend_end:
                         candidates.append(
@@ -327,7 +344,7 @@ class ManualBlendPlanner:
                         )
                     depletion_end = current + timedelta(
                         hours=chunk["balance"] / (
-                            self.crusher_rate * ratio
+                            current_crusher_rate * ratio
                         )
                     )
                     if current < depletion_end < blend_end:
@@ -344,7 +361,7 @@ class ManualBlendPlanner:
                 duration_hours = (
                     state_end - current
                 ).total_seconds() / 3600
-                feed_tonnes = duration_hours * self.crusher_rate
+                feed_tonnes = duration_hours * current_crusher_rate
                 state = {
                     "steady_state_number": len(states) + 1,
                     "state_key": self.state_key(
@@ -357,7 +374,7 @@ class ManualBlendPlanner:
                     "period": self._period_number(current),
                     "trigger": trigger,
                     "feed_capacity_tonnes": feed_tonnes,
-                    "crusher_rate": self.crusher_rate,
+                    "crusher_rate": current_crusher_rate,
                 }
                 states.append(state)
 
