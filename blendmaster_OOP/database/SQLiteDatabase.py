@@ -178,6 +178,40 @@ class DatabaseManager:
         self.write_optimised_stockpile_depletion_report_to_database(results)
         StockpileProfileReport.write_optimised_stockpile_profile_report_to_database(periods)
 
+    def write_manual_blend_report_to_database(self, results: pd.DataFrame):
+        """
+        Replace the manual blend report with the current submitted manual plan.
+
+        The manual report intentionally uses the same source- and
+        crusher-level columns as ``optimised_blend_report`` so Results queries
+        and downstream comparisons can treat the two plans consistently.
+        """
+        database_name = get_database_path()
+        results = (
+            results.copy()
+            if isinstance(results, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        for column in ("start_datetime", "end_datetime"):
+            if column in results.columns:
+                results[column] = pd.to_datetime(
+                    results[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        connection = sqlite3.connect(database_name)
+        try:
+            results.to_sql(
+                "manual_blend_report",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        print(f"Manual blend report saved to database {database_name}")
+
     def write_product_build_report_to_database(self, results: pd.DataFrame):
         database_name = get_database_path()
         conn = sqlite3.connect(database_name)

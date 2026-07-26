@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea, QDialog
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -13,9 +13,14 @@ from classes.HaulCycleDataHandler import HaulCycleDataHandler
 from classes.Optimizer import Optimizer
 from classes.PeriodManager import PeriodManager
 from classes.ManualBlendRules import ManualBlendRules
+from classes.ManualBlendPlanner import (
+    ManualBlendPlanner,
+    ManualBlendPlanningError,
+)
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
+from GUI.ManualSteadyStateDialog import ManualSteadyStateDialog
 from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
@@ -1143,7 +1148,9 @@ class UserInputs(QMainWindow):
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
-            "stored_blend_sequence_table_for_gantt_default", "default_start_datetime",
+            "stored_blend_sequence_table_for_gantt_default",
+            "manual_direct_tip_allocations", "manual_steady_states",
+            "default_start_datetime",
             "default_end_datetime", "default_start_datetime_str", "default_end_datetime_str",
             "crusher_rate", "crusher_rate_input_value", "blend_config_table_inputs",
         ]
@@ -1386,6 +1393,13 @@ class UserInputs(QMainWindow):
             self.stored_blend_sequence_table_for_gantt_default = copy.deepcopy(
                 state.get("stored_blend_sequence_table_for_gantt_default") or []
             )
+            self.manual_direct_tip_allocations = copy.deepcopy(
+                state.get("manual_direct_tip_allocations") or {}
+            )
+            self.manual_steady_states = copy.deepcopy(
+                state.get("manual_steady_states") or []
+            )
+            self.manual_blend_report = pd.DataFrame()
             self.default_start_datetime = state.get("default_start_datetime")
             self.default_end_datetime = state.get("default_end_datetime")
             self.default_start_datetime_str = state.get("default_start_datetime_str")
@@ -7098,6 +7112,10 @@ class UserInputs(QMainWindow):
             loaded_state["stored_blend_sequence_table_for_gantt"] = []
         if loaded_state.get("stored_blend_sequence_table_for_gantt_default") is None:
             loaded_state["stored_blend_sequence_table_for_gantt_default"] = []
+        if loaded_state.get("manual_direct_tip_allocations") is None:
+            loaded_state["manual_direct_tip_allocations"] = {}
+        if loaded_state.get("manual_steady_states") is None:
+            loaded_state["manual_steady_states"] = []
         if loaded_state.get("hex_sequence_table") is None:
             loaded_state["hex_sequence_table"] = []
         if loaded_state.get("AMT_stockpile_data") is None:
@@ -11293,11 +11311,30 @@ class UserInputs(QMainWindow):
         store_button = QPushButton("Submit")
         store_button.setFixedWidth(120)
         store_button.clicked.connect(self.submit_blend_sequence_table_to_gantt)
+
+        if self.setup_blend_sequence_table_first_call:
+            self.manual_steady_state_button = QPushButton(
+                "Steady States & Direct Tip"
+            )
+            self.style_green_action_button(
+                self.manual_steady_state_button, 230
+            )
+            self.manual_steady_state_button.clicked.connect(
+                self.open_manual_steady_state_dialog
+            )
+        self.manual_steady_state_button.setEnabled(
+            bool(getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            ))
+        )
         
         if self.setup_blend_sequence_table_first_call:
             
             # Add the button to the layout
             self.blend_sequence_table_external_layout.addWidget(store_button)
+            self.blend_sequence_table_external_layout.addWidget(
+                self.manual_steady_state_button
+            )
             
         if self.is_project_loaded and self.setup_blend_sequence_table_first_call:
             self.populate_blend_sequence_table_if_project_is_loaded()
@@ -11585,6 +11622,14 @@ class UserInputs(QMainWindow):
             for row in self.collect_blend_sequence_table_rows()
             if str(row.get("Blend ID")) in defined_blend_ids
         ]
+        if not candidate_rows:
+            QMessageBox.warning(
+                self,
+                "Manual Blend Sequence",
+                "Add at least one scheduled user-defined blend before "
+                "submitting the sequence.",
+            )
+            return False
         conflicts = ManualBlendRules.overlapping_blend_bar_conflicts(
             candidate_rows,
         )
@@ -11607,15 +11652,186 @@ class UserInputs(QMainWindow):
 
         # If all rows are valid, store data
         self.stored_blend_sequence_table_for_gantt = candidate_rows
+
+        try:
+            self.generate_manual_blend_plan(
+                show_dialog=False, preserve_allocations=True
+            )
+        except (ManualBlendPlanningError, OSError, ValueError) as error:
+            QMessageBox.warning(
+                self, "Manual Blend Sequence", str(error)
+            )
+            return False
         
         self.start_or_update_dash_manual_chart_thread()
 
         self.load_manual_gantt_chart()  
 
         self.set_page_enabled(self.grade_profile_tab_index, True)  # Enable Grade Profile tab
+        if hasattr(self, "manual_steady_state_button"):
+            self.manual_steady_state_button.setEnabled(True)
 
-        QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
+        QMessageBox.information(
+            self,
+            "BlendMaster",
+            "Blend sequence successfully submitted.\n\n"
+            "Manual steady states and manual_blend_report have been "
+            "generated. Use Steady States & Direct Tip to review available "
+            "grade blocks and choose direct-tip tonnes.",
+        )
         return True
+
+    def manual_expit_payload_transactions(self):
+        if not self.is_direct_tip_enabled():
+            return pd.DataFrame()
+        schedule_path = str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ).strip()
+        if not schedule_path:
+            return pd.DataFrame()
+
+        context = self.active_site_context()
+        destination_guidance = context.get(
+            "aps_destination_guidance"
+        ) or {}
+        if not destination_guidance:
+            reference_path = str(
+                getattr(self, "file_path_choice", "") or schedule_path
+            ).strip()
+            destination_guidance = (
+                ExpitDataHandler.build_2wp_destination_guidance(
+                    reference_path
+                )
+            )
+
+        handler = ExpitDataHandler(
+            schedule_path,
+            include_crusher_destinations=getattr(
+                self, "reevaluate_aps_direct_tip_choice", False
+            ),
+            selected_crusher_name=getattr(
+                self, "aps_direct_tip_crusher_choice", []
+            ),
+            operational_mine=context.get("mine"),
+            operational_crusher=context.get("crusher"),
+            operational_opf=context.get("opf"),
+            direct_tip_movement_rules=context.get(
+                "direct_tip_movement_rules", []
+            ),
+            destination_guidance=destination_guidance,
+            selected_agent_names=getattr(
+                self, "selected_24hr_expit_agents", []
+            ),
+        )
+        transactions = handler.process_transactions()
+        if int(getattr(self, "expit_mode_choice", 1) or 1) == 2:
+            transactions = handler.update_transactions(
+                transactions, self.start_time_choice
+            )
+        return Run._ensure_direct_tip_ids(transactions)
+
+    def create_manual_blend_planner(self):
+        start_time = (
+            getattr(self, "start_time_choice", None)
+            or getattr(self, "default_start_datetime", None)
+            or datetime.now()
+        )
+        periods = PeriodManager()
+        periods.calculate_periods(start_time)
+
+        rate = (
+            getattr(self, "crusher_rate", None)
+            or getattr(self, "crusher_rate_input_value", None)
+        )
+        return ManualBlendPlanner(
+            getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            ),
+            getattr(self, "saved_blends_for_schedule", []),
+            getattr(self, "updated_stockpile_data", {}),
+            getattr(self, "hex_sequence_table", []),
+            self.manual_expit_payload_transactions(),
+            periods.get_periods(),
+            getattr(self, "product_build_settings", []),
+            rate,
+            calendar_inputs=getattr(self, "calendar_inputs", {}),
+        )
+
+    def generate_manual_blend_plan(
+        self, show_dialog=False, preserve_allocations=True
+    ):
+        planner = self.create_manual_blend_planner()
+        states = planner.build_steady_states()
+        allocations = (
+            copy.deepcopy(getattr(
+                self, "manual_direct_tip_allocations", {}
+            ))
+            if preserve_allocations else {}
+        )
+
+        # Old selections whose delivery window no longer exists are harmless,
+        # but keeping them in the project would be misleading.
+        state_keys = {state["state_key"] for state in states}
+        allocations = {
+            key: value for key, value in allocations.items()
+            if key in state_keys
+        }
+
+        if show_dialog:
+            dialog = ManualSteadyStateDialog(
+                planner, states, allocations, self
+            )
+            if dialog.exec_() != QDialog.Accepted:
+                return False
+            allocations = dialog.allocations
+            report = dialog.report
+        else:
+            try:
+                report = planner.build_report(states, allocations)
+            except ManualBlendPlanningError:
+                # A schedule edit can reduce availability. Reset stale
+                # allocations and still create a valid stockpile-only report.
+                allocations = {}
+                report = planner.build_report(states, allocations)
+
+        self.manual_direct_tip_allocations = allocations
+        self.manual_steady_states = states
+        self.manual_blend_report = report
+        DatabaseManager().write_manual_blend_report_to_database(report)
+        self.refresh_sqlite_reports()
+        if hasattr(self, "draw_grade_profile_chart"):
+            self.draw_grade_profile_chart.update_data(
+                self.manual_grade_profile_data()
+            )
+        self.save_active_scenario_state()
+        return True
+
+    def open_manual_steady_state_dialog(self):
+        if not getattr(
+            self, "stored_blend_sequence_table_for_gantt", []
+        ):
+            QMessageBox.information(
+                self,
+                "Manual Steady States",
+                "Submit a manual blend sequence first.",
+            )
+            return
+        try:
+            applied = self.generate_manual_blend_plan(
+                show_dialog=True, preserve_allocations=True
+            )
+        except (ManualBlendPlanningError, OSError, ValueError) as error:
+            QMessageBox.warning(
+                self, "Manual Steady States", str(error)
+            )
+            return
+        if applied:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Direct-tip selections applied and manual_blend_report "
+                "regenerated.",
+            )
 
     def update_early_start_conditional_format(self):
         """
@@ -11843,7 +12059,11 @@ class UserInputs(QMainWindow):
         """Update or start the Dash app."""
         hex_sequence_table = copy.deepcopy(self.hex_sequence_table)
         updated_stockpile_data = copy.deepcopy(self.updated_stockpile_data)
-        grade_profile_data = self.draw_manual_gantt_chart.return_grade_profile_data()
+        grade_profile_data = self.manual_grade_profile_data()
+        if grade_profile_data.empty:
+            grade_profile_data = (
+                self.draw_manual_gantt_chart.return_grade_profile_data()
+            )
 
         if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
             # Update data in the running Dash app
@@ -11854,6 +12074,61 @@ class UserInputs(QMainWindow):
             self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
             self.dash_thread_grade_profile.start()
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
+
+    def manual_grade_profile_data(self):
+        report = getattr(self, "manual_blend_report", None)
+        if not isinstance(report, pd.DataFrame) or report.empty:
+            try:
+                connection = sqlite3.connect(get_database_path())
+                report = pd.read_sql(
+                    "SELECT * FROM manual_blend_report", connection
+                )
+            except (sqlite3.Error, pd.errors.DatabaseError):
+                return pd.DataFrame()
+            finally:
+                if "connection" in locals():
+                    connection.close()
+        if report.empty:
+            return pd.DataFrame()
+
+        rows = []
+        group_columns = [
+            "steady_state_number", "blend_ID", "start_datetime",
+            "end_datetime", "steady_state_duration",
+        ]
+        for keys, group in report.groupby(
+            group_columns, sort=False, dropna=False
+        ):
+            (
+                _state_number, blend_id, start, end, duration
+            ) = keys
+            first = group.iloc[0]
+            rows.append({
+                "Blend ID": blend_id,
+                "Origin": "Manual",
+                "Start Datetime": start,
+                "End Datetime": end,
+                "Duration (hrs)": duration,
+                "Feed Tonnes": first.get(
+                    "crusher_actual_tonnes", 0
+                ),
+                "Grade Fe": first.get(
+                    "crusher_actual_grade_fe", 0
+                ),
+                "Grade Si": first.get(
+                    "crusher_actual_grade_si", 0
+                ),
+                "Grade Al": first.get(
+                    "crusher_actual_grade_al", 0
+                ),
+                "Grade P": first.get(
+                    "crusher_actual_grade_p", 0
+                ),
+                "Grade Mn": first.get(
+                    "crusher_actual_grade_mn", 0
+                ),
+            })
+        return pd.DataFrame(rows)
 
     def save_state(self, show_success=True):
         """Save the application state to a file using pickle."""
@@ -11951,7 +12226,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 7,
+                "project_format_version": 8,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -12013,6 +12288,8 @@ class UserInputs(QMainWindow):
                 "stockpile_data_use_column": self.stockpile_data_use_column,
                 "stored_blend_sequence_table_for_gantt": self.stored_blend_sequence_table_for_gantt,
                 "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
+                "manual_direct_tip_allocations": self.manual_direct_tip_allocations,
+                "manual_steady_states": self.manual_steady_states,
                 "time_mode_choice": self.time_mode_choice,
                 "updated_stockpile_data": self.updated_stockpile_data,
                 "blend_config_table_inputs":  self.blend_config_table_inputs,
@@ -12367,6 +12644,13 @@ class UserInputs(QMainWindow):
         self.stored_blend_sequence_table_for_gantt_default = (
             loaded_state.get("stored_blend_sequence_table_for_gantt_default") or []
         )
+        self.manual_direct_tip_allocations = copy.deepcopy(
+            loaded_state.get("manual_direct_tip_allocations") or {}
+        )
+        self.manual_steady_states = copy.deepcopy(
+            loaded_state.get("manual_steady_states") or []
+        )
+        self.manual_blend_report = pd.DataFrame()
         self.time_mode_choice = loaded_state.get("time_mode_choice", None)
         self.updated_stockpile_data = loaded_state.get("updated_stockpile_data", None)
         self.blend_config_table_inputs =  loaded_state.get("blend_config_table_inputs", None)
@@ -12488,6 +12772,9 @@ class UserInputs(QMainWindow):
         self.stockpile_data_use_column = {}
         self.stored_blend_sequence_table_for_gantt = None
         self.stored_blend_sequence_table_for_gantt_default = None
+        self.manual_direct_tip_allocations = {}
+        self.manual_steady_states = []
+        self.manual_blend_report = pd.DataFrame()
         self.time_mode_choice = None
         self.updated_stockpile_data = None
         self.blend_config_table_inputs = None
