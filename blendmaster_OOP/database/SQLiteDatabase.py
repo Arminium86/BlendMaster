@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from classes.PeriodManager import PeriodManager
+from classes.ProductBuildProgress import ProductBuildProgress
 from database.DatabaseContext import get_database_path
 
 class DatabaseManager:
@@ -29,6 +30,51 @@ class DatabaseManager:
             conn.commit()
         finally:
             conn.close()
+
+    def add_product_build_progress_to_existing_reports(
+        self, product_build_settings, database_name=None
+    ):
+        """Upgrade legacy blend-report tables without requiring a rerun."""
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+            for table_name in (
+                "optimised_blend_report",
+                "manual_blend_report",
+            ):
+                if table_name not in table_names:
+                    continue
+                report = pd.read_sql(
+                    f'SELECT * FROM "{table_name}"',
+                    connection,
+                )
+                report = ProductBuildProgress.annotate(
+                    report, product_build_settings
+                )
+                for column in ("start_datetime", "end_datetime"):
+                    if column in report.columns:
+                        report[column] = pd.to_datetime(
+                            report[column], errors="coerce"
+                        ).dt.strftime("%Y-%m-%d %H:%M:%S")
+                report.to_sql(
+                    table_name,
+                    connection,
+                    if_exists="replace",
+                    index=False,
+                )
+            connection.commit()
+        finally:
+            connection.close()
 
     def write_optimised_blend_report_to_database (self, results: pd.DataFrame, periods: PeriodManager):
         # Connect to the SQLite database or create it
@@ -91,6 +137,28 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_type TEXT")
         if "actual_direct_tip_ratio" not in existing_columns:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN actual_direct_tip_ratio REAL")
+        text_progress_columns = {
+            "product_build_id",
+            "product_build_name",
+            "product_build_brand",
+        }
+        boolean_progress_columns = {
+            "product_build_complete",
+            "product_build_current_on_spec",
+            "product_build_complete_on_spec",
+        }
+        for column in ProductBuildProgress.COLUMNS:
+            if column in existing_columns:
+                continue
+            column_type = (
+                "TEXT" if column in text_progress_columns
+                else "INTEGER" if column in boolean_progress_columns
+                else "REAL"
+            )
+            cursor.execute(
+                f'ALTER TABLE optimised_blend_report '
+                f'ADD COLUMN "{column}" {column_type}'
+            )
 
         cursor.execute('DELETE FROM optimised_blend_report')
 
@@ -106,68 +174,27 @@ class DatabaseManager:
             results["source_type"] = ""
         if "actual_direct_tip_ratio" not in results.columns:
             results["actual_direct_tip_ratio"] = 0
+        for column in ProductBuildProgress.COLUMNS:
+            if column not in results.columns:
+                results[column] = None
 
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['end_datetime'] = pd.to_datetime(results['end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        # Insert each row from the DataFrame into the database
-        for _, row in results.iterrows():
-            cursor.execute('''
-            INSERT INTO optimised_blend_report (
-                start_datetime,
-                end_datetime,
-                steady_state_number,
-                blend_option,
-                blend_ID,
-                steady_state_duration,
-                period,
-                actual_direct_tip_ratio,
-                source,
-                source_id,
-                source_type,
-                source_blend_ratio,
-                source_opening_balance,
-                source_actual_tonnes,
-                source_closing_balance,
-                source_grade_fe,
-                source_grade_si,
-                source_grade_al,
-                source_grade_p,
-                source_grade_mn,
-                equipment,
-                equipment_rate_input,
-                equipment_rate_output,
-                crusher_actual_tonnes,
-                crusher_rate_input,
-                crusher_rate_output,
-                crusher_actual_grade_fe,
-                crusher_actual_grade_si,
-                crusher_actual_grade_al,
-                crusher_actual_grade_p,
-                crusher_actual_grade_mn,
-                crusher_grade_target_min_fe,
-                crusher_grade_target_max_fe,
-                crusher_grade_target_min_si,
-                crusher_grade_target_max_si,
-                crusher_grade_target_min_al,
-                crusher_grade_target_max_al,
-                crusher_grade_target_min_p,
-                crusher_grade_target_max_p,
-                crusher_grade_target_min_mn,
-                crusher_grade_target_max_mn
-            ) VALUES (
-                :start_datetime, :end_datetime, :steady_state_number, :blend_option, :blend_ID,
-                :steady_state_duration, :period, :actual_direct_tip_ratio, :source, :source_id, :source_type, :source_blend_ratio, :source_opening_balance,
-                :source_actual_tonnes, :source_closing_balance, :source_grade_fe, :source_grade_si,
-                :source_grade_al, :source_grade_p, :source_grade_mn, :equipment, :equipment_rate_input,
-                :equipment_rate_output, :crusher_actual_tonnes, :crusher_rate_input, :crusher_rate_output,
-                :crusher_actual_grade_fe, :crusher_actual_grade_si, :crusher_actual_grade_al,
-                :crusher_actual_grade_p, :crusher_actual_grade_mn, :crusher_grade_target_min_fe,
-                :crusher_grade_target_max_fe, :crusher_grade_target_min_si, :crusher_grade_target_max_si,
-                :crusher_grade_target_min_al, :crusher_grade_target_max_al, :crusher_grade_target_min_p,
-                :crusher_grade_target_max_p, :crusher_grade_target_min_mn, :crusher_grade_target_max_mn
-            )
-            ''', row.to_dict())
+        cursor.execute("PRAGMA table_info(optimised_blend_report)")
+        report_columns = [row[1] for row in cursor.fetchall()]
+        results_to_write = results.reindex(
+            columns=[
+                column for column in report_columns
+                if column in results.columns
+            ]
+        )
+        results_to_write.to_sql(
+            "optimised_blend_report",
+            conn,
+            if_exists="append",
+            index=False,
+        )
 
         # Commit and close the connection
         conn.commit()

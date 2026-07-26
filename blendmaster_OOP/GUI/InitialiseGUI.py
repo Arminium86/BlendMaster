@@ -894,6 +894,10 @@ class UserInputs(QMainWindow):
             force or not self.database_contains_table(database_path, "opening_AMT_stockpile_inventories")
         ):
             self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
+        DatabaseManager().add_product_build_progress_to_existing_reports(
+            getattr(self, "product_build_settings", []) or [],
+            database_path,
+        )
 
     @staticmethod
     def snapshot_database(database_path):

@@ -5,6 +5,7 @@ from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
+from classes.ProductBuildProgress import ProductBuildProgress
 from classes.CrusherTarget import CrusherTarget
 from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
@@ -1290,6 +1291,9 @@ class CaseModeller:
         #print(f"All results written to {filename}")
 
         report_results = self.group_grade_block_rows(self.results)
+        report_results = ProductBuildProgress.annotate(
+            report_results, self.product_build_settings
+        )
         self.database_manager.write_optimised_blend_report_to_database(report_results, self.periods)
 
     def product_build_grade_on_spec(self, build_state, build_setting):

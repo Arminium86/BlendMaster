@@ -6,6 +6,8 @@ from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 
+from classes.ProductBuildProgress import ProductBuildProgress
+
 
 class ManualBlendPlanningError(ValueError):
     """A user-correctable error in a manual blend plan."""
@@ -38,7 +40,7 @@ class ManualBlendPlanner:
         "crusher_grade_target_min_al", "crusher_grade_target_max_al",
         "crusher_grade_target_min_p", "crusher_grade_target_max_p",
         "crusher_grade_target_min_mn", "crusher_grade_target_max_mn",
-    ]
+    ] + ProductBuildProgress.COLUMNS
 
     def __init__(
         self,
@@ -640,7 +642,6 @@ class ManualBlendPlanner:
                 direct_tip_tonnes / total_tonnes
                 if total_tonnes > 0 else 0
             )
-            build = self._active_build(produced_tonnes)
             targets = self._target_values(state["period"])
             duration = state["steady_state_duration"]
 
@@ -682,7 +683,18 @@ class ManualBlendPlanner:
                 })
             produced_tonnes += total_tonnes
 
-        return pd.DataFrame(report_rows, columns=self.REPORT_COLUMNS)
+        report = pd.DataFrame(
+            report_rows,
+            columns=[
+                column
+                for column in self.REPORT_COLUMNS
+                if column not in ProductBuildProgress.COLUMNS
+            ],
+        )
+        report = ProductBuildProgress.annotate(
+            report, self.product_build_settings
+        )
+        return report.reindex(columns=self.REPORT_COLUMNS)
 
     def state_summaries(self, states, allocations=None):
         report = self.build_report(states, allocations or {})
