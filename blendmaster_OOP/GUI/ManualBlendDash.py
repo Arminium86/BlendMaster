@@ -459,7 +459,13 @@ function buildLegendDetails(row) {
         const ratios = String(row["Source Ratios"]).split(",");
         html += "<div style='margin-top:5px;'>Sources and Ratios:</div>";
         sources.forEach((source, index) => {
-            html += "<div>- " + escapeHtml(source.trim()) + " @ " + escapeHtml((ratios[index] || "").trim()) + "%</div>";
+            const rawRatio = String(ratios[index] || "").trim();
+            const numericRatio = Number(rawRatio);
+            const displayedRatio = Number.isFinite(numericRatio)
+                ? (numericRatio * 100).toFixed(2)
+                : rawRatio;
+            html += "<div>- " + escapeHtml(source.trim()) + " @ " +
+                escapeHtml(displayedRatio) + "%</div>";
         });
     }
     return html;
@@ -511,7 +517,7 @@ function updateRowFromTimes(rowIndex, startMs, endMs) {
     const row = state.rows[rowIndex];
     row["Start Datetime"] = formatDate(new Date(startMs));
     row["End Datetime"] = formatDate(new Date(endMs));
-    row["Duration (hrs)"] = ((endMs - startMs) / 3600000).toFixed(2);
+    row["Duration (hrs)"] = ((endMs - startMs) / 3600000).toFixed(1);
 }
 
 function positionBar(bar, row) {
@@ -521,8 +527,17 @@ function positionBar(bar, row) {
     bar.style.left = leftFor(start.getTime()) + "px";
     bar.style.width = widthFor(start.getTime(), end.getTime()) + "px";
     const duration = Number(row["Duration (hrs)"] || 0);
-    bar.querySelector(".bar-label").textContent = "Blend " + row["Blend ID"] + " - " + duration.toFixed(2) + " hrs";
-    bar.title = "Start: " + row["Start Datetime"] + "\\nEnd: " + row["End Datetime"] + "\\nDuration: " + row["Duration (hrs)"] + " hrs";
+    bar.querySelector(".bar-label").textContent = "Blend " + row["Blend ID"] + " - " + duration.toFixed(1) + " hrs";
+    const durationHours = Number(row["Duration (hrs)"] || 0);
+    bar.title = "Start: " + row["Start Datetime"] +
+        "\\nEnd: " + row["End Datetime"] +
+        "\\nDuration: " + durationHours.toFixed(1) + " hrs";
+    if (row["Direct Tip Tonnes"] !== undefined && row["Direct Tip Tonnes"] !== null) {
+        const directTipTonnes = Number(row["Direct Tip Tonnes"] || 0);
+        const directTipRatio = Number(row["Direct Tip Ratio"] || 0);
+        bar.title += "\\nSelected Direct Tip: " + directTipTonnes.toFixed(1) +
+            " t (" + (directTipRatio * 100).toFixed(1) + "%)";
+    }
 }
 
 function beginDrag(event, rowIndex, mode) {

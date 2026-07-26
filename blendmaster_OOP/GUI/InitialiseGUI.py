@@ -17,6 +17,7 @@ from classes.ManualBlendPlanner import (
     ManualBlendPlanner,
     ManualBlendPlanningError,
 )
+from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
@@ -143,13 +144,13 @@ class MultiSelectBlendComboBox(QComboBox):
 
     selectionChanged = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, blend_ids=None):
         super().__init__(parent)
         self.setEditable(True)
         self.lineEdit().setReadOnly(True)
         self.lineEdit().setAlignment(Qt.AlignCenter)
         self.view().viewport().installEventFilter(self)
-        for blend_id in range(1, 6):
+        for blend_id in (blend_ids or range(1, 6)):
             super().addItem(str(blend_id))
             item = self.model().item(self.count() - 1)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
@@ -182,10 +183,13 @@ class MultiSelectBlendComboBox(QComboBox):
         ]
 
     def set_selected_blend_ids(self, blend_ids):
+        available = {
+            self.itemText(index) for index in range(self.count())
+        }
         selected = {
             str(value).strip()
             for value in (blend_ids or [])
-            if str(value).strip() in {"1", "2", "3", "4", "5"}
+            if str(value).strip() in available
         }
         blocked = self.blockSignals(True)
         try:
@@ -8101,6 +8105,165 @@ class UserInputs(QMainWindow):
         self.setup_blends_tab()
         self.set_page_enabled(self.blend_config_tab_index, True)
 
+    def fetch_optimised_blend_report(self):
+        connection = sqlite3.connect(get_database_path())
+        try:
+            return pd.read_sql(
+                "SELECT * FROM optimised_blend_report",
+                connection,
+            )
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
+        finally:
+            connection.close()
+
+    def prepopulate_manual_from_optimised_result(
+        self, automatic=False
+    ):
+        has_manual_plan = bool(
+            getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            )
+            or getattr(self, "manual_direct_tip_allocations", {})
+            or getattr(self, "saved_blends_for_schedule", [])
+            or getattr(self, "blend_config_table_inputs", {})
+        )
+        if automatic and has_manual_plan:
+            return False
+        if not automatic and has_manual_plan:
+            reply = QMessageBox.question(
+                self,
+                "Replace Manual Blend Plan?",
+                "This will replace the current Setup Blends, Blend Sequence, "
+                "and manual direct-tip selections with the latest optimized "
+                "result. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+
+        optimised_report = self.fetch_optimised_blend_report()
+        if optimised_report.empty:
+            if not automatic:
+                QMessageBox.information(
+                    self,
+                    "Prepopulate Manual Blending",
+                    "Run the optimiser first. No optimized blend result is "
+                    "available for this site scenario.",
+                )
+            return False
+
+        previous_manual_state = {
+            field: copy.deepcopy(getattr(self, field, None))
+            for field in (
+                "blend_config_table_inputs",
+                "saved_blends_for_schedule",
+                "stored_blend_sequence_table_for_gantt",
+                "stored_blend_sequence_table_for_gantt_default",
+                "manual_direct_tip_allocations",
+                "manual_steady_states",
+                "manual_blend_report",
+            )
+        }
+        try:
+            transfer = OptimisedToManualPlan(
+                optimised_report,
+                getattr(self, "updated_stockpile_data", {}),
+            ).build()
+
+            self.blend_config_table_inputs = copy.deepcopy(
+                transfer["blend_config_table_inputs"]
+            )
+            self.saved_blends_for_schedule = copy.deepcopy(
+                transfer["blend_definitions"]
+            )
+            imported_sequence = copy.deepcopy(
+                transfer["sequence_rows"]
+            )
+            self.stored_blend_sequence_table_for_gantt = (
+                imported_sequence
+            )
+            self.stored_blend_sequence_table_for_gantt_default = []
+            self.manual_gantt_legend_and_tooltip = (
+                self.saved_blends_for_schedule
+            )
+
+            planner = self.create_manual_blend_planner()
+            states = planner.build_steady_states()
+            allocations = OptimisedToManualPlan.direct_tip_allocations(
+                states, transfer["direct_tip_rows"]
+            )
+            report = planner.build_report(states, allocations)
+        except Exception as error:
+            for field, value in previous_manual_state.items():
+                setattr(self, field, value)
+            if automatic:
+                print(
+                    "Manual prepopulation from optimized result was not "
+                    f"completed: {error}"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Prepopulate Manual Blending",
+                    str(error),
+                )
+            return False
+
+        self.manual_direct_tip_allocations = allocations
+        self.manual_steady_states = states
+        self.manual_blend_report = report
+        DatabaseManager().write_manual_blend_report_to_database(report)
+
+        # Rebuild Setup Blends so every optimized source-to-ratio pattern is
+        # visible, including plans containing more than five Blend IDs.
+        if hasattr(self, "blend_config_table"):
+            previous_project_loaded = self.is_project_loaded
+            self.is_project_loaded = True
+            try:
+                self.populate_blend_config_table()
+                self.populate_blend_config_weights_and_ids()
+                self.update_blend_results()
+            finally:
+                self.is_project_loaded = previous_project_loaded
+
+        previous_project_loaded = self.is_project_loaded
+        self.is_project_loaded = True
+        try:
+            self.setup_sequence_tab()
+            self.populate_blend_sequence_table_if_project_is_loaded()
+            self.apply_manual_gantt_rows_to_table(imported_sequence)
+        finally:
+            self.is_project_loaded = previous_project_loaded
+
+        # Table hydration contains user-facing columns only. Restore the
+        # optimized-state metadata used to preserve exact decision boundaries
+        # and per-state crusher rates.
+        self.stored_blend_sequence_table_for_gantt = imported_sequence
+        self.manual_gantt_legend_and_tooltip = (
+            self.saved_blends_for_schedule
+        )
+        self.start_or_update_dash_manual_chart_thread()
+        self.set_page_enabled(self.blend_sequence_tab_index, True)
+        self.set_page_enabled(self.grade_profile_tab_index, True)
+        self.refresh_sqlite_reports()
+        self.save_active_scenario_state()
+
+        if not automatic:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                f"Manual blending was prepopulated from "
+                f"{transfer['steady_state_count']} optimized steady "
+                f"state(s) using {transfer['blend_count']} manual blend "
+                f"definition(s).\n\n"
+                f"Transferred selected direct tip: "
+                f"{transfer['direct_tip_tonnes']:,.1f} t.",
+            )
+            self.show_page(self.blend_sequence_tab_index)
+        return True
+
     def navigate_to_solver_configuration(self):
         self.load_solver_config_inputs()
         self.set_page_enabled(self.solver_config_tab_index, True)
@@ -9481,6 +9644,7 @@ class UserInputs(QMainWindow):
         self.set_start_and_end_datetime(periods=periods)
         self.update_decision_point_tab_state()
         self.activate_manual_setup_tab()
+        self.prepopulate_manual_from_optimised_result(automatic=True)
         self.refresh_sqlite_reports()
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
@@ -10361,10 +10525,20 @@ class UserInputs(QMainWindow):
             # Create Submit Button
             submit_button = QPushButton("Submit")
             submit_button.clicked.connect(self.store_blend_results)
+            self.prepopulate_manual_button = QPushButton(
+                "Prepopulate from Optimised Result"
+            )
+            self.style_green_action_button(
+                self.prepopulate_manual_button, 260
+            )
+            self.prepopulate_manual_button.clicked.connect(
+                self.prepopulate_manual_from_optimised_result
+            )
 
             # Align button to the bottom-left using layout
             button_layout = QHBoxLayout()
             button_layout.addWidget(submit_button)
+            button_layout.addWidget(self.prepopulate_manual_button)
             button_layout.addStretch()  # Push the button to the left
 
             self.setup_blends_tab_layout.addLayout(button_layout)
@@ -10490,7 +10664,9 @@ class UserInputs(QMainWindow):
             # A stockpile can participate in several manual blends. The same
             # weight is used in each selected blend and normalized separately
             # against that blend's other selected stockpiles.
-            blend_ids_combo = MultiSelectBlendComboBox()
+            blend_ids_combo = MultiSelectBlendComboBox(
+                blend_ids=self.manual_blend_id_options()
+            )
             blend_ids_combo.setToolTip(
                 "Select one or more Blend IDs. Configure each selected "
                 "blend's weight in the adjacent column."
@@ -10622,6 +10798,34 @@ class UserInputs(QMainWindow):
             return [] if not value or value == "None" else [value]
         return []
 
+    def manual_blend_id_options(self):
+        blend_ids = {str(value) for value in range(1, 6)}
+        for blend_id in (
+            getattr(self, "blend_config_table_inputs", {}) or {}
+        ):
+            if str(blend_id).strip():
+                blend_ids.add(str(blend_id).strip())
+        for row in (
+            getattr(self, "saved_blends_for_schedule", []) or []
+        ):
+            if row.get("Blend ID") not in (None, ""):
+                blend_ids.add(str(row["Blend ID"]).strip())
+        for row in (
+            getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            ) or []
+        ):
+            if row.get("Blend ID") not in (None, ""):
+                blend_ids.add(str(row["Blend ID"]).strip())
+
+        def sort_key(value):
+            try:
+                return (0, int(value))
+            except (TypeError, ValueError):
+                return (1, str(value))
+
+        return sorted(blend_ids, key=sort_key)
+
     @staticmethod
     def parse_manual_blend_weights(text, blend_ids):
         blend_ids = [str(blend_id) for blend_id in blend_ids]
@@ -10708,7 +10912,10 @@ class UserInputs(QMainWindow):
 
         try:
             # Initialize a dictionary to store total weights for each blend ID
-            blend_weights = {str(i): 0 for i in range(1, 6)}
+            blend_weights = {
+                blend_id: 0 for blend_id
+                in self.manual_blend_id_options()
+            }
 
             # Step 1: Calculate total weights for each blend ID
             for row_idx in range(self.blend_config_table.rowCount()):
@@ -10799,7 +11006,9 @@ class UserInputs(QMainWindow):
         self.blend_results_table.horizontalHeader().setFont(header_font)
 
         # Set up rows for each blend ID
-        self.blend_results_table.setRowCount(5)
+        self.blend_results_table.setRowCount(
+            len(self.manual_blend_id_options())
+        )
         self.update_blend_results()
 
         # Connect edits to update results
@@ -10887,9 +11096,18 @@ class UserInputs(QMainWindow):
         Recalculate and update the Blend Results Table, ensuring unused Blend IDs are cleared.
         """
         # Initialize a dictionary to aggregate data for each blend ID
-        self.blend_data_from_config_table_inputs = {str(i): {"weights": [], "grades": [], "balances": [], "available": [], "sources": [], "source_ratios": []} for i in range(1, 6)}
+        blend_id_options = self.manual_blend_id_options()
+        self.blend_data_from_config_table_inputs = {
+            blend_id: {
+                "weights": [], "grades": [], "balances": [],
+                "available": [], "sources": [], "source_ratios": [],
+            }
+            for blend_id in blend_id_options
+        }
 
-        blend_weights = {str(i): 0.0 for i in range(1, 6)}
+        blend_weights = {
+            blend_id: 0.0 for blend_id in blend_id_options
+        }
         for row_idx in range(self.blend_config_table.rowCount()):
             for blend_id, weight in (
                 self.manual_blend_weights_for_row(row_idx).items()
@@ -10953,8 +11171,9 @@ class UserInputs(QMainWindow):
                 continue
 
         # Update the Blend Results Table
-        for blend_id, data in self.blend_data_from_config_table_inputs.items():
-            row_idx = int(blend_id) - 1
+        self.blend_results_table.setRowCount(len(blend_id_options))
+        for row_idx, blend_id in enumerate(blend_id_options):
+            data = self.blend_data_from_config_table_inputs[blend_id]
             total_weight = sum(data["weights"])
 
             if total_weight > 0:
@@ -11163,7 +11382,12 @@ class UserInputs(QMainWindow):
         self.blend_sequence_table.setHorizontalHeaderLabels(headers)
 
         # Prepopulate the table
-        blend_ids = sorted([blend["Blend ID"] for blend in self.saved_blends_for_schedule])
+        blend_ids = sorted(
+            [blend["Blend ID"] for blend in self.saved_blends_for_schedule],
+            key=lambda value: (
+                0, int(value)
+            ) if str(value).isdigit() else (1, str(value)),
+        )
         row_data = []
         current_start = self.default_start_datetime
 
@@ -11208,8 +11432,11 @@ class UserInputs(QMainWindow):
             current_start = end_datetime
 
         # Add rows for missing Blend IDs
-        all_blend_ids = set(range(1, 6))  # Default blend IDs 1-5
-        missing_blend_ids = [blend_id for blend_id in all_blend_ids if str(blend_id) not in blend_ids]
+        all_blend_ids = self.manual_blend_id_options()
+        missing_blend_ids = [
+            blend_id for blend_id in all_blend_ids
+            if str(blend_id) not in {str(value) for value in blend_ids}
+        ]
 
         for blend_id in sorted(missing_blend_ids):
             duration = (self.default_end_datetime - self.default_start_datetime).total_seconds() / 3600
@@ -11230,7 +11457,9 @@ class UserInputs(QMainWindow):
 
                 if key == "Blend ID":
                     blend_dropdown = QComboBox()
-                    blend_dropdown.addItems([str(i) for i in range(1, 6)])  # Blend IDs 1 to 5
+                    blend_dropdown.addItems(
+                        self.manual_blend_id_options()
+                    )
                     blend_dropdown.currentIndexChanged.connect(lambda _, row=row: self.update_blend_id(row))
                     self.blend_sequence_table.setCellWidget(row, col, blend_dropdown)
                     blend_dropdown.setCurrentText(str(data[key]))  # Set initial value
@@ -11238,7 +11467,9 @@ class UserInputs(QMainWindow):
 
                 # Add editable field for Duration
                 elif key == "Duration (hrs)":
-                    duration_item = QTableWidgetItem(str(data[key]))
+                    duration_item = QTableWidgetItem(
+                        f"{float(data[key]):.1f}"
+                    )
                     duration_item.setFlags(duration_item.flags() | Qt.ItemIsEditable)  # Make editable
                     duration_item.setTextAlignment(Qt.AlignCenter)
                     self.blend_sequence_table.setItem(row, col, duration_item)
@@ -11398,7 +11629,9 @@ class UserInputs(QMainWindow):
             
             if key == "Blend ID":
                 blend_dropdown = QComboBox()
-                blend_dropdown.addItems([str(i) for i in range(1, 6)])  # Blend IDs 1 to 5
+                blend_dropdown.addItems(
+                    self.manual_blend_id_options()
+                )
                 blend_dropdown.currentIndexChanged.connect(lambda _, row=current_row_count: self.update_blend_id(row))
                 self.blend_sequence_table.setCellWidget(current_row_count, col, blend_dropdown)
                 blend_dropdown.setCurrentText(str(1))  # Set initial default value
@@ -11488,6 +11721,14 @@ class UserInputs(QMainWindow):
             duration_item = self.blend_sequence_table.item(row, 3)
             if duration_item:
                 duration = float(duration_item.text())
+                rounded_duration_text = f"{duration:.1f}"
+                duration = float(rounded_duration_text)
+                if duration_item.text() != rounded_duration_text:
+                    blocked = self.blend_sequence_table.blockSignals(True)
+                    try:
+                        duration_item.setText(rounded_duration_text)
+                    finally:
+                        self.blend_sequence_table.blockSignals(blocked)
                 
             # Update End Datetime
             start_datetime_widget = self.blend_sequence_table.cellWidget(row, 2)  # Access the widget in the cell
@@ -11570,6 +11811,12 @@ class UserInputs(QMainWindow):
                     duration_item = QTableWidgetItem()
                     self.blend_sequence_table.setItem(row_index, duration_col, duration_item)
                 duration_item.setText(str(row_data.get("Duration (hrs)", "")))
+                try:
+                    duration_item.setText(
+                        f"{float(row_data.get('Duration (hrs)', 0)):.1f}"
+                    )
+                except (TypeError, ValueError):
+                    pass
                 duration_item.setTextAlignment(Qt.AlignCenter)
 
                 end_item = self.blend_sequence_table.item(row_index, end_col)
@@ -11580,6 +11827,8 @@ class UserInputs(QMainWindow):
                 end_item.setTextAlignment(Qt.AlignCenter)
 
                 self.update_blend_id(row_index)
+                if row_data.get("Origin") not in (None, ""):
+                    origin_item.setText(str(row_data["Origin"]))
         finally:
             self.blend_sequence_table.blockSignals(False)
 
@@ -11687,48 +11936,111 @@ class UserInputs(QMainWindow):
         schedule_path = str(
             getattr(self, "file_path_24hr_choice", "") or ""
         ).strip()
-        if not schedule_path:
+        transactions = pd.DataFrame()
+        # Prefer the exact payload population used by the completed
+        # optimisation. Reprocessing Expit Mode 2 later can return a different
+        # live progress cut and therefore regenerate different payload IDs.
+        connection = sqlite3.connect(get_database_path())
+        try:
+            transactions = pd.read_sql(
+                "SELECT * FROM expit_payload_transactions",
+                connection,
+            )
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            transactions = pd.DataFrame()
+        finally:
+            connection.close()
+
+        if transactions.empty and schedule_path:
+            context = self.active_site_context()
+            destination_guidance = context.get(
+                "aps_destination_guidance"
+            ) or {}
+            if not destination_guidance:
+                reference_path = str(
+                    getattr(self, "file_path_choice", "")
+                    or schedule_path
+                ).strip()
+                destination_guidance = (
+                    ExpitDataHandler.build_2wp_destination_guidance(
+                        reference_path
+                    )
+                )
+
+            handler = ExpitDataHandler(
+                schedule_path,
+                include_crusher_destinations=getattr(
+                    self, "reevaluate_aps_direct_tip_choice", False
+                ),
+                selected_crusher_name=getattr(
+                    self, "aps_direct_tip_crusher_choice", []
+                ),
+                operational_mine=context.get("mine"),
+                operational_crusher=context.get("crusher"),
+                operational_opf=context.get("opf"),
+                direct_tip_movement_rules=context.get(
+                    "direct_tip_movement_rules", []
+                ),
+                destination_guidance=destination_guidance,
+                selected_agent_names=getattr(
+                    self, "selected_24hr_expit_agents", []
+                ),
+            )
+            transactions = handler.process_transactions()
+            if (
+                transactions is not None
+                and not transactions.empty
+                and int(
+                    getattr(self, "expit_mode_choice", 1) or 1
+                ) == 2
+            ):
+                transactions = handler.update_transactions(
+                    transactions, self.start_time_choice
+                )
+
+        if transactions is None or transactions.empty:
             return pd.DataFrame()
 
-        context = self.active_site_context()
-        destination_guidance = context.get(
-            "aps_destination_guidance"
-        ) or {}
-        if not destination_guidance:
-            reference_path = str(
-                getattr(self, "file_path_choice", "") or schedule_path
-            ).strip()
-            destination_guidance = (
-                ExpitDataHandler.build_2wp_destination_guidance(
-                    reference_path
-                )
+        transactions = Run._ensure_direct_tip_ids(transactions)
+        if "direct_tip_eligible" not in transactions:
+            transactions["direct_tip_eligible"] = transactions.get(
+                "aps_direct_tip_candidate",
+                pd.Series(False, index=transactions.index),
+            ).map(
+                lambda value: str(value).strip().lower()
+                in {"true", "1", "yes"}
             )
 
-        handler = ExpitDataHandler(
-            schedule_path,
-            include_crusher_destinations=getattr(
-                self, "reevaluate_aps_direct_tip_choice", False
-            ),
-            selected_crusher_name=getattr(
-                self, "aps_direct_tip_crusher_choice", []
-            ),
-            operational_mine=context.get("mine"),
-            operational_crusher=context.get("crusher"),
-            operational_opf=context.get("opf"),
-            direct_tip_movement_rules=context.get(
-                "direct_tip_movement_rules", []
-            ),
-            destination_guidance=destination_guidance,
-            selected_agent_names=getattr(
-                self, "selected_24hr_expit_agents", []
-            ),
-        )
-        transactions = handler.process_transactions()
-        if int(getattr(self, "expit_mode_choice", 1) or 1) == 2:
-            transactions = handler.update_transactions(
-                transactions, self.start_time_choice
-            )
-        return Run._ensure_direct_tip_ids(transactions)
+        # Payloads already selected by the optimiser must remain available
+        # when that result is transferred to Manual Blending. The persisted
+        # expit schema predates direct_tip_eligible, so these IDs are the
+        # authoritative bridge between the two workflows.
+        optimised_report = self.fetch_optimised_blend_report()
+        selected_direct_tip_ids = set()
+        if (
+            not optimised_report.empty
+            and "source_type" in optimised_report
+            and "source_id" in optimised_report
+        ):
+            direct_tip_rows = optimised_report[
+                optimised_report["source_type"].astype(str)
+                .str.strip().str.lower()
+                .isin({"grade_block", "grade block", "gradeblock"})
+            ]
+            for source_ids in direct_tip_rows["source_id"].dropna():
+                selected_direct_tip_ids.update(
+                    part.strip()
+                    for part in str(source_ids).split(",")
+                    if part.strip()
+                )
+        if selected_direct_tip_ids:
+            selected_mask = transactions["direct_tip_id"].astype(
+                str
+            ).isin(selected_direct_tip_ids)
+            transactions.loc[
+                selected_mask, "direct_tip_eligible"
+            ] = True
+        return transactions
 
     def create_manual_blend_planner(self):
         start_time = (
@@ -11797,6 +12109,9 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = allocations
         self.manual_steady_states = states
         self.manual_blend_report = report
+        self.update_manual_sequence_direct_tip_annotations(
+            states, allocations
+        )
         DatabaseManager().write_manual_blend_report_to_database(report)
         self.refresh_sqlite_reports()
         if hasattr(self, "draw_grade_profile_chart"):
@@ -11805,6 +12120,69 @@ class UserInputs(QMainWindow):
             )
         self.save_active_scenario_state()
         return True
+
+    def update_manual_sequence_direct_tip_annotations(
+        self, states, allocations
+    ):
+        sequence = getattr(
+            self, "stored_blend_sequence_table_for_gantt", []
+        ) or []
+        for sequence_row in sequence:
+            sequence_start = pd.to_datetime(
+                sequence_row.get(
+                    "_exact_start",
+                    sequence_row.get("Start Datetime"),
+                ),
+                errors="coerce",
+            )
+            sequence_end = pd.to_datetime(
+                sequence_row.get(
+                    "_exact_end",
+                    sequence_row.get("End Datetime"),
+                ),
+                errors="coerce",
+            )
+            matching_states = [
+                state for state in (states or [])
+                if (
+                    str(state.get("blend_ID"))
+                    == str(sequence_row.get("Blend ID"))
+                    and not pd.isna(sequence_start)
+                    and not pd.isna(sequence_end)
+                    and pd.Timestamp(state["start_datetime"])
+                    >= sequence_start
+                    and pd.Timestamp(state["end_datetime"])
+                    <= sequence_end
+                )
+            ]
+            direct_tip_tonnes = sum(
+                float(value or 0)
+                for state in matching_states
+                for value in (
+                    (allocations or {}).get(
+                        state["state_key"], {}
+                    ) or {}
+                ).values()
+            )
+            capacity = sum(
+                float(state.get("feed_capacity_tonnes") or 0)
+                for state in matching_states
+            )
+            sequence_row["Direct Tip Tonnes"] = direct_tip_tonnes
+            sequence_row["Direct Tip Ratio"] = (
+                direct_tip_tonnes / capacity if capacity > 0 else 0
+            )
+
+        manual_chart = getattr(
+            self, "draw_manual_gantt_chart", None
+        )
+        if manual_chart is not None:
+            manual_chart.update_data(
+                sequence,
+                getattr(
+                    self, "manual_gantt_legend_and_tooltip", []
+                ),
+            )
 
     def open_manual_steady_state_dialog(self):
         if not getattr(
@@ -11937,9 +12315,18 @@ class UserInputs(QMainWindow):
             duration = row_data.get("Duration (hrs)")
             duration_item = self.blend_sequence_table.item(row_index, 3)
             if isinstance(duration_item, QTableWidgetItem):
-                duration_item.setText(duration if duration is not None else "")
+                duration_item.setText(
+                    f"{float(duration):.1f}"
+                    if duration is not None else ""
+                )
             else:  # Create a new QTableWidgetItem if not already set
-                self.blend_sequence_table.setItem(row_index, 3, QTableWidgetItem(duration if duration is not None else ""))
+                self.blend_sequence_table.setItem(
+                    row_index, 3,
+                    QTableWidgetItem(
+                        f"{float(duration):.1f}"
+                        if duration is not None else ""
+                    ),
+                )
             
             self.on_cell_changed(row_index,3)
             self.update_blend_id(row_index)
@@ -12226,7 +12613,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 8,
+                "project_format_version": 9,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,

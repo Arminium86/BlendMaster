@@ -99,8 +99,13 @@ class ManualBlendPlanner:
     def _normalise_sequence(self, rows):
         result = []
         for row in rows or []:
-            start = self._datetime(row.get("Start Datetime"), "Blend start")
-            end_value = row.get("End Datetime")
+            start = self._datetime(
+                row.get("_exact_start", row.get("Start Datetime")),
+                "Blend start",
+            )
+            end_value = row.get(
+                "_exact_end", row.get("End Datetime")
+            )
             if end_value in (None, ""):
                 duration = self._number(row.get("Duration (hrs)"))
                 end = start + timedelta(hours=duration)
@@ -126,6 +131,11 @@ class ManualBlendPlanner:
                 in self._split_values(row.get("Source Ratios"))
             ]
             if not sources:
+                result[blend_id] = {
+                    **dict(row),
+                    "_sources": [],
+                    "_ratios": [],
+                }
                 continue
             if len(ratios) != len(sources) or sum(ratios) <= 0:
                 ratios = [1.0 / len(sources)] * len(sources)
@@ -255,6 +265,37 @@ class ManualBlendPlanner:
             current = sequence_row["_start"]
             blend_end = sequence_row["_end"]
 
+            if sequence_row.get("_fixed_steady_state"):
+                duration_hours = (
+                    blend_end - current
+                ).total_seconds() / 3600
+                state_crusher_rate = self._number(
+                    sequence_row.get("_crusher_rate"),
+                    self.crusher_rate,
+                )
+                if state_crusher_rate <= 0:
+                    state_crusher_rate = self.crusher_rate
+                feed_tonnes = duration_hours * state_crusher_rate
+                states.append({
+                    "steady_state_number": len(states) + 1,
+                    "state_key": self.state_key(
+                        current, blend_end, blend_id
+                    ),
+                    "blend_ID": blend_id,
+                    "start_datetime": current,
+                    "end_datetime": blend_end,
+                    "steady_state_duration": duration_hours,
+                    "period": self._period_number(current),
+                    "trigger": "Optimised decision point",
+                    "feed_capacity_tonnes": feed_tonnes,
+                    "crusher_rate": state_crusher_rate,
+                    "optimised_steady_state_number": sequence_row.get(
+                        "_optimised_steady_state"
+                    ),
+                })
+                produced_tonnes += feed_tonnes
+                continue
+
             while current < blend_end - timedelta(microseconds=1):
                 candidates = [(blend_end, "Blend completion")]
                 for boundary in period_boundaries:
@@ -316,6 +357,7 @@ class ManualBlendPlanner:
                     "period": self._period_number(current),
                     "trigger": trigger,
                     "feed_capacity_tonnes": feed_tonnes,
+                    "crusher_rate": self.crusher_rate,
                 }
                 states.append(state)
 
@@ -446,6 +488,16 @@ class ManualBlendPlanner:
                     f"Direct tip in steady state "
                     f"{state['steady_state_number']} exceeds the total "
                     "crusher feed capacity."
+                )
+            blend = self.blends.get(state["blend_ID"], {})
+            if (
+                not blend.get("_sources")
+                and abs(total - state["feed_capacity_tonnes"]) > 1e-5
+            ):
+                raise ManualBlendPlanningError(
+                    f"Steady state {state['steady_state_number']} is a "
+                    "direct-tip-only optimized state. Its accepted direct-tip "
+                    "tonnes must remain at 100% of crusher feed."
                 )
         return True
 
@@ -598,8 +650,12 @@ class ManualBlendPlanner:
                         amount / duration if duration > 0 else 0
                     ),
                     "crusher_actual_tonnes": total_tonnes,
-                    "crusher_rate_input": self.crusher_rate,
-                    "crusher_rate_output": self.crusher_rate,
+                    "crusher_rate_input": state.get(
+                        "crusher_rate", self.crusher_rate
+                    ),
+                    "crusher_rate_output": state.get(
+                        "crusher_rate", self.crusher_rate
+                    ),
                     **{
                         f"crusher_actual_grade_{grade}": value
                         for grade, value in crusher_grades.items()

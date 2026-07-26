@@ -22,7 +22,7 @@ class ManualSteadyStateDialog(QDialog):
     HEADERS = [
         "Steady State", "Blend ID", "Start", "End", "Duration (h)",
         "Boundary Event", "Direct Tip Source", "Available (t)",
-        "Selected (t)", "DT Fe", "DT Si", "DT Al", "DT P", "DT Mn",
+        "Acceptance Ratio (0–1)", "DT Fe", "DT Si", "DT Al", "DT P", "DT Mn",
         "Stockpile Feed (t)", "Direct Tip (%)", "Total Feed (t)",
         "Output Fe", "Output Si", "Output Al", "Output P", "Output Mn",
     ]
@@ -45,9 +45,10 @@ class ManualSteadyStateDialog(QDialog):
 
         help_label = QLabel(
             "Each row is an aggregated grade-block source delivered within "
-            "that steady state. Enter the tonnes to direct tip. The remaining "
-            "crusher feed is supplied by the scheduled stockpile blend, so "
-            "direct tip plus stockpile feed always equals 100%."
+            "that steady state. Enter the ratio of its available tonnes to "
+            "direct tip, from 0 (none) to 1 (all). The remaining crusher feed "
+            "is supplied by the scheduled stockpile blend, so direct tip plus "
+            "stockpile feed always equals 100%."
         )
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
@@ -121,7 +122,9 @@ class ManualSteadyStateDialog(QDialog):
             for row_number, (state, candidate) in enumerate(rows):
                 source = candidate["source"] if candidate else ""
                 self._row_context[row_number] = (
-                    state["state_key"], source
+                    state["state_key"],
+                    source,
+                    candidate["available_tonnes"] if candidate else 0,
                 )
                 values = [
                     state["steady_state_number"],
@@ -141,20 +144,33 @@ class ManualSteadyStateDialog(QDialog):
                         row_number, column, self._item(value)
                     )
 
-                selected = (
+                selected_tonnes = (
                     self.allocations.get(
                         state["state_key"], {}
                     ).get(source, 0)
                     if candidate else 0
                 )
+                acceptance_ratio = (
+                    selected_tonnes / candidate["available_tonnes"]
+                    if candidate
+                    and candidate["available_tonnes"] > 0
+                    else 0
+                )
                 self.table.setItem(
                     row_number,
                     self.SELECTED_COLUMN,
                     self._item(
-                        self._format(selected, 1),
+                        self._format(acceptance_ratio, 3),
                         editable=candidate is not None,
                     ),
                 )
+                if candidate is not None:
+                    self.table.item(
+                        row_number, self.SELECTED_COLUMN
+                    ).setToolTip(
+                        "Enter a value from 0 to 1. Accepted direct-tip "
+                        "tonnes are this ratio multiplied by Available (t)."
+                    )
 
                 for index, grade in enumerate(
                     self.planner.GRADES, start=9
@@ -178,25 +194,27 @@ class ManualSteadyStateDialog(QDialog):
     def handle_cell_changed(self, row, column):
         if self._updating or column != self.SELECTED_COLUMN:
             return
-        state_key, source = self._row_context[row]
+        state_key, source, available_tonnes = self._row_context[row]
         if not source:
             return
         item = self.table.item(row, column)
         text = (item.text() if item else "").replace(",", "").strip()
         try:
-            value = float(text or 0)
-            if value < 0:
+            acceptance_ratio = float(text or 0)
+            if not 0 <= acceptance_ratio <= 1:
                 raise ValueError
         except ValueError:
             self.status_label.setText(
-                "Selected direct-tip tonnes must be a non-negative number."
+                "The direct-tip acceptance ratio must be a number from 0 to 1."
             )
             self.status_label.setStyleSheet(
                 "color: #b91c1c; font-weight: 600;"
             )
             self.apply_button.setEnabled(False)
             return
-        self.allocations.setdefault(state_key, {})[source] = value
+        self.allocations.setdefault(state_key, {})[source] = (
+            acceptance_ratio * available_tonnes
+        )
         self.recalculate()
 
     def recalculate(self):
@@ -214,7 +232,9 @@ class ManualSteadyStateDialog(QDialog):
 
         self._updating = True
         try:
-            for row_number, (state_key, _) in self._row_context.items():
+            for row_number, (
+                state_key, _source, _available_tonnes
+            ) in self._row_context.items():
                 summary = summaries[state_key]
                 output_values = [
                     self._format(
