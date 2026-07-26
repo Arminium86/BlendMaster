@@ -3,6 +3,7 @@ import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
+from classes.HaulCycleDataHandler import HaulCycleDataHandler
 from pandas import DataFrame
 
 class DataLoader:
@@ -25,7 +26,14 @@ class DataLoader:
         stockpile_data_objects = self.create_stockpile_data_objects(stockpile_data, calendar_inputs)
         grade_block_data_objects = self.create_grade_block_data_objects(self.expit_payload_transactions)
 
-        equipment_data = self.calendar_inputs['reclaim_equipment_max_reclaim_rate']
+        if self.uses_stockpile_max_reclaim_rates():
+            equipment_data = {
+                "Preplan": 0.0,
+                "Period_1": 0.0,
+                "Period_2": 0.0,
+            }
+        else:
+            equipment_data = self.calendar_inputs['reclaim_equipment_max_reclaim_rate']
         crusher_rate_data = self.calendar_inputs['crusher_rate']
         equipment_data_objects = self.create_equipment_data_objects(equipment_data, crusher_rate_data)
 
@@ -83,6 +91,11 @@ class DataLoader:
                 raise ValueError("Direct Tip Ratio Min cannot be greater than Direct Tip Ratio Max.")
 
         return stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data
+
+    def uses_stockpile_max_reclaim_rates(self):
+        site_context = (self.calendar_inputs or {}).get("site_context", {}) or {}
+        crusher = str(site_context.get("crusher") or "").strip().upper()
+        return crusher.replace("-", "_") == "TOTAL_FEED_PC"
 
     def get_direct_feed_ratio(self, key, period, default):
         if not self.direct_tip_enabled:
@@ -168,22 +181,85 @@ class DataLoader:
     
     def create_stockpile_data_objects(self, stockpile_data:dict, calendar_inputs:dict):
         """Create a list of StockpileData objects from a list of dictionaries."""
-        return [
-            StockpileData(
+        stockpiles = []
+        use_stockpile_rates = self.uses_stockpile_max_reclaim_rates()
+        rehandle_penalty_enabled = bool(
+            self.solver_config.get("rehandle_cycle_time_penalty_enabled", False)
+        )
+        haulage_cost_per_hour = self.solver_config.get(
+            "haulage_cost_per_hour",
+            0.0,
+        )
+        for record, nested_record in stockpile_data.items():
+            calendar_name = nested_record["name"]
+            states = [
+                calendar_inputs[f"stockpiles_{calendar_name}_state"][period]
+                for period in ("Preplan", "Period_1", "Period_2")
+            ]
+            max_reclaim_rate = nested_record.get("max_reclaim_rate")
+            if use_stockpile_rates:
+                reclaimable = any(
+                    str(state or "").strip().lower() != "build"
+                    for state in states
+                )
+                if max_reclaim_rate is not None:
+                    try:
+                        max_reclaim_rate = float(max_reclaim_rate)
+                    except (TypeError, ValueError):
+                        max_reclaim_rate = 0.0
+                if reclaimable and (
+                    max_reclaim_rate is None or max_reclaim_rate <= 0
+                ):
+                    raise ValueError(
+                        f"Max Reclaim Rate must be greater than 0 t/h for "
+                        f"Total_Feed stockpile '{record}'."
+                    )
+            else:
+                max_reclaim_rate = None
+
+            reclaimable = any(
+                str(state or "").strip().lower() != "build"
+                for state in states
+            )
+            cycle_time_minutes = nested_record.get(
+                "rehandle_cycle_time_minutes"
+            )
+            if rehandle_penalty_enabled and reclaimable:
+                try:
+                    cycle_time_minutes = float(cycle_time_minutes)
+                except (TypeError, ValueError):
+                    cycle_time_minutes = 0.0
+                if cycle_time_minutes <= 0:
+                    raise ValueError(
+                        f"No selected-crusher haul cycle was found for "
+                        f"stockpile '{record}'."
+                    )
+            derived_cost_per_tonne = (
+                HaulCycleDataHandler.cost_per_tonne(
+                    cycle_time_minutes,
+                    haulage_cost_per_hour,
+                )
+                if rehandle_penalty_enabled
+                else 0.0
+            )
+
+            stockpiles.append(StockpileData(
                 name=record,
                 balance=nested_record["balance"],
-                state_preplan=calendar_inputs[f"stockpiles_{nested_record['name']}_state"]['Preplan'],
-                state_period_1=calendar_inputs[f"stockpiles_{nested_record['name']}_state"]['Period_1'],
-                state_period_2=calendar_inputs[f"stockpiles_{nested_record['name']}_state"]['Period_2'],
-                max_quantity_preplan=calendar_inputs[f"stockpiles_{nested_record['name']}_maximum_quantity"]['Preplan'],
-                max_quantity_period_1=calendar_inputs[f"stockpiles_{nested_record['name']}_maximum_quantity"]['Period_1'],
-                max_quantity_period_2=calendar_inputs[f"stockpiles_{nested_record['name']}_maximum_quantity"]['Period_2'],
-                cost_preplan=calendar_inputs[f"stockpiles_{nested_record['name']}_cost"]['Preplan'],
-                cost_period_1=calendar_inputs[f"stockpiles_{nested_record['name']}_cost"]['Period_1'],
-                cost_period_2=calendar_inputs[f"stockpiles_{nested_record['name']}_cost"]['Period_2'],
-                cash_preplan=calendar_inputs[f"stockpiles_{nested_record['name']}_cash"]['Preplan'],
-                cash_period_1=calendar_inputs[f"stockpiles_{nested_record['name']}_cash"]['Period_1'],
-                cash_period_2=calendar_inputs[f"stockpiles_{nested_record['name']}_cash"]['Period_2'],
+                state_preplan=states[0],
+                state_period_1=states[1],
+                state_period_2=states[2],
+                max_quantity_preplan=calendar_inputs[f"stockpiles_{calendar_name}_maximum_quantity"]['Preplan'],
+                max_quantity_period_1=calendar_inputs[f"stockpiles_{calendar_name}_maximum_quantity"]['Period_1'],
+                max_quantity_period_2=calendar_inputs[f"stockpiles_{calendar_name}_maximum_quantity"]['Period_2'],
+                cost_preplan=derived_cost_per_tonne,
+                cost_period_1=derived_cost_per_tonne,
+                cost_period_2=derived_cost_per_tonne,
+                # Retained on StockpileData for project compatibility. Calendar
+                # Cash is no longer an active optimisation input.
+                cash_preplan=0.0,
+                cash_period_1=0.0,
+                cash_period_2=0.0,
                 equipment="RC",
                 reclaim_threshold=nested_record["reclaim_threshold"],
                 grade_fe=nested_record["grade_fe"],
@@ -196,11 +272,11 @@ class DataLoader:
                 is_AMT=nested_record["amt"],
                 aps_brand=nested_record.get("aps_brand", ""),
                 aps_brand_proportions=nested_record.get("aps_brand_proportions", {}),
-                aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {})
+                aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {}),
+                max_reclaim_rate=max_reclaim_rate,
 
-            )
-            for record, nested_record in stockpile_data.items()
-        ]
+            ))
+        return stockpiles
 
     def create_grade_block_data_objects(self, expit_payload_transactions):
         """Create a list of GradeBlockData objects from a list of dictionaries."""

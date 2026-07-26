@@ -36,7 +36,9 @@ from classes.EventData import EventData
 class Optimizer:
     MIN_SELECTED_STOCKPILE_BLEND_RATIO = 0.01
     SOLUTION_TOLERANCE = 1e-6
-    THROUGHPUT_REWARD_PER_TONNE = 1_000_000
+    # Legacy-compatible defaults used when loading projects without these
+    # user-facing Solver Configuration fields.
+    THROUGHPUT_REWARD_PER_TONNE = 1_000_100
     TIE_BREAK_REWARD_PER_TONNE = 1.0
     FEWER_STOCKPILE_PENALTY = 10.0
     SOURCE_SELECTION_EPSILON_PENALTY = 0.001
@@ -375,7 +377,6 @@ class Optimizer:
         if not 0.01 <= min_stockpile_contribution_ratio <= 1:
             raise ValueError("Min Stockpile Contribution Ratio must be between 0.01 and 1.")
 
-        dmc = -100  # Default movement cash flow in $/tonne (negative for minimisation)
         solver_config = solver_config or {}
         try:
             blend_option_timeout_seconds = float(
@@ -587,24 +588,75 @@ class Optimizer:
 
         preference_rewards = [0.0] * len(event_pool)
         balance_preference = solver_config.get("balance_preference", "none")
-        if balance_preference in ("lower", "higher") and event_pool:
-            balances = [safe_float(event.balance) for event in event_pool]
+        balance_preference_incentive = max(
+            safe_float(
+                solver_config.get(
+                    "balance_preference_incentive",
+                    Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                ),
+                Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+            ),
+            0.0,
+        )
+        stockpile_indices_for_preferences = [
+            i for i, event in enumerate(event_pool) if event.is_stockpile
+        ]
+        if (
+            balance_preference in ("lower", "higher")
+            and stockpile_indices_for_preferences
+            and balance_preference_incentive
+        ):
+            balances = [
+                safe_float(event_pool[i].balance)
+                for i in stockpile_indices_for_preferences
+            ]
             min_balance = min(balances)
             max_balance = max(balances)
             balance_range = max_balance - min_balance
             if balance_range > Optimizer.SOLUTION_TOLERANCE:
-                for i, balance in enumerate(balances):
+                for i, balance in zip(
+                    stockpile_indices_for_preferences,
+                    balances,
+                ):
                     if balance_preference == "lower":
-                        preference_rewards[i] += (max_balance - balance) / balance_range
+                        preference_rewards[i] += (
+                            balance_preference_incentive
+                            * (max_balance - balance)
+                            / balance_range
+                        )
                     else:
-                        preference_rewards[i] += (balance - min_balance) / balance_range
+                        preference_rewards[i] += (
+                            balance_preference_incentive
+                            * (balance - min_balance)
+                            / balance_range
+                        )
 
         if solver_config.get("prefer_amt_stockpiles", False):
+            amt_preference_incentive = max(
+                safe_float(
+                    solver_config.get(
+                        "amt_preference_incentive",
+                        Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                    ),
+                    Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                ),
+                0.0,
+            )
             for i, event in enumerate(event_pool):
                 if event.is_stockpile and getattr(event, "is_amt", False):
-                    preference_rewards[i] += 1.0
+                    preference_rewards[i] += amt_preference_incentive
 
         if solver_config.get("prefer_contaminated_stockpiles", False):
+            contaminated_preference_incentive = max(
+                safe_float(
+                    solver_config.get(
+                        "contaminated_preference_incentive",
+                        Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                    ),
+                    Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                ),
+                0.0,
+            )
             thresholds = solver_config.get("contaminant_thresholds", {})
             contaminant_grades = {
                 "si": "grade_si",
@@ -613,24 +665,57 @@ class Optimizer:
                 "mn": "grade_mn",
             }
             for i, event in enumerate(event_pool):
+                if not event.is_stockpile:
+                    continue
                 for contaminant, attribute in contaminant_grades.items():
                     threshold = safe_float(thresholds.get(contaminant))
                     grade = safe_float(getattr(event, attribute, 0))
                     if grade > threshold:
-                        preference_rewards[i] += 1.0 + ((grade - threshold) / max(abs(threshold), 1.0))
+                        preference_rewards[i] += (
+                            contaminated_preference_incentive
+                            * (
+                                1.0
+                                + (
+                                    (grade - threshold)
+                                    / max(abs(threshold), 1.0)
+                                )
+                            )
+                        )
 
         if solver_config.get("prefer_low_fe_stockpiles", False):
+            low_fe_preference_incentive = max(
+                safe_float(
+                    solver_config.get(
+                        "low_fe_preference_incentive",
+                        Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                    ),
+                    Optimizer.TIE_BREAK_REWARD_PER_TONNE,
+                ),
+                0.0,
+            )
             threshold = safe_float(solver_config.get("low_fe_threshold", 58.0), 58.0)
             for i, event in enumerate(event_pool):
+                if not event.is_stockpile:
+                    continue
                 grade_fe = safe_float(event.grade_fe)
                 if grade_fe < threshold:
-                    preference_rewards[i] += 1.0 + ((threshold - grade_fe) / max(abs(threshold), 1.0))
+                    preference_rewards[i] += (
+                        low_fe_preference_incentive
+                        * (
+                            1.0
+                            + (
+                                (threshold - grade_fe)
+                                / max(abs(threshold), 1.0)
+                            )
+                        )
+                    )
         
         # Step 2: Build the cost and constraints based on event pool
         base_costs = []
         for i, event in enumerate(event_pool):
-            # Movement cash flow = dmc + combined priority (think about this value as a $/tonne cost) of stockpile / grade block and reclaimer / digger
-            preference_reward = preference_rewards[i] * Optimizer.TIE_BREAK_REWARD_PER_TONNE
+            # Per-tonne source costs and enabled rewards/penalties. Throughput
+            # incentive is applied separately below so it can be configured.
+            preference_reward = preference_rewards[i]
             direct_tip_reward = direct_tip_cash_incentive if event.is_grade_block else 0
             continuity_reward = (
                 stay_on_same_blend_incentive
@@ -673,17 +758,36 @@ class Optimizer:
                     event_timing_compliance(event),
                 )
             base_costs.append(
-                dmc + event.cost + event.cash + brand_guidance_cost
+                event.cost + event.cash + brand_guidance_cost
                 + timing_guidance_cost
                 - preference_reward - direct_tip_reward - continuity_reward
                 - grade_block_pair_reward
             )
 
-        throughput_reward = max(
-            Optimizer.THROUGHPUT_REWARD_PER_TONNE,
-            (max((abs(cost) for cost in base_costs), default=0) + 1) * 1000,
+        throughput_incentive_per_tonne = max(
+            safe_float(
+                solver_config.get(
+                    "throughput_incentive_per_tonne",
+                    Optimizer.THROUGHPUT_REWARD_PER_TONNE,
+                ),
+                Optimizer.THROUGHPUT_REWARD_PER_TONNE,
+            ),
+            0.0,
         )
-        c = [cost - throughput_reward for cost in base_costs]
+        source_selection_tie_break_penalty = max(
+            safe_float(
+                solver_config.get(
+                    "source_selection_tie_break_penalty",
+                    Optimizer.SOURCE_SELECTION_EPSILON_PENALTY,
+                ),
+                Optimizer.SOURCE_SELECTION_EPSILON_PENALTY,
+            ),
+            0.0,
+        )
+        c = [
+            cost - throughput_incentive_per_tonne
+            for cost in base_costs
+        ]
 
         # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
         # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
@@ -978,6 +1082,21 @@ class Optimizer:
         ]
 
         objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
+        fewer_stockpiles_incentive = max(
+            safe_float(
+                solver_config.get(
+                    "fewer_stockpiles_incentive",
+                    Optimizer.FEWER_STOCKPILE_PENALTY,
+                ),
+                Optimizer.FEWER_STOCKPILE_PENALTY,
+            ),
+            0.0,
+        )
+        prefer_fewer_stockpiles = bool(
+            solver_config.get("prefer_fewer_stockpiles", False)
+            and fewer_stockpiles_incentive
+            > Optimizer.SOLUTION_TOLERANCE
+        )
 
         # Inequality constraints
         for row, rhs in zip(A_ub_total, b_ub_total):
@@ -994,7 +1113,7 @@ class Optimizer:
         use_binary_selection = (
             min_stockpiles is not None
             or max_stockpiles is not None
-            or solver_config.get("prefer_fewer_stockpiles", False)
+            or prefer_fewer_stockpiles
             or bool(excluded_source_sets)
             or bool(
                 active_blend_guidance_enabled
@@ -1050,9 +1169,11 @@ class Optimizer:
                         + lpSum(y_vars[source_name] for source_name in outside_sources)
                         >= 1
                     )
-                objective += Optimizer.SOURCE_SELECTION_EPSILON_PENALTY * lpSum(y_vars.values())
-            if solver_config.get("prefer_fewer_stockpiles", False):
-                objective += Optimizer.FEWER_STOCKPILE_PENALTY * lpSum(
+                objective += source_selection_tie_break_penalty * lpSum(
+                    y_vars.values()
+                )
+            if prefer_fewer_stockpiles:
+                objective += fewer_stockpiles_incentive * lpSum(
                     y_vars[name] for name in stockpile_event_indices
                 )
             if (
@@ -1095,15 +1216,8 @@ class Optimizer:
                     prob += exact_match >= lpSum(match_terms) - (
                         len(match_terms) - 1
                     )
-                guidance_value = abs(active_blend_guidance_incentive)
-                # CBC solves against a deliberately dominant throughput term.
-                # Scale this binary tie-break enough to remain numerically
-                # visible while keeping it below the value of one lost tonne.
                 active_blend_tie_break = (
-                    min(
-                        guidance_value * max_total_feed * 1000.0,
-                        Optimizer.THROUGHPUT_REWARD_PER_TONNE * 0.5,
-                    )
+                    abs(active_blend_guidance_incentive) * max_total_feed
                 )
                 if active_blend_guidance_incentive >= 0:
                     objective -= active_blend_tie_break * exact_match
@@ -1381,7 +1495,7 @@ class Optimizer:
         if min_stockpiles is not None and len(positive_stockpiles) < min_stockpiles:
             likely_causes.append(
                 f"Only {len(positive_stockpiles)} stockpile(s) have positive capacity, "
-                f"but Solver Configuration requires at least {min_stockpiles}."
+                f"but Decision Levers requires at least {min_stockpiles}."
             )
         if direct_feed_ratio_min > direct_feed_ratio_max + Optimizer.SOLUTION_TOLERANCE:
             likely_causes.append(
@@ -1429,6 +1543,14 @@ class Optimizer:
             "min_stockpile_contribution_ratio": min_stockpile_contribution_ratio,
             "direct_feed_ratio_min": direct_feed_ratio_min,
             "direct_feed_ratio_max": direct_feed_ratio_max,
+            "throughput_incentive_per_tonne": solver_config.get(
+                "throughput_incentive_per_tonne",
+                Optimizer.THROUGHPUT_REWARD_PER_TONNE,
+            ),
+            "source_selection_tie_break_penalty": solver_config.get(
+                "source_selection_tie_break_penalty",
+                Optimizer.SOURCE_SELECTION_EPSILON_PENALTY,
+            ),
             "direct_tip_enabled": solver_config.get("direct_tip_enabled", True),
             "direct_tip_cash_incentive": solver_config.get("direct_tip_cash_incentive", 10.0),
             "stay_on_same_blend_incentive": solver_config.get("stay_on_same_blend_incentive", 0.0),
@@ -1438,5 +1560,15 @@ class Optimizer:
             "stay_on_same_grade_block_pair_incentive": solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0),
             "grade_block_lock_enabled": solver_config.get("grade_block_lock_enabled", False),
             "stockpile_feasibility_mode": solver_config.get("stockpile_feasibility_mode", "stockpile_must_be_feasible"),
+            "prefer_fewer_stockpiles": solver_config.get("prefer_fewer_stockpiles", False),
+            "fewer_stockpiles_incentive": solver_config.get("fewer_stockpiles_incentive", Optimizer.FEWER_STOCKPILE_PENALTY),
+            "balance_preference": solver_config.get("balance_preference", "none"),
+            "balance_preference_incentive": solver_config.get("balance_preference_incentive", Optimizer.TIE_BREAK_REWARD_PER_TONNE),
+            "prefer_amt_stockpiles": solver_config.get("prefer_amt_stockpiles", False),
+            "amt_preference_incentive": solver_config.get("amt_preference_incentive", Optimizer.TIE_BREAK_REWARD_PER_TONNE),
+            "prefer_contaminated_stockpiles": solver_config.get("prefer_contaminated_stockpiles", False),
+            "contaminated_preference_incentive": solver_config.get("contaminated_preference_incentive", Optimizer.TIE_BREAK_REWARD_PER_TONNE),
+            "prefer_low_fe_stockpiles": solver_config.get("prefer_low_fe_stockpiles", False),
+            "low_fe_preference_incentive": solver_config.get("low_fe_preference_incentive", Optimizer.TIE_BREAK_REWARD_PER_TONNE),
             "period_duration": periods.get_periods().get(f"{period_tracker}_duration"),
         }

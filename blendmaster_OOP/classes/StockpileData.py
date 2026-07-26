@@ -5,7 +5,8 @@ class StockpileData:
         cost_preplan, cost_period_1, cost_period_2,
         cash_preplan, cash_period_1, cash_period_2,
         equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready, is_AMT,
-        aps_brand=None, aps_brand_proportions=None, aps_brand_tonnes=None
+        aps_brand=None, aps_brand_proportions=None, aps_brand_tonnes=None,
+        max_reclaim_rate=None
     ):
         self._name = name
         self._balance = balance
@@ -34,6 +35,7 @@ class StockpileData:
         self._aps_brand = aps_brand or ""
         self._aps_brand_proportions = aps_brand_proportions or {}
         self._aps_brand_tonnes = aps_brand_tonnes or {}
+        self._max_reclaim_rate = max_reclaim_rate
 
     # Getters
     @property
@@ -143,6 +145,10 @@ class StockpileData:
     @property
     def aps_brand_tonnes(self):
         return self._aps_brand_tonnes
+
+    @property
+    def max_reclaim_rate(self):
+        return self._max_reclaim_rate
     
     # Setters
     @name.setter
@@ -253,6 +259,10 @@ class StockpileData:
     def aps_brand_tonnes(self, value):
         self._aps_brand_tonnes = value or {}
 
+    @max_reclaim_rate.setter
+    def max_reclaim_rate(self, value):
+        self._max_reclaim_rate = value
+
     # Method to retrieve the original dictionary
     def to_dict(self):
         return {
@@ -282,6 +292,7 @@ class StockpileData:
             "is_AMT": self._is_AMT,
             "aps_brand": self._aps_brand,
             "aps_brand_proportions": self._aps_brand_proportions,
-            "aps_brand_tonnes": self._aps_brand_tonnes
+            "aps_brand_tonnes": self._aps_brand_tonnes,
+            "max_reclaim_rate": self._max_reclaim_rate
 
         }

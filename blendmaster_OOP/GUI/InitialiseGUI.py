@@ -5,12 +5,14 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
-from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer, QSize
+from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer, QSize, QEvent
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 from execute.Run import Run
 from classes.ExpitDataHandler import ExpitDataHandler
+from classes.HaulCycleDataHandler import HaulCycleDataHandler
 from classes.Optimizer import Optimizer
 from classes.PeriodManager import PeriodManager
+from classes.ManualBlendRules import ManualBlendRules
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
@@ -129,6 +131,84 @@ class FullCaptionTabBar(QTabBar):
             painter.setFont(font)
             painter.setPen(QColor("#0f172a" if selected else "#334155"))
             painter.drawText(rect.adjusted(16, 4, -16, -4), Qt.AlignCenter, self.tabText(index))
+
+
+class MultiSelectBlendComboBox(QComboBox):
+    """Compact checkable selector used for assigning several manual blends."""
+
+    selectionChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setAlignment(Qt.AlignCenter)
+        self.view().viewport().installEventFilter(self)
+        for blend_id in range(1, 6):
+            super().addItem(str(blend_id))
+            item = self.model().item(self.count() - 1)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setData(Qt.Unchecked, Qt.CheckStateRole)
+        self.update_display_text()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.view().viewport()
+            and event.type() == QEvent.MouseButtonRelease
+        ):
+            index = self.view().indexAt(event.pos())
+            if index.isValid():
+                item = self.model().item(index.row())
+                item.setCheckState(
+                    Qt.Unchecked
+                    if item.checkState() == Qt.Checked
+                    else Qt.Checked
+                )
+                self.update_display_text()
+                self.selectionChanged.emit()
+            return True
+        return super().eventFilter(watched, event)
+
+    def selected_blend_ids(self):
+        return [
+            self.itemText(index)
+            for index in range(self.count())
+            if self.model().item(index).checkState() == Qt.Checked
+        ]
+
+    def set_selected_blend_ids(self, blend_ids):
+        selected = {
+            str(value).strip()
+            for value in (blend_ids or [])
+            if str(value).strip() in {"1", "2", "3", "4", "5"}
+        }
+        blocked = self.blockSignals(True)
+        try:
+            for index in range(self.count()):
+                self.model().item(index).setCheckState(
+                    Qt.Checked
+                    if self.itemText(index) in selected
+                    else Qt.Unchecked
+                )
+            self.update_display_text()
+        finally:
+            self.blockSignals(blocked)
+
+    def setCurrentText(self, text):
+        values = [
+            value.strip()
+            for value in str(text or "").replace(";", ",").split(",")
+            if value.strip() and value.strip().lower() != "none"
+        ]
+        self.set_selected_blend_ids(values)
+        self.selectionChanged.emit()
+
+    def currentText(self):
+        values = self.selected_blend_ids()
+        return ", ".join(values) if values else "None"
+
+    def update_display_text(self):
+        self.lineEdit().setText(self.currentText())
 
 
 def create_startup_splash():
@@ -663,7 +743,17 @@ class UserInputs(QMainWindow):
         tab_widget, tab_index = location
         return tab_widget.isTabEnabled(tab_index)
 
-    def show_page(self, page_id):
+    def show_page(self, page_id, force=False):
+        if (
+            getattr(
+                self,
+                "project_load_keep_site_configuration_visible",
+                False,
+            )
+            and page_id != "site_configuration"
+            and not force
+        ):
+            return
         location = self.page_locations.get(page_id)
         if location is None:
             return
@@ -1013,6 +1103,9 @@ class UserInputs(QMainWindow):
             "selected_24hr_expit_agents": copy.deepcopy(getattr(
                 self, "selected_24hr_expit_agents", []
             )),
+            "selected_haul_cycle_crushers": copy.deepcopy(getattr(
+                self, "selected_haul_cycle_crushers", []
+            )),
         }
 
     def capture_scenario_state(self):
@@ -1035,6 +1128,9 @@ class UserInputs(QMainWindow):
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
             "expit_mode_choice", "file_path_choice", "file_path_24hr_choice",
             "available_24hr_expit_agents", "selected_24hr_expit_agents",
+            "haul_cycle_file_path_choice",
+            "available_haul_cycle_crushers",
+            "selected_haul_cycle_crushers", "haul_cycle_routes",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "auto_load_2wp_targets_choice",
@@ -1202,6 +1298,22 @@ class UserInputs(QMainWindow):
             self.selected_24hr_expit_agents = self.normalized_expit_agent_names(
                 state.get("selected_24hr_expit_agents") or []
             )
+            self.haul_cycle_file_path_choice = str(
+                state.get("haul_cycle_file_path_choice") or ""
+            )
+            self.available_haul_cycle_crushers = (
+                self.normalized_expit_agent_names(
+                    state.get("available_haul_cycle_crushers") or []
+                )
+            )
+            self.selected_haul_cycle_crushers = (
+                self.normalized_expit_agent_names(
+                    state.get("selected_haul_cycle_crushers") or []
+                )
+            )
+            self.haul_cycle_routes = copy.deepcopy(
+                state.get("haul_cycle_routes") or {}
+            )
             self.blend_mode_choice = state.get("blend_mode_choice") or 1
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 state.get("product_brand_labels_choice") or self.default_product_brand_labels()
@@ -1305,6 +1417,13 @@ class UserInputs(QMainWindow):
             self.set_24hr_expit_agent_items(
                 self.available_24hr_expit_agents,
                 self.selected_24hr_expit_agents,
+            )
+            self.haul_cycle_file_path.setText(
+                self.haul_cycle_file_path_choice
+            )
+            self.set_haul_cycle_crusher_items(
+                self.available_haul_cycle_crushers,
+                self.selected_haul_cycle_crushers,
             )
             self.load_ratio_controls_from_state()
             self.set_direct_tip_movement_options(
@@ -1412,33 +1531,86 @@ class UserInputs(QMainWindow):
             self.solver_config_tab,
             "Solver Configuration",
         )
-        self.solver_config_layout = QVBoxLayout(self.solver_config_tab)
+        solver_root_layout = QVBoxLayout(self.solver_config_tab)
+        solver_root_layout.setContentsMargins(0, 0, 0, 0)
+        solver_scroll = QScrollArea()
+        solver_scroll.setWidgetResizable(True)
+        solver_scroll.setFrameShape(QFrame.NoFrame)
+        solver_content = QWidget()
+        self.solver_config_layout = QVBoxLayout(solver_content)
+        self.solver_config_layout.setContentsMargins(18, 16, 18, 16)
+        self.solver_config_layout.setSpacing(8)
+        solver_scroll.setWidget(solver_content)
+        solver_root_layout.addWidget(solver_scroll)
 
         contribution_ratio_validator = QDoubleValidator(0.01, 1.0, 4, self)
         contribution_ratio_validator.setNotation(QDoubleValidator.StandardNotation)
         threshold_validator = QDoubleValidator(0.0, 1000.0, 4, self)
         threshold_validator.setNotation(QDoubleValidator.StandardNotation)
+        hourly_cost_validator = QDoubleValidator(0.0, 100000.0, 4, self)
+        hourly_cost_validator.setNotation(QDoubleValidator.StandardNotation)
+        objective_value_validator = QDoubleValidator(
+            0.0,
+            1_000_000_000.0,
+            4,
+            self,
+        )
+        objective_value_validator.setNotation(
+            QDoubleValidator.StandardNotation
+        )
         signed_incentive_validator = QDoubleValidator(-1000.0, 1000.0, 4, self)
         signed_incentive_validator.setNotation(QDoubleValidator.StandardNotation)
-        positive_integer_validator = QIntValidator(1, 1000, self)
-
         limits_label = QLabel("Blend Settings")
         limits_label.setStyleSheet("font-weight: bold;")
         self.solver_config_layout.addWidget(limits_label)
 
-        stockpile_limit_layout = QHBoxLayout()
-        self.min_stockpiles_input = QLineEdit()
-        self.min_stockpiles_input.setPlaceholderText("Min Stockpiles")
-        self.min_stockpiles_input.setFixedWidth(100)
-        self.max_stockpiles_input = QLineEdit()
-        self.max_stockpiles_input.setPlaceholderText("Max Stockpiles")
-        self.max_stockpiles_input.setFixedWidth(100)
-        stockpile_limit_layout.addWidget(QLabel("Min Stockpiles:"))
-        stockpile_limit_layout.addWidget(self.min_stockpiles_input)
-        stockpile_limit_layout.addWidget(QLabel("Max Stockpiles:"))
-        stockpile_limit_layout.addWidget(self.max_stockpiles_input)
-        stockpile_limit_layout.addStretch()
-        self.solver_config_layout.addLayout(stockpile_limit_layout)
+        throughput_incentive_layout = QHBoxLayout()
+        self.throughput_incentive_input = (
+            self.create_solver_threshold_input(
+                "1000100.0",
+                objective_value_validator,
+            )
+        )
+        self.throughput_incentive_input.setFixedWidth(120)
+        self.throughput_incentive_input.setToolTip(
+            "Reward applied to every processed tonne. The high default "
+            "preserves the existing throughput-first optimisation behavior; "
+            "lower values allow source costs and other incentives to trade "
+            "against throughput."
+        )
+        throughput_incentive_layout.addWidget(
+            QLabel("Throughput Incentive:")
+        )
+        throughput_incentive_layout.addWidget(
+            self.throughput_incentive_input
+        )
+        throughput_incentive_layout.addWidget(QLabel("$/t"))
+        throughput_incentive_layout.addStretch()
+        self.solver_config_layout.addLayout(
+            throughput_incentive_layout
+        )
+
+        source_selection_penalty_layout = QHBoxLayout()
+        self.source_selection_tie_break_penalty_input = (
+            self.create_solver_threshold_input(
+                "0.001",
+                threshold_validator,
+            )
+        )
+        self.source_selection_tie_break_penalty_input.setToolTip(
+            "Small penalty per selected source while generating alternative "
+            "blend options. It makes otherwise equal solutions deterministic."
+        )
+        source_selection_penalty_layout.addWidget(
+            QLabel("Source Selection Tie-break Penalty:")
+        )
+        source_selection_penalty_layout.addWidget(
+            self.source_selection_tie_break_penalty_input
+        )
+        source_selection_penalty_layout.addStretch()
+        self.solver_config_layout.addLayout(
+            source_selection_penalty_layout
+        )
 
         stockpile_contribution_layout = QHBoxLayout()
         self.min_stockpile_contribution_ratio_input = QLineEdit()
@@ -1467,26 +1639,8 @@ class UserInputs(QMainWindow):
         blend_option_timeout_layout.addWidget(QLabel("Blend Option Timeout:"))
         blend_option_timeout_layout.addWidget(self.blend_option_timeout_input)
         blend_option_timeout_layout.addWidget(QLabel("sec (0 = off)"))
-        self.max_blend_options_input = QLineEdit()
-        self.max_blend_options_input.setText("12")
-        self.max_blend_options_input.setValidator(positive_integer_validator)
-        self.max_blend_options_input.setFixedWidth(70)
-        blend_option_timeout_layout.addWidget(QLabel("Max Blend Options per Steady State:"))
-        blend_option_timeout_layout.addWidget(self.max_blend_options_input)
         blend_option_timeout_layout.addStretch()
         self.solver_config_layout.addLayout(blend_option_timeout_layout)
-
-        feasibility_layout = QHBoxLayout()
-        feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
-        self.stockpile_feasibility_combo = QComboBox()
-        self.stockpile_feasibility_combo.addItems([
-            "Stockpile blend must be feasible",
-            "Stockpile blend can rely on grade blocks"
-        ])
-        self.stockpile_feasibility_combo.setFixedWidth(260)
-        feasibility_layout.addWidget(self.stockpile_feasibility_combo)
-        feasibility_layout.addStretch()
-        self.solver_config_layout.addLayout(feasibility_layout)
 
         self.allow_offspec_steady_states_checkbox = QCheckBox(
             "Off-spec steady states are allowed if ultimate build is on spec"
@@ -1495,14 +1649,6 @@ class UserInputs(QMainWindow):
 
         brand_guidance_layout = QHBoxLayout()
         brand_guidance_layout.addWidget(QLabel("2WP Product Guidance Reward/Penalty:"))
-        self.brand_guidance_mode_combo = QComboBox()
-        self.brand_guidance_mode_combo.addItems([
-            "Ignore 2WP brand guidance",
-            "Prefer matching product brand",
-            "Penalize mismatched product brand",
-            "Force matching product brand",
-        ])
-        self.brand_guidance_mode_combo.setFixedWidth(240)
         self.brand_guidance_incentive_input = self.create_solver_threshold_input(
             "0.0", signed_incentive_validator
         )
@@ -1554,12 +1700,25 @@ class UserInputs(QMainWindow):
         active_blend_guidance_layout.addStretch()
         self.solver_config_layout.addLayout(active_blend_guidance_layout)
 
+        haulage_cost_layout = QHBoxLayout()
+        haulage_cost_layout.addWidget(QLabel("Haulage Cost:"))
+        self.haulage_cost_per_hour_input = (
+            self.create_solver_threshold_input(
+                "0.0",
+                hourly_cost_validator,
+            )
+        )
+        self.haulage_cost_per_hour_input.setToolTip(
+            "Applied as $/t = $/hr × cycle minutes ÷ 6000, using a "
+            "nominal 100 t payload."
+        )
+        haulage_cost_layout.addWidget(self.haulage_cost_per_hour_input)
+        haulage_cost_layout.addWidget(QLabel("$/hr"))
+        haulage_cost_layout.addStretch()
+        self.solver_config_layout.addLayout(haulage_cost_layout)
+
         direct_tip_layout = QHBoxLayout()
-        self.direct_tip_enabled_checkbox = QCheckBox("Enable Direct Tip")
-        self.direct_tip_enabled_checkbox.setChecked(True)
-        self.direct_tip_enabled_checkbox.toggled.connect(self.update_direct_tip_input_state)
         self.direct_tip_cash_incentive_input = self.create_solver_threshold_input("10.0", threshold_validator)
-        direct_tip_layout.addWidget(self.direct_tip_enabled_checkbox)
         direct_tip_layout.addWidget(QLabel("Direct Tip Incentive:"))
         direct_tip_layout.addWidget(self.direct_tip_cash_incentive_input)
         direct_tip_layout.addWidget(QLabel("$/t"))
@@ -1580,8 +1739,14 @@ class UserInputs(QMainWindow):
 
         grade_block_pair_duration_layout = QHBoxLayout()
         self.min_grade_block_pair_duration_input = self.create_solver_threshold_input("0.0", threshold_validator)
+        grade_block_pair_duration_label = QLabel(
+            "Min Grade Block Pair Duration:"
+        )
+        grade_block_pair_duration_label.setToolTip(
+            "Only applies to longer steady-state durations."
+        )
         grade_block_pair_duration_layout.addWidget(
-            QLabel("Min Grade Block Pair Duration (only applies to longer steady state durations):")
+            grade_block_pair_duration_label
         )
         grade_block_pair_duration_layout.addWidget(self.min_grade_block_pair_duration_input)
         grade_block_pair_duration_layout.addWidget(QLabel("hrs"))
@@ -1603,31 +1768,78 @@ class UserInputs(QMainWindow):
         preference_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
         self.solver_config_layout.addWidget(preference_label)
 
-        self.prefer_fewer_stockpiles_checkbox = QCheckBox("Prefer using fewer stockpiles")
-        self.solver_config_layout.addWidget(self.prefer_fewer_stockpiles_checkbox)
-
-        balance_layout = QHBoxLayout()
-        balance_layout.addWidget(QLabel("Balance Preference:"))
-        self.balance_preference_combo = QComboBox()
-        self.balance_preference_combo.addItems([
-            "No balance preference",
-            "Lower balance first",
-            "Higher balance first"
-        ])
-        self.balance_preference_combo.setFixedWidth(180)
-        balance_layout.addWidget(self.balance_preference_combo)
-        balance_layout.addStretch()
-        self.solver_config_layout.addLayout(balance_layout)
-
-        self.prefer_amt_stockpiles_checkbox = QCheckBox(
-            "Prefer AMT stockpiles before weighted average inventory stockpiles"
+        fewer_stockpiles_incentive_layout = QHBoxLayout()
+        self.fewer_stockpiles_incentive_input = (
+            self.create_solver_threshold_input(
+                "10.0",
+                threshold_validator,
+            )
         )
-        self.solver_config_layout.addWidget(self.prefer_amt_stockpiles_checkbox)
-
-        self.prefer_contaminated_stockpiles_checkbox = QCheckBox(
-            "Try blending contaminated stockpiles/chunks first"
+        self.fewer_stockpiles_incentive_input.setToolTip(
+            "Objective penalty applied for each selected stockpile when "
+            "the Decision Lever is enabled."
         )
-        self.solver_config_layout.addWidget(self.prefer_contaminated_stockpiles_checkbox)
+        fewer_stockpiles_incentive_layout.addWidget(
+            QLabel("Fewer Stockpiles Incentive:")
+        )
+        fewer_stockpiles_incentive_layout.addWidget(
+            self.fewer_stockpiles_incentive_input
+        )
+        fewer_stockpiles_incentive_layout.addStretch()
+        self.solver_config_layout.addLayout(
+            fewer_stockpiles_incentive_layout
+        )
+
+        balance_incentive_layout = QHBoxLayout()
+        self.balance_preference_incentive_input = (
+            self.create_solver_threshold_input(
+                "1.0",
+                threshold_validator,
+            )
+        )
+        balance_incentive_layout.addWidget(
+            QLabel("Balance Preference Incentive:")
+        )
+        balance_incentive_layout.addWidget(
+            self.balance_preference_incentive_input
+        )
+        balance_incentive_layout.addWidget(QLabel("$/t"))
+        balance_incentive_layout.addStretch()
+        self.solver_config_layout.addLayout(balance_incentive_layout)
+
+        amt_incentive_layout = QHBoxLayout()
+        self.amt_preference_incentive_input = (
+            self.create_solver_threshold_input(
+                "1.0",
+                threshold_validator,
+            )
+        )
+        amt_incentive_layout.addWidget(QLabel("AMT Preference Incentive:"))
+        amt_incentive_layout.addWidget(
+            self.amt_preference_incentive_input
+        )
+        amt_incentive_layout.addWidget(QLabel("$/t"))
+        amt_incentive_layout.addStretch()
+        self.solver_config_layout.addLayout(amt_incentive_layout)
+
+        contaminated_incentive_layout = QHBoxLayout()
+        self.contaminated_preference_incentive_input = (
+            self.create_solver_threshold_input(
+                "1.0",
+                threshold_validator,
+            )
+        )
+        contaminated_incentive_layout.addWidget(
+            QLabel("Contaminated Stockpile Incentive:")
+        )
+        contaminated_incentive_layout.addWidget(
+            self.contaminated_preference_incentive_input
+        )
+        contaminated_incentive_layout.addWidget(QLabel("$/t"))
+        contaminated_incentive_layout.addStretch()
+        self.solver_config_layout.addLayout(
+            contaminated_incentive_layout
+        )
 
         contaminant_layout = QHBoxLayout()
         self.contaminant_si_threshold_input = self.create_solver_threshold_input("5.0", threshold_validator)
@@ -1646,9 +1858,18 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addLayout(contaminant_layout)
 
         low_fe_layout = QHBoxLayout()
-        self.prefer_low_fe_stockpiles_checkbox = QCheckBox("Try blending low grade stockpiles/chunks first")
+        self.low_fe_preference_incentive_input = (
+            self.create_solver_threshold_input(
+                "1.0",
+                threshold_validator,
+            )
+        )
         self.low_fe_threshold_input = self.create_solver_threshold_input("58.0", threshold_validator)
-        low_fe_layout.addWidget(self.prefer_low_fe_stockpiles_checkbox)
+        low_fe_layout.addWidget(QLabel("Low Grade Stockpile Incentive:"))
+        low_fe_layout.addWidget(
+            self.low_fe_preference_incentive_input
+        )
+        low_fe_layout.addWidget(QLabel("$/t"))
         low_fe_layout.addWidget(QLabel("Fe threshold:"))
         low_fe_layout.addWidget(self.low_fe_threshold_input)
         low_fe_layout.addStretch()
@@ -1671,21 +1892,84 @@ class UserInputs(QMainWindow):
             self.decision_levers_tab,
             "Decision Levers",
         )
-        layout = QVBoxLayout(self.decision_levers_tab)
+        root_layout = QVBoxLayout(self.decision_levers_tab)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        decision_scroll = QScrollArea()
+        decision_scroll.setWidgetResizable(True)
+        decision_scroll.setFrameShape(QFrame.NoFrame)
+        decision_content = QWidget()
+        layout = QVBoxLayout(decision_content)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
+        decision_scroll.setWidget(decision_content)
+        root_layout.addWidget(decision_scroll)
 
         title = QLabel("Decision Levers")
         title.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
         layout.addWidget(title)
 
         description = QLabel(
-            "Choose which planning guidance influences blend selection. "
-            "Signed reward/penalty values remain under Setup > Solver Configuration."
+            "Choose the operational constraints and preferences that influence "
+            "blend selection. Detailed thresholds and incentive values remain "
+            "under Setup > Solver Configuration."
         )
         description.setWordWrap(True)
         description.setStyleSheet("font-size: 12px; color: #64748b;")
         layout.addWidget(description)
+
+        blend_section = QLabel("Blend Composition")
+        blend_section.setStyleSheet(
+            "font-weight: bold; margin-top: 10px; color: #334155;"
+        )
+        layout.addWidget(blend_section)
+
+        stockpile_count_validator = QIntValidator(1, 1000, self)
+        stockpile_limit_layout = QHBoxLayout()
+        self.min_stockpiles_input = QLineEdit()
+        self.min_stockpiles_input.setPlaceholderText("Optional")
+        self.min_stockpiles_input.setValidator(stockpile_count_validator)
+        self.min_stockpiles_input.setFixedWidth(90)
+        self.max_stockpiles_input = QLineEdit()
+        self.max_stockpiles_input.setPlaceholderText("Optional")
+        self.max_stockpiles_input.setValidator(stockpile_count_validator)
+        self.max_stockpiles_input.setFixedWidth(90)
+        stockpile_limit_layout.addWidget(QLabel("Min Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.min_stockpiles_input)
+        stockpile_limit_layout.addWidget(QLabel("Max Stockpiles:"))
+        stockpile_limit_layout.addWidget(self.max_stockpiles_input)
+        stockpile_limit_layout.addStretch()
+        layout.addLayout(stockpile_limit_layout)
+
+        blend_options_layout = QHBoxLayout()
+        self.max_blend_options_input = QLineEdit("12")
+        self.max_blend_options_input.setValidator(
+            QIntValidator(1, 1000, self)
+        )
+        self.max_blend_options_input.setFixedWidth(90)
+        blend_options_layout.addWidget(
+            QLabel("Max Blend Options per Steady State:")
+        )
+        blend_options_layout.addWidget(self.max_blend_options_input)
+        blend_options_layout.addStretch()
+        layout.addLayout(blend_options_layout)
+
+        feasibility_layout = QHBoxLayout()
+        feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
+        self.stockpile_feasibility_combo = QComboBox()
+        self.stockpile_feasibility_combo.addItems([
+            "Stockpile blend must be feasible",
+            "Stockpile blend can rely on grade blocks",
+        ])
+        self.stockpile_feasibility_combo.setFixedWidth(290)
+        feasibility_layout.addWidget(self.stockpile_feasibility_combo)
+        feasibility_layout.addStretch()
+        layout.addLayout(feasibility_layout)
+
+        guidance_section = QLabel("Planning Guidance")
+        guidance_section.setStyleSheet(
+            "font-weight: bold; margin-top: 10px; color: #334155;"
+        )
+        layout.addWidget(guidance_section)
 
         self.brand_guidance_enabled_checkbox = QCheckBox(
             "Use 2WP Product Guidance"
@@ -1696,9 +1980,77 @@ class UserInputs(QMainWindow):
         self.active_blend_guidance_enabled_checkbox = QCheckBox(
             "Use 2WP Active Blend Guidance"
         )
+        self.rehandle_cycle_time_penalty_checkbox = QCheckBox(
+            "Use Rehandle Cycle Time Penalty"
+        )
+        self.rehandle_cycle_time_penalty_checkbox.toggled.connect(
+            self.update_rehandle_cycle_time_input_state
+        )
         layout.addWidget(self.brand_guidance_enabled_checkbox)
         layout.addWidget(self.timing_guidance_enabled_checkbox)
         layout.addWidget(self.active_blend_guidance_enabled_checkbox)
+        layout.addWidget(self.rehandle_cycle_time_penalty_checkbox)
+
+        direct_tip_section = QLabel("Direct Tip")
+        direct_tip_section.setStyleSheet(
+            "font-weight: bold; margin-top: 10px; color: #334155;"
+        )
+        layout.addWidget(direct_tip_section)
+        self.direct_tip_enabled_checkbox = QCheckBox("Enable Direct Tip")
+        self.direct_tip_enabled_checkbox.setChecked(True)
+        self.direct_tip_enabled_checkbox.toggled.connect(
+            self.update_direct_tip_input_state
+        )
+        layout.addWidget(self.direct_tip_enabled_checkbox)
+
+        preference_section = QLabel("Source Preferences")
+        preference_section.setStyleSheet(
+            "font-weight: bold; margin-top: 10px; color: #334155;"
+        )
+        layout.addWidget(preference_section)
+        self.prefer_fewer_stockpiles_checkbox = QCheckBox(
+            "Prefer using fewer stockpiles"
+        )
+        layout.addWidget(self.prefer_fewer_stockpiles_checkbox)
+
+        balance_layout = QHBoxLayout()
+        balance_layout.addWidget(QLabel("Balance Preference:"))
+        self.balance_preference_combo = QComboBox()
+        self.balance_preference_combo.addItems([
+            "No balance preference",
+            "Lower balance first",
+            "Higher balance first",
+        ])
+        self.balance_preference_combo.setFixedWidth(200)
+        balance_layout.addWidget(self.balance_preference_combo)
+        balance_layout.addStretch()
+        layout.addLayout(balance_layout)
+
+        self.prefer_amt_stockpiles_checkbox = QCheckBox(
+            "Prefer AMT stockpiles before weighted average inventory stockpiles"
+        )
+        self.prefer_contaminated_stockpiles_checkbox = QCheckBox(
+            "Try blending contaminated stockpiles/chunks first"
+        )
+        self.prefer_low_fe_stockpiles_checkbox = QCheckBox(
+            "Try blending low grade stockpiles/chunks first"
+        )
+        layout.addWidget(self.prefer_amt_stockpiles_checkbox)
+        layout.addWidget(self.prefer_contaminated_stockpiles_checkbox)
+        layout.addWidget(self.prefer_low_fe_stockpiles_checkbox)
+        self.update_rehandle_cycle_time_input_state()
+        self.update_direct_tip_input_state()
+
+        decision_submit_layout = QHBoxLayout()
+        self.decision_levers_submit_button = QPushButton("Submit")
+        self.decision_levers_submit_button.clicked.connect(
+            self.handle_decision_levers_submit
+        )
+        decision_submit_layout.addWidget(
+            self.decision_levers_submit_button
+        )
+        decision_submit_layout.addStretch()
+        layout.addLayout(decision_submit_layout)
         layout.addStretch()
 
     def setup_product_build_settings_tab(self):
@@ -2075,6 +2427,17 @@ class UserInputs(QMainWindow):
         if not self.store_product_build_settings():
             return
         self.save_active_scenario_state()
+        self.navigate_to_decision_levers()
+
+    def navigate_to_decision_levers(self):
+        self.load_solver_config_inputs()
+        self.set_page_enabled(self.decision_levers_tab_index, True)
+        self.show_page(self.decision_levers_tab_index)
+
+    def handle_decision_levers_submit(self):
+        if not self.store_solver_config_inputs():
+            return
+        self.save_active_scenario_state()
         self.setup_calendar()
         self.set_page_enabled(self.calendar_tab_index, True)
         self.show_page(self.calendar_tab_index)
@@ -2150,12 +2513,23 @@ class UserInputs(QMainWindow):
         if hasattr(self, "grade_block_lock_checkbox"):
             self.grade_block_lock_checkbox.setEnabled(direct_tip_enabled)
 
+    def update_rehandle_cycle_time_input_state(self, checked=None):
+        if not hasattr(self, "haulage_cost_per_hour_input"):
+            return
+        enabled = bool(
+            hasattr(self, "rehandle_cycle_time_penalty_checkbox")
+            and self.rehandle_cycle_time_penalty_checkbox.isChecked()
+        )
+        self.haulage_cost_per_hour_input.setEnabled(enabled)
+
     def is_direct_tip_enabled(self):
         solver_config = self.normalized_solver_config()
         return bool(solver_config.get("direct_tip_enabled", True))
 
     def normalized_solver_config(self, solver_config=None):
         defaults = {
+            "throughput_incentive_per_tonne": 1_000_100.0,
+            "source_selection_tie_break_penalty": 0.001,
             "stockpile_feasibility_mode": "stockpile_must_be_feasible",
             "min_feed_duration_hours": None,
             "direct_tip_enabled": True,
@@ -2167,9 +2541,13 @@ class UserInputs(QMainWindow):
             "stay_on_same_grade_block_pair_incentive": 0.0,
             "grade_block_lock_enabled": False,
             "prefer_fewer_stockpiles": False,
+            "fewer_stockpiles_incentive": 10.0,
             "balance_preference": "none",
+            "balance_preference_incentive": 1.0,
             "prefer_amt_stockpiles": False,
+            "amt_preference_incentive": 1.0,
             "prefer_contaminated_stockpiles": False,
+            "contaminated_preference_incentive": 1.0,
             "contaminant_thresholds": {
                 "si": 5.0,
                 "al": 3.0,
@@ -2177,6 +2555,7 @@ class UserInputs(QMainWindow):
                 "mn": 0.1,
             },
             "prefer_low_fe_stockpiles": False,
+            "low_fe_preference_incentive": 1.0,
             "low_fe_threshold": 58.0,
             "allow_offspec_steady_states_for_product_build": False,
             "brand_guidance_mode": "ignore",
@@ -2187,6 +2566,8 @@ class UserInputs(QMainWindow):
             "timing_guidance_tolerance_hours": 0.0,
             "active_blend_guidance_enabled": False,
             "active_blend_guidance_incentive": 0.0,
+            "rehandle_cycle_time_penalty_enabled": False,
+            "haulage_cost_per_hour": 0.0,
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -2489,6 +2870,31 @@ class UserInputs(QMainWindow):
                 background-color: #eef7f0;
                 border-color: #98d4a6;
             }
+            QWidget#guidanceSchedulesTab
+            QPushButton#guidanceSchedulesSubmitButton:enabled {
+                color: #ffffff;
+                background-color: #16803c;
+                border: 1px solid #126b32;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-weight: 700;
+            }
+            QWidget#guidanceSchedulesTab
+            QPushButton#guidanceSchedulesSubmitButton:enabled:hover {
+                background-color: #116b31;
+                border-color: #0e5929;
+            }
+            QWidget#guidanceSchedulesTab
+            QPushButton#guidanceSchedulesSubmitButton:enabled:pressed {
+                background-color: #0d5728;
+                border-color: #0a4821;
+            }
+            QWidget#guidanceSchedulesTab
+            QPushButton#guidanceSchedulesSubmitButton:disabled {
+                color: #7b8794;
+                background-color: #e5e7eb;
+                border-color: #cbd5e1;
+            }
         """)
 
         guidance_root_layout = QVBoxLayout(self.guidance_schedules_tab)
@@ -2751,6 +3157,72 @@ class UserInputs(QMainWindow):
         direct_tip_label.setStyleSheet("font-weight: bold;")
         guidance_layout.addRow(direct_tip_label, aps_direct_tip_layout)
 
+        haul_cycle_file_label = QLabel(
+            "Select 2WP Haul Infinity Cycles.csv (optional):"
+        )
+        haul_cycle_file_label.setStyleSheet("font-weight: bold;")
+        self.haul_cycle_file_path = QLineEdit()
+        self.haul_cycle_file_path.setReadOnly(True)
+        self.haul_cycle_file_path.setFixedWidth(400)
+        self.haul_cycle_file_button = QPushButton("Browse")
+        self.haul_cycle_file_button.setFixedWidth(100)
+        self.haul_cycle_file_button.clicked.connect(
+            self.browse_haul_cycle_file
+        )
+        haul_cycle_file_layout = QHBoxLayout()
+        haul_cycle_file_layout.addWidget(self.haul_cycle_file_path)
+        haul_cycle_file_layout.addWidget(self.haul_cycle_file_button)
+        guidance_layout.addRow(
+            haul_cycle_file_label,
+            haul_cycle_file_layout,
+        )
+
+        self.haul_cycle_crusher_button = QPushButton("Get Crusher Names")
+        self.haul_cycle_crusher_button.setMinimumWidth(170)
+        self.haul_cycle_crusher_button.clicked.connect(
+            self.load_haul_cycle_crusher_names
+        )
+        self.haul_cycle_crusher_input = QListWidget()
+        self.haul_cycle_crusher_input.setSelectionMode(
+            QAbstractItemView.MultiSelection
+        )
+        self.haul_cycle_crusher_input.setMinimumWidth(420)
+        self.haul_cycle_crusher_input.setMaximumHeight(105)
+        haul_cycle_crusher_layout = QVBoxLayout()
+        haul_cycle_crusher_header = QHBoxLayout()
+        haul_cycle_crusher_header.addWidget(
+            self.haul_cycle_crusher_button
+        )
+        haul_cycle_crusher_header.addWidget(QLabel(
+            "Nearest Crusher is resolved from the shortest selected route."
+        ))
+        haul_cycle_crusher_header.addStretch()
+        haul_cycle_crusher_layout.addLayout(haul_cycle_crusher_header)
+        haul_cycle_crusher_layout.addWidget(
+            self.haul_cycle_crusher_input
+        )
+        haul_cycle_crusher_label = QLabel("Haul Cycle Crushers:")
+        haul_cycle_crusher_label.setStyleSheet("font-weight: bold;")
+        guidance_layout.addRow(
+            haul_cycle_crusher_label,
+            haul_cycle_crusher_layout,
+        )
+
+        self.guidance_schedules_submit_button = QPushButton("Submit")
+        self.guidance_schedules_submit_button.setObjectName(
+            "guidanceSchedulesSubmitButton"
+        )
+        self.guidance_schedules_submit_button.setFixedWidth(100)
+        self.guidance_schedules_submit_button.clicked.connect(
+            self.handle_guidance_schedules_submit
+        )
+        guidance_submit_layout = QHBoxLayout()
+        guidance_submit_layout.addWidget(
+            self.guidance_schedules_submit_button
+        )
+        guidance_submit_layout.addStretch()
+        guidance_layout.addRow(guidance_submit_layout)
+
         product_brand_label = QLabel("Product Brands:")
         product_brand_label.setStyleSheet("font-weight: bold;")
         self.product_brand_labels_input = QLineEdit()
@@ -2841,6 +3313,13 @@ class UserInputs(QMainWindow):
         self.file_path.textChanged.connect(self.validate_form)
         self.file_path_24hr.textChanged.connect(self.validate_form)
         self.expit_agent_input.itemSelectionChanged.connect(self.validate_form)
+        self.haul_cycle_file_path.textChanged.connect(self.validate_form)
+        self.haul_cycle_crusher_input.itemSelectionChanged.connect(
+            self.validate_form
+        )
+        self.haul_cycle_crusher_input.itemSelectionChanged.connect(
+            self.handle_haul_cycle_selection_changed
+        )
         self.product_brand_labels_input.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
         self.agent_enabled_checkbox.toggled.connect(self.toggle_agent_enabled)
@@ -2854,7 +3333,7 @@ class UserInputs(QMainWindow):
         self.remove_direct_tip_rule_button.clicked.connect(self.remove_direct_tip_movement_rule)
 
     def validate_form(self):
-        """Enable or disable the submit button based on form completion."""
+        """Enable each workflow submit button from the fields it owns."""
         ratio_ready = self.current_crusher_ratio() is not None
         if self.crusher_ratio_mode() == "aps" and len(self.current_site_crusher_options()) > 1:
             ratio_ready = (
@@ -2880,7 +3359,11 @@ class UserInputs(QMainWindow):
             not self.file_path_24hr.text().strip()
             or bool(self.selected_24hr_expit_agent_names())
         )
-        all_fields_populated = (
+        haul_cycles_ready = (
+            not self.haul_cycle_file_path.text().strip()
+            or bool(self.selected_haul_cycle_crusher_names())
+        )
+        site_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
             and self.opf_input.currentIndex() != -1
@@ -2888,12 +3371,21 @@ class UserInputs(QMainWindow):
             and ratio_ready
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
-            and aps_direct_tip_ready
+        )
+        guidance_fields_populated = (
+            aps_direct_tip_ready
             and schedule_paths_ready
             and expit_agents_ready
+            and haul_cycles_ready
         )
-        self.submit_button.setEnabled(all_fields_populated)
-        self.save_button.setEnabled(all_fields_populated)
+        self.submit_button.setEnabled(site_fields_populated)
+        self.guidance_schedules_submit_button.setEnabled(
+            guidance_fields_populated
+            and bool(getattr(self, "stockpile_data", None))
+        )
+        self.save_button.setEnabled(
+            site_fields_populated and guidance_fields_populated
+        )
 
     def show_progress_dialog(self, message, cancel_callback=None):
         if self.progress_dialog:
@@ -3019,6 +3511,166 @@ class UserInputs(QMainWindow):
         if file_path:
             self.file_path_24hr.setText(file_path)
             self.set_24hr_expit_agent_items([], [])
+
+    def browse_haul_cycle_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select 2WP Haul Infinity Cycles.csv",
+            "",
+            "Haul Infinity Cycles.csv (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.haul_cycle_file_path.setText(file_path)
+            self.set_haul_cycle_crusher_items([], [])
+            self.haul_cycle_routes = {}
+            self.apply_haul_cycle_routes_to_stockpile_data()
+            if getattr(self, "stockpile_data", None):
+                self.setup_stockpile_table()
+
+    def selected_haul_cycle_crusher_names(self):
+        if not hasattr(self, "haul_cycle_crusher_input"):
+            return []
+        return sorted(
+            item.text().strip()
+            for item in self.haul_cycle_crusher_input.selectedItems()
+            if item.text().strip()
+        )
+
+    def available_haul_cycle_crusher_names(self):
+        if not hasattr(self, "haul_cycle_crusher_input"):
+            return []
+        return sorted(
+            self.haul_cycle_crusher_input.item(row).text().strip()
+            for row in range(self.haul_cycle_crusher_input.count())
+            if self.haul_cycle_crusher_input.item(row).text().strip()
+        )
+
+    def set_haul_cycle_crusher_items(
+        self,
+        crusher_names,
+        selected_crushers=None,
+    ):
+        if not hasattr(self, "haul_cycle_crusher_input"):
+            return
+        crusher_names = self.normalized_expit_agent_names(crusher_names)
+        selected = set(
+            self.normalized_expit_agent_names(selected_crushers)
+        )
+        self.haul_cycle_crusher_input.blockSignals(True)
+        try:
+            self.haul_cycle_crusher_input.clear()
+            self.haul_cycle_crusher_input.addItems(crusher_names)
+            for row in range(self.haul_cycle_crusher_input.count()):
+                item = self.haul_cycle_crusher_input.item(row)
+                item.setSelected(item.text().strip() in selected)
+        finally:
+            self.haul_cycle_crusher_input.blockSignals(False)
+
+    def load_haul_cycle_crusher_names(self):
+        file_path = self.haul_cycle_file_path.text().strip()
+        if not file_path:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "Select a 2WP Haul Infinity Cycles.csv file first.",
+            )
+            return
+        try:
+            crusher_names = (
+                HaulCycleDataHandler.get_distinct_crusher_names(file_path)
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "BlendMaster",
+                f"Unable to read haul-cycle crusher names: {exc}",
+            )
+            return
+        previous = self.selected_haul_cycle_crusher_names()
+        retained = [name for name in previous if name in crusher_names]
+        selected = retained or crusher_names
+        self.set_haul_cycle_crusher_items(crusher_names, selected)
+        self.refresh_haul_cycle_routes(show_errors=True)
+        if getattr(self, "stockpile_data", None):
+            self.setup_stockpile_table()
+        if crusher_names:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                f"Found {len(crusher_names)} crusher destination(s). "
+                "All are selected by default.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "No crusher destinations were found in the cycle file.",
+            )
+        self.validate_form()
+
+    def handle_haul_cycle_selection_changed(self):
+        self.refresh_haul_cycle_routes(show_errors=False)
+        if getattr(self, "stockpile_data", None):
+            self.setup_stockpile_table()
+        self.validate_form()
+
+    def refresh_haul_cycle_routes(self, show_errors=False):
+        file_path = (
+            self.haul_cycle_file_path.text().strip()
+            if hasattr(self, "haul_cycle_file_path")
+            else str(getattr(self, "haul_cycle_file_path_choice", "") or "")
+        )
+        selected = self.selected_haul_cycle_crusher_names()
+        self.available_haul_cycle_crushers = (
+            self.available_haul_cycle_crusher_names()
+        )
+        self.selected_haul_cycle_crushers = selected
+        if not file_path or not selected:
+            self.haul_cycle_routes = {}
+            self.apply_haul_cycle_routes_to_stockpile_data()
+            return False
+        try:
+            self.haul_cycle_routes = (
+                HaulCycleDataHandler.build_nearest_crusher_routes(
+                    file_path,
+                    selected,
+                )
+            )
+        except Exception as exc:
+            self.haul_cycle_routes = {}
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "BlendMaster",
+                    f"Unable to resolve nearest-crusher routes: {exc}",
+                )
+            return False
+        self.apply_haul_cycle_routes_to_stockpile_data()
+        return True
+
+    def apply_haul_cycle_routes_to_stockpile_data(self):
+        routes = getattr(self, "haul_cycle_routes", {}) or {}
+        for data in (
+            getattr(self, "stockpile_data", None),
+            getattr(self, "updated_stockpile_data", None),
+        ):
+            if not isinstance(data, dict):
+                continue
+            for key, attributes in data.items():
+                if not isinstance(attributes, dict):
+                    continue
+                stockpile_name = str(
+                    attributes.get("name")
+                    or attributes.get("NAME")
+                    or key
+                ).strip()
+                route = routes.get(stockpile_name.upper())
+                attributes["nearest_crusher"] = (
+                    route.get("nearest_crusher", "") if route else ""
+                )
+                attributes["rehandle_cycle_time_minutes"] = (
+                    route.get("cycle_time_minutes") if route else None
+                )
 
     @staticmethod
     def normalized_expit_agent_names(agent_names):
@@ -3173,10 +3825,10 @@ class UserInputs(QMainWindow):
         )
 
     def is_total_feed_operating_crusher(self):
-        return (
-            hasattr(self, "site_crusher_input")
-            and self.site_crusher_input.currentText().strip().upper() == "TOTAL_FEED_PC"
-        )
+        crusher = getattr(self, "crusher_input_choice", "")
+        if hasattr(self, "site_crusher_input"):
+            crusher = self.site_crusher_input.currentText()
+        return str(crusher or "").strip().upper().replace("-", "_") == "TOTAL_FEED_PC"
 
     def current_site_start_time(self):
         if hasattr(self, "time_mode") and self.time_mode.currentIndex() == 1:
@@ -3716,31 +4368,9 @@ class UserInputs(QMainWindow):
     def validate_site_configuration_constraints(self):
         if len(self.selected_site_crushers) != 1:
             return False, "Select exactly one operating crusher for this site scenario."
-        if self.file_path_24hr_choice and not self.file_path_choice:
-            return False, (
-                "Select a 2WP Mining.csv reference before importing a 24HR Mining.csv schedule."
-            )
-        if (
-            self.file_path_24hr_choice
-            and not self.selected_24hr_expit_agents
-        ):
-            return False, (
-                "Load and select at least one 24HR expit dig circuit."
-            )
         ratio = self.crusher_contribution_ratio_choice
         if ratio is None or not 0 < ratio <= 1:
             return False, "Enter or derive a crusher contribution ratio greater than 0% and no more than 100%."
-        if self.reevaluate_aps_direct_tip_choice:
-            selected_destinations = self.aps_direct_tip_crusher_choice
-            if not selected_destinations:
-                return False, "Select at least one 2WP direct-tip crusher destination."
-            if not self.selected_aps_crusher_matches_operating_crusher():
-                return False, (
-                    "Each selected 2WP direct-tip crusher destination must map to the "
-                    "operating crusher for this scenario."
-                )
-            if not self.is_total_feed_operating_crusher() and len(selected_destinations) != 1:
-                return False, "Select exactly one 2WP direct-tip crusher destination for an individual crusher scenario."
 
         group_states = self.site_ratio_group_states()
         crushers = [
@@ -3780,6 +4410,47 @@ class UserInputs(QMainWindow):
             )
         return True, ""
 
+    def validate_guidance_schedule_constraints(self):
+        if self.file_path_24hr_choice and not self.file_path_choice:
+            return False, (
+                "Select a 2WP Mining.csv reference before importing a "
+                "24HR Mining.csv schedule."
+            )
+        if (
+            self.file_path_24hr_choice
+            and not self.selected_24hr_expit_agents
+        ):
+            return False, (
+                "Load and select at least one 24HR expit dig circuit."
+            )
+        if (
+            self.haul_cycle_file_path_choice
+            and not self.selected_haul_cycle_crushers
+        ):
+            return False, (
+                "Load and select at least one Haul Infinity crusher."
+            )
+        if self.reevaluate_aps_direct_tip_choice:
+            selected_destinations = self.aps_direct_tip_crusher_choice
+            if not selected_destinations:
+                return False, (
+                    "Select at least one 2WP direct-tip crusher destination."
+                )
+            if not self.selected_aps_crusher_matches_operating_crusher():
+                return False, (
+                    "Each selected 2WP direct-tip crusher destination must "
+                    "map to the operating crusher for this scenario."
+                )
+            if (
+                not self.is_total_feed_operating_crusher()
+                and len(selected_destinations) != 1
+            ):
+                return False, (
+                    "Select exactly one 2WP direct-tip crusher destination "
+                    "for an individual crusher scenario."
+                )
+        return True, ""
+
     def validate_active_ratio_group_for_run(self):
         # Each operating-crusher scenario is independently optimisable.  The
         # contribution ratio scales this scenario's product-build target; it is
@@ -3810,6 +4481,17 @@ class UserInputs(QMainWindow):
         self.selected_24hr_expit_agents = (
             self.selected_24hr_expit_agent_names()
         )
+        self.haul_cycle_file_path_choice = (
+            self.haul_cycle_file_path.text().strip()
+        )
+        self.available_haul_cycle_crushers = (
+            self.available_haul_cycle_crusher_names()
+        )
+        self.selected_haul_cycle_crushers = (
+            self.selected_haul_cycle_crusher_names()
+        )
+        if self.haul_cycle_file_path_choice:
+            self.refresh_haul_cycle_routes(show_errors=False)
         self.blend_mode_choice = self.blend_mode.currentIndex() + 1
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             self.product_brand_labels_input.text()
@@ -3830,6 +4512,57 @@ class UserInputs(QMainWindow):
             else []
         )
 
+    def capture_guidance_schedule_controls(self):
+        """Capture controls owned by the Guidance Schedules workflow step."""
+        self.expit_mode_choice = (
+            self.expit_mode.currentIndex() + 1
+            if self.expit_mode.isEnabled()
+            else 1
+        )
+        self.file_path_choice = self.file_path.text().strip()
+        self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.available_24hr_expit_agents = (
+            self.available_24hr_expit_agent_names()
+        )
+        self.selected_24hr_expit_agents = (
+            self.selected_24hr_expit_agent_names()
+        )
+        self.haul_cycle_file_path_choice = (
+            self.haul_cycle_file_path.text().strip()
+        )
+        self.available_haul_cycle_crushers = (
+            self.available_haul_cycle_crusher_names()
+        )
+        self.selected_haul_cycle_crushers = (
+            self.selected_haul_cycle_crusher_names()
+        )
+        self.direct_tip_grade_block_sources = [
+            self.direct_tip_grade_block_source_input.item(row).text().strip()
+            for row in range(
+                self.direct_tip_grade_block_source_input.count()
+            )
+        ]
+        self.direct_tip_crusher_destinations = [
+            self.direct_tip_crusher_destination_input.item(row).text().strip()
+            for row in range(
+                self.direct_tip_crusher_destination_input.count()
+            )
+        ]
+        self.direct_tip_movement_rules = (
+            ExpitDataHandler._normalize_movement_rules(
+                self.direct_tip_movement_rules
+            )
+        )
+        self.reevaluate_aps_direct_tip_choice = (
+            self.reevaluate_aps_direct_tip_checkbox.isChecked()
+        )
+        self.aps_direct_tip_crusher_choice = (
+            self.selected_aps_crusher_names()
+            if self.reevaluate_aps_direct_tip_choice
+            else []
+        )
+        self.refresh_haul_cycle_routes(show_errors=False)
+
     def restore_site_configuration_controls(self):
         """Restore Site Configuration widgets without discarding legacy project defaults."""
         self.hub_input.setCurrentText(str(self.hub_input_choice or ""))
@@ -3845,6 +4578,13 @@ class UserInputs(QMainWindow):
         self.set_24hr_expit_agent_items(
             getattr(self, "available_24hr_expit_agents", []),
             getattr(self, "selected_24hr_expit_agents", []),
+        )
+        self.haul_cycle_file_path.setText(str(
+            getattr(self, "haul_cycle_file_path_choice", "") or ""
+        ))
+        self.set_haul_cycle_crusher_items(
+            getattr(self, "available_haul_cycle_crushers", []),
+            getattr(self, "selected_haul_cycle_crushers", []),
         )
         self.load_ratio_controls_from_state()
         self.set_direct_tip_movement_options(
@@ -4040,6 +4780,10 @@ class UserInputs(QMainWindow):
         self.refresh_scenario_selector()
 
     def finish_site_config_submit(self, stockpile_data):
+        restoring_project = bool(
+            self.is_project_loaded
+            and self.project_load_restore_in_progress
+        )
         self.submit_button.setEnabled(True)
         self.save_button.setEnabled(True)
         build_targets = {}
@@ -4059,6 +4803,10 @@ class UserInputs(QMainWindow):
         self.stockpile_data = stockpile_data
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
+        if self.haul_cycle_file_path_choice:
+            self.refresh_haul_cycle_routes(show_errors=True)
+        else:
+            self.apply_haul_cycle_routes_to_stockpile_data()
         if build_targets:
             self.register_submitted_site_scenarios(build_targets)
         else:
@@ -4079,15 +4827,60 @@ class UserInputs(QMainWindow):
                 "\n\nAutomatic 2WP product-build targets were skipped. "
                 "Use Product Build Settings for manual entry or load them there later."
             )
-        QMessageBox.information(self, "BlendMaster", message)
+        if not restoring_project:
+            QMessageBox.information(self, "BlendMaster", message)
 
         self.setup_stockpile_table()
-        self.set_page_enabled(self.stockpile_tab_index, True)
-        self.show_page(self.stockpile_tab_index)  # Switch to the next tab
+        self.set_page_enabled(
+            self.stockpile_tab_index,
+            restoring_project,
+        )
+        if not restoring_project:
+            self.show_page(self.guidance_schedules_tab_index)
+        self.validate_form()
 
         if getattr(self, "agent_workflow_after_site_config", False):
             self.agent_workflow_after_site_config = False
             QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
+
+    def handle_guidance_schedules_submit(self):
+        """Apply optional schedule guidance before stockpile selection."""
+        if not self.stockpile_data:
+            QMessageBox.warning(
+                self,
+                "Guidance Schedules",
+                "Submit Site Configuration before applying guidance schedules.",
+            )
+            return
+
+        self.capture_guidance_schedule_controls()
+        valid, validation_message = (
+            self.validate_guidance_schedule_constraints()
+        )
+        if not valid:
+            QMessageBox.warning(
+                self,
+                "Guidance Schedules",
+                validation_message,
+            )
+            self.validate_form()
+            return
+
+        self.refresh_aps_stockpile_brand_map()
+        self.apply_aps_brand_guidance_to_stockpile_data()
+        if self.haul_cycle_file_path_choice:
+            if not self.refresh_haul_cycle_routes(show_errors=True):
+                self.validate_form()
+                return
+        else:
+            self.haul_cycle_routes = {}
+            self.apply_haul_cycle_routes_to_stockpile_data()
+
+        self.setup_stockpile_table()
+        self.set_page_enabled(self.stockpile_tab_index, True)
+        self.save_active_scenario_state()
+        self.show_page(self.stockpile_tab_index, force=True)
+        self.validate_form()
 
     def handle_site_config_error(self, error_message):
         self.submit_button.setEnabled(True)
@@ -4656,6 +5449,12 @@ class UserInputs(QMainWindow):
                 "selected_24hr_expit_agents": getattr(
                     self, "selected_24hr_expit_agents", []
                 ),
+                "haul_cycle_csv": getattr(
+                    self, "haul_cycle_file_path_choice", ""
+                ),
+                "selected_haul_cycle_crushers": getattr(
+                    self, "selected_haul_cycle_crushers", []
+                ),
                 "product_brands": getattr(self, "product_brand_labels_choice", self.default_product_brand_labels()),
                 "auto_load_2wp_targets": getattr(
                     self,
@@ -4751,7 +5550,12 @@ class UserInputs(QMainWindow):
             self.agent_proposals_table.setItem(
                 row,
                 4,
-                QTableWidgetItem("Drive the normal UI sequence: Site Configuration, Stockpiles, AMT if needed, Solver Configuration, Calendar."),
+                QTableWidgetItem(
+                    "Drive the normal UI sequence: Site Configuration, "
+                    "Guidance Schedules, Stockpiles, AMT if needed, Solver "
+                    "Configuration, Product Build Settings, Decision Levers, "
+                    "Calendar."
+                ),
             )
             self.agent_latest_proposals.append({
                 "target": "agent_workflow",
@@ -5618,6 +6422,8 @@ class UserInputs(QMainWindow):
             "min_stockpiles",
             "max_stockpiles",
             "min_stockpile_contribution_ratio",
+            "throughput_incentive_per_tonne",
+            "source_selection_tie_break_penalty",
             "stockpile_feasibility_mode",
             "allow_offspec_steady_states_for_product_build",
             "brand_guidance_mode",
@@ -5628,6 +6434,8 @@ class UserInputs(QMainWindow):
             "timing_guidance_tolerance_hours",
             "active_blend_guidance_enabled",
             "active_blend_guidance_incentive",
+            "rehandle_cycle_time_penalty_enabled",
+            "haulage_cost_per_hour",
             "min_feed_duration_hours",
             "direct_tip_enabled",
             "direct_tip_cash_incentive",
@@ -5638,14 +6446,19 @@ class UserInputs(QMainWindow):
             "stay_on_same_grade_block_pair_incentive",
             "grade_block_lock_enabled",
             "prefer_fewer_stockpiles",
+            "fewer_stockpiles_incentive",
             "balance_preference",
+            "balance_preference_incentive",
             "prefer_amt_stockpiles",
+            "amt_preference_incentive",
             "prefer_contaminated_stockpiles",
+            "contaminated_preference_incentive",
             "contaminant_thresholds.si",
             "contaminant_thresholds.al",
             "contaminant_thresholds.p",
             "contaminant_thresholds.mn",
             "prefer_low_fe_stockpiles",
+            "low_fe_preference_incentive",
             "low_fe_threshold",
         }
         return key in known
@@ -5846,6 +6659,20 @@ class UserInputs(QMainWindow):
                 or []
             )
             self.set_24hr_expit_agent_items(selected_agents, selected_agents)
+        haul_cycle_path = (
+            site_config.get("haul_cycle_csv")
+            or site_config.get("haul_infinity_cycles_csv")
+        )
+        if haul_cycle_path:
+            self.haul_cycle_file_path.setText(str(haul_cycle_path))
+        if "selected_haul_cycle_crushers" in site_config:
+            selected_crushers = self.normalized_expit_agent_names(
+                site_config.get("selected_haul_cycle_crushers") or []
+            )
+            self.set_haul_cycle_crusher_items(
+                selected_crushers,
+                selected_crushers,
+            )
 
         ratio_mode_value = (
             site_config.get("crusher_ratio_mode")
@@ -6344,6 +7171,28 @@ class UserInputs(QMainWindow):
             loaded_state["available_24hr_expit_agents"] = list(
                 loaded_state["selected_24hr_expit_agents"]
             )
+        loaded_state["haul_cycle_file_path_choice"] = str(
+            loaded_state.get("haul_cycle_file_path_choice") or ""
+        )
+        loaded_state["available_haul_cycle_crushers"] = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("available_haul_cycle_crushers") or []
+            )
+        )
+        loaded_state["selected_haul_cycle_crushers"] = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("selected_haul_cycle_crushers") or []
+            )
+        )
+        if (
+            not loaded_state["available_haul_cycle_crushers"]
+            and loaded_state["selected_haul_cycle_crushers"]
+        ):
+            loaded_state["available_haul_cycle_crushers"] = list(
+                loaded_state["selected_haul_cycle_crushers"]
+            )
+        if loaded_state.get("haul_cycle_routes") is None:
+            loaded_state["haul_cycle_routes"] = {}
         if (
             "file_path_24hr_choice" not in loaded_state
             and loaded_state.get("file_path_choice")
@@ -6438,6 +7287,23 @@ class UserInputs(QMainWindow):
             )
             loaded_state["available_24hr_expit_agents"] = list(
                 loaded_state["selected_24hr_expit_agents"]
+            )
+        if (
+            "haul_cycle_csv" in site_config
+            or "haul_infinity_cycles_csv" in site_config
+        ):
+            loaded_state["haul_cycle_file_path_choice"] = (
+                site_config.get("haul_cycle_csv")
+                or site_config.get("haul_infinity_cycles_csv")
+            )
+        if "selected_haul_cycle_crushers" in site_config:
+            loaded_state["selected_haul_cycle_crushers"] = (
+                self.normalized_expit_agent_names(
+                    site_config.get("selected_haul_cycle_crushers") or []
+                )
+            )
+            loaded_state["available_haul_cycle_crushers"] = list(
+                loaded_state["selected_haul_cycle_crushers"]
             )
         if "file_path" in site_config:
             loaded_state["file_path_choice"] = site_config.get("file_path")
@@ -6548,6 +7414,12 @@ class UserInputs(QMainWindow):
         if key == "min_stockpile_contribution_ratio":
             set_line_edit(self.min_stockpile_contribution_ratio_input, value)
             return True
+        if key == "throughput_incentive_per_tonne":
+            set_line_edit(self.throughput_incentive_input, value)
+            return True
+        if key == "source_selection_tie_break_penalty":
+            set_line_edit(self.source_selection_tie_break_penalty_input, value)
+            return True
         if key == "stockpile_feasibility_mode":
             label = {
                 "stockpile_must_be_feasible": "Stockpile blend must be feasible",
@@ -6560,24 +7432,6 @@ class UserInputs(QMainWindow):
             return True
         if key == "brand_guidance_mode":
             normalized = str(value or "").strip().lower().replace(" ", "_")
-            label = {
-                "ignore": "Ignore 2WP brand guidance",
-                "none": "Ignore 2WP brand guidance",
-                "ignore_aps_brand_guidance": "Ignore 2WP brand guidance",
-                "ignore_2wp_brand_guidance": "Ignore 2WP brand guidance",
-                "prefer": "Prefer matching product brand",
-                "prefer_match": "Prefer matching product brand",
-                "prefer_matching_product_brand": "Prefer matching product brand",
-                "penalize": "Penalize mismatched product brand",
-                "penalise": "Penalize mismatched product brand",
-                "penalize_mismatch": "Penalize mismatched product brand",
-                "penalise_mismatch": "Penalize mismatched product brand",
-                "penalize_mismatched_product_brand": "Penalize mismatched product brand",
-                "force": "Force matching product brand",
-                "force_match": "Force matching product brand",
-                "force_matching_product_brand": "Force matching product brand",
-            }.get(normalized, str(value))
-            self.brand_guidance_mode_combo.setCurrentText(label)
             self.brand_guidance_enabled_checkbox.setChecked(
                 normalized not in {
                     "ignore",
@@ -6607,6 +7461,14 @@ class UserInputs(QMainWindow):
             return True
         if key == "active_blend_guidance_incentive":
             set_line_edit(self.active_blend_guidance_incentive_input, value)
+            return True
+        if key == "rehandle_cycle_time_penalty_enabled":
+            self.rehandle_cycle_time_penalty_checkbox.setChecked(
+                to_bool(value)
+            )
+            return True
+        if key == "haulage_cost_per_hour":
+            set_line_edit(self.haulage_cost_per_hour_input, value)
             return True
         if key == "min_feed_duration_hours":
             set_line_edit(self.min_feed_duration_input, value)
@@ -6638,6 +7500,9 @@ class UserInputs(QMainWindow):
         if key == "prefer_fewer_stockpiles":
             self.prefer_fewer_stockpiles_checkbox.setChecked(to_bool(value))
             return True
+        if key == "fewer_stockpiles_incentive":
+            set_line_edit(self.fewer_stockpiles_incentive_input, value)
+            return True
         if key == "balance_preference":
             label = {
                 "none": "No balance preference",
@@ -6646,11 +7511,26 @@ class UserInputs(QMainWindow):
             }.get(str(value), str(value))
             self.balance_preference_combo.setCurrentText(label)
             return True
+        if key == "balance_preference_incentive":
+            set_line_edit(
+                self.balance_preference_incentive_input,
+                value,
+            )
+            return True
         if key == "prefer_amt_stockpiles":
             self.prefer_amt_stockpiles_checkbox.setChecked(to_bool(value))
             return True
+        if key == "amt_preference_incentive":
+            set_line_edit(self.amt_preference_incentive_input, value)
+            return True
         if key == "prefer_contaminated_stockpiles":
             self.prefer_contaminated_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "contaminated_preference_incentive":
+            set_line_edit(
+                self.contaminated_preference_incentive_input,
+                value,
+            )
             return True
         if key == "contaminant_thresholds.si":
             set_line_edit(self.contaminant_si_threshold_input, value)
@@ -6666,6 +7546,9 @@ class UserInputs(QMainWindow):
             return True
         if key == "prefer_low_fe_stockpiles":
             self.prefer_low_fe_stockpiles_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "low_fe_preference_incentive":
+            set_line_edit(self.low_fe_preference_incentive_input, value)
             return True
         if key == "low_fe_threshold":
             set_line_edit(self.low_fe_threshold_input, value)
@@ -6779,14 +7662,13 @@ class UserInputs(QMainWindow):
             return True
         return False
     
-    def setup_stockpile_table(self):
-        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
-        # Define Headers (Add "Use" Column)
+    def stockpile_inventory_headers(self):
         headers = [
             "Use",
             "AMT",
             "Stockpile Name",
             "2WP Brand",
+            "Nearest Crusher",
             "Build",
             "Balance (WMT)",
             "Grade Fe (%)",
@@ -6794,8 +7676,22 @@ class UserInputs(QMainWindow):
             "Grade Al (%)",
             "Grade P (%)",
             "Grade Mn (%)",
-            "Reclaim Threshold (WMT)"
         ]
+        if self.is_total_feed_operating_crusher():
+            headers.append("Max Reclaim Rate (t/h)")
+        headers.append("Reclaim Threshold (WMT)")
+        return headers
+
+    def stockpile_table_column_index(self, caption):
+        for column in range(self.stockpile_table.columnCount()):
+            header_item = self.stockpile_table.horizontalHeaderItem(column)
+            if header_item and header_item.text() == caption:
+                return column
+        return None
+
+    def setup_stockpile_table(self):
+        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+        headers = self.stockpile_inventory_headers()
         self.stockpile_table.setColumnCount(len(headers))
         self.stockpile_table.setHorizontalHeaderLabels(headers)
         self.stockpile_table.verticalHeader().setVisible(False)
@@ -6857,10 +7753,42 @@ class UserInputs(QMainWindow):
             brand_item.setTextAlignment(Qt.AlignCenter)
             self.stockpile_table.setItem(row_idx, 3, brand_item)
 
+            nearest_crusher = str(
+                attributes.get(
+                    "nearest_crusher",
+                    attributes.get("NEAREST_CRUSHER", ""),
+                )
+                or ""
+            )
+            nearest_crusher_item = QTableWidgetItem(nearest_crusher)
+            nearest_crusher_item.setFlags(Qt.ItemIsEnabled)
+            nearest_crusher_item.setTextAlignment(Qt.AlignCenter)
+            cycle_minutes = attributes.get(
+                "rehandle_cycle_time_minutes",
+                attributes.get("REHANDLE_CYCLE_TIME_MINUTES"),
+            )
+            if cycle_minutes not in (None, ""):
+                try:
+                    cycle_tooltip = (
+                        f"Shortest selected haul cycle: "
+                        f"{float(cycle_minutes):g} min"
+                    )
+                except (TypeError, ValueError):
+                    cycle_tooltip = "Shortest selected haul cycle unavailable"
+                nearest_crusher_item.setToolTip(cycle_tooltip)
+            self.stockpile_table.setItem(
+                row_idx,
+                headers.index("Nearest Crusher"),
+                nearest_crusher_item,
+            )
+
             # Attributes (Balance and Grades, Center-aligned)
             keys = ["BUILD", "BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
        
-            for col_idx, key in enumerate(keys, start=4):  # Start after "Use", "AMT", "Stockpile Name", "2WP Brand"
+            for col_idx, key in enumerate(
+                keys,
+                start=headers.index("Build"),
+            ):
 
                 try:
                     value = attributes[key]
@@ -6901,26 +7829,44 @@ class UserInputs(QMainWindow):
                     grade_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, grade_item)
 
+            if self.is_total_feed_operating_crusher():
+                max_reclaim_rate = attributes.get(
+                    "max_reclaim_rate",
+                    attributes.get("MAX_RECLAIM_RATE", 1000),
+                )
+                try:
+                    max_reclaim_rate = float(max_reclaim_rate)
+                except (TypeError, ValueError):
+                    max_reclaim_rate = 1000.0
+                max_rate_item = QTableWidgetItem(f"{max_reclaim_rate:g}")
+                max_rate_item.setTextAlignment(Qt.AlignCenter)
+                self.stockpile_table.setItem(
+                    row_idx,
+                    headers.index("Max Reclaim Rate (t/h)"),
+                    max_rate_item,
+                )
+
             # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
             reclaim_value = round(float(reclaim_value))  # Ensure reclaim threshold is rounded
             reclaim_item = QTableWidgetItem(str(reclaim_value))
             reclaim_item.setTextAlignment(Qt.AlignCenter)
-            self.stockpile_table.setItem(row_idx, len(headers) - 1, reclaim_item)
+            self.stockpile_table.setItem(
+                row_idx,
+                headers.index("Reclaim Threshold (WMT)"),
+                reclaim_item,
+            )
 
         # Resize Columns
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
-        self.stockpile_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        for column, header in enumerate(headers):
+            resize_mode = (
+                QHeaderView.Stretch
+                if header.startswith("Grade ")
+                else QHeaderView.ResizeToContents
+            )
+            self.stockpile_table.horizontalHeader().setSectionResizeMode(
+                column, resize_mode
+            )
 
         if self.setup_stockpile_table_first_call:
             # Connect cellChanged signal to a slot for live formatting
@@ -6977,21 +7923,22 @@ class UserInputs(QMainWindow):
             state_by_column[column][stockpile_item.text()] = checked
 
     def handle_cell_change(self, row, column):
-        """Handle live formatting for the Reclaim Threshold column."""
-        headers = [
-            "Use",
-            "AMT",
-            "Stockpile Name",
-            "2WP Brand",
-            "Build",
-            "Balance (WMT)",
-            "Grade Fe (%)",
-            "Grade Si (%)",
-            "Grade Al (%)",
-            "Grade P (%)",
-            "Grade Mn (%)",
-            "Reclaim Threshold (WMT)"
-        ]
+        """Handle validation formatting for editable inventory properties."""
+        headers = self.stockpile_inventory_headers()
+
+        if (
+            "Max Reclaim Rate (t/h)" in headers
+            and column == headers.index("Max Reclaim Rate (t/h)")
+        ):
+            rate_item = self.stockpile_table.item(row, column)
+            if rate_item is None:
+                return
+            try:
+                valid_rate = float(rate_item.text()) > 0
+            except (AttributeError, TypeError, ValueError):
+                valid_rate = False
+            rate_item.setForeground(QColor("green" if valid_rate else "red"))
+            return
 
         if column == headers.index("Reclaim Threshold (WMT)"):  # Check if the changed cell is in the Reclaim Threshold column
             reclaim_item = self.stockpile_table.item(row, column)
@@ -7015,6 +7962,34 @@ class UserInputs(QMainWindow):
         """Store stockpile details entered by the user, filtering by the 'Use' column."""
         
         updated_stockpile_data = {}
+        max_rate_column = self.stockpile_table_column_index(
+            "Max Reclaim Rate (t/h)"
+        )
+        reclaim_threshold_column = self.stockpile_table_column_index(
+            "Reclaim Threshold (WMT)"
+        )
+
+        if max_rate_column is not None:
+            for row in range(self.stockpile_table.rowCount()):
+                stockpile_item = self.stockpile_table.item(row, 2)
+                max_rate_item = self.stockpile_table.item(row, max_rate_column)
+                stockpile_name = stockpile_item.text() if stockpile_item else ""
+                try:
+                    max_reclaim_rate = float(max_rate_item.text())
+                except (AttributeError, TypeError, ValueError):
+                    max_reclaim_rate = 0.0
+                if max_reclaim_rate <= 0:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        f"Max Reclaim Rate must be greater than 0 t/h for "
+                        f"{stockpile_name or 'each stockpile'}.",
+                    )
+                    return
+                if stockpile_name in self.stockpile_data:
+                    self.stockpile_data[stockpile_name][
+                        "max_reclaim_rate"
+                    ] = max_reclaim_rate
 
         for row in range(self.stockpile_table.rowCount()):
             # Check if "Use" column checkbox is checked
@@ -7041,12 +8016,22 @@ class UserInputs(QMainWindow):
                             self.stockpile_data_AMT_column[stockpile_name] = False
 
                     # Retrieve Reclaim Threshold
-                    reclaim_item = self.stockpile_table.item(row, self.stockpile_table.columnCount() - 1)
+                    reclaim_item = self.stockpile_table.item(
+                        row, reclaim_threshold_column
+                    )
                     reclaim_threshold = float(reclaim_item.text()) if reclaim_item else 0
 
                     # Update stockpile data
                     updated_stockpile_data[stockpile_name] = self.stockpile_data.get(stockpile_name, {})
                     updated_stockpile_data[stockpile_name]["reclaim_threshold"] = reclaim_threshold
+                    if max_rate_column is not None:
+                        updated_stockpile_data[stockpile_name][
+                            "max_reclaim_rate"
+                        ] = float(
+                            self.stockpile_table.item(
+                                row, max_rate_column
+                            ).text()
+                        )
                     updated_stockpile_data[stockpile_name]["AMT"] = self.stockpile_data_AMT_column[stockpile_name]
 
                 else:
@@ -7278,11 +8263,16 @@ class UserInputs(QMainWindow):
             QTimer.singleShot(250, self.agent_workflow_apply_amt_stockpiles)
 
     def handle_AMT_stockpile_fetch_error(self, error_message):
+        project_load_failed = bool(
+            getattr(self, "project_load_restore_in_progress", False)
+        )
         self.project_load_waiting_for_AMT = False
         self.agent_workflow_waiting_for_amt = False
         if getattr(self, "agent_workflow_active", False):
             self.stop_agent_workflow_apply(f"Agent workflow stopped while fetching AMT stockpile data: {error_message}")
         self.project_load_restore_in_progress = False
+        if project_load_failed:
+            self.finish_project_load_ui(success=False)
         self.show_error_popup(error_message)
 
     def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
@@ -7438,10 +8428,26 @@ class UserInputs(QMainWindow):
         direct_tip_enabled = self.is_direct_tip_enabled()
         direct_tip_editables = [direct_tip_enabled, direct_tip_enabled, direct_tip_enabled]
         direct_tip_max_defaults = ["1", "1", "1"] if direct_tip_enabled else ["0", "0", "0"]
+        stockpile_reclaim_rates = self.is_total_feed_operating_crusher()
+        reclaim_rate_editables = [
+            not stockpile_reclaim_rates,
+            not stockpile_reclaim_rates,
+            not stockpile_reclaim_rates,
+        ]
+        reclaim_rate_defaults = (
+            ["Per stockpile", "Per stockpile", "Per stockpile"]
+            if stockpile_reclaim_rates
+            else ["1000", "1000", "1000"]
+        )
 
         self.calendar_rows.extend([
             ("Reclaim Equipment", [False, False, False], "green", ["", "", ""]),
-            {"reclaim_equipment_max_reclaim_rate": ("  Max Reclaim Rate", [True, True, True], "green", ["1000", "1000", "1000"])},
+            {"reclaim_equipment_max_reclaim_rate": (
+                "  Max Reclaim Rate",
+                reclaim_rate_editables,
+                "green",
+                reclaim_rate_defaults,
+            )},
 
             ("Crusher", [False, False, False], "blue", ["", "", ""]),
             {"crusher_rate": ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"])},
@@ -7505,8 +8511,6 @@ class UserInputs(QMainWindow):
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", [default_state, default_state, default_state])})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cost": (f"    Cost", [True, True, True], "red", ["0", "0", "0"])})
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_cash": (f"    Cash", [True, True, True], "red", ["10", "10", "10"])})
 
         self.populate_calendar()
        
@@ -7609,6 +8613,14 @@ class UserInputs(QMainWindow):
             item_caption.setBackground(QBrush(
                 section_colors[color_group] if is_section_row else parent_colors[color_group]
             ))
+            if (
+                row_key == "reclaim_equipment_max_reclaim_rate"
+                and self.is_total_feed_operating_crusher()
+            ):
+                item_caption.setToolTip(
+                    "Total_Feed scenarios use Max Reclaim Rate from each "
+                    "Stockpile Inventories footprint."
+                )
             self.main_table.setItem(row_idx, 0, item_caption)
 
             # Editable and Non-Editable Cells with Default Values
@@ -7632,6 +8644,13 @@ class UserInputs(QMainWindow):
                     item.setBackground(QBrush(
                         section_colors[color_group] if is_section_row else QColor("#eef2f7")
                     ))
+                    if (
+                        row_key == "reclaim_equipment_max_reclaim_rate"
+                        and self.is_total_feed_operating_crusher()
+                    ):
+                        item.setToolTip(
+                            "Configured per footprint in Stockpile Inventories."
+                        )
                     if is_section_row:
                         item.setFont(bold_font)
                 else:
@@ -7684,7 +8703,20 @@ class UserInputs(QMainWindow):
                 else [0, 0, 0]
             )
 
-            self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = ("  Max Reclaim Rate", [True, True, True], "green", calendar_values("reclaim_equipment_max_reclaim_rate", thousand_defaults))
+            stockpile_reclaim_rates = self.is_total_feed_operating_crusher()
+            self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = (
+                "  Max Reclaim Rate",
+                [not stockpile_reclaim_rates] * 3,
+                "green",
+                (
+                    ["Per stockpile"] * 3
+                    if stockpile_reclaim_rates
+                    else calendar_values(
+                        "reclaim_equipment_max_reclaim_rate",
+                        thousand_defaults,
+                    )
+                ),
+            )
             self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", calendar_values("crusher_rate", thousand_defaults))
             self.calendar_rows[5]["crusher_direct_tip_ratio_min"] = ("    Min", direct_tip_editables, "blue", direct_tip_min_values)
             self.calendar_rows[6]["crusher_direct_tip_ratio_max"] = ("    Max", direct_tip_editables, "blue", direct_tip_max_values)
@@ -7727,21 +8759,7 @@ class UserInputs(QMainWindow):
                         {header: 100000 for header in self.calendar_headers[1:]},
                     )
                 )
-                self.calendar_rows[calendar_index + 3][f"stockpiles_{stockpile.lower()}_cost"] = (
-                    f"    Cost", [True, True, True], "red",
-                    calendar_values(
-                        f"stockpiles_{stockpile.lower()}_cost",
-                        {header: 0 for header in self.calendar_headers[1:]},
-                    )
-                )
-                self.calendar_rows[calendar_index + 4][f"stockpiles_{stockpile.lower()}_cash"] = (
-                    f"    Cash", [True, True, True], "red",
-                    calendar_values(
-                        f"stockpiles_{stockpile.lower()}_cash",
-                        {header: 10 for header in self.calendar_headers[1:]},
-                    )
-                )
-                calendar_index += 5
+                calendar_index += 3
                     
             self.populate_calendar()
             self.store_calendar_inputs_no_run()
@@ -7753,6 +8771,15 @@ class UserInputs(QMainWindow):
 
         item = self.main_table.item(row_idx, col_idx)
         return item.text().strip() if item and item.text().strip() else None
+
+    @staticmethod
+    def normalized_calendar_input_value(outer_key, value):
+        if value is None or "state" in str(outer_key).lower():
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
 
     def store_calendar_inputs_no_run(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -7803,12 +8830,22 @@ class UserInputs(QMainWindow):
         self.calendar_inputs = {
             outer_key: {
                 inner_key: (
-                    float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+                    self.normalized_calendar_input_value(
+                        outer_key, inner_value
+                    )
                 )
                 for inner_key, inner_value in outer_value.items()
             }
             for outer_key, outer_value in self.calendar_inputs.items()
         }
+
+        # Calendar Cash is retained in the project schema for compatibility,
+        # but it is no longer a user input or an optimisation objective term.
+        zero_cash = {header: 0.0 for header in headers}
+        for stockpile in getattr(self, "calendar_stockpile_names", []):
+            self.calendar_inputs[
+                f"stockpiles_{str(stockpile).lower()}_cash"
+            ] = copy.deepcopy(zero_cash)
 
         self.store_stockpile_constraint_inputs()
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
@@ -7835,6 +8872,12 @@ class UserInputs(QMainWindow):
 
         solver_config = self.normalized_solver_config()
         self.solver_config = copy.deepcopy(solver_config)
+        self.throughput_incentive_input.setText(str(
+            solver_config.get("throughput_incentive_per_tonne", 1_000_100.0)
+        ))
+        self.source_selection_tie_break_penalty_input.setText(str(
+            solver_config.get("source_selection_tie_break_penalty", 0.001)
+        ))
         feasibility_label = {
             "stockpile_must_be_feasible": "Stockpile blend must be feasible",
             "stockpile_can_rely_on_grade_blocks": "Stockpile blend can rely on grade blocks"
@@ -7846,13 +8889,6 @@ class UserInputs(QMainWindow):
         self.allow_offspec_steady_states_checkbox.setChecked(
             bool(solver_config.get("allow_offspec_steady_states_for_product_build", False))
         )
-        brand_guidance_label = {
-            "ignore": "Ignore 2WP brand guidance",
-            "prefer_match": "Prefer matching product brand",
-            "penalize_mismatch": "Penalize mismatched product brand",
-            "force_match": "Force matching product brand",
-        }.get(solver_config.get("brand_guidance_mode", "ignore"), "Ignore 2WP brand guidance")
-        self.brand_guidance_mode_combo.setCurrentText(brand_guidance_label)
         self.brand_guidance_enabled_checkbox.setChecked(
             bool(solver_config.get("brand_guidance_enabled", False))
         )
@@ -7872,6 +8908,16 @@ class UserInputs(QMainWindow):
         self.active_blend_guidance_incentive_input.setText(
             str(solver_config.get("active_blend_guidance_incentive", 0.0))
         )
+        self.rehandle_cycle_time_penalty_checkbox.setChecked(
+            bool(solver_config.get(
+                "rehandle_cycle_time_penalty_enabled",
+                False,
+            ))
+        )
+        self.haulage_cost_per_hour_input.setText(str(
+            solver_config.get("haulage_cost_per_hour", 0.0)
+        ))
+        self.update_rehandle_cycle_time_input_state()
         min_feed_duration = solver_config.get("min_feed_duration_hours")
         self.min_feed_duration_input.setText(
             "" if min_feed_duration in (None, "") else str(min_feed_duration)
@@ -7886,6 +8932,9 @@ class UserInputs(QMainWindow):
         self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
         self.update_direct_tip_input_state()
         self.prefer_fewer_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_fewer_stockpiles", False)))
+        self.fewer_stockpiles_incentive_input.setText(str(
+            solver_config.get("fewer_stockpiles_incentive", 10.0)
+        ))
         balance_preference = solver_config.get("balance_preference", "none")
         balance_label = {
             "none": "No balance preference",
@@ -7893,14 +8942,29 @@ class UserInputs(QMainWindow):
             "higher": "Higher balance first"
         }.get(balance_preference, "No balance preference")
         self.balance_preference_combo.setCurrentText(balance_label)
+        self.balance_preference_incentive_input.setText(str(
+            solver_config.get("balance_preference_incentive", 1.0)
+        ))
         self.prefer_amt_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_amt_stockpiles", False)))
+        self.amt_preference_incentive_input.setText(str(
+            solver_config.get("amt_preference_incentive", 1.0)
+        ))
         self.prefer_contaminated_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_contaminated_stockpiles", False)))
+        self.contaminated_preference_incentive_input.setText(str(
+            solver_config.get(
+                "contaminated_preference_incentive",
+                1.0,
+            )
+        ))
         contaminant_thresholds = solver_config.get("contaminant_thresholds", {})
         self.contaminant_si_threshold_input.setText(str(contaminant_thresholds.get("si", 5.0)))
         self.contaminant_al_threshold_input.setText(str(contaminant_thresholds.get("al", 3.0)))
         self.contaminant_p_threshold_input.setText(str(contaminant_thresholds.get("p", 0.1)))
         self.contaminant_mn_threshold_input.setText(str(contaminant_thresholds.get("mn", 0.1)))
         self.prefer_low_fe_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_low_fe_stockpiles", False)))
+        self.low_fe_preference_incentive_input.setText(str(
+            solver_config.get("low_fe_preference_incentive", 1.0)
+        ))
         self.low_fe_threshold_input.setText(str(solver_config.get("low_fe_threshold", 58.0)))
 
     def store_solver_config_inputs(self, show_errors=True):
@@ -8034,6 +9098,41 @@ class UserInputs(QMainWindow):
             "mn": parse_threshold(self.contaminant_mn_threshold_input, "Mn threshold"),
         }
         low_fe_threshold = parse_threshold(self.low_fe_threshold_input, "Fe threshold")
+        throughput_incentive_per_tonne = parse_non_negative_input(
+            self.throughput_incentive_input,
+            "Throughput Incentive",
+            1_000_100.0,
+        )
+        source_selection_tie_break_penalty = parse_non_negative_input(
+            self.source_selection_tie_break_penalty_input,
+            "Source Selection Tie-break Penalty",
+            0.001,
+        )
+        fewer_stockpiles_incentive = parse_non_negative_input(
+            self.fewer_stockpiles_incentive_input,
+            "Fewer Stockpiles Incentive",
+            10.0,
+        )
+        balance_preference_incentive = parse_non_negative_input(
+            self.balance_preference_incentive_input,
+            "Balance Preference Incentive",
+            1.0,
+        )
+        amt_preference_incentive = parse_non_negative_input(
+            self.amt_preference_incentive_input,
+            "AMT Preference Incentive",
+            1.0,
+        )
+        contaminated_preference_incentive = parse_non_negative_input(
+            self.contaminated_preference_incentive_input,
+            "Contaminated Stockpile Incentive",
+            1.0,
+        )
+        low_fe_preference_incentive = parse_non_negative_input(
+            self.low_fe_preference_incentive_input,
+            "Low Grade Stockpile Incentive",
+            1.0,
+        )
         direct_tip_cash_incentive = parse_non_negative_input(
             self.direct_tip_cash_incentive_input,
             "Direct Tip Incentive",
@@ -8084,6 +9183,11 @@ class UserInputs(QMainWindow):
             "2WP Active Blend Reward/Penalty",
             0.0,
         )
+        haulage_cost_per_hour = parse_non_negative_input(
+            self.haulage_cost_per_hour_input,
+            "Haulage Cost",
+            0.0,
+        )
         min_feed_duration_hours = parse_optional_non_negative(
             min_feed_duration_text,
             "Min Stockpile Feed Duration",
@@ -8092,6 +9196,13 @@ class UserInputs(QMainWindow):
         if (
             any(value is None for value in contaminant_thresholds.values())
             or low_fe_threshold is None
+            or throughput_incentive_per_tonne is None
+            or source_selection_tie_break_penalty is None
+            or fewer_stockpiles_incentive is None
+            or balance_preference_incentive is None
+            or amt_preference_incentive is None
+            or contaminated_preference_incentive is None
+            or low_fe_preference_incentive is None
             or direct_tip_cash_incentive is None
             or stay_on_same_blend_incentive is None
             or blend_option_timeout_seconds is None
@@ -8102,6 +9213,7 @@ class UserInputs(QMainWindow):
             or timing_guidance_incentive is None
             or timing_guidance_tolerance_hours is None
             or active_blend_guidance_incentive is None
+            or haulage_cost_per_hour is None
             or (min_feed_duration_text and min_feed_duration_hours is None)
         ):
             return False
@@ -8117,8 +9229,39 @@ class UserInputs(QMainWindow):
         }.get(self.stockpile_feasibility_combo.currentText(), "stockpile_must_be_feasible")
         brand_guidance_enabled = self.brand_guidance_enabled_checkbox.isChecked()
         brand_guidance_mode = "prefer_match" if brand_guidance_enabled else "ignore"
+        rehandle_penalty_enabled = (
+            self.rehandle_cycle_time_penalty_checkbox.isChecked()
+        )
+        if rehandle_penalty_enabled:
+            if haulage_cost_per_hour <= 0:
+                if show_errors:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "Haulage Cost must be greater than 0 $/hr when "
+                        "Rehandle Cycle Time Penalty is enabled.",
+                    )
+                return False
+            missing_routes = [
+                stockpile
+                for stockpile, attributes in (
+                    getattr(self, "updated_stockpile_data", {}) or {}
+                ).items()
+                if not attributes.get("rehandle_cycle_time_minutes")
+            ]
+            if missing_routes:
+                if show_errors:
+                    QMessageBox.warning(
+                        self,
+                        "Missing Haul Cycles",
+                        "No selected-crusher haul cycle was found for: "
+                        + ", ".join(sorted(missing_routes)),
+                    )
+                return False
 
         self.solver_config = {
+            "throughput_incentive_per_tonne": throughput_incentive_per_tonne,
+            "source_selection_tie_break_penalty": source_selection_tie_break_penalty,
             "stockpile_feasibility_mode": stockpile_feasibility_mode,
             "allow_offspec_steady_states_for_product_build": self.allow_offspec_steady_states_checkbox.isChecked(),
             "brand_guidance_mode": brand_guidance_mode,
@@ -8129,6 +9272,8 @@ class UserInputs(QMainWindow):
             "timing_guidance_tolerance_hours": timing_guidance_tolerance_hours,
             "active_blend_guidance_enabled": self.active_blend_guidance_enabled_checkbox.isChecked(),
             "active_blend_guidance_incentive": active_blend_guidance_incentive,
+            "rehandle_cycle_time_penalty_enabled": rehandle_penalty_enabled,
+            "haulage_cost_per_hour": haulage_cost_per_hour,
             "min_feed_duration_hours": min_feed_duration_hours,
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
@@ -8139,11 +9284,16 @@ class UserInputs(QMainWindow):
             "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
             "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
             "prefer_fewer_stockpiles": self.prefer_fewer_stockpiles_checkbox.isChecked(),
+            "fewer_stockpiles_incentive": fewer_stockpiles_incentive,
             "balance_preference": balance_preference,
+            "balance_preference_incentive": balance_preference_incentive,
             "prefer_amt_stockpiles": self.prefer_amt_stockpiles_checkbox.isChecked(),
+            "amt_preference_incentive": amt_preference_incentive,
             "prefer_contaminated_stockpiles": self.prefer_contaminated_stockpiles_checkbox.isChecked(),
+            "contaminated_preference_incentive": contaminated_preference_incentive,
             "contaminant_thresholds": contaminant_thresholds,
             "prefer_low_fe_stockpiles": self.prefer_low_fe_stockpiles_checkbox.isChecked(),
+            "low_fe_preference_incentive": low_fe_preference_incentive,
             "low_fe_threshold": low_fe_threshold,
         }
         self.solver_config = self.normalized_solver_config(self.solver_config)
@@ -8217,7 +9367,7 @@ class UserInputs(QMainWindow):
         self.calendar_inputs = {
     outer_key: {
         inner_key: (
-            float(inner_value) if inner_value is not None and "state" not in outer_key.lower() else inner_value
+            self.normalized_calendar_input_value(outer_key, inner_value)
         )
         for inner_key, inner_value in outer_value.items()
     }
@@ -8287,6 +9437,28 @@ class UserInputs(QMainWindow):
             getattr(self, "selected_24hr_expit_agents", []),
         )
 
+    def finish_project_load_ui(self, success):
+        """Return project loading to Site Configuration and notify once."""
+        show_success = bool(
+            getattr(self, "project_load_show_success", False)
+        )
+        source_label = str(
+            getattr(self, "project_load_source_label", "") or ""
+        )
+        self.project_load_keep_site_configuration_visible = False
+        self.project_load_show_success = False
+        self.project_load_source_label = ""
+        self.show_page(self.site_config_tab_index)
+        if success and show_success:
+            message = "Project loaded successfully!"
+            if source_label:
+                message += f"\n\n{source_label}"
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                message,
+            )
+
     def finish_run_program(self, periods):
         self.set_start_and_end_datetime(periods=periods)
         self.update_decision_point_tab_state()
@@ -8299,10 +9471,15 @@ class UserInputs(QMainWindow):
             self.project_load_continuation_pending = False
             self.on_blend_data_change()
             self.store_blend_results()
-            QMessageBox.information(self, "BlendMaster", "Project loaded successfully!")
+            self.finish_project_load_ui(success=True)
 
     def handle_run_program_error(self, error_message):
+        project_load_failed = bool(
+            self.project_load_continuation_pending
+        )
         self.project_load_continuation_pending = False
+        if project_load_failed:
+            self.finish_project_load_ui(success=False)
 
         error_title = "Error"
         error_text = str(error_message)
@@ -9186,7 +10363,7 @@ class UserInputs(QMainWindow):
         headers = [
             "Stockpile Name", "Balance (WMT)", "Projected Balance (WMT)", "Projected Last Payload Delivered",
             "Use Projected Balance", "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn",
-            "Blend ID", "Weight", "Reclaim Rate", "Source Ratio"
+            "Blend IDs", "Weights by Blend ID", "Reclaim Rate", "Source Ratio"
         ]
         self.blend_config_table.setColumnCount(len(headers))
         self.blend_config_table.setHorizontalHeaderLabels(headers)
@@ -9292,17 +10469,31 @@ class UserInputs(QMainWindow):
             checkbox_layout.setContentsMargins(0, 0, 0, 0)
             self.blend_config_table.setCellWidget(row_idx, 4, checkbox_widget)
 
-            # Blend ID (Dropdown with "None" default)
-            self.blend_id_combo = QComboBox()
-            self.blend_id_combo.addItems(["None"] + [str(i) for i in range(1, 6)])  # Add "None" option
-            self.blend_id_combo.setCurrentText("None")  # Set default to "None"
-            self.blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
-            self.blend_config_table.setCellWidget(row_idx, len(keys) + 4, self.blend_id_combo)  
+            # A stockpile can participate in several manual blends. The same
+            # weight is used in each selected blend and normalized separately
+            # against that blend's other selected stockpiles.
+            blend_ids_combo = MultiSelectBlendComboBox()
+            blend_ids_combo.setToolTip(
+                "Select one or more Blend IDs. Configure each selected "
+                "blend's weight in the adjacent column."
+            )
+            blend_ids_combo.selectionChanged.connect(
+                lambda row=row_idx: self.on_manual_blend_membership_change(row)
+            )
+            self.blend_config_table.setCellWidget(
+                row_idx,
+                len(keys) + 4,
+                blend_ids_combo,
+            )
             
             # Weight (Editable)
             weight_item = QTableWidgetItem("0")
             weight_item.setTextAlignment(Qt.AlignCenter)
             weight_item.setForeground(QColor("green"))
+            weight_item.setToolTip(
+                "For one blend, enter a number. For several blends, use "
+                "'1: 50; 2: 30'. Weights are normalized within each blend."
+            )
             self.blend_config_table.setItem(row_idx, len(keys) + 5, weight_item)
 
             # Reclaim Rate (Auto-calculated)
@@ -9404,9 +10595,90 @@ class UserInputs(QMainWindow):
         self.update_reclaim_rate()  # Update reclaim rates
         self.update_blend_results()  # Refresh blend results table
 
+    @staticmethod
+    def selected_manual_blend_ids(widget):
+        if isinstance(widget, MultiSelectBlendComboBox):
+            return widget.selected_blend_ids()
+        if isinstance(widget, QComboBox):
+            value = widget.currentText().strip()
+            return [] if not value or value == "None" else [value]
+        return []
+
+    @staticmethod
+    def parse_manual_blend_weights(text, blend_ids):
+        blend_ids = [str(blend_id) for blend_id in blend_ids]
+        text = str(text or "").strip()
+        mapped_weights = {}
+        if ":" in text:
+            for entry in text.replace(",", ";").split(";"):
+                blend_id, separator, weight = entry.partition(":")
+                if not separator:
+                    continue
+                try:
+                    mapped_weights[blend_id.strip()] = float(weight.strip())
+                except (TypeError, ValueError):
+                    continue
+            return {
+                blend_id: mapped_weights.get(blend_id, 0.0)
+                for blend_id in blend_ids
+            }
+
+        try:
+            shared_weight = float(text or 0)
+        except (TypeError, ValueError):
+            shared_weight = 0.0
+        return {blend_id: shared_weight for blend_id in blend_ids}
+
+    @staticmethod
+    def format_manual_blend_weights(weights, blend_ids):
+        blend_ids = [str(blend_id) for blend_id in blend_ids]
+        if not blend_ids:
+            return "0"
+        if len(blend_ids) == 1:
+            return f"{float(weights.get(blend_ids[0], 0.0)):g}"
+        return "; ".join(
+            f"{blend_id}: {float(weights.get(blend_id, 0.0)):g}"
+            for blend_id in blend_ids
+        )
+
+    def manual_blend_weights_for_row(self, row_idx):
+        blend_ids = self.selected_manual_blend_ids(
+            self.blend_config_table.cellWidget(row_idx, 10)
+        )
+        weight_item = self.blend_config_table.item(row_idx, 11)
+        return self.parse_manual_blend_weights(
+            weight_item.text() if weight_item else "",
+            blend_ids,
+        )
+
+    def on_manual_blend_membership_change(self, row_idx):
+        blend_ids = self.selected_manual_blend_ids(
+            self.blend_config_table.cellWidget(row_idx, 10)
+        )
+        weight_item = self.blend_config_table.item(row_idx, 11)
+        if weight_item is None:
+            weight_item = QTableWidgetItem("0")
+            weight_item.setTextAlignment(Qt.AlignCenter)
+            self.blend_config_table.setItem(row_idx, 11, weight_item)
+        weights = self.parse_manual_blend_weights(
+            weight_item.text(),
+            blend_ids,
+        )
+        blocked = self.blend_config_table.blockSignals(True)
+        try:
+            weight_item.setText(
+                self.format_manual_blend_weights(weights, blend_ids)
+            )
+        finally:
+            self.blend_config_table.blockSignals(blocked)
+        self.on_blend_data_change()
+
     def update_reclaim_rate(self):
         """
-        Calculate and update the Reclaim Rate for each stockpile based on its Blend ID and Weight.
+        Calculate reclaim rates for every stockpile/blend membership.
+
+        A configuration row may belong to several Blend IDs. Each configured
+        weight is normalized independently inside its selected blend.
         """
         try:
             self.crusher_rate = float(self.crusher_rate_input.text())
@@ -9423,41 +10695,43 @@ class UserInputs(QMainWindow):
             # Step 1: Calculate total weights for each blend ID
             for row_idx in range(self.blend_config_table.rowCount()):
                 try:
-                    blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  # Adjusted column index
-                    weight_item = self.blend_config_table.item(row_idx, 11)  # Adjusted column index
-                    blend_id = blend_id_combo.currentText()
-                    if blend_id == "None":
-                        continue
-                    weight = float(weight_item.text())
-                    blend_weights[blend_id] += weight
-                except (ValueError, AttributeError):
+                    for blend_id, weight in (
+                        self.manual_blend_weights_for_row(row_idx).items()
+                    ):
+                        blend_weights[blend_id] += weight
+                except AttributeError:
                     continue
 
             # Step 2: Calculate and update Reclaim Rate for each stockpile
             for row_idx in range(self.blend_config_table.rowCount()):
                 try:
                     blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  
-                    weight_item = self.blend_config_table.item(row_idx, 11)  
                     reclaim_item = self.blend_config_table.item(row_idx, 12)  
                     ratio_item = self.blend_config_table.item(row_idx, 13)  
 
-                    blend_id = blend_id_combo.currentText()
-                    if blend_id == "None":
+                    selected_blend_ids = self.selected_manual_blend_ids(
+                        blend_id_combo
+                    )
+                    if not selected_blend_ids:
                         if reclaim_item:
                             reclaim_item.setText("0")
                             ratio_item.setText("0.00")
                         continue
 
-                    weight = float(weight_item.text())
-                    total_weight = blend_weights.get(blend_id, 0)
-
-                    # Calculate ratio and reclaim rate
-                    if total_weight > 0:
-                        ratio = weight / total_weight
-                    else:
-                        ratio = 0
-
-                    reclaim_rate = ratio * self.crusher_rate
+                    row_weights = self.manual_blend_weights_for_row(row_idx)
+                    ratios = {
+                        blend_id: (
+                            row_weights.get(blend_id, 0.0)
+                            / blend_weights[blend_id]
+                            if blend_weights.get(blend_id, 0) > 0
+                            else 0
+                        )
+                        for blend_id in selected_blend_ids
+                    }
+                    reclaim_rates = {
+                        blend_id: ratios[blend_id] * self.crusher_rate
+                        for blend_id in selected_blend_ids
+                    }
 
                     # Update the reclaim rate cell
                     if not reclaim_item:
@@ -9466,11 +10740,17 @@ class UserInputs(QMainWindow):
                         self.blend_config_table.setItem(row_idx, 13, ratio_item)
 
 
-                    reclaim_item.setText(f"{reclaim_rate:.0f}")
+                    reclaim_item.setText("; ".join(
+                        f"{blend_id}: {reclaim_rates[blend_id]:.0f}"
+                        for blend_id in selected_blend_ids
+                    ))
                     reclaim_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
                     reclaim_item.setTextAlignment(Qt.AlignCenter)  # Center-align the text
 
-                    ratio_item.setText(f"{ratio:.2f}")
+                    ratio_item.setText("; ".join(
+                        f"{blend_id}: {ratios[blend_id]:.2f}"
+                        for blend_id in selected_blend_ids
+                    ))
                     ratio_item.setFlags(Qt.ItemIsEnabled)  # Ensure non-editable
                     ratio_item.setTextAlignment(Qt.AlignCenter)  # Center-align the text
 
@@ -9508,46 +10788,81 @@ class UserInputs(QMainWindow):
         self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
 
     def populate_blend_config_weights_and_ids(self):
-
-        self.blend_id_combo.currentIndexChanged.disconnect(self.on_blend_data_change)
-        self.blend_config_table.itemChanged.disconnect(self.on_blend_data_change)     
-        self.crusher_rate_input.textChanged.disconnect(self.on_blend_data_change)
-
+        assignments_by_source = {}
         if self.is_project_loaded and self.blend_config_table_inputs:
-            # Loop through the 5 keys in self.blend_config_table_inputs
-            for row_idx, key in enumerate(self.blend_config_table_inputs.keys()):
-                # Get the row data from the dictionary
-                row_data = self.blend_config_table_inputs[key]
+            for blend_id, row_data in self.blend_config_table_inputs.items():
+                sources = row_data.get("sources", [])
+                weights = row_data.get("weights", [])
+                sources = (
+                    sources
+                    if isinstance(sources, list)
+                    else str(sources).split(",")
+                )
+                weights = (
+                    weights
+                    if isinstance(weights, list)
+                    else str(weights).split(",")
+                )
+                for source, weight in zip(sources, weights):
+                    source = str(source).strip()
+                    if not source:
+                        continue
+                    assignment = assignments_by_source.setdefault(
+                        source,
+                        {"blend_ids": set(), "weights": {}},
+                    )
+                    assignment["blend_ids"].add(str(blend_id))
+                    try:
+                        assignment["weights"][str(blend_id)] = float(weight)
+                    except (TypeError, ValueError):
+                        pass
 
-                # Process columns 10 (QComboBox) and 11 (weights) together
-                sources_list = row_data['sources'] if isinstance(row_data['sources'], list) else row_data['sources'].split(",")
-                weights_list = row_data['weights'] if isinstance(row_data['weights'], list) else row_data['weights'].split(",")
+        table_blocked = self.blend_config_table.blockSignals(True)
+        crusher_blocked = self.crusher_rate_input.blockSignals(True)
+        try:
+            for table_row in range(self.blend_config_table.rowCount()):
+                source_item = self.blend_config_table.item(table_row, 0)
+                if source_item is None:
+                    continue
+                assignment = assignments_by_source.get(source_item.text())
+                if not assignment:
+                    continue
 
-                # Loop through sources and weights simultaneously
-                for source, weight in zip(sources_list, weights_list):
-                    # Find the matching row in the first column
-                    for table_row in range(self.blend_config_table.rowCount()):
-                        table_item = self.blend_config_table.item(table_row, 0)  # Get the first column
-                        if table_item and table_item.text() == source.strip():  # Match the source
-                            # Set the value in the combo box (Column 10)
-                            combo_box = self.blend_config_table.cellWidget(table_row, 10)
-                            if isinstance(combo_box, QComboBox):
-                                combo_box.setCurrentText(key)
-                                combo_box.setStyleSheet("QComboBox { text-align: center; }")  # Center align text
+                combo_box = self.blend_config_table.cellWidget(table_row, 10)
+                if isinstance(combo_box, MultiSelectBlendComboBox):
+                    combo_box.set_selected_blend_ids(
+                        assignment["blend_ids"]
+                    )
 
-                            # Set the value in column 11 (weights)
-                            weights_item = QTableWidgetItem(str(round(weight)).strip())
-                            weights_item.setTextAlignment(Qt.AlignCenter)
-                            self.blend_config_table.setItem(table_row, 11, weights_item)
+                if assignment["weights"]:
+                    ordered_blend_ids = sorted(
+                        assignment["blend_ids"],
+                        key=lambda value: int(value),
+                    )
+                    weights_item = QTableWidgetItem(
+                        self.format_manual_blend_weights(
+                            assignment["weights"],
+                            ordered_blend_ids,
+                        )
+                    )
+                    weights_item.setTextAlignment(Qt.AlignCenter)
+                    weights_item.setToolTip(
+                        "Weights are restored independently for every "
+                        "selected Blend ID."
+                    )
+                    self.blend_config_table.setItem(
+                        table_row, 11, weights_item
+                    )
 
-                            break
+            if self.is_project_loaded and self.crusher_rate_input_value:
+                self.crusher_rate_input.setText(
+                    self.crusher_rate_input_value
+                )
+        finally:
+            self.blend_config_table.blockSignals(table_blocked)
+            self.crusher_rate_input.blockSignals(crusher_blocked)
 
-        if self.is_project_loaded and self.crusher_rate_input_value:
-            self.crusher_rate_input.setText(self.crusher_rate_input_value)
-        
-        self.blend_id_combo.currentIndexChanged.connect(self.on_blend_data_change)
-        self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
-        self.crusher_rate_input.textChanged.connect(self.on_blend_data_change)
+        self.on_blend_data_change()
 
     def update_blend_results(self):
         """
@@ -9556,17 +10871,23 @@ class UserInputs(QMainWindow):
         # Initialize a dictionary to aggregate data for each blend ID
         self.blend_data_from_config_table_inputs = {str(i): {"weights": [], "grades": [], "balances": [], "available": [], "sources": [], "source_ratios": []} for i in range(1, 6)}
 
+        blend_weights = {str(i): 0.0 for i in range(1, 6)}
+        for row_idx in range(self.blend_config_table.rowCount()):
+            for blend_id, weight in (
+                self.manual_blend_weights_for_row(row_idx).items()
+            ):
+                blend_weights[blend_id] += weight
+
         # Aggregate data from blend configuration table
         for row_idx in range(self.blend_config_table.rowCount()):
             try:
-                blend_id_combo = self.blend_config_table.cellWidget(row_idx, 10)  # Column index for Blend ID
-                blend_id = blend_id_combo.currentText()
-
-                # Skip calculations if Blend ID is "None"
-                if blend_id == "None":
+                blend_ids = self.selected_manual_blend_ids(
+                    self.blend_config_table.cellWidget(row_idx, 10)
+                )
+                if not blend_ids:
                     continue
 
-                weight = float(self.blend_config_table.item(row_idx, 11).text())  # Column index for Weight
+                row_weights = self.manual_blend_weights_for_row(row_idx)
                 use_projected = (
                     self.blend_config_table.cellWidget(row_idx, 4)
                     .layout()
@@ -9588,14 +10909,27 @@ class UserInputs(QMainWindow):
                 grades = [float(self.blend_config_table.item(row_idx, col).text()) if self.blend_config_table.item(row_idx, col).text() != "AMT" else "AMT" for col in range(5, 10)]
 
                 sources = self.blend_config_table.item(row_idx, 0).text()
-                source_ratios = self.blend_config_table.item(row_idx, 13).text()
-
-                self.blend_data_from_config_table_inputs[blend_id]["weights"].append(weight)
-                self.blend_data_from_config_table_inputs[blend_id]["grades"].append([grade * weight if grade != "AMT" else "AMT" for grade in grades])
-                self.blend_data_from_config_table_inputs[blend_id]["balances"].append(balance)
-                self.blend_data_from_config_table_inputs[blend_id]["available"].append(available)
-                self.blend_data_from_config_table_inputs[blend_id]["sources"].append(sources)
-                self.blend_data_from_config_table_inputs[blend_id]["source_ratios"].append(source_ratios)
+                for blend_id in blend_ids:
+                    weight = row_weights.get(blend_id, 0.0)
+                    source_ratio = (
+                        weight / blend_weights[blend_id]
+                        if blend_weights.get(blend_id, 0) > 0
+                        else 0
+                    )
+                    blend_data = self.blend_data_from_config_table_inputs[
+                        blend_id
+                    ]
+                    blend_data["weights"].append(weight)
+                    blend_data["grades"].append([
+                        grade * weight if grade != "AMT" else "AMT"
+                        for grade in grades
+                    ])
+                    blend_data["balances"].append(balance)
+                    blend_data["available"].append(available)
+                    blend_data["sources"].append(sources)
+                    blend_data["source_ratios"].append(
+                        f"{source_ratio:.2f}"
+                    )
 
             except (ValueError, AttributeError):
                 continue
@@ -9732,14 +11066,10 @@ class UserInputs(QMainWindow):
         if not isinstance(getattr(self, "stored_blend_sequence_table_for_gantt", []), list):
             self.stored_blend_sequence_table_for_gantt = []
 
-        default_duration = str((self.default_end_datetime - self.default_start_datetime).total_seconds() / 3600)
-        self.stored_blend_sequence_table_for_gantt_default = [
-        {"Blend ID": "1", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
-        {"Blend ID": "2", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
-        {"Blend ID": "3", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
-        {"Blend ID": "4", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""},
-        {"Blend ID": "5", "Origin": "Default", "Start Datetime": self.default_start_datetime_str, "Duration (hrs)": default_duration, "End Datetime": self.default_end_datetime_str, "Early Start Flag": ""}
-        ]
+        # Do not place every blend over the full horizon as a placeholder:
+        # shared-stockpile blends would immediately violate mutual exclusion.
+        # The chart remains empty until a valid sequence is submitted.
+        self.stored_blend_sequence_table_for_gantt_default = []
         
         if not self.is_project_loaded:
             self.stored_blend_sequence_table_for_gantt = []
@@ -10223,8 +11553,6 @@ class UserInputs(QMainWindow):
     def submit_blend_sequence_table_to_gantt(self):
                 
         headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
-
-        self.stored_blend_sequence_table_for_gantt = []
                 
         # Check for negative values in "Remaining Hrs"
         for row in range(self.blend_sequence_table.rowCount()):
@@ -10247,8 +11575,38 @@ class UserInputs(QMainWindow):
                     )
                     return
 
+        defined_blend_ids = {
+            str(blend.get("Blend ID"))
+            for blend in (self.saved_blends_for_schedule or [])
+            if blend.get("Blend ID") not in (None, "")
+        }
+        candidate_rows = [
+            row
+            for row in self.collect_blend_sequence_table_rows()
+            if str(row.get("Blend ID")) in defined_blend_ids
+        ]
+        conflicts = ManualBlendRules.overlapping_blend_bar_conflicts(
+            candidate_rows,
+        )
+        if conflicts:
+            conflict = conflicts[0]
+            additional = (
+                f"\n\nThere are {len(conflicts) - 1} additional conflict(s)."
+                if len(conflicts) > 1
+                else ""
+            )
+            QMessageBox.warning(
+                self,
+                "Overlapping Manual Blends",
+                ManualBlendRules.conflict_message(conflict)
+                + "\n\nOnly one blend bar can be active at a time. Adjust "
+                "a start time or duration."
+                + additional,
+            )
+            return False
+
         # If all rows are valid, store data
-        self.stored_blend_sequence_table_for_gantt = self.collect_blend_sequence_table_rows()
+        self.stored_blend_sequence_table_for_gantt = candidate_rows
         
         self.start_or_update_dash_manual_chart_thread()
 
@@ -10257,6 +11615,7 @@ class UserInputs(QMainWindow):
         self.set_page_enabled(self.grade_profile_tab_index, True)  # Enable Grade Profile tab
 
         QMessageBox.information(self, "BlendMaster", "Blend sequence successfully submitted.")
+        return True
 
     def update_early_start_conditional_format(self):
         """
@@ -10523,6 +11882,17 @@ class UserInputs(QMainWindow):
             self.selected_24hr_expit_agents = (
                 self.selected_24hr_expit_agent_names()
             )
+        if hasattr(self, "haul_cycle_file_path"):
+            self.haul_cycle_file_path_choice = (
+                self.haul_cycle_file_path.text().strip()
+            )
+            self.available_haul_cycle_crushers = (
+                self.available_haul_cycle_crusher_names()
+            )
+            self.selected_haul_cycle_crushers = (
+                self.selected_haul_cycle_crusher_names()
+            )
+            self.refresh_haul_cycle_routes(show_errors=False)
         if hasattr(self, "product_brand_labels_input"):
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 self.product_brand_labels_input.text()
@@ -10581,7 +11951,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 5,
+                "project_format_version": 7,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -10605,6 +11975,10 @@ class UserInputs(QMainWindow):
                 "file_path_24hr_choice": self.file_path_24hr_choice,
                 "available_24hr_expit_agents": self.available_24hr_expit_agents,
                 "selected_24hr_expit_agents": self.selected_24hr_expit_agents,
+                "haul_cycle_file_path_choice": self.haul_cycle_file_path_choice,
+                "available_haul_cycle_crushers": self.available_haul_cycle_crushers,
+                "selected_haul_cycle_crushers": self.selected_haul_cycle_crushers,
+                "haul_cycle_routes": self.haul_cycle_routes,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "product_build_settings": self.product_build_settings,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
@@ -10686,16 +12060,22 @@ class UserInputs(QMainWindow):
             with open(file_path, 'rb') as file:
                 loaded_state = pickle.load(file)
 
-            self.restore_loaded_state(loaded_state, source_label=file_path, show_success=False)
+            self.restore_loaded_state(
+                loaded_state,
+                source_label=file_path,
+                show_success=True,
+            )
             return
 
         except FileNotFoundError:
             QMessageBox.warning(self, "Error", "No saved projects found!")
             self.is_project_loaded = False
+            self.finish_project_load_ui(success=False)
             return
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
             self.is_project_loaded = False
+            self.finish_project_load_ui(success=False)
             return
 
     def resolve_missing_aps_mining_csv_paths(self, loaded_state):
@@ -10717,6 +12097,7 @@ class UserInputs(QMainWindow):
             "aps_mining_csv",
             "mining_csv",
             "file_path",
+            "haul_cycle_file_path_choice",
         )
         replacements = {}
         for state in state_records:
@@ -10734,12 +12115,20 @@ class UserInputs(QMainWindow):
                     replacement, _ = QFileDialog.getOpenFileName(
                         self,
                         (
-                            "Locate 24HR Mining.csv"
-                            if "24hr" in key.lower() or "twenty_four" in key.lower()
-                            else "Locate 2WP Mining.csv"
+                            "Locate 2WP Haul Infinity Cycles.csv"
+                            if "haul_cycle" in key.lower()
+                            else (
+                                "Locate 24HR Mining.csv"
+                                if "24hr" in key.lower() or "twenty_four" in key.lower()
+                                else "Locate 2WP Mining.csv"
+                            )
                         ),
                         start_directory,
-                        "APS Mining.csv (*.csv);;All Files (*)",
+                        (
+                            "Haul Infinity Cycles.csv (*.csv);;All Files (*)"
+                            if "haul_cycle" in key.lower()
+                            else "APS Mining.csv (*.csv);;All Files (*)"
+                        ),
                     )
                     if not replacement:
                         QMessageBox.information(
@@ -10837,9 +12226,15 @@ class UserInputs(QMainWindow):
     def restore_loaded_state(self, loaded_state, source_label=None, show_success=False):
         """Restore app state using the same path as Load Project."""
         self.is_project_loaded = True
+        self.project_load_keep_site_configuration_visible = bool(show_success)
+        self.project_load_show_success = bool(show_success)
+        self.project_load_source_label = str(source_label or "")
+        if show_success:
+            self.show_page(self.site_config_tab_index)
         loaded_state = self.normalized_agent_project_state(loaded_state)
         if not self.resolve_missing_aps_mining_csv_paths(loaded_state):
             self.is_project_loaded = False
+            self.finish_project_load_ui(success=False)
             return False
         loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
@@ -10881,6 +12276,22 @@ class UserInputs(QMainWindow):
         )
         self.selected_24hr_expit_agents = self.normalized_expit_agent_names(
             loaded_state.get("selected_24hr_expit_agents") or []
+        )
+        self.haul_cycle_file_path_choice = str(
+            loaded_state.get("haul_cycle_file_path_choice") or ""
+        )
+        self.available_haul_cycle_crushers = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("available_haul_cycle_crushers") or []
+            )
+        )
+        self.selected_haul_cycle_crushers = (
+            self.normalized_expit_agent_names(
+                loaded_state.get("selected_haul_cycle_crushers") or []
+            )
+        )
+        self.haul_cycle_routes = copy.deepcopy(
+            loaded_state.get("haul_cycle_routes") or {}
         )
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             loaded_state.get("product_brand_labels_choice", self.default_product_brand_labels())
@@ -10990,8 +12401,6 @@ class UserInputs(QMainWindow):
         if getattr(self, "project_load_waiting_for_AMT", False):
             return
         self.continue_project_load_after_stockpile_setup()
-        if show_success:
-            QMessageBox.information(self, "BlendMaster", f"Project state loaded from {source_label or 'agent result'}.")
 
     def continue_project_load_after_stockpile_setup(self):
         self.project_load_restore_in_progress = False
@@ -11014,6 +12423,9 @@ class UserInputs(QMainWindow):
             }
         }
         self.scenario_switch_in_progress = False
+        self.project_load_keep_site_configuration_visible = False
+        self.project_load_show_success = False
+        self.project_load_source_label = ""
         set_database_path(initial_database_path)
         self.blend_mode_choice = None
         self.calendar_inputs = None
@@ -11027,6 +12439,10 @@ class UserInputs(QMainWindow):
         self.file_path_24hr_choice = None
         self.available_24hr_expit_agents = []
         self.selected_24hr_expit_agents = []
+        self.haul_cycle_file_path_choice = None
+        self.available_haul_cycle_crushers = []
+        self.selected_haul_cycle_crushers = []
+        self.haul_cycle_routes = {}
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True

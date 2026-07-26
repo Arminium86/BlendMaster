@@ -21,13 +21,17 @@ class EventPoolGenerator:
             stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
             if (self.is_stockpile_ready(stockpile, period, current_time, balance_tracker)):
                 stockpile_cost = stockpile.to_dict().get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
-                stockpile_cash = -stockpile.to_dict().get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+                # Compatibility field only. Calendar Cash no longer
+                # participates in source selection.
+                stockpile_cash = 0.0
                 stockpile_max_quantity = stockpile.to_dict().get(f"max_quantity_{period}", 0)
                 for equipment in self.equipment:
                     
                     if equipment.name in stockpile.to_dict().get("equipment", []) and "RC" in equipment.name: 
                         equipment_priority = equipment.to_dict().get(f"priority_{period}", 0)
-                        reclaim_rate = equipment.to_dict().get(f"rate_{period}", 0)
+                        reclaim_rate = stockpile.max_reclaim_rate
+                        if reclaim_rate is None:
+                            reclaim_rate = equipment.to_dict().get(f"rate_{period}", 0)
 
                         events.append({
                             "stockpile": stockpile.name,
@@ -62,7 +66,7 @@ class EventPoolGenerator:
                 continue
 
             grade_block_cost = grade_block.to_dict().get(f"cost_{period}", 0) # This can be used as a future cost per tonne for a stockpile based on haulage time / distance 
-            grade_block_cash = -grade_block.to_dict().get(f"cash_{period}", 0) # Manual user cash flow to incentivise / disincentivise a source - negative value for Linprog to minimize
+            grade_block_cash = 0.0
             grade_block_max_quantity = grade_block.to_dict().get(f"max_quantity_{period}", 0)
             if grade_block_max_quantity <= 0:
                 continue

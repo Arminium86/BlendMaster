@@ -276,10 +276,6 @@ class Run:
                 {"Preplan": 100000, "Period_1": 100000, "Period_2": 100000},
             )
             calendar_inputs.setdefault(
-                f"stockpiles_{calendar_name}_cost",
-                {"Preplan": 0, "Period_1": 0, "Period_2": 0},
-            )
-            calendar_inputs.setdefault(
                 f"stockpiles_{calendar_name}_cash",
                 {"Preplan": 0, "Period_1": 0, "Period_2": 0},
             )
@@ -527,7 +523,8 @@ class Run:
             f"BlendMaster could not satisfy the stockpile-count constraints ({constraint_text}) "
             f"with each selected stockpile contributing at least "
             f"{Run._format_stockpile_contribution_ratio(min_stockpile_contribution_ratio)} of crusher feed. "
-            "Review Solver Configuration and the Calendar inputs, then rerun."
+            "Review Decision Levers, Solver Configuration and the Calendar "
+            "inputs, then rerun."
         )
         return self._format_infeasible_run_message(detail, diagnostics, stockpile_message)
 

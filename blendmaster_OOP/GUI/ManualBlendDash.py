@@ -9,6 +9,7 @@ import requests
 from dash import dcc, html, Input, Output, dash_table, Dash
 from flask import Flask, jsonify, request
 import threading
+from classes.ManualBlendRules import ManualBlendRules
 
 class ManualBlendDash:
     def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port, crusher_rate):
@@ -16,7 +17,7 @@ class ManualBlendDash:
         self.manual_gantt_legend_and_tooltip = manual_gantt_legend_and_tooltip
         self.port = port
         self.crusher_rate = crusher_rate
-        self.app = dash.Dash(__name__)
+        self.app = Dash(__name__)
         self.colors = [
             "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7",
             "#BFD8D2", "#CDB4DB", "#F4BFBF", "#BDE0FE", "#C9E4CA"
@@ -93,6 +94,17 @@ class ManualBlendDash:
                     for key, value in row.items()
                     if not str(key).startswith("_")
                 })
+
+            conflicts = ManualBlendRules.overlapping_blend_bar_conflicts(
+                cleaned_rows,
+            )
+            if conflicts:
+                return jsonify({
+                    "status": "conflict",
+                    "message": ManualBlendRules.conflict_message(
+                        conflicts[0]
+                    ),
+                }), 409
 
             with self.data_lock:
                 self.stored_blend_sequence_table_for_gantt = cleaned_rows
@@ -579,11 +591,15 @@ async function postUpdate() {
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({rows})
         });
-        if (!response.ok) throw new Error("Update failed");
+        const result = await response.json();
+        if (!response.ok) {
+            await loadData();
+            throw new Error(result.message || "Update failed");
+        }
         setStatus("Chart edits saved to table");
         setTimeout(() => setStatus(""), 1800);
     } catch (error) {
-        setStatus("Could not save chart edit");
+        setStatus(error.message || "Could not save chart edit");
         console.error(error);
     }
 }
