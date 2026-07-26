@@ -1127,6 +1127,10 @@ class UserInputs(QMainWindow):
             self.auto_load_2wp_targets_choice = (
                 self.auto_load_2wp_targets_checkbox.isChecked()
             )
+        if hasattr(self, "group_2wp_build_targets_checkbox"):
+            self.group_2wp_build_targets_by_brand_choice = (
+                self.group_2wp_build_targets_checkbox.isChecked()
+            )
         if hasattr(self, "solver_config_tab"):
             self.store_solver_config_inputs(show_errors=False)
         if hasattr(self, "product_build_table"):
@@ -1147,6 +1151,7 @@ class UserInputs(QMainWindow):
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "auto_load_2wp_targets_choice",
+            "group_2wp_build_targets_by_brand_choice",
             "reevaluate_aps_direct_tip_choice", "aps_direct_tip_crusher_choice",
             "aps_stockpile_brand_map", "aps_stockpile_timing_guidance",
             "aps_active_blend_guidance", "aps_destination_guidance",
@@ -1339,6 +1344,11 @@ class UserInputs(QMainWindow):
             self.product_build_settings = copy.deepcopy(state.get("product_build_settings") or [])
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
+            )
+            self.group_2wp_build_targets_by_brand_choice = bool(
+                state.get(
+                    "group_2wp_build_targets_by_brand_choice", False
+                )
             )
             self.reevaluate_aps_direct_tip_choice = bool(state.get("reevaluate_aps_direct_tip_choice", False))
             self.aps_direct_tip_crusher_choice = self.normalized_aps_crusher_choice(
@@ -2141,10 +2151,22 @@ class UserInputs(QMainWindow):
             "Load tonnes and grade targets from the latest Wednesday 2WP scenario for the active mine and crusher."
         )
         self.product_build_2wp_button.clicked.connect(self.load_2wp_product_build_targets)
+        self.group_2wp_build_targets_checkbox = QCheckBox(
+            "Group by Brand"
+        )
+        self.group_2wp_build_targets_checkbox.setChecked(bool(getattr(
+            self, "group_2wp_build_targets_by_brand_choice", False
+        )))
+        self.group_2wp_build_targets_checkbox.setToolTip(
+            "Combine consecutive imported 2WP rows that have the same "
+            "brand. Tonnes are summed and grade targets are tonne-weighted; "
+            "a different intervening brand starts a new build."
+        )
         top_layout.addWidget(QLabel("Number of builds"))
         top_layout.addWidget(self.product_build_count_input)
         top_layout.addWidget(self.product_build_count_button)
         top_layout.addWidget(self.product_build_2wp_button)
+        top_layout.addWidget(self.group_2wp_build_targets_checkbox)
         top_layout.addStretch()
         self.product_build_layout.addLayout(top_layout)
 
@@ -2243,6 +2265,14 @@ class UserInputs(QMainWindow):
 
     def populate_product_build_table(self):
         settings = getattr(self, "product_build_settings", []) or []
+        if hasattr(self, "group_2wp_build_targets_checkbox"):
+            self.group_2wp_build_targets_checkbox.setChecked(bool(
+                getattr(
+                    self,
+                    "group_2wp_build_targets_by_brand_choice",
+                    False,
+                )
+            ))
         if hasattr(self, "product_build_count_input"):
             self.product_build_count_input.setText(str(len(settings)))
         self.product_build_table.setRowCount(len(settings))
@@ -2503,6 +2533,13 @@ class UserInputs(QMainWindow):
                 f"No overlapping 2WP OPF Feed targets were found for {mine} / {opf} / {crusher}.",
                 )
                 return
+            self.group_2wp_build_targets_by_brand_choice = bool(
+                self.group_2wp_build_targets_checkbox.isChecked()
+            )
+            if self.group_2wp_build_targets_by_brand_choice:
+                settings = self.planning_plan_targets.group_builds_by_brand(
+                    settings
+                )
             extra_brands = [setting.get("brand") for setting in settings if setting.get("brand")]
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 self.product_brand_options() + extra_brands
@@ -4734,6 +4771,12 @@ class UserInputs(QMainWindow):
                         opf=self.opf_input_choice,
                         crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
                     )
+                    if self.group_2wp_build_targets_by_brand_choice:
+                        build_targets[crusher] = (
+                            self.planning_plan_targets.group_builds_by_brand(
+                                build_targets[crusher]
+                            )
+                        )
                 except Exception as exc:
                     target_errors[crusher] = str(exc)
         return {
@@ -7146,6 +7189,12 @@ class UserInputs(QMainWindow):
             loaded_state["product_build_settings"] = []
         if loaded_state.get("auto_load_2wp_targets_choice") is None:
             loaded_state["auto_load_2wp_targets_choice"] = True
+        if loaded_state.get(
+            "group_2wp_build_targets_by_brand_choice"
+        ) is None:
+            loaded_state[
+                "group_2wp_build_targets_by_brand_choice"
+            ] = False
         mine = str(loaded_state.get("mine_input_choice") or "").strip().upper()
         opf = str(loaded_state.get("opf_input_choice") or "").strip()
         crusher = str(loaded_state.get("crusher_input_choice") or "").strip()
@@ -13130,6 +13179,10 @@ class UserInputs(QMainWindow):
             self.auto_load_2wp_targets_choice = (
                 self.auto_load_2wp_targets_checkbox.isChecked()
             )
+        if hasattr(self, "group_2wp_build_targets_checkbox"):
+            self.group_2wp_build_targets_by_brand_choice = (
+                self.group_2wp_build_targets_checkbox.isChecked()
+            )
         if hasattr(self, "reevaluate_aps_direct_tip_checkbox"):
             self.reevaluate_aps_direct_tip_choice = self.reevaluate_aps_direct_tip_checkbox.isChecked()
         if hasattr(self, "aps_crusher_input"):
@@ -13216,6 +13269,9 @@ class UserInputs(QMainWindow):
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "product_build_settings": self.product_build_settings,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
+                "group_2wp_build_targets_by_brand_choice": (
+                    self.group_2wp_build_targets_by_brand_choice
+                ),
                 "aps_stockpile_brand_map": getattr(self, "aps_stockpile_brand_map", {}),
                 "aps_stockpile_timing_guidance": getattr(
                     self, "aps_stockpile_timing_guidance", {}
@@ -13541,6 +13597,11 @@ class UserInputs(QMainWindow):
         self.auto_load_2wp_targets_choice = bool(
             loaded_state.get("auto_load_2wp_targets_choice", True)
         )
+        self.group_2wp_build_targets_by_brand_choice = bool(
+            loaded_state.get(
+                "group_2wp_build_targets_by_brand_choice", False
+            )
+        )
         self.aps_stockpile_brand_map = loaded_state.get("aps_stockpile_brand_map", {}) or {}
         self.aps_stockpile_timing_guidance = (
             loaded_state.get("aps_stockpile_timing_guidance", {}) or {}
@@ -13695,6 +13756,7 @@ class UserInputs(QMainWindow):
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True
+        self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}
         self.aps_stockpile_timing_guidance = {}
         self.aps_active_blend_guidance = []

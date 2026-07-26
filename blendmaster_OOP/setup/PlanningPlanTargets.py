@@ -231,3 +231,89 @@ class PlanningPlanTargets:
             brand_counts[brand] = brand_counts.get(brand, 0) + 1
             build["build_name"] = f"{brand} Build {brand_counts[brand]}" if brand else f"Build {build['build_id']}"
         return builds
+
+    @classmethod
+    def group_builds_by_brand(cls, builds):
+        """Combine only consecutive 2WP rows that share the same brand."""
+        grade_fields = [
+            f"target_{grade}_{bound}"
+            for grade in ("fe", "si", "al", "p", "mn")
+            for bound in ("min", "max")
+        ]
+        groups = []
+        for build in builds or []:
+            brand = str(build.get("brand") or "").strip().upper()
+            if not groups or groups[-1]["brand"] != brand:
+                groups.append({
+                    "brand": brand,
+                    "target_tonnes": 0.0,
+                    "planning_target_tonnes": 0.0,
+                    "_weighted_grades": {
+                        field: 0.0 for field in grade_fields
+                    },
+                    "_operations": [],
+                    "_template": dict(build),
+                    "_starts": [],
+                    "_ends": [],
+                })
+            group = groups[-1]
+            tonnes = cls._number(build.get("target_tonnes"))
+            group["target_tonnes"] += tonnes
+            group["planning_target_tonnes"] += cls._number(
+                build.get("planning_target_tonnes")
+            )
+            for field in grade_fields:
+                group["_weighted_grades"][field] += (
+                    cls._number(build.get(field)) * tonnes
+                )
+            operation = str(
+                build.get("planning_operation") or ""
+            ).strip()
+            if operation and operation not in group["_operations"]:
+                group["_operations"].append(operation)
+            if build.get("planning_period_start") is not None:
+                group["_starts"].append(
+                    build["planning_period_start"]
+                )
+            if build.get("planning_period_end") is not None:
+                group["_ends"].append(
+                    build["planning_period_end"]
+                )
+
+        combined = []
+        brand_counts = {}
+        for group in groups:
+            brand = group["brand"]
+            brand_counts[brand] = brand_counts.get(brand, 0) + 1
+            total = group["target_tonnes"]
+            result = group["_template"]
+            result.update({
+                "build_id": len(combined) + 1,
+                "build_name": (
+                    f"{brand} Build {brand_counts[brand]}"
+                    if brand else f"Build {len(combined) + 1}"
+                ),
+                "brand": brand,
+                "target_tonnes": total,
+                "planning_target_tonnes": (
+                    group["planning_target_tonnes"]
+                ),
+                "planning_operation": ", ".join(
+                    group["_operations"]
+                ),
+            })
+            if group["_starts"]:
+                result["planning_period_start"] = min(
+                    group["_starts"]
+                )
+            if group["_ends"]:
+                result["planning_period_end"] = max(
+                    group["_ends"]
+                )
+            for field in grade_fields:
+                result[field] = (
+                    group["_weighted_grades"][field] / total
+                    if total > 0 else 0.0
+                )
+            combined.append(result)
+        return combined
