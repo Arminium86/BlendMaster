@@ -526,23 +526,24 @@ class ManualBlendPlanner:
                 return setting
         return {}
 
-    def _target_values(self, build, period):
+    def _target_values(self, period):
         result = {}
         period_name = {
             0: "Preplan", 1: "Period_1", 2: "Period_2"
         }.get(period, "Preplan")
         for grade in self.GRADES:
             for bound in ("min", "max"):
-                value = build.get(f"target_{grade}_{bound}")
-                if value is None:
-                    calendar_values = self.calendar_inputs.get(
-                        f"crusher_target_{grade}_{bound}", {}
-                    )
-                    if isinstance(calendar_values, Mapping):
-                        value = calendar_values.get(period_name)
+                value = None
+                calendar_values = self.calendar_inputs.get(
+                    f"crusher_target_{grade}_{bound}", {}
+                )
+                if isinstance(calendar_values, Mapping):
+                    value = calendar_values.get(period_name)
                 result[
                     f"crusher_grade_target_{bound}_{grade}"
-                ] = self._number(value)
+                ] = self._number(
+                    value, 0.0 if bound == "min" else 100.0
+                )
         return result
 
     def build_report(self, states, allocations=None):
@@ -640,7 +641,7 @@ class ManualBlendPlanner:
                 if total_tonnes > 0 else 0
             )
             build = self._active_build(produced_tonnes)
-            targets = self._target_values(build, state["period"])
+            targets = self._target_values(state["period"])
             duration = state["steady_state_duration"]
 
             for source_row in source_rows:

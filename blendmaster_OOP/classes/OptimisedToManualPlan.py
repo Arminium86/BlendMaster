@@ -61,6 +61,15 @@ class OptimisedToManualPlan:
             if part.strip()
         ]
 
+    @staticmethod
+    def _native_value(value):
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return value.item()
+            except (TypeError, ValueError):
+                pass
+        return value
+
     def _prepared_report(self):
         required = {
             "start_datetime", "end_datetime", "steady_state_number",
@@ -258,6 +267,7 @@ class OptimisedToManualPlan:
                 "crusher_rate": state_crusher_rate,
                 "period": period_name,
                 "stockpile_rows": stockpile_rows,
+                "grade_block_rows": grade_blocks.copy(),
             })
 
             states.append({
@@ -268,9 +278,9 @@ class OptimisedToManualPlan:
                 "End Datetime": end.strftime("%Y-%m-%d %H:%M"),
                 "Early Start Flag": "On Time",
                 "Remaining Hrs": 0,
-                "_optimised_steady_state": first[
-                    "steady_state_number"
-                ],
+                "_optimised_steady_state": self._native_value(
+                    first["steady_state_number"]
+                ),
                 "_fixed_steady_state": True,
                 "_crusher_rate": state_crusher_rate,
                 "_period_name": period_name,
@@ -285,9 +295,9 @@ class OptimisedToManualPlan:
 
             for _, row in grade_blocks.iterrows():
                 direct_tip_rows.append({
-                    "optimised_steady_state": row[
-                        "steady_state_number"
-                    ],
+                    "optimised_steady_state": self._native_value(
+                        row["steady_state_number"]
+                    ),
                     "start_datetime": start,
                     "end_datetime": end,
                     "source": str(row.get("source") or "").strip(),
@@ -313,6 +323,10 @@ class OptimisedToManualPlan:
             )
             source_rows = pd.concat(
                 [item["stockpile_rows"] for item in state_groups],
+                ignore_index=True,
+            )
+            grade_block_rows = pd.concat(
+                [item["grade_block_rows"] for item in state_groups],
                 ignore_index=True,
             )
             tonnes_by_source = (
@@ -382,6 +396,25 @@ class OptimisedToManualPlan:
                 bool(self.stockpile_data.get(source, {}).get("amt"))
                 for source in sources
             )
+            direct_tip_tonnes_by_source = (
+                grade_block_rows.groupby(
+                    "_source_name", sort=True
+                )["_tonnes"].sum()
+            )
+            direct_tip_sources = (
+                direct_tip_tonnes_by_source.index.tolist()
+            )
+            total_crusher_tonnes = sum(
+                item["crusher_tonnes"] for item in state_groups
+            )
+            direct_tip_ratios = [
+                (
+                    float(direct_tip_tonnes_by_source[source])
+                    / total_crusher_tonnes
+                    if total_crusher_tonnes > self.TOLERANCE else 0
+                )
+                for source in direct_tip_sources
+            ]
             definitions.append({
                 "Blend ID": blend_id,
                 "Grade Fe": (
@@ -405,6 +438,16 @@ class OptimisedToManualPlan:
                 "Sources": ", ".join(sources),
                 "Source Ratios": ", ".join(
                     f"{ratio:.6f}" for ratio in source_ratios
+                ),
+                "Direct Tip Sources": ", ".join(
+                    direct_tip_sources
+                ),
+                "Direct Tip Ratios": ", ".join(
+                    f"{ratio:.6f}" for ratio in direct_tip_ratios
+                ),
+                "Direct Tip Tonnes": ", ".join(
+                    f"{float(direct_tip_tonnes_by_source[source]):.1f}"
+                    for source in direct_tip_sources
                 ),
             })
             config_inputs[blend_id] = {

@@ -9,6 +9,7 @@ import requests
 from dash import dcc, html, Input, Output, dash_table, Dash
 from flask import Flask, jsonify, request
 import threading
+from datetime import date, datetime
 from classes.ManualBlendRules import ManualBlendRules
 
 class ManualBlendDash:
@@ -129,13 +130,38 @@ class ManualBlendDash:
         for index, row in enumerate(rows):
             row["_row_index"] = index
 
-        return {
+        return self.json_safe_value({
             "rows": rows,
             "legend": legend,
             "crusher_rate": self.crusher_rate,
             "colors": self.colors,
             "revision": revision,
-        }
+        })
+
+    @classmethod
+    def json_safe_value(cls, value):
+        if isinstance(value, dict):
+            return {
+                str(key): cls.json_safe_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [cls.json_safe_value(item) for item in value]
+        if isinstance(value, (datetime, date, pd.Timestamp)):
+            return value.isoformat()
+        if value is pd.NA:
+            return None
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return cls.json_safe_value(value.item())
+            except (TypeError, ValueError):
+                pass
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return value
 
     def consume_pending_table_update(self):
         with self.data_lock:
@@ -472,6 +498,28 @@ function buildLegendDetails(row) {
                 : rawRatio;
             html += "<div>- " + escapeHtml(source.trim()) + " @ " +
                 escapeHtml(displayedRatio) + "%</div>";
+        });
+    }
+    if (row["Direct Tip Sources"]) {
+        const sources = String(row["Direct Tip Sources"]).split(",");
+        const ratios = String(row["Direct Tip Ratios"] || "").split(",");
+        const tonnes = String(row["Direct Tip Tonnes"] || "").split(",");
+        html += "<div style='margin-top:5px;'>Direct Tip Grade Blocks:</div>";
+        sources.forEach((source, index) => {
+            const numericRatio = Number(String(ratios[index] || "").trim());
+            const numericTonnes = Number(String(tonnes[index] || "").trim());
+            const displayedRatio = Number.isFinite(numericRatio)
+                ? (numericRatio * 100).toFixed(2) + "%"
+                : "";
+            const displayedTonnes = Number.isFinite(numericTonnes)
+                ? " (" + numericTonnes.toLocaleString(undefined, {
+                    minimumFractionDigits: 1,
+                    maximumFractionDigits: 1
+                }) + " t)"
+                : "";
+            html += "<div>- " + escapeHtml(source.trim()) +
+                (displayedRatio ? " @ " + escapeHtml(displayedRatio) : "") +
+                displayedTonnes + "</div>";
         });
     }
     return html;

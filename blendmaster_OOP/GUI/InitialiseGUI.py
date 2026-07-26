@@ -8124,6 +8124,105 @@ class UserInputs(QMainWindow):
         finally:
             connection.close()
 
+    def reset_manual_blending_plan_state(self):
+        self.blend_config_table_inputs = {}
+        self.blend_data_from_config_table_inputs = {}
+        self.saved_blends_for_schedule = []
+        self.stored_blend_sequence_table_for_gantt = []
+        self.stored_blend_sequence_table_for_gantt_default = []
+        self.manual_direct_tip_allocations = {}
+        self.manual_steady_states = []
+        self.manual_blend_report = pd.DataFrame(
+            columns=ManualBlendPlanner.REPORT_COLUMNS
+        )
+        self.manual_gantt_legend_and_tooltip = []
+
+    def clear_manual_blending_plan(self):
+        has_manual_data = bool(
+            getattr(self, "saved_blends_for_schedule", [])
+            or getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            )
+            or getattr(self, "manual_direct_tip_allocations", {})
+            or (
+                isinstance(
+                    getattr(self, "manual_blend_report", None),
+                    pd.DataFrame,
+                )
+                and not self.manual_blend_report.empty
+            )
+        )
+        if has_manual_data:
+            reply = QMessageBox.question(
+                self,
+                "Clear Manual Blending Session?",
+                "Clear Setup Blends, Blend Sequence, direct-tip "
+                "selections, manual steady states, and the manual report?\n\n"
+                "Stockpile Inventories, Calendar settings, guidance "
+                "schedules, and optimized results will be retained.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+
+        self.reset_manual_blending_plan_state()
+        self.set_manual_crusher_rate_inputs(
+            self.calendar_crusher_rate_values()
+        )
+        DatabaseManager().write_manual_blend_report_to_database(
+            self.manual_blend_report
+        )
+
+        if hasattr(self, "blend_config_table"):
+            self._manual_blend_reset_in_progress = True
+            was_blocked = self.blend_config_table.blockSignals(True)
+            try:
+                self.populate_blend_config_table()
+                self.populate_blend_config_weights_and_ids()
+                self.update_blend_results()
+            finally:
+                self.blend_config_table.blockSignals(was_blocked)
+                self._manual_blend_reset_in_progress = False
+            # The UI calculation builds empty placeholder entries for the
+            # default Blend IDs. They are not configured manual blends.
+            self.blend_config_table_inputs = {}
+            self.blend_data_from_config_table_inputs = {}
+
+        if hasattr(self, "blend_results_table_view"):
+            self.blend_results_table_view.clearContents()
+            self.blend_results_table_view.setRowCount(0)
+            self.blend_results_table_view.setColumnCount(0)
+        if hasattr(self, "blend_sequence_table"):
+            self.blend_sequence_table.clearContents()
+            self.blend_sequence_table.setRowCount(0)
+        if hasattr(self, "manual_steady_state_button"):
+            self.manual_steady_state_button.setEnabled(False)
+
+        manual_chart = getattr(
+            self, "draw_manual_gantt_chart", None
+        )
+        if manual_chart is not None:
+            manual_chart.update_data([], [])
+        if hasattr(self, "manual_gantt_view"):
+            self.load_manual_gantt_chart()
+            QTimer.singleShot(250, self.manual_gantt_view.reload)
+        if hasattr(self, "draw_grade_profile_chart"):
+            self.draw_grade_profile_chart.update_data(pd.DataFrame())
+
+        self.set_page_enabled(self.blend_sequence_tab_index, False)
+        self.set_page_enabled(self.grade_profile_tab_index, False)
+        self.refresh_sqlite_reports()
+        self.save_active_scenario_state()
+        self.show_page(self.blend_config_tab_index)
+        QMessageBox.information(
+            self,
+            "BlendMaster",
+            "The manual blending session has been cleared. "
+            "Setup Blends is ready for a fresh manual plan.",
+        )
+        return True
+
     def prepopulate_manual_from_optimised_result(
         self, automatic=False
     ):
@@ -8264,6 +8363,8 @@ class UserInputs(QMainWindow):
             self.saved_blends_for_schedule
         )
         self.start_or_update_dash_manual_chart_thread()
+        self.load_manual_gantt_chart()
+        QTimer.singleShot(250, self.manual_gantt_view.reload)
         self.set_page_enabled(self.blend_sequence_tab_index, True)
         self.set_page_enabled(self.grade_profile_tab_index, True)
         self.refresh_sqlite_reports()
@@ -10632,11 +10733,31 @@ class UserInputs(QMainWindow):
             self.prepopulate_manual_button.clicked.connect(
                 self.prepopulate_manual_from_optimised_result
             )
+            self.clear_manual_plan_button = QPushButton(
+                "Clear & Start Fresh"
+            )
+            self.clear_manual_plan_button.setMinimumWidth(190)
+            self.clear_manual_plan_button.setStyleSheet(
+                "QPushButton { background: #b91c1c; color: white; "
+                "font-weight: 600; padding: 7px 14px; "
+                "border-radius: 4px; } "
+                "QPushButton:hover { background: #991b1b; } "
+                "QPushButton:pressed { background: #7f1d1d; }"
+            )
+            self.clear_manual_plan_button.setToolTip(
+                "Clear Setup Blends, Blend Sequence, manual direct-tip "
+                "selections, and the manual report while retaining this "
+                "scenario's stockpiles, Calendar, and guidance inputs."
+            )
+            self.clear_manual_plan_button.clicked.connect(
+                self.clear_manual_blending_plan
+            )
 
             # Align button to the bottom-left using layout
             button_layout = QHBoxLayout()
             button_layout.addWidget(submit_button)
             button_layout.addWidget(self.prepopulate_manual_button)
+            button_layout.addWidget(self.clear_manual_plan_button)
             button_layout.addStretch()  # Push the button to the left
 
             self.setup_blends_tab_layout.addLayout(button_layout)
@@ -10895,6 +11016,10 @@ class UserInputs(QMainWindow):
 
     def on_blend_data_change(self):
         """Recalculate and update blend results whenever blend data changes."""
+        if getattr(
+            self, "_manual_blend_reset_in_progress", False
+        ):
+            return
         self.update_reclaim_rate()  # Update reclaim rates
         self.update_blend_results()  # Refresh blend results table
 
@@ -11016,8 +11141,10 @@ class UserInputs(QMainWindow):
         self.crusher_rate = period_rates["Preplan"]
         self.crusher_rate_input_value = str(self.crusher_rate)
 
-        # Temporarily disconnect the signal to prevent recursion
-        self.blend_config_table.blockSignals(True)
+        # Temporarily disconnect the signal to prevent recursion. Restore the
+        # prior state because callers such as Clear & Start Fresh may already
+        # be holding a wider signal block around a table rebuild.
+        was_blocked = self.blend_config_table.blockSignals(True)
 
         try:
             # Initialize a dictionary to store total weights for each blend ID
@@ -11032,7 +11159,12 @@ class UserInputs(QMainWindow):
                     for blend_id, weight in (
                         self.manual_blend_weights_for_row(row_idx).items()
                     ):
-                        blend_weights[blend_id] += weight
+                        # A table-change event can briefly expose an old
+                        # imported Blend ID while the table is being rebuilt.
+                        # Treat it as a valid transitional key.
+                        blend_weights[blend_id] = (
+                            blend_weights.get(blend_id, 0) + weight
+                        )
                 except AttributeError:
                     continue
 
@@ -11157,7 +11289,7 @@ class UserInputs(QMainWindow):
 
         finally:
             # Reconnect the signal after updates are complete
-            self.blend_config_table.blockSignals(False)
+            self.blend_config_table.blockSignals(was_blocked)
 
         # Optional: Resize columns to fit updated content
         self.blend_config_table.resizeColumnsToContents()
@@ -11471,11 +11603,48 @@ class UserInputs(QMainWindow):
         item = QTableWidgetItem(text)
         item.setTextAlignment(Qt.AlignCenter)
         return item
+
+    @staticmethod
+    def can_preserve_optimised_sequence(
+        existing_sequence, saved_blends
+    ):
+        defined_blend_ids = {
+            str(blend.get("Blend ID"))
+            for blend in (saved_blends or [])
+            if blend.get("Blend ID") not in (None, "")
+        }
+        return bool(
+            existing_sequence
+            and any(
+                row.get("_fixed_steady_state")
+                for row in existing_sequence
+            )
+            and all(
+                str(row.get("Blend ID")) in defined_blend_ids
+                for row in existing_sequence
+            )
+        )
     
     def store_blend_results(self):
         """
         Store the blend results table data into self.saved_blends_for_schedule.
         """
+        existing_sequence = copy.deepcopy(
+            getattr(
+                self, "stored_blend_sequence_table_for_gantt", []
+            ) or []
+        )
+        existing_blend_metadata = {
+            str(blend.get("Blend ID")): {
+                key: value
+                for key, value in blend.items()
+                if str(key).startswith("Direct Tip ")
+            }
+            for blend in (
+                getattr(self, "saved_blends_for_schedule", []) or []
+            )
+            if blend.get("Blend ID") not in (None, "")
+        }
         self.saved_blends_for_schedule = []
 
         # Iterate through rows of the blend results table
@@ -11492,9 +11661,51 @@ class UserInputs(QMainWindow):
 
             # Skip rows that are entirely empty
             if any(value is not None and value != "" for value in blend_data.values()):
+                blend_data.update(
+                    existing_blend_metadata.get(
+                        str(blend_data.get("Blend ID")), {}
+                    )
+                )
                 self.saved_blends_for_schedule.append(blend_data)
 
-        self.setup_sequence_tab()
+        preserve_optimised_sequence = (
+            self.can_preserve_optimised_sequence(
+                existing_sequence,
+                self.saved_blends_for_schedule,
+            )
+        )
+
+        previous_project_loaded = self.is_project_loaded
+        if preserve_optimised_sequence:
+            self.stored_blend_sequence_table_for_gantt = (
+                existing_sequence
+            )
+            self.is_project_loaded = True
+        try:
+            self.setup_sequence_tab()
+            if preserve_optimised_sequence:
+                self.populate_blend_sequence_table_if_project_is_loaded()
+                self.apply_manual_gantt_rows_to_table(
+                    existing_sequence
+                )
+        finally:
+            self.is_project_loaded = previous_project_loaded
+
+        if preserve_optimised_sequence:
+            # Table hydration intentionally contains only user-facing
+            # columns. Restore the exact optimized timing/rate metadata and
+            # direct-tip annotations after rebuilding Setup Blends.
+            self.stored_blend_sequence_table_for_gantt = (
+                existing_sequence
+            )
+            self.manual_gantt_legend_and_tooltip = (
+                self.saved_blends_for_schedule
+            )
+            self.start_or_update_dash_manual_chart_thread()
+            self.load_manual_gantt_chart()
+            QTimer.singleShot(
+                250, self.manual_gantt_view.reload
+            )
         self.set_page_enabled(self.blend_sequence_tab_index, True)
         self.show_page(self.blend_sequence_tab_index)
         self.save_button.setEnabled(True)
@@ -12457,6 +12668,27 @@ class UserInputs(QMainWindow):
                 direct_tip_tonnes / capacity if capacity > 0 else 0
             )
 
+        legend_metadata = self.manual_direct_tip_legend_metadata(
+            states, allocations
+        )
+        legend_collections = [
+            getattr(self, "saved_blends_for_schedule", []) or [],
+            getattr(self, "manual_gantt_legend_and_tooltip", []) or [],
+        ]
+        for legend_rows in legend_collections:
+            for legend_row in legend_rows:
+                blend_id = str(legend_row.get("Blend ID") or "")
+                legend_row.update(
+                    legend_metadata.get(
+                        blend_id,
+                        {
+                            "Direct Tip Sources": "",
+                            "Direct Tip Ratios": "",
+                            "Direct Tip Tonnes": "",
+                        },
+                    )
+                )
+
         manual_chart = getattr(
             self, "draw_manual_gantt_chart", None
         )
@@ -12467,6 +12699,53 @@ class UserInputs(QMainWindow):
                     self, "manual_gantt_legend_and_tooltip", []
                 ),
             )
+
+    @staticmethod
+    def manual_direct_tip_legend_metadata(states, allocations):
+        capacity_by_blend = {}
+        tonnes_by_blend_source = {}
+        for state in states or []:
+            blend_id = str(state.get("blend_ID") or "")
+            if not blend_id:
+                continue
+            capacity_by_blend[blend_id] = (
+                capacity_by_blend.get(blend_id, 0.0)
+                + float(state.get("feed_capacity_tonnes") or 0)
+            )
+            source_totals = tonnes_by_blend_source.setdefault(
+                blend_id, {}
+            )
+            for source, tonnes in (
+                (allocations or {}).get(
+                    state.get("state_key"), {}
+                ) or {}
+            ).items():
+                selected_tonnes = float(tonnes or 0)
+                if selected_tonnes <= 0:
+                    continue
+                source_name = str(source).strip()
+                source_totals[source_name] = (
+                    source_totals.get(source_name, 0.0)
+                    + selected_tonnes
+                )
+
+        result = {}
+        for blend_id, source_totals in tonnes_by_blend_source.items():
+            sources = sorted(source_totals)
+            capacity = capacity_by_blend.get(blend_id, 0.0)
+            result[blend_id] = {
+                "Direct Tip Sources": ", ".join(sources),
+                "Direct Tip Ratios": ", ".join(
+                    f"{source_totals[source] / capacity:.6f}"
+                    if capacity > 0 else "0.000000"
+                    for source in sources
+                ),
+                "Direct Tip Tonnes": ", ".join(
+                    f"{source_totals[source]:.1f}"
+                    for source in sources
+                ),
+            }
+        return result
 
     def open_manual_steady_state_dialog(self):
         if not getattr(

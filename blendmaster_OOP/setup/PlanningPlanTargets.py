@@ -214,9 +214,15 @@ class PlanningPlanTargets:
                 "planning_period_end": row["PERIOD_END"].to_pydatetime(),
                 "planning_scenario": scenario,
             }
-            for grade, value in grades.items():
-                build[f"target_{grade}_min"] = value
-                build[f"target_{grade}_max"] = value
+            # Planning Plan provides a lower-bound target for Fe and
+            # upper-bound targets for the contaminants. Keep the opposite
+            # bounds open instead of turning each target into an exact-grade
+            # equality.
+            build["target_fe_min"] = grades["fe"]
+            build["target_fe_max"] = 100.0
+            for grade in ("si", "al", "p", "mn"):
+                build[f"target_{grade}_min"] = 0.0
+                build[f"target_{grade}_max"] = grades[grade]
             builds.append(build)
 
         brand_counts = {}
