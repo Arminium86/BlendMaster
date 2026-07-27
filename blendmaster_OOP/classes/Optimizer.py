@@ -194,6 +194,25 @@ class Optimizer:
         return steady_state_duration, None, None
 
     @staticmethod
+    def product_build_can_complete_in_steady_state(
+        target_tonnes,
+        opening_tonnes,
+        crusher_rate,
+        steady_state_duration,
+    ):
+        """Use the same tonnes tolerance as the runtime completion check."""
+        remaining_tonnes = max(float(target_tonnes) - float(opening_tonnes), 0.0)
+        steady_state_capacity = max(
+            float(crusher_rate) * float(steady_state_duration),
+            0.0,
+        )
+        return (
+            float(target_tonnes) > Optimizer.SOLUTION_TOLERANCE
+            and remaining_tonnes
+            <= steady_state_capacity + Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE
+        )
+
+    @staticmethod
     def filter_events_by_steady_state_window(event_pool, current_time, steady_state_duration):
         steady_state_end_time = current_time + timedelta(hours=steady_state_duration)
         filtered_events = []
@@ -936,11 +955,11 @@ class Optimizer:
         if target_product_build:
             opening_product_tonnes = safe_float(target_product_build_state.get("tonnes"), 0.0)
             target_product_tonnes = safe_float(target_product_build.get("target_tonnes"), 0.0)
-            remaining_product_tonnes = max(target_product_tonnes - opening_product_tonnes, 0.0)
-            steady_state_capacity = period_crusher_target["crusher_rate"] * steady_state_duration
-            product_build_can_complete = (
-                target_product_tonnes > Optimizer.SOLUTION_TOLERANCE
-                and remaining_product_tonnes <= steady_state_capacity + Optimizer.SOLUTION_TOLERANCE
+            product_build_can_complete = Optimizer.product_build_can_complete_in_steady_state(
+                target_product_tonnes,
+                opening_product_tonnes,
+                safe_float(period_crusher_target.get("crusher_rate"), 0.0),
+                steady_state_duration,
             )
             allow_offspec_build_state = bool(
                 solver_config.get(

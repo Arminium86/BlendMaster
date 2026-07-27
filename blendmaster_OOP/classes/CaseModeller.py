@@ -132,7 +132,6 @@ class CaseModeller:
             state = self.product_build_runtime_states[index]
             if state["tonnes"] < setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE:
                 return index
-            state["tonnes"] = setting["target_tonnes"]
         return None
 
     def current_product_build_setting(self):
@@ -170,8 +169,6 @@ class CaseModeller:
             return
 
         allocation_tonnes = min(crusher_tonnes, capacity)
-        if 0 < capacity - allocation_tonnes <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-            allocation_tonnes = capacity
         allocation_fraction = allocation_tonnes / crusher_tonnes if crusher_tonnes else 0
         for _, row in data.iterrows():
             source_to_build = float(row.get("source_actual_tonnes") or 0) * allocation_fraction
@@ -179,8 +176,6 @@ class CaseModeller:
                 grade_value = float(row.get(f"source_grade_{grade}") or 0)
                 build_state[f"grade_{grade}_metal"] += source_to_build * grade_value
         build_state["tonnes"] += allocation_tonnes
-        if build_setting["target_tonnes"] - build_state["tonnes"] <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-            build_state["tonnes"] = build_setting["target_tonnes"]
 
     def request_abort(self):
         self.abort_requested = True
@@ -1452,13 +1447,10 @@ class CaseModeller:
             build_opening = build_state["tonnes"]
             build_capacity = build_setting["target_tonnes"] - build_opening
             if build_capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-                build_state["tonnes"] = build_setting["target_tonnes"]
                 active_build_index += 1
                 continue
 
             allocation_tonnes = min(crusher_tonnes, build_capacity)
-            if 0 < build_capacity - allocation_tonnes <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-                allocation_tonnes = build_capacity
             allocation_fraction = allocation_tonnes / crusher_tonnes if crusher_tonnes else 0
 
             for _, row in steady_state_group.iterrows():
@@ -1521,8 +1513,6 @@ class CaseModeller:
                 })
 
             build_state["tonnes"] += allocation_tonnes
-            if build_setting["target_tonnes"] - build_state["tonnes"] <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-                build_state["tonnes"] = build_setting["target_tonnes"]
             build_complete = build_state["tonnes"] >= build_setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE
             build_on_spec = self.product_build_grade_on_spec(build_state, build_setting) if build_complete else False
             build_grades = {
