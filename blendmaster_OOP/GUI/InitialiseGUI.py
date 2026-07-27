@@ -1690,6 +1690,18 @@ class UserInputs(QMainWindow):
         )
         self.solver_config_layout.addWidget(self.allow_offspec_steady_states_checkbox)
 
+        self.enforce_calendar_crusher_grade_targets_checkbox = QCheckBox(
+            "Enforce Calendar Crusher Grade Targets"
+        )
+        self.enforce_calendar_crusher_grade_targets_checkbox.setChecked(True)
+        self.enforce_calendar_crusher_grade_targets_checkbox.setToolTip(
+            "When selected, every steady state must meet the Calendar crusher min/max "
+            "grade targets. Clear only when those targets are intentionally advisory."
+        )
+        self.solver_config_layout.addWidget(
+            self.enforce_calendar_crusher_grade_targets_checkbox
+        )
+
         brand_guidance_layout = QHBoxLayout()
         brand_guidance_layout.addWidget(QLabel("2WP Product Guidance Reward/Penalty:"))
         self.brand_guidance_incentive_input = self.create_solver_threshold_input(
@@ -2033,16 +2045,6 @@ class UserInputs(QMainWindow):
         layout.addWidget(self.timing_guidance_enabled_checkbox)
         layout.addWidget(self.active_blend_guidance_enabled_checkbox)
         layout.addWidget(self.rehandle_cycle_time_penalty_checkbox)
-
-        self.enforce_calendar_crusher_grade_targets_checkbox = QCheckBox(
-            "Enforce Calendar Crusher Grade Targets"
-        )
-        self.enforce_calendar_crusher_grade_targets_checkbox.setChecked(True)
-        self.enforce_calendar_crusher_grade_targets_checkbox.setToolTip(
-            "When selected, every steady state must meet the Calendar crusher min/max "
-            "grade targets. Clear only when those targets are intentionally advisory."
-        )
-        layout.addWidget(self.enforce_calendar_crusher_grade_targets_checkbox)
 
         direct_tip_section = QLabel("Direct Tip")
         direct_tip_section.setStyleSheet(
@@ -3072,10 +3074,6 @@ class UserInputs(QMainWindow):
         crusher_ratio_header.addStretch()
         crusher_ratio_layout.addLayout(crusher_ratio_header)
         crusher_ratio_layout.addWidget(self.aps_ratio_crusher_input)
-        crusher_ratio_label = QLabel("Crusher Contribution:")
-        crusher_ratio_label.setStyleSheet("font-weight: bold;")
-        layout.addRow(crusher_ratio_label, crusher_ratio_layout)
-
         # --- Input 1: Time Starts At ---
         time_label = QLabel("Time Starts At:")
         time_label.setStyleSheet("font-weight: bold;")
@@ -3131,6 +3129,12 @@ class UserInputs(QMainWindow):
         file_layout.addWidget(self.file_button)
 
         guidance_layout.addRow(file_label, file_layout)
+
+        # This input is derived from 2WP Mining.csv, so keep it with the
+        # schedule guidance that supplies that data.
+        crusher_ratio_label = QLabel("Crusher Contribution:")
+        crusher_ratio_label.setStyleSheet("font-weight: bold;")
+        guidance_layout.addRow(crusher_ratio_label, crusher_ratio_layout)
 
         file_24hr_label = QLabel("Select 24HR Mining.csv (optional):")
         file_24hr_label.setStyleSheet("font-weight: bold;")
@@ -3391,6 +3395,7 @@ class UserInputs(QMainWindow):
         self.aps_ratio_crusher_input.itemSelectionChanged.connect(self.validate_form)
         self.time_mode.currentIndexChanged.connect(self.validate_form)
         self.start_time.dateTimeChanged.connect(self.validate_form)
+        self.file_path.textChanged.connect(self.toggle_crusher_ratio_controls)
         self.file_path.textChanged.connect(self.validate_form)
         self.file_path_24hr.textChanged.connect(self.validate_form)
         self.expit_agent_input.itemSelectionChanged.connect(self.validate_form)
@@ -3449,12 +3454,12 @@ class UserInputs(QMainWindow):
             and self.mine_input.currentIndex() != -1
             and self.opf_input.currentIndex() != -1
             and len(self.selected_site_crusher_names()) == 1
-            and ratio_ready
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
         )
         guidance_fields_populated = (
-            aps_direct_tip_ready
+            ratio_ready
+            and aps_direct_tip_ready
             and schedule_paths_ready
             and expit_agents_ready
             and haul_cycles_ready
@@ -4492,6 +4497,9 @@ class UserInputs(QMainWindow):
         return True, ""
 
     def validate_guidance_schedule_constraints(self):
+        valid_ratio, ratio_message = self.validate_active_ratio_group_for_run()
+        if not valid_ratio:
+            return False, ratio_message
         if self.file_path_24hr_choice and not self.file_path_choice:
             return False, (
                 "Select a 2WP Mining.csv reference before importing a "
@@ -4595,6 +4603,9 @@ class UserInputs(QMainWindow):
 
     def capture_guidance_schedule_controls(self):
         """Capture controls owned by the Guidance Schedules workflow step."""
+        # Crusher contribution is configured on this step because it may be
+        # derived from the selected 2WP Mining.csv.
+        self.capture_site_ratio_and_movement_controls()
         self.expit_mode_choice = (
             self.expit_mode.currentIndex() + 1
             if self.expit_mode.isEnabled()
@@ -8151,6 +8162,28 @@ class UserInputs(QMainWindow):
             for key, value in self.updated_stockpile_data.items()
         }
 
+        # Route completeness belongs to Stockpile Inventories: this is where
+        # the selected stockpile footprint is defined. Do not re-raise this
+        # setup warning when a user only resubmits Solver Configuration or
+        # Decision Levers after an optimisation run.
+        if (
+            hasattr(self, "rehandle_cycle_time_penalty_checkbox")
+            and self.rehandle_cycle_time_penalty_checkbox.isChecked()
+        ):
+            missing_routes = [
+                stockpile
+                for stockpile, attributes in self.updated_stockpile_data.items()
+                if not attributes.get("rehandle_cycle_time_minutes")
+            ]
+            if missing_routes:
+                QMessageBox.warning(
+                    self,
+                    "Missing Haul Cycles",
+                    "No selected-crusher haul cycle was found for: "
+                    + ", ".join(sorted(missing_routes)),
+                )
+                return
+
         if self.updated_stockpile_data:
             self.save_active_scenario_state()
             # Enable the next tab (Calendar Tab)
@@ -9616,23 +9649,6 @@ class UserInputs(QMainWindow):
                         "Rehandle Cycle Time Penalty is enabled.",
                     )
                 return False
-            missing_routes = [
-                stockpile
-                for stockpile, attributes in (
-                    getattr(self, "updated_stockpile_data", {}) or {}
-                ).items()
-                if not attributes.get("rehandle_cycle_time_minutes")
-            ]
-            if missing_routes:
-                if show_errors:
-                    QMessageBox.warning(
-                        self,
-                        "Missing Haul Cycles",
-                        "No selected-crusher haul cycle was found for: "
-                        + ", ".join(sorted(missing_routes)),
-                    )
-                return False
-
         self.solver_config = {
             "throughput_incentive_per_tonne": throughput_incentive_per_tonne,
             "source_selection_tie_break_penalty": source_selection_tie_break_penalty,
