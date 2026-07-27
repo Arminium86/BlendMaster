@@ -277,6 +277,13 @@ class Run:
         self.case_bridge.print("Optimisation complete. Writing database tables...")
         database_manager.clear_optimisation_plan_results()
 
+        self.case_bridge.print(
+            "Writing 2WP active blend schedule to database..."
+        )
+        database_manager.write_two_wp_active_blend_report_to_database(
+            solver_config.get("active_blend_guidance", [])
+        )
+
         if expit_payload_transactions_to_save is not None:
             self.case_bridge.print("Writing expit payload transactions to database...")
             database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_to_save)

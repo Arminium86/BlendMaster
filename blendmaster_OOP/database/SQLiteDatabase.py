@@ -48,10 +48,66 @@ class DatabaseManager:
                 self.PLAN_RESULT_TABLES["build"],
                 self.PLAN_RESULT_TABLES["product_build"],
                 "optimisation_plan_status",
+                "two_wp_active_blend_report",
             ):
                 connection.execute(
                     f'DROP TABLE IF EXISTS "{table_name}"'
                 )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def write_two_wp_active_blend_report_to_database(
+        self, active_blend_guidance, database_name=None
+    ):
+        """Write every derived 2WP active-blend time window."""
+        database_name = database_name or get_database_path()
+        records = []
+        for window in active_blend_guidance or []:
+            stockpiles = sorted({
+                str(stockpile).strip()
+                for stockpile in window.get("stockpiles", [])
+                if str(stockpile).strip()
+            })
+            start = pd.to_datetime(
+                window.get("start_datetime"), errors="coerce"
+            )
+            end = pd.to_datetime(
+                window.get("end_datetime"), errors="coerce"
+            )
+            records.append({
+                "product_brand": str(
+                    window.get("product_brand") or ""
+                ).strip(),
+                "two_wp_active_blend": " + ".join(stockpiles),
+                "stockpiles": ", ".join(stockpiles),
+                "stockpile_count": len(stockpiles),
+                "start_datetime": (
+                    start.strftime("%Y-%m-%d %H:%M:%S")
+                    if not pd.isna(start) else ""
+                ),
+                "end_datetime": (
+                    end.strftime("%Y-%m-%d %H:%M:%S")
+                    if not pd.isna(end) else ""
+                ),
+                "duration_hours": float(
+                    window.get("duration_hours") or 0
+                ),
+            })
+        columns = [
+            "product_brand", "two_wp_active_blend", "stockpiles",
+            "stockpile_count", "start_datetime", "end_datetime",
+            "duration_hours",
+        ]
+        report = pd.DataFrame(records, columns=columns)
+        connection = sqlite3.connect(database_name)
+        try:
+            report.to_sql(
+                "two_wp_active_blend_report",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
             connection.commit()
         finally:
             connection.close()
@@ -248,6 +304,19 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_type TEXT")
         if "actual_direct_tip_ratio" not in existing_columns:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN actual_direct_tip_ratio REAL")
+        two_wp_report_columns = {
+            "two_wp_active_blend": "TEXT",
+            "two_wp_active_blend_product_brand": "TEXT",
+            "two_wp_active_blend_start_datetime": "TEXT",
+            "two_wp_active_blend_end_datetime": "TEXT",
+            "two_wp_active_blend_exact_match": "INTEGER",
+        }
+        for column, column_type in two_wp_report_columns.items():
+            if column not in existing_columns:
+                cursor.execute(
+                    f'ALTER TABLE optimised_blend_report '
+                    f'ADD COLUMN "{column}" {column_type}'
+                )
         text_progress_columns = {
             "product_build_id",
             "product_build_name",

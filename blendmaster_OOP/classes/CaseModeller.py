@@ -193,6 +193,112 @@ class CaseModeller:
             return None
         return self.product_build_settings[index]
 
+    @staticmethod
+    def normalize_two_wp_stockpile_name(value):
+        name = str(value or "").strip()
+        if name.upper().startswith("STOCKPILES/"):
+            name = name.split("/", 1)[1].strip()
+        return name.upper()
+
+    def two_wp_active_blend_report_fields(self, result=None):
+        """Return the active 2WP stockpile set for the current state."""
+        empty_fields = {
+            "two_wp_active_blend": "",
+            "two_wp_active_blend_product_brand": "",
+            "two_wp_active_blend_start_datetime": "",
+            "two_wp_active_blend_end_datetime": "",
+            "two_wp_active_blend_exact_match": None,
+        }
+        current_time = pd.to_datetime(
+            getattr(self, "current_time", None), errors="coerce"
+        )
+        if pd.isna(current_time):
+            return empty_fields
+
+        current_build = self.current_product_build_setting()
+        product_brand = str(
+            (current_build or {}).get("brand") or ""
+        ).strip()
+        normalized_brand = product_brand.upper()
+        active_windows = []
+        for window in (
+            (getattr(self, "solver_config", {}) or {}).get(
+                "active_blend_guidance", []
+            )
+            or []
+        ):
+            start = pd.to_datetime(
+                window.get("start_datetime"), errors="coerce"
+            )
+            end = pd.to_datetime(
+                window.get("end_datetime"), errors="coerce"
+            )
+            window_brand = str(
+                window.get("product_brand") or ""
+            ).strip()
+            if (
+                pd.isna(start)
+                or pd.isna(end)
+                or not (start <= current_time < end)
+                or (
+                    normalized_brand
+                    and window_brand.upper() != normalized_brand
+                )
+            ):
+                continue
+            active_windows.append((window, start, end, window_brand))
+
+        if not active_windows:
+            empty_fields["two_wp_active_blend_product_brand"] = (
+                product_brand
+            )
+            return empty_fields
+        if not normalized_brand and len(active_windows) != 1:
+            return empty_fields
+
+        window, start, end, window_brand = active_windows[0]
+        stockpiles = sorted({
+            str(stockpile).strip()
+            for stockpile in window.get("stockpiles", [])
+            if str(stockpile).strip()
+        })
+        expected = {
+            self.normalize_two_wp_stockpile_name(stockpile)
+            for stockpile in stockpiles
+        }
+        exact_match = None
+        solution = (result or {}).get("Linprog_result_object")
+        if expected and getattr(solution, "success", False):
+            selected = {
+                self.normalize_two_wp_stockpile_name(
+                    transaction.get("source")
+                    or transaction.get("source_id")
+                )
+                for transaction in (result or {}).get(
+                    "transactions", []
+                )
+                if (
+                    transaction.get("source_type") == "stockpile"
+                    and float(transaction.get("actual_tonnes") or 0)
+                    > Optimizer.SOLUTION_TOLERANCE
+                )
+            }
+            exact_match = int(selected == expected)
+
+        return {
+            "two_wp_active_blend": " + ".join(stockpiles),
+            "two_wp_active_blend_product_brand": (
+                window_brand or product_brand
+            ),
+            "two_wp_active_blend_start_datetime": (
+                start.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            "two_wp_active_blend_end_datetime": (
+                end.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            "two_wp_active_blend_exact_match": exact_match,
+        }
+
     def update_product_build_runtime_state(self, selected_results):
         if not self.product_build_settings or selected_results is None or selected_results.empty:
             return None
@@ -1629,6 +1735,9 @@ class CaseModeller:
 
     def record_results(self, result):
         """Record results from an optimization run into the main DataFrame."""
+        two_wp_active_blend_fields = (
+            self.two_wp_active_blend_report_fields(result)
+        )
         if not result['Linprog_result_object'].success:
             failed_blend_label = (
                 self.blend_option
@@ -1646,6 +1755,7 @@ class CaseModeller:
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "actual_direct_tip_ratio": 0,
+                    **two_wp_active_blend_fields,
                     "source": "",
                     "source_id": "",
                     "source_type": "",
@@ -1705,6 +1815,7 @@ class CaseModeller:
                     "steady_state_duration": result["steady_state_duration"],
                     "period": self.period_tracker,
                     "actual_direct_tip_ratio": actual_direct_tip_ratio,
+                    **two_wp_active_blend_fields,
                     "source": transaction["source"],
                     "source_id": transaction.get("source_id", transaction["source"]),
                     "source_type": transaction.get("source_type", ""),
