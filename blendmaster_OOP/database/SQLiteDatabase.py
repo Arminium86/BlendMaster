@@ -79,6 +79,9 @@ class DatabaseManager:
                 "product_brand": str(
                     window.get("product_brand") or ""
                 ).strip(),
+                "destination_full_name": str(
+                    window.get("destination_full_name") or ""
+                ).strip(),
                 "two_wp_active_blend": " + ".join(stockpiles),
                 "stockpiles": ", ".join(stockpiles),
                 "stockpile_count": len(stockpiles),
@@ -95,7 +98,8 @@ class DatabaseManager:
                 ),
             })
         columns = [
-            "product_brand", "two_wp_active_blend", "stockpiles",
+            "product_brand", "destination_full_name",
+            "two_wp_active_blend", "stockpiles",
             "stockpile_count", "start_datetime", "end_datetime",
             "duration_hours",
         ]

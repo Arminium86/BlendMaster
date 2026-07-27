@@ -591,7 +591,14 @@ class ExpitDataHandler:
         }
 
     @classmethod
-    def _read_2wp_feed_guidance_rows(cls, input_data, brand_labels):
+    def _read_2wp_feed_guidance_rows(
+        cls,
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+        operational_opf=None,
+    ):
         required_columns = {
             "Destination.Type",
             "Destination.Name",
@@ -602,12 +609,15 @@ class ExpitDataHandler:
             "Time.EndTime",
             "Mining.wetTonnes",
         }
+        read_columns = required_columns | {"Destination.FullName"}
         data = pd.read_csv(
             input_data,
-            usecols=lambda column: column in required_columns,
+            usecols=lambda column: column in read_columns,
         )
         if data.empty or not required_columns.issubset(set(data.columns)):
             return pd.DataFrame()
+        if "Destination.FullName" not in data.columns:
+            data["Destination.FullName"] = data["Destination.Name"]
 
         filtered = data[
             (
@@ -624,6 +634,32 @@ class ExpitDataHandler:
                 == "flow"
             )
         ].copy()
+        if filtered.empty:
+            return filtered
+
+        filtered["destination_full_name"] = (
+            filtered["Destination.FullName"]
+            .astype("string").fillna("").str.strip()
+        )
+        missing_full_name = filtered["destination_full_name"].eq("")
+        filtered.loc[
+            missing_full_name, "destination_full_name"
+        ] = (
+            filtered.loc[missing_full_name, "Destination.Name"]
+            .astype("string").fillna("").str.strip()
+        )
+        if operational_mine and operational_crusher:
+            destination_matches = filtered[
+                "destination_full_name"
+            ].apply(
+                lambda destination: cls.crusher_destination_matches(
+                    destination,
+                    operational_mine,
+                    operational_crusher,
+                    operational_opf,
+                )
+            )
+            filtered = filtered[destination_matches].copy()
         if filtered.empty:
             return filtered
 
@@ -651,6 +687,7 @@ class ExpitDataHandler:
             filtered["stockpile"].notna()
             & filtered["stockpile"].ne("")
             & filtered["brand"].ne("")
+            & filtered["destination_full_name"].ne("")
             & (filtered["tonnes"] > 0)
             & filtered["start_datetime"].notna()
             & filtered["end_datetime"].notna()
@@ -710,8 +747,21 @@ class ExpitDataHandler:
         return guidance
 
     @classmethod
-    def get_stockpile_timing_guidance(cls, input_data, brand_labels):
-        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+    def get_stockpile_timing_guidance(
+        cls,
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+        operational_opf=None,
+    ):
+        rows = cls._read_2wp_feed_guidance_rows(
+            input_data,
+            brand_labels,
+            operational_mine,
+            operational_crusher,
+            operational_opf,
+        )
         return cls._stockpile_timing_guidance_from_rows(rows)
 
     @classmethod
@@ -720,7 +770,13 @@ class ExpitDataHandler:
             return []
 
         active_windows = []
-        for brand, brand_rows in rows.groupby("brand", sort=False):
+        for (
+            brand,
+            destination_full_name,
+        ), brand_rows in rows.groupby(
+            ["brand", "destination_full_name"],
+            sort=False,
+        ):
             boundaries = sorted(set(
                 pd.Timestamp(value)
                 for value in pd.concat([
@@ -749,6 +805,9 @@ class ExpitDataHandler:
                 else:
                     brand_windows.append({
                         "product_brand": str(brand),
+                        "destination_full_name": str(
+                            destination_full_name
+                        ),
                         "stockpiles": stockpiles,
                         "start_datetime": start,
                         "end_datetime": end,
@@ -763,13 +822,27 @@ class ExpitDataHandler:
             key=lambda window: (
                 window["start_datetime"],
                 window["product_brand"],
+                window["destination_full_name"],
                 tuple(window["stockpiles"]),
             ),
         )
 
     @classmethod
-    def get_active_blend_guidance(cls, input_data, brand_labels):
-        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+    def get_active_blend_guidance(
+        cls,
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+        operational_opf=None,
+    ):
+        rows = cls._read_2wp_feed_guidance_rows(
+            input_data,
+            brand_labels,
+            operational_mine,
+            operational_crusher,
+            operational_opf,
+        )
         return cls._active_blend_guidance_from_rows(rows)
 
     @staticmethod
@@ -804,9 +877,22 @@ class ExpitDataHandler:
         return guidance
 
     @classmethod
-    def get_2wp_schedule_guidance(cls, input_data, brand_labels):
-        """Read the 2WP feed rows once for all three independent guidance layers."""
-        rows = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+    def get_2wp_schedule_guidance(
+        cls,
+        input_data,
+        brand_labels,
+        operational_mine=None,
+        operational_crusher=None,
+        operational_opf=None,
+    ):
+        """Read crusher-scoped 2WP rows once for all guidance layers."""
+        rows = cls._read_2wp_feed_guidance_rows(
+            input_data,
+            brand_labels,
+            operational_mine,
+            operational_crusher,
+            operational_opf,
+        )
         return {
             "brand_guidance": cls._stockpile_brand_guidance_from_rows(rows),
             "stockpile_timing_guidance": cls._stockpile_timing_guidance_from_rows(
@@ -824,15 +910,14 @@ class ExpitDataHandler:
         operational_crusher=None,
         operational_opf=None,
     ):
-        """Map APS plan rows to ROM stockpile brand proportions.
-
-        Stockpile Inventories is a hub/mine-level view.  Therefore guidance is
-        deliberately derived across all qualifying crusher destinations in the
-        APS file, rather than being filtered by the active OPF or operating
-        crusher.  The optional scenario arguments remain in the signature for
-        compatibility with older callers.
-        """
-        filtered = cls._read_2wp_feed_guidance_rows(input_data, brand_labels)
+        """Map crusher-scoped APS plan rows to stockpile brands."""
+        filtered = cls._read_2wp_feed_guidance_rows(
+            input_data,
+            brand_labels,
+            operational_mine,
+            operational_crusher,
+            operational_opf,
+        )
         return cls._stockpile_brand_guidance_from_rows(filtered)
 
     def _destination_allocations_for_row(self, row):

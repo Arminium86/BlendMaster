@@ -64,6 +64,7 @@ class Optimizer:
         min_stockpile_contribution_ratio: Optional[float] = None,
         solver_config: Optional[dict] = None,
         excluded_source_sets: Optional[List[set]] = None,
+        excluded_stockpile_sets: Optional[List[set]] = None,
     ):
         """Runs blending optimization and adjusts steady state if needed."""
         
@@ -86,6 +87,7 @@ class Optimizer:
             min_stockpile_contribution_ratio,
             solver_config,
             excluded_source_sets,
+            excluded_stockpile_sets,
         )
         
         if result['Linprog_result_object'].success: 
@@ -121,6 +123,7 @@ class Optimizer:
                 min_stockpile_contribution_ratio,
                 solver_config,
                 excluded_source_sets,
+                excluded_stockpile_sets,
             )
 
             if result['Linprog_result_object'].success: 
@@ -144,6 +147,7 @@ class Optimizer:
                     min_stockpile_contribution_ratio,
                     solver_config,
                     excluded_source_sets,
+                    excluded_stockpile_sets,
                 )
 
                 if result['Linprog_result_object'].success: 
@@ -387,6 +391,7 @@ class Optimizer:
         min_stockpile_contribution_ratio: Optional[float] = None,
         solver_config: Optional[dict] = None,
         excluded_source_sets: Optional[List[set]] = None,
+        excluded_stockpile_sets: Optional[List[set]] = None,
     ):
         """Core optimisation logic using a mixed integer solver."""
 
@@ -444,7 +449,15 @@ class Optimizer:
         }
 
         excluded_source_sets = [
-            set(source_set) for source_set in (excluded_source_sets or []) if source_set
+            set(source_set)
+            for source_set in (excluded_source_sets or [])
+            if source_set
+        ]
+        # Empty means a direct-tip-only option and must be retained so the
+        # next hard-mode candidate is required to use a stockpile.
+        excluded_stockpile_sets = [
+            set(source_set)
+            for source_set in (excluded_stockpile_sets or [])
         ]
 
         # Step 1: Define bounds (how many tonnes each event contributes)
@@ -1165,6 +1178,7 @@ class Optimizer:
             or max_stockpiles is not None
             or prefer_fewer_stockpiles
             or bool(excluded_source_sets)
+            or bool(excluded_stockpile_sets)
             or bool(
                 active_blend_guidance_enabled
                 and active_blend_guidance_incentive
@@ -1184,10 +1198,16 @@ class Optimizer:
                 source_feed_upper_bound = sum(bounds[i][1] for i in indices)
 
                 prob += source_feed <= source_feed_upper_bound * y_var
-                if (
-                    active_blend_guidance_enabled
-                    and active_blend_guidance_incentive
-                    and expected_active_blend
+                if source_feed_upper_bound <= Optimizer.SOLUTION_TOLERANCE:
+                    prob += y_var == 0
+                elif (
+                    (
+                        active_blend_guidance_enabled
+                        and active_blend_guidance_incentive
+                        and expected_active_blend
+                    )
+                    or bool(excluded_source_sets)
+                    or bool(excluded_stockpile_sets)
                 ):
                     prob += (
                         source_feed
@@ -1219,6 +1239,36 @@ class Optimizer:
                         + lpSum(y_vars[source_name] for source_name in outside_sources)
                         >= 1
                     )
+            if excluded_stockpile_sets:
+                all_stockpile_names = set(stockpile_event_indices)
+                for stockpile_set in excluded_stockpile_sets:
+                    known_stockpiles = (
+                        stockpile_set & all_stockpile_names
+                    )
+                    if not stockpile_set:
+                        if all_stockpile_names:
+                            prob += lpSum(
+                                y_vars[name]
+                                for name in all_stockpile_names
+                            ) >= 1
+                        continue
+                    if known_stockpiles != stockpile_set:
+                        continue
+                    outside_stockpiles = (
+                        all_stockpile_names - known_stockpiles
+                    )
+                    prob += (
+                        lpSum(
+                            1 - y_vars[name]
+                            for name in known_stockpiles
+                        )
+                        + lpSum(
+                            y_vars[name]
+                            for name in outside_stockpiles
+                        )
+                        >= 1
+                    )
+            if excluded_source_sets or excluded_stockpile_sets:
                 objective += source_selection_tie_break_penalty * lpSum(
                     y_vars.values()
                 )

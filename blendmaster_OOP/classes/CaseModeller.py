@@ -613,11 +613,17 @@ class CaseModeller:
         period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)
         candidate_source_sets = []
         excluded_source_sets = []
+        excluded_stockpile_sets = []
         candidate_source_signatures = set()
         required_min_feed_duration = self.configured_min_feed_duration_hours()
         blend_option_timeout_seconds = self.configured_blend_option_timeout_seconds()
         max_decision_blend_options = self.configured_max_decision_blend_options()
         step_solver_config = self.solver_config_for_current_step()
+        enumerate_stockpile_mixes_only = (
+            bool(self.reserved_blend_signatures)
+            and self.configured_contingency_distinctness_mode()
+            == self.CONTINGENCY_STOCKPILE_MIX_ONLY
+        )
         last_solver_result = None
         no_selected_blend_message = "No feasible blend found."
 
@@ -673,6 +679,7 @@ class CaseModeller:
                 self.min_stockpile_contribution_ratio,
                 step_solver_config,
                 excluded_source_sets,
+                excluded_stockpile_sets,
             )
             last_solver_result = result
             self.check_abort_requested()
@@ -758,7 +765,16 @@ class CaseModeller:
 
                     self.record_results(result)
                     candidate_source_sets.append(set(active_source_ids))
-                    excluded_source_sets.append(set(active_source_ids))
+                    if enumerate_stockpile_mixes_only:
+                        excluded_stockpile_sets.append(
+                            self.stockpile_source_ids_from_transactions(
+                                result.get("transactions", [])
+                            )
+                        )
+                    else:
+                        excluded_source_sets.append(
+                            set(active_source_ids)
+                        )
                     candidate_source_signatures.add(active_source_signature)
                     active_source_names = self.active_source_names_from_result(result)
                     print(

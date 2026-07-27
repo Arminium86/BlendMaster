@@ -4337,6 +4337,8 @@ class UserInputs(QMainWindow):
             os.path.normcase(os.path.abspath(file_path)),
             file_stamp,
             str(getattr(self, "mine_input_choice", "") or "").strip().upper(),
+            str(getattr(self, "opf_input_choice", "") or "").strip().upper(),
+            str(getattr(self, "crusher_input_choice", "") or "").strip().upper(),
             tuple(self.product_brand_options()),
         )
         cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
@@ -4363,6 +4365,15 @@ class UserInputs(QMainWindow):
             guidance = ExpitDataHandler.get_2wp_schedule_guidance(
                 file_path,
                 self.product_brand_options(),
+                operational_mine=getattr(
+                    self, "mine_input_choice", None
+                ),
+                operational_crusher=getattr(
+                    self, "crusher_input_choice", None
+                ),
+                operational_opf=getattr(
+                    self, "opf_input_choice", None
+                ),
             )
             guidance["destination_guidance"] = (
                 ExpitDataHandler.build_2wp_destination_guidance(file_path)
