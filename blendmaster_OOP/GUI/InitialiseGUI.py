@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea, QDialog
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea, QDialog, QSpinBox
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -1044,6 +1044,7 @@ class UserInputs(QMainWindow):
                         pass
                 values[header] = value
             captured[full_key] = values
+        captured["planning_period_count"] = self.planning_period_count()
         captured["solver_config"] = copy.deepcopy(self.solver_config or {})
         captured["product_build_settings"] = copy.deepcopy(self.product_build_settings or [])
         captured["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
@@ -1112,6 +1113,7 @@ class UserInputs(QMainWindow):
             "crusher_contribution_ratio": getattr(
                 self, "crusher_contribution_ratio_choice", 1.0
             ),
+            "planning_period_count": self.planning_period_count(),
             "direct_tip_movement_rules": copy.deepcopy(getattr(
                 self, "direct_tip_movement_rules", []
             )),
@@ -1134,6 +1136,7 @@ class UserInputs(QMainWindow):
 
     def capture_scenario_state(self):
         self.capture_stockpile_table_choices()
+        self.capture_active_manual_plan_state()
         if hasattr(self, "auto_load_2wp_targets_checkbox"):
             self.auto_load_2wp_targets_choice = (
                 self.auto_load_2wp_targets_checkbox.isChecked()
@@ -1154,6 +1157,7 @@ class UserInputs(QMainWindow):
             "crusher_ratio_configured", "aps_ratio_crusher_choices",
             "direct_tip_grade_block_sources", "direct_tip_crusher_destinations",
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
+            "planning_period_count_choice",
             "expit_mode_choice", "file_path_choice", "file_path_24hr_choice",
             "available_24hr_expit_agents", "selected_24hr_expit_agents",
             "haul_cycle_file_path_choice",
@@ -1174,6 +1178,7 @@ class UserInputs(QMainWindow):
             "stored_blend_sequence_table_for_gantt",
             "stored_blend_sequence_table_for_gantt_default",
             "manual_direct_tip_allocations", "manual_steady_states",
+            "manual_plan_states", "active_manual_plan_id",
             "default_start_datetime",
             "default_end_datetime", "default_start_datetime_str", "default_end_datetime_str",
             "crusher_rate", "crusher_rate_input_value",
@@ -1319,6 +1324,9 @@ class UserInputs(QMainWindow):
             )
             self.time_mode_choice = state.get("time_mode_choice") or 1
             self.start_time_choice = state.get("start_time_choice") or datetime.now()
+            self.planning_period_count_choice = PeriodManager.normalize_period_count(
+                state.get("planning_period_count_choice", 3)
+            )
             self.expit_mode_choice = state.get("expit_mode_choice") or 1
             self.file_path_choice = state.get("file_path_choice") or ""
             self.file_path_24hr_choice = (
@@ -1431,6 +1439,12 @@ class UserInputs(QMainWindow):
             self.manual_steady_states = copy.deepcopy(
                 state.get("manual_steady_states") or []
             )
+            self.manual_plan_states = copy.deepcopy(
+                state.get("manual_plan_states") or {}
+            )
+            self.active_manual_plan_id = str(
+                state.get("active_manual_plan_id") or "Primary"
+            )
             self.manual_blend_report = pd.DataFrame()
             self.default_start_datetime = state.get("default_start_datetime")
             self.default_end_datetime = state.get("default_end_datetime")
@@ -1481,6 +1495,9 @@ class UserInputs(QMainWindow):
             )
             self.refresh_direct_tip_rule_list()
             self.time_mode.setCurrentIndex(max(self.time_mode_choice - 1, 0))
+            self.planning_period_count_input.setValue(
+                self.planning_period_count_choice
+            )
             start_time = self.start_time_choice
             self.start_time.setDateTime(QDateTime(
                 start_time.year,
@@ -2043,6 +2060,23 @@ class UserInputs(QMainWindow):
         blend_options_layout.addStretch()
         layout.addLayout(blend_options_layout)
 
+        contingency_layout = QHBoxLayout()
+        self.contingency_plan_count_input = QLineEdit("0")
+        self.contingency_plan_count_input.setValidator(
+            QIntValidator(0, 10, self)
+        )
+        self.contingency_plan_count_input.setFixedWidth(90)
+        self.contingency_plan_count_input.setToolTip(
+            "Number of alternative plans to generate after the primary "
+            "plan. Each plan prefers blends not used by earlier plans."
+        )
+        contingency_layout.addWidget(QLabel("Contingency Plans:"))
+        contingency_layout.addWidget(
+            self.contingency_plan_count_input
+        )
+        contingency_layout.addStretch()
+        layout.addLayout(contingency_layout)
+
         feasibility_layout = QHBoxLayout()
         feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
         self.stockpile_feasibility_combo = QComboBox()
@@ -2575,6 +2609,7 @@ class UserInputs(QMainWindow):
                 crusher_contribution_ratio=getattr(
                     self, "crusher_contribution_ratio_choice", 1.0
                 ),
+                planning_period_count=self.planning_period_count(),
             )
 
         def success(settings):
@@ -2654,6 +2689,7 @@ class UserInputs(QMainWindow):
             "stay_on_same_blend_incentive": 0.0,
             "blend_option_timeout_seconds": 30.0,
             "max_blend_options_per_steady_state": 12,
+            "contingency_plan_count": 0,
             "min_grade_block_pair_duration_hours": 0.0,
             "stay_on_same_grade_block_pair_incentive": 0.0,
             "grade_block_lock_enabled": False,
@@ -3132,6 +3168,25 @@ class UserInputs(QMainWindow):
         start_time_label = QLabel("Set Date & Time:")
         start_time_label.setStyleSheet("font-weight: bold;")
         layout.addRow(start_time_label, self.start_time)
+
+        planning_period_label = QLabel("Planning Periods:")
+        planning_period_label.setStyleSheet("font-weight: bold;")
+        self.planning_period_count_input = QSpinBox()
+        self.planning_period_count_input.setRange(
+            PeriodManager.MIN_PERIOD_COUNT,
+            PeriodManager.MAX_PERIOD_COUNT,
+        )
+        self.planning_period_count_input.setValue(
+            PeriodManager.normalize_period_count(
+                getattr(self, "planning_period_count_choice", 3)
+            )
+        )
+        self.planning_period_count_input.setSuffix(" periods")
+        self.planning_period_count_input.setToolTip(
+            "Total planning periods, including the preplan. "
+            "Each later period is 12 hours."
+        )
+        layout.addRow(planning_period_label, self.planning_period_count_input)
 
         # --- Input 2: Expit Transactions ---
         expit_label = QLabel("Expit Transactions (optional):")
@@ -4133,6 +4188,7 @@ class UserInputs(QMainWindow):
                 file_path,
                 self.current_site_start_time(),
                 selected,
+                self.planning_period_count(),
             )
         except Exception as exc:
             self.crusher_ratio_input.clear()
@@ -4595,6 +4651,9 @@ class UserInputs(QMainWindow):
             if self.time_mode_choice == 2
             else datetime.now()
         )
+        self.planning_period_count_choice = (
+            self.planning_period_count_input.value()
+        )
         self.expit_mode_choice = (
             self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         )
@@ -4722,6 +4781,11 @@ class UserInputs(QMainWindow):
         self.refresh_direct_tip_rule_list()
 
         self.time_mode.setCurrentIndex(max(int(self.time_mode_choice or 1) - 1, 0))
+        self.planning_period_count_input.setValue(
+            PeriodManager.normalize_period_count(
+                getattr(self, "planning_period_count_choice", 3)
+            )
+        )
         start_time = self.start_time_choice or datetime.now()
         self.start_time.setDateTime(QDateTime(
             start_time.year,
@@ -4833,6 +4897,7 @@ class UserInputs(QMainWindow):
                         self.product_brand_labels_choice,
                         opf=self.opf_input_choice,
                         crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
+                        planning_period_count=self.planning_period_count(),
                     )
                     if self.group_2wp_build_targets_by_brand_choice:
                         build_targets[crusher] = (
@@ -6401,7 +6466,7 @@ class UserInputs(QMainWindow):
                         "rationale": rationale,
                     })
             else:
-                for period in ["Preplan", "Period_1", "Period_2"]:
+                for period in self.planning_period_labels():
                     expanded.append({
                         "target": f"calendar_rates.{row_key}.{period}",
                         "value": value,
@@ -6497,18 +6562,20 @@ class UserInputs(QMainWindow):
 
     def agent_period_key_alias(self, period):
         normalized = str(period or "").strip().lower().replace(" ", "_")
-        aliases = {
-            "preplan": "Preplan",
-            "period_1": "Period_1",
-            "period1": "Period_1",
-            "p1": "Period_1",
-            "1": "Period_1",
-            "period_2": "Period_2",
-            "period2": "Period_2",
-            "p2": "Period_2",
-            "2": "Period_2",
-        }
-        return aliases.get(normalized, str(period) if str(period) in getattr(self, "calendar_headers", []) else None)
+        aliases = {"preplan": "Preplan"}
+        for index, label in enumerate(self.planning_period_labels()[1:], 1):
+            aliases.update({
+                f"period_{index}": label,
+                f"period{index}": label,
+                f"p{index}": label,
+                str(index): label,
+            })
+        return aliases.get(
+            normalized,
+            str(period)
+            if str(period) in getattr(self, "calendar_headers", [])
+            else None,
+        )
 
     def find_calendar_row_by_key(self, row_key):
         if not hasattr(self, "calendar_rows"):
@@ -8246,7 +8313,7 @@ class UserInputs(QMainWindow):
         if self.default_start_datetime and self.default_end_datetime:
             return
 
-        periods = PeriodManager()
+        periods = PeriodManager(self.planning_period_count())
         periods.calculate_periods(self.start_time_choice or datetime.now())
         self.set_start_and_end_datetime(periods)
 
@@ -8255,17 +8322,114 @@ class UserInputs(QMainWindow):
         self.setup_blends_tab()
         self.set_page_enabled(self.blend_config_tab_index, True)
 
-    def fetch_optimised_blend_report(self):
+    def fetch_optimised_blend_report(self, plan_id=None):
+        plan_id = plan_id or (
+            getattr(self, "manual_plan_selector", None).currentText()
+            if getattr(self, "manual_plan_selector", None) is not None
+            else self.selected_optimisation_plan_id()
+        )
+        plan_id = str(plan_id or "Primary")
         connection = sqlite3.connect(get_database_path())
         try:
             return pd.read_sql(
-                "SELECT * FROM optimised_blend_report",
+                """
+                SELECT * FROM optimisation_plan_blend_report
+                WHERE plan_id = ?
+                ORDER BY steady_state_number, source
+                """,
                 connection,
-            )
+                params=(plan_id,),
+            ).drop(columns=["plan_id", "plan_rank"], errors="ignore")
         except (sqlite3.Error, pd.errors.DatabaseError):
-            return pd.DataFrame()
+            if plan_id != "Primary":
+                return pd.DataFrame()
+            try:
+                return pd.read_sql(
+                    "SELECT * FROM optimised_blend_report",
+                    connection,
+                )
+            except (sqlite3.Error, pd.errors.DatabaseError):
+                return pd.DataFrame()
         finally:
             connection.close()
+
+    MANUAL_PLAN_STATE_FIELDS = (
+        "blend_config_table_inputs",
+        "saved_blends_for_schedule",
+        "stored_blend_sequence_table_for_gantt",
+        "stored_blend_sequence_table_for_gantt_default",
+        "manual_direct_tip_allocations",
+        "manual_steady_states",
+        "manual_blend_report",
+        "crusher_rate",
+        "crusher_rate_input_value",
+        "crusher_rate_input_values",
+    )
+
+    def capture_active_manual_plan_state(self):
+        if not hasattr(self, "manual_plan_states"):
+            self.manual_plan_states = {}
+        plan_id = str(
+            getattr(self, "active_manual_plan_id", "Primary")
+            or "Primary"
+        )
+        self.manual_plan_states[plan_id] = {
+            field: copy.deepcopy(getattr(self, field, None))
+            for field in self.MANUAL_PLAN_STATE_FIELDS
+        }
+
+    def handle_manual_plan_selection(self):
+        selector = getattr(self, "manual_plan_selector", None)
+        if selector is None or not selector.currentText().strip():
+            return
+        previous_plan = str(
+            getattr(self, "active_manual_plan_id", "Primary")
+            or "Primary"
+        )
+        selected_plan = selector.currentText().strip()
+        if previous_plan == selected_plan:
+            return
+        self.capture_active_manual_plan_state()
+        self.active_manual_plan_id = selected_plan
+        saved = copy.deepcopy(
+            (getattr(self, "manual_plan_states", {}) or {}).get(
+                selected_plan
+            )
+        )
+        if saved:
+            for field in self.MANUAL_PLAN_STATE_FIELDS:
+                setattr(self, field, saved.get(field))
+        else:
+            self.reset_manual_blending_plan_state()
+        if hasattr(self, "blend_config_table"):
+            self.populate_blend_config_table()
+            self.populate_blend_config_weights_and_ids()
+            self.update_blend_results()
+        if hasattr(self, "blend_sequence_table"):
+            self.populate_blend_sequence_table_if_project_is_loaded()
+
+    def active_manual_plan_rank(self):
+        plan_id = str(
+            getattr(self, "active_manual_plan_id", "Primary")
+        )
+        if plan_id == "Primary":
+            return 0
+        try:
+            return int(plan_id.rsplit(" ", 1)[-1])
+        except (TypeError, ValueError):
+            return 0
+
+    def write_active_manual_plan_reports(self, report):
+        manager = DatabaseManager()
+        manager.write_manual_blend_report_to_database(report)
+        manager.write_optimisation_plan_result(
+            "manual",
+            report,
+            getattr(self, "active_manual_plan_id", "Primary"),
+            self.active_manual_plan_rank(),
+        )
+        self.write_manual_material_destination_plan(report)
+        self.capture_active_manual_plan_state()
 
     def reset_manual_blending_plan_state(self):
         self.blend_config_table_inputs = {}
@@ -8313,13 +8477,8 @@ class UserInputs(QMainWindow):
         self.set_manual_crusher_rate_inputs(
             self.calendar_crusher_rate_values()
         )
-        DatabaseManager().write_manual_blend_report_to_database(
+        self.write_active_manual_plan_reports(
             self.manual_blend_report
-        )
-        DatabaseManager().write_material_destination_plan_to_database(
-            payload_transactions=pd.DataFrame(),
-            blend_report=pd.DataFrame(),
-            plan_type="manual",
         )
 
         if hasattr(self, "blend_config_table"):
@@ -8397,7 +8556,9 @@ class UserInputs(QMainWindow):
             if reply != QMessageBox.Yes:
                 return False
 
-        optimised_report = self.fetch_optimised_blend_report()
+        optimised_report = self.fetch_optimised_blend_report(
+            getattr(self, "active_manual_plan_id", "Primary")
+        )
         if optimised_report.empty:
             if not automatic:
                 QMessageBox.information(
@@ -8480,8 +8641,7 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = allocations
         self.manual_steady_states = states
         self.manual_blend_report = report
-        DatabaseManager().write_manual_blend_report_to_database(report)
-        self.write_manual_material_destination_plan(report)
+        self.write_active_manual_plan_reports(report)
 
         # Rebuild Setup Blends so every optimized source-to-ratio pattern is
         # visible, including plans containing more than five Blend IDs.
@@ -8868,30 +9028,42 @@ class UserInputs(QMainWindow):
             total_balance = sum(max(float(hex_entry.get('balance', 0) or 0), 0) for hex_entry in filtered_hexes)
             self.total_AMT_stockpile_balances[footprint] = total_balance
         
+    def planning_period_count(self):
+        if hasattr(self, "planning_period_count_input"):
+            return PeriodManager.normalize_period_count(
+                self.planning_period_count_input.value()
+            )
+        return PeriodManager.normalize_period_count(
+            getattr(self, "planning_period_count_choice", 3)
+        )
+
+    def planning_period_labels(self):
+        return PeriodManager.period_labels_for_count(
+            self.planning_period_count()
+        )
+
     def setup_calendar(self):
         """Setup for the main table with a Submit button."""
             
-        self.calendar_headers = ["", "Preplan", "Period_1", "Period_2"]  # Column headers
+        period_labels = self.planning_period_labels()
+        period_count = len(period_labels)
+        self.calendar_headers = ["", *period_labels]
         self.calendar_rows = []
 
         # Static Rows with default values of 0
         direct_tip_enabled = self.is_direct_tip_enabled()
-        direct_tip_editables = [direct_tip_enabled, direct_tip_enabled, direct_tip_enabled]
-        direct_tip_max_defaults = ["1", "1", "1"] if direct_tip_enabled else ["0", "0", "0"]
+        direct_tip_editables = [direct_tip_enabled] * period_count
+        direct_tip_max_defaults = ["1"] * period_count if direct_tip_enabled else ["0"] * period_count
         stockpile_reclaim_rates = self.is_total_feed_operating_crusher()
-        reclaim_rate_editables = [
-            not stockpile_reclaim_rates,
-            not stockpile_reclaim_rates,
-            not stockpile_reclaim_rates,
-        ]
+        reclaim_rate_editables = [not stockpile_reclaim_rates] * period_count
         reclaim_rate_defaults = (
-            ["Per stockpile", "Per stockpile", "Per stockpile"]
+            ["Per stockpile"] * period_count
             if stockpile_reclaim_rates
-            else ["1000", "1000", "1000"]
+            else ["1000"] * period_count
         )
 
         self.calendar_rows.extend([
-            ("Reclaim Equipment", [False, False, False], "green", ["", "", ""]),
+            ("Reclaim Equipment", [False] * period_count, "green", [""] * period_count),
             {"reclaim_equipment_max_reclaim_rate": (
                 "  Max Reclaim Rate",
                 reclaim_rate_editables,
@@ -8899,36 +9071,36 @@ class UserInputs(QMainWindow):
                 reclaim_rate_defaults,
             )},
 
-            ("Crusher", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_rate": ("  Rate", [True, True, True], "blue", ["1000", "1000", "1000"])},
-            ("  Direct Tip Ratio", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_direct_tip_ratio_min": ("    Min", direct_tip_editables, "blue", ["0", "0", "0"])},
+            ("Crusher", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_rate": ("  Rate", [True] * period_count, "blue", ["1000"] * period_count)},
+            ("  Direct Tip Ratio", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_direct_tip_ratio_min": ("    Min", direct_tip_editables, "blue", ["0"] * period_count)},
             {"crusher_direct_tip_ratio_max": ("    Max", direct_tip_editables, "blue", direct_tip_max_defaults)},
 
-            ("  Target", [False, False, False], "blue", ["", "", ""]),
-            ("    Fe", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_target_fe_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
-            {"crusher_target_fe_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
+            ("  Target", [False] * period_count, "blue", [""] * period_count),
+            ("    Fe", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_target_fe_min": ("      Min", [True] * period_count, "blue", ["0"] * period_count)},
+            {"crusher_target_fe_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
 
-            ("    Si", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_target_si_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
-            {"crusher_target_si_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
+            ("    Si", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_target_si_min": ("      Min", [True] * period_count, "blue", ["0"] * period_count)},
+            {"crusher_target_si_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
 
-            ("    Al", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_target_al_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
-            {"crusher_target_al_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
+            ("    Al", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_target_al_min": ("      Min", [True] * period_count, "blue", ["0"] * period_count)},
+            {"crusher_target_al_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
 
-            ("    P", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_target_p_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
-            {"crusher_target_p_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
+            ("    P", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_target_p_min": ("      Min", [True] * period_count, "blue", ["0"] * period_count)},
+            {"crusher_target_p_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
 
-            ("    Mn", [False, False, False], "blue", ["", "", ""]),
-            {"crusher_target_mn_min": ("      Min", [True, True, True], "blue", ["0", "0", "0"])},
-            {"crusher_target_mn_max": ("      Max", [True, True, True], "blue", ["100", "100", "100"])},
+            ("    Mn", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_target_mn_min": ("      Min", [True] * period_count, "blue", ["0"] * period_count)},
+            {"crusher_target_mn_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
         ])
 
         # Dynamically Add Stockpile Rows with default values
-        self.calendar_rows.append(("Stockpiles", [False, False, False], "red", ["", "", ""]))
+        self.calendar_rows.append(("Stockpiles", [False] * period_count, "red", [""] * period_count))
 
         selected_stockpiles = list(getattr(self, "updated_stockpile_data_keys", []) or [])
         selected_stockpile_keys = {str(stockpile).strip().upper() for stockpile in selected_stockpiles}
@@ -8958,9 +9130,9 @@ class UserInputs(QMainWindow):
                 if str(stockpile).strip().upper() in self.calendar_build_only_stockpiles
                 else "Auto"
             )
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False, False, False], "red", ["", "", ""])})
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True, True, True], "red", [default_state, default_state, default_state])})
-            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True, True, True], "red", ["100000", "100000", "100000"])})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}" : (f"  {stockpile}", [False] * period_count, "red", [""] * period_count)})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True] * period_count, "red", [default_state] * period_count)})
+            self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True] * period_count, "red", ["100000"] * period_count)})
 
         self.populate_calendar()
        
@@ -9127,6 +9299,8 @@ class UserInputs(QMainWindow):
             self.load_solver_config_inputs()
 
         if self.is_project_loaded or not self.submit_calendar_first_call:
+            period_count = len(self.calendar_headers) - 1
+            period_labels = self.calendar_headers[1:]
             def calendar_values(key, defaults, fallback_key=None):
                 saved_values = self.calendar_inputs.get(key, {}) if self.calendar_inputs else {}
                 if not saved_values and fallback_key:
@@ -9136,30 +9310,30 @@ class UserInputs(QMainWindow):
                     for header in self.calendar_headers[1:]
                 ]
             
-            zero_defaults = {"Preplan": 0, "Period_1": 0, "Period_2": 0}
-            one_defaults = {"Preplan": 1, "Period_1": 1, "Period_2": 1}
-            hundred_defaults = {"Preplan": 100, "Period_1": 100, "Period_2": 100}
-            thousand_defaults = {"Preplan": 1000, "Period_1": 1000, "Period_2": 1000}
+            zero_defaults = {period: 0 for period in period_labels}
+            one_defaults = {period: 1 for period in period_labels}
+            hundred_defaults = {period: 100 for period in period_labels}
+            thousand_defaults = {period: 1000 for period in period_labels}
             direct_tip_enabled = self.is_direct_tip_enabled()
-            direct_tip_editables = [direct_tip_enabled, direct_tip_enabled, direct_tip_enabled]
+            direct_tip_editables = [direct_tip_enabled] * period_count
             direct_tip_min_values = (
                 calendar_values("crusher_direct_tip_ratio_min", zero_defaults, "crusher_direct_feed_ratio_min")
                 if direct_tip_enabled
-                else [0, 0, 0]
+                else [0] * period_count
             )
             direct_tip_max_values = (
                 calendar_values("crusher_direct_tip_ratio_max", one_defaults, "crusher_direct_feed_ratio_max")
                 if direct_tip_enabled
-                else [0, 0, 0]
+                else [0] * period_count
             )
 
             stockpile_reclaim_rates = self.is_total_feed_operating_crusher()
             self.calendar_rows[1]["reclaim_equipment_max_reclaim_rate"] = (
                 "  Max Reclaim Rate",
-                [not stockpile_reclaim_rates] * 3,
+                [not stockpile_reclaim_rates] * period_count,
                 "green",
                 (
-                    ["Per stockpile"] * 3
+                    ["Per stockpile"] * period_count
                     if stockpile_reclaim_rates
                     else calendar_values(
                         "reclaim_equipment_max_reclaim_rate",
@@ -9167,19 +9341,19 @@ class UserInputs(QMainWindow):
                     )
                 ),
             )
-            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True, True, True], "blue", calendar_values("crusher_rate", thousand_defaults))
+            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True] * period_count, "blue", calendar_values("crusher_rate", thousand_defaults))
             self.calendar_rows[5]["crusher_direct_tip_ratio_min"] = ("    Min", direct_tip_editables, "blue", direct_tip_min_values)
             self.calendar_rows[6]["crusher_direct_tip_ratio_max"] = ("    Max", direct_tip_editables, "blue", direct_tip_max_values)
-            self.calendar_rows[9]["crusher_target_fe_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_fe_min", zero_defaults))
-            self.calendar_rows[10]["crusher_target_fe_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_fe_max", hundred_defaults))
-            self.calendar_rows[12]["crusher_target_si_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_si_min", zero_defaults))
-            self.calendar_rows[13]["crusher_target_si_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_si_max", hundred_defaults))
-            self.calendar_rows[15]["crusher_target_al_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_al_min", zero_defaults))
-            self.calendar_rows[16]["crusher_target_al_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_al_max", hundred_defaults))
-            self.calendar_rows[18]["crusher_target_p_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_p_min", zero_defaults))
-            self.calendar_rows[19]["crusher_target_p_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_p_max", hundred_defaults))
-            self.calendar_rows[21]["crusher_target_mn_min"] = ("      Min", [True, True, True], "blue", calendar_values("crusher_target_mn_min", zero_defaults))
-            self.calendar_rows[22]["crusher_target_mn_max"] = ("      Max", [True, True, True], "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
+            self.calendar_rows[9]["crusher_target_fe_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_fe_min", zero_defaults))
+            self.calendar_rows[10]["crusher_target_fe_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_fe_max", hundred_defaults))
+            self.calendar_rows[12]["crusher_target_si_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_si_min", zero_defaults))
+            self.calendar_rows[13]["crusher_target_si_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_si_max", hundred_defaults))
+            self.calendar_rows[15]["crusher_target_al_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_al_min", zero_defaults))
+            self.calendar_rows[16]["crusher_target_al_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_al_max", hundred_defaults))
+            self.calendar_rows[18]["crusher_target_p_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_p_min", zero_defaults))
+            self.calendar_rows[19]["crusher_target_p_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_p_max", hundred_defaults))
+            self.calendar_rows[21]["crusher_target_mn_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_mn_min", zero_defaults))
+            self.calendar_rows[22]["crusher_target_mn_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
 
             
             start_index = 24
@@ -9193,17 +9367,17 @@ class UserInputs(QMainWindow):
                 )
                 # Populate the rows using calendar_index
                 self.calendar_rows[calendar_index][f"stockpiles_{stockpile.lower()}"] = (
-                    f"  {stockpile}", [False, False, False], "red", ["", "", ""]
+                    f"  {stockpile}", [False] * period_count, "red", [""] * period_count
                 )
                 self.calendar_rows[calendar_index + 1][f"stockpiles_{stockpile.lower()}_state"] = (
-                    f"    State", [True, True, True], "red",
+                    f"    State", [True] * period_count, "red",
                     calendar_values(
                         f"stockpiles_{stockpile.lower()}_state",
                         {header: default_state for header in self.calendar_headers[1:]},
                     )
                 )
                 self.calendar_rows[calendar_index + 2][f"stockpiles_{stockpile.lower()}_maximum_quantity"] = (
-                    f"    Maximum Quantity", [True, True, True], "red",
+                    f"    Maximum Quantity", [True] * period_count, "red",
                     calendar_values(
                         f"stockpiles_{stockpile.lower()}_maximum_quantity",
                         {header: 100000 for header in self.calendar_headers[1:]},
@@ -9298,6 +9472,7 @@ class UserInputs(QMainWindow):
             ] = copy.deepcopy(zero_cash)
 
         self.store_stockpile_constraint_inputs()
+        self.calendar_inputs["planning_period_count"] = self.planning_period_count()
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
 
@@ -9383,6 +9558,9 @@ class UserInputs(QMainWindow):
         self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
         self.blend_option_timeout_input.setText(str(solver_config.get("blend_option_timeout_seconds", 30.0)))
         self.max_blend_options_input.setText(str(solver_config.get("max_blend_options_per_steady_state", 12)))
+        self.contingency_plan_count_input.setText(str(
+            solver_config.get("contingency_plan_count", 0)
+        ))
         self.min_grade_block_pair_duration_input.setText(str(solver_config.get("min_grade_block_pair_duration_hours", 0.0)))
         self.stay_on_same_grade_block_pair_incentive_input.setText(str(solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0)))
         self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
@@ -9609,6 +9787,9 @@ class UserInputs(QMainWindow):
             "Max Blend Options per Steady State",
             12,
         )
+        contingency_plan_count = int(
+            self.contingency_plan_count_input.text().strip() or 0
+        )
         min_grade_block_pair_duration_hours = parse_non_negative_input(
             self.min_grade_block_pair_duration_input,
             "Min Grade Block Pair Duration (only applies to longer steady state durations)",
@@ -9721,6 +9902,7 @@ class UserInputs(QMainWindow):
             "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
             "blend_option_timeout_seconds": blend_option_timeout_seconds,
             "max_blend_options_per_steady_state": max_blend_options_per_steady_state,
+            "contingency_plan_count": contingency_plan_count,
             "min_grade_block_pair_duration_hours": min_grade_block_pair_duration_hours,
             "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
             "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
@@ -9821,6 +10003,7 @@ class UserInputs(QMainWindow):
             self.calendar_inputs.get("solver_config", self.solver_config)
         )
         self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
+        self.calendar_inputs["planning_period_count"] = self.planning_period_count()
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         self.calendar_inputs["site_context"] = self.active_site_context()
@@ -9876,6 +10059,7 @@ class UserInputs(QMainWindow):
             self.active_site_context(),
             self.file_path_choice,
             getattr(self, "selected_24hr_expit_agents", []),
+            self.planning_period_count(),
         )
 
     def finish_project_load_ui(self, success):
@@ -9906,6 +10090,7 @@ class UserInputs(QMainWindow):
         self.activate_manual_setup_tab()
         self.prepopulate_manual_from_optimised_result(automatic=True)
         self.refresh_sqlite_reports()
+        self.refresh_optimisation_plan_selectors()
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
 
@@ -9998,6 +10183,25 @@ class UserInputs(QMainWindow):
         header_layout.addWidget(results_subtitle)
         self.results_layout.addLayout(header_layout)
 
+        plan_controls = QHBoxLayout()
+        plan_controls.addWidget(QLabel("Optimised Plan:"))
+        self.optimisation_plan_selector = QComboBox()
+        self.optimisation_plan_selector.currentIndexChanged.connect(
+            self.handle_optimisation_plan_selection
+        )
+        plan_controls.addWidget(self.optimisation_plan_selector)
+        self.optimisation_plan_status_label = QLabel("")
+        plan_controls.addWidget(self.optimisation_plan_status_label)
+        plan_controls.addStretch()
+        self.results_layout.addLayout(plan_controls)
+
+        self.optimisation_plan_preview = CustomTableWidget()
+        self.optimisation_plan_preview.setEditTriggers(
+            QTableWidget.NoEditTriggers
+        )
+        self.optimisation_plan_preview.setMaximumHeight(240)
+        self.results_layout.addWidget(self.optimisation_plan_preview)
+
         # Create a QFrame
         self.top_frame = QFrame()
         self.top_frame.setObjectName("resultsChartFrame")
@@ -10027,6 +10231,99 @@ class UserInputs(QMainWindow):
         controls_layout.addWidget(self.load_chart_button)
         controls_layout.addStretch()
         self.results_layout.addLayout(controls_layout)
+
+    def available_optimisation_plan_rows(self):
+        fallback_count = int(
+            self.normalized_solver_config().get(
+                "contingency_plan_count", 0
+            ) or 0
+        )
+        fallback = [{
+            "plan_id": (
+                "Primary" if index == 0 else f"Contingency {index}"
+            ),
+            "plan_rank": index,
+            "status": "not run",
+            "message": "",
+        } for index in range(fallback_count + 1)]
+        connection = sqlite3.connect(get_database_path())
+        try:
+            return pd.read_sql(
+                """
+                SELECT plan_id, plan_rank, status, message
+                FROM optimisation_plan_status
+                ORDER BY plan_rank
+                """,
+                connection,
+            ).to_dict(orient="records")
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return fallback
+        finally:
+            connection.close()
+
+    def refresh_optimisation_plan_selectors(self):
+        rows = self.available_optimisation_plan_rows()
+        plan_ids = [str(row["plan_id"]) for row in rows]
+        for selector_name in (
+            "optimisation_plan_selector",
+            "manual_plan_selector",
+        ):
+            selector = getattr(self, selector_name, None)
+            if selector is None:
+                continue
+            current = selector.currentText()
+            selector.blockSignals(True)
+            selector.clear()
+            selector.addItems(plan_ids)
+            if current in plan_ids:
+                selector.setCurrentText(current)
+            elif plan_ids:
+                selector.setCurrentIndex(0)
+            selector.blockSignals(False)
+        self.handle_optimisation_plan_selection()
+
+    def selected_optimisation_plan_id(self):
+        selector = getattr(self, "optimisation_plan_selector", None)
+        return (
+            selector.currentText().strip()
+            if selector is not None and selector.currentText().strip()
+            else "Primary"
+        )
+
+    def handle_optimisation_plan_selection(self):
+        selector = getattr(self, "optimisation_plan_selector", None)
+        preview = getattr(self, "optimisation_plan_preview", None)
+        if selector is None or preview is None:
+            return
+        plan_id = self.selected_optimisation_plan_id()
+        rows = self.available_optimisation_plan_rows()
+        status = next(
+            (
+                row for row in rows
+                if str(row.get("plan_id")) == plan_id
+            ),
+            {},
+        )
+        self.optimisation_plan_status_label.setText(
+            f"{status.get('status', '')}: {status.get('message', '')}".strip(
+                ": "
+            )
+        )
+        report = self.fetch_optimised_blend_report(plan_id)
+        preview.clearContents()
+        preview.setRowCount(min(len(report), 200))
+        preview.setColumnCount(len(report.columns))
+        preview.setHorizontalHeaderLabels(
+            [str(column) for column in report.columns]
+        )
+        for row_index, (_, row) in enumerate(report.head(200).iterrows()):
+            for column_index, value in enumerate(row):
+                preview.setItem(
+                    row_index,
+                    column_index,
+                    QTableWidgetItem("" if pd.isna(value) else str(value)),
+                )
+        preview.resizeColumnsToContents()
 
     def load_AMT_map(self):
         if not self.store_AMT_chunk_settings():
@@ -10748,7 +11045,7 @@ class UserInputs(QMainWindow):
             or 1000
         )
         result = {}
-        for period in ("Preplan", "Period_1", "Period_2"):
+        for period in self.planning_period_labels():
             try:
                 rate = float(saved.get(period, legacy) or legacy)
             except (TypeError, ValueError):
@@ -10760,7 +11057,7 @@ class UserInputs(QMainWindow):
         inputs = getattr(self, "crusher_rate_inputs", {}) or {}
         fallback = self.calendar_crusher_rate_values()
         values = {}
-        for period in ("Preplan", "Period_1", "Period_2"):
+        for period in self.planning_period_labels():
             try:
                 value = float(inputs[period].text())
             except (KeyError, TypeError, ValueError, AttributeError):
@@ -10775,7 +11072,7 @@ class UserInputs(QMainWindow):
         values = values or {}
         defaults = self.calendar_crusher_rate_values()
         normalized = {}
-        for period in ("Preplan", "Period_1", "Period_2"):
+        for period in self.planning_period_labels():
             try:
                 rate = float(values.get(period, defaults[period]))
             except (TypeError, ValueError):
@@ -10798,7 +11095,18 @@ class UserInputs(QMainWindow):
     def setup_blends_tab(self):
         
         if self.setup_blends_tab_first_call:
-        
+
+            manual_plan_layout = QHBoxLayout()
+            manual_plan_layout.addWidget(QLabel("Manual Plan:"))
+            self.manual_plan_selector = QComboBox()
+            self.manual_plan_selector.currentIndexChanged.connect(
+                self.handle_manual_plan_selection
+            )
+            manual_plan_layout.addWidget(self.manual_plan_selector)
+            manual_plan_layout.addStretch()
+            self.setup_blends_tab_layout.addLayout(manual_plan_layout)
+            self.refresh_optimisation_plan_selectors()
+
             initial_crusher_rates = (
                 getattr(self, "crusher_rate_input_values", {}) or {}
             ) or self.calendar_crusher_rate_values()
@@ -10811,11 +11119,8 @@ class UserInputs(QMainWindow):
             crusher_layout = QHBoxLayout()
             crusher_layout.addWidget(crusher_label)
             self.crusher_rate_inputs = {}
-            for period, caption in (
-                ("Preplan", "Preplan"),
-                ("Period_1", "Period 1"),
-                ("Period_2", "Period 2"),
-            ):
+            for period in self.planning_period_labels():
+                caption = period.replace("_", " ")
                 crusher_layout.addWidget(QLabel(caption))
                 rate_input = QLineEdit()
                 rate_input.setFixedWidth(100)
@@ -11533,9 +11838,7 @@ class UserInputs(QMainWindow):
                 if not saved_rates and self.crusher_rate_input_value:
                     saved_rates = {
                         period: self.crusher_rate_input_value
-                        for period in (
-                            "Preplan", "Period_1", "Period_2"
-                        )
+                        for period in self.planning_period_labels()
                     }
                 self.set_manual_crusher_rate_inputs(saved_rates)
         finally:
@@ -11957,9 +12260,9 @@ class UserInputs(QMainWindow):
     def set_start_and_end_datetime(self, periods):
         # Set start and end datetime
         self.default_start_datetime = periods.get_periods()["preplan_start"]
-        self.default_end_datetime = periods.get_periods()["period_2_end"]
+        self.default_end_datetime = periods.horizon_end()
         self.default_start_datetime_str = periods.get_periods()["preplan_start"].strftime("%Y-%m-%d %H:%M")
-        self.default_end_datetime_str = periods.get_periods()["period_2_end"].strftime("%Y-%m-%d %H:%M")
+        self.default_end_datetime_str = periods.horizon_end().strftime("%Y-%m-%d %H:%M")
     
     def setup_blend_sequence_table(self):
         
@@ -12560,6 +12863,9 @@ class UserInputs(QMainWindow):
             payload_transactions=self.manual_expit_payload_transactions(True),
             blend_report=report,
             plan_type="manual",
+            plan_id=getattr(
+                self, "active_manual_plan_id", "Primary"
+            ),
             crusher_destination=(
                 getattr(self, "aps_direct_tip_crusher_choice", None)
                 or site_context.get("crusher")
@@ -12687,7 +12993,7 @@ class UserInputs(QMainWindow):
             or getattr(self, "default_start_datetime", None)
             or datetime.now()
         )
-        periods = PeriodManager()
+        periods = PeriodManager(self.planning_period_count())
         periods.calculate_periods(start_time)
 
         rate = (
@@ -12763,8 +13069,7 @@ class UserInputs(QMainWindow):
         self.update_manual_sequence_direct_tip_annotations(
             states, allocations
         )
-        DatabaseManager().write_manual_blend_report_to_database(report)
-        self.write_manual_material_destination_plan(report)
+        self.write_active_manual_plan_reports(report)
         self.refresh_sqlite_reports()
         if hasattr(self, "draw_grade_profile_chart"):
             self.draw_grade_profile_chart.update_data(
@@ -13248,6 +13553,10 @@ class UserInputs(QMainWindow):
             self.capture_site_ratio_and_movement_controls()
         if hasattr(self, "time_mode"):
             self.time_mode_choice = self.time_mode.currentIndex() + 1
+        if hasattr(self, "planning_period_count_input"):
+            self.planning_period_count_choice = (
+                self.planning_period_count_input.value()
+            )
         if hasattr(self, "start_time") and self.time_mode_choice == 2:
             self.start_time_choice = self.start_time.dateTime().toPyDateTime()
         elif self.start_time_choice is None:
@@ -13403,6 +13712,7 @@ class UserInputs(QMainWindow):
                 "opening_stockpile_inventories": self.opening_stockpile_inventories,
                 "saved_blends_for_schedule": self.saved_blends_for_schedule,
                 "start_time_choice": self.start_time_choice,
+                "planning_period_count_choice": self.planning_period_count_choice,
                 "stockpile_data": self.stockpile_data,
                 "stockpile_data_use_column": self.stockpile_data_use_column,
                 "stored_blend_sequence_table_for_gantt": self.stored_blend_sequence_table_for_gantt,
@@ -13763,6 +14073,9 @@ class UserInputs(QMainWindow):
             self.opening_stockpile_inventories = OpeningStockpileInventories()
         self.saved_blends_for_schedule = loaded_state.get("saved_blends_for_schedule") or []
         self.start_time_choice = loaded_state.get("start_time_choice", None)
+        self.planning_period_count_choice = PeriodManager.normalize_period_count(
+            loaded_state.get("planning_period_count_choice", 3)
+        )
         self.stockpile_data = loaded_state.get("stockpile_data", None)
         self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", {})
         self.stored_blend_sequence_table_for_gantt = (
@@ -13776,6 +14089,12 @@ class UserInputs(QMainWindow):
         )
         self.manual_steady_states = copy.deepcopy(
             loaded_state.get("manual_steady_states") or []
+        )
+        self.manual_plan_states = copy.deepcopy(
+            loaded_state.get("manual_plan_states") or {}
+        )
+        self.active_manual_plan_id = str(
+            loaded_state.get("active_manual_plan_id") or "Primary"
         )
         self.manual_blend_report = pd.DataFrame()
         self.time_mode_choice = loaded_state.get("time_mode_choice", None)
@@ -13899,6 +14218,7 @@ class UserInputs(QMainWindow):
         self.opening_stockpile_inventories = None
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
+        self.planning_period_count_choice = 3
         self.stockpile_data = None
         self.stockpile_data_use_column = {}
         self.stored_blend_sequence_table_for_gantt = None
@@ -13906,6 +14226,8 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = {}
         self.manual_steady_states = []
         self.manual_blend_report = pd.DataFrame()
+        self.manual_plan_states = {}
+        self.active_manual_plan_id = "Primary"
         self.time_mode_choice = None
         self.updated_stockpile_data = None
         self.blend_config_table_inputs = None

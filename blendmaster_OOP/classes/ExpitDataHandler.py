@@ -195,17 +195,17 @@ class ExpitDataHandler:
         return normalized(left) == normalized(right)
 
     @staticmethod
-    def _planning_window(start_time):
+    def _planning_window(start_time, planning_period_count=3):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
         if not isinstance(start_time, datetime):
             start_time = pd.to_datetime(start_time).to_pydatetime()
-        periods = PeriodManager()
+        periods = PeriodManager(planning_period_count)
         periods.calculate_periods(start_time)
-        return start_time, periods.get_periods()["period_2_end"]
+        return start_time, periods.horizon_end()
 
     @classmethod
-    def _read_planning_window_rows(cls, input_data, columns, start_time=None):
+    def _read_planning_window_rows(cls, input_data, columns, start_time=None, planning_period_count=3):
         requested_columns = set(columns) | {"Time.StartTime", "Time.EndTime"}
         data = pd.read_csv(
             input_data,
@@ -224,7 +224,7 @@ class ExpitDataHandler:
         data["Time.EndTime"] = cls._parse_datetime_column(
             data["Time.EndTime"], "Time.EndTime"
         )
-        window_start, window_end = cls._planning_window(start_time)
+        window_start, window_end = cls._planning_window(start_time, planning_period_count)
         return data[
             data["Time.StartTime"].notna()
             & data["Time.EndTime"].notna()
@@ -350,6 +350,7 @@ class ExpitDataHandler:
         input_data,
         start_time,
         selected_crusher_destinations,
+        planning_period_count=3,
     ):
         data = cls._read_planning_window_rows(
             input_data,
@@ -358,6 +359,7 @@ class ExpitDataHandler:
                 "Mining.wetTonnes",
             },
             start_time,
+            planning_period_count,
         )
         destination_column = cls._destination_name_column(data)
         selected = {

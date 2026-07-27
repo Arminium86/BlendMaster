@@ -62,6 +62,7 @@ class CaseModeller:
         "total_AMT_stockpile_balances", "product_build_runtime_states",
         "optimization_diagnostics", "previous_selected_stockpile_source_ids",
         "previous_selected_grade_block_pairs", "grade_block_pair_locks",
+        "selected_blend_signatures", "contingency_reuse_fallbacks",
     )
 
     def __init__(
@@ -80,6 +81,8 @@ class CaseModeller:
         solver_config: Optional[dict] = None,
         product_build_settings: Optional[list] = None,
         abort_callback: Optional[Callable[[], bool]] = None,
+        plan_id: str = "Primary",
+        reserved_blend_signatures: Optional[set] = None,
     ):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
@@ -109,6 +112,13 @@ class CaseModeller:
         self.max_stockpiles = max_stockpiles
         self.min_stockpile_contribution_ratio = min_stockpile_contribution_ratio
         self.solver_config = solver_config or {}
+        self.plan_id = str(plan_id or "Primary")
+        self.reserved_blend_signatures = {
+            frozenset(signature)
+            for signature in (reserved_blend_signatures or set())
+        }
+        self.selected_blend_signatures = set()
+        self.contingency_reuse_fallbacks = 0
         self.product_build_settings = self.normalized_product_build_settings(product_build_settings)
         self.product_build_runtime_states = [
             {
@@ -335,8 +345,65 @@ class CaseModeller:
         if self.abort_requested or self.abort_callback():
             raise SolverRunAborted()
 
+    def configured_period_keys(self):
+        if hasattr(self.periods, "period_keys"):
+            return list(self.periods.period_keys())
+        period_data = self.periods.get_periods()
+        keys = []
+        index = 0
+        while True:
+            key = "preplan" if index == 0 else f"period_{index}"
+            if f"{key}_start" not in period_data:
+                break
+            keys.append(key)
+            index += 1
+        if not keys:
+            keys = [
+                key[:-4]
+                for key in period_data
+                if key.endswith("_end")
+            ]
+            keys.sort(
+                key=lambda key: (
+                    0 if key == "preplan" else 1,
+                    int(key.rsplit("_", 1)[-1])
+                    if key.rsplit("_", 1)[-1].isdigit()
+                    else 0,
+                )
+            )
+        return keys
+
+    def planning_horizon_end(self):
+        if hasattr(self.periods, "horizon_end"):
+            return self.periods.horizon_end()
+        period_data = self.periods.get_periods()
+        return period_data[f"{self.configured_period_keys()[-1]}_end"]
+
+    def period_for_time(self, value):
+        if hasattr(self.periods, "period_for_datetime"):
+            return self.periods.period_for_datetime(value)
+        period_data = self.periods.get_periods()
+        for period_key in self.configured_period_keys():
+            period_start = period_data.get(f"{period_key}_start")
+            period_end = period_data.get(f"{period_key}_end")
+            if (
+                period_start is not None
+                and period_end is not None
+                and period_start <= value < period_end
+            ):
+                return period_key
+        return None
+
     def run(self):
         """Runs the modeling process, coordinating optimization and time tracking."""
+        if not hasattr(self, "plan_id"):
+            self.plan_id = "Primary"
+        if not hasattr(self, "reserved_blend_signatures"):
+            self.reserved_blend_signatures = set()
+        if not hasattr(self, "selected_blend_signatures"):
+            self.selected_blend_signatures = set()
+        if not hasattr(self, "contingency_reuse_fallbacks"):
+            self.contingency_reuse_fallbacks = 0
         print(
             "Active solver configuration: "
             f"Min Grade Block Pair Duration = "
@@ -350,7 +417,7 @@ class CaseModeller:
         )
         repair_checkpoints = {}
         repair_attempts = 0
-        while self.current_time < self.periods.get_periods()["period_2_end"]:
+        while self.current_time < self.planning_horizon_end():
             self.check_abort_requested()
             if self.product_build_settings and self.current_product_build_index() is None:
                 raise ProductBuildCapacityComplete()
@@ -692,8 +759,10 @@ class CaseModeller:
             else: pass
             
             if self.user_interaction_mode == 1:
-                
-                self.user_blend_choice = 1
+
+                self.user_blend_choice = (
+                    self.select_automatic_blend_option()
+                )
 
                 if self.steady_state_tracker != 0:
                     if not list(current_filtered_sources) == list(previous_filtered_sources):
@@ -808,6 +877,80 @@ class CaseModeller:
             self.decision_point_results = pd.DataFrame()
             self.blend_option = 1
     
+    @staticmethod
+    def blend_signature_from_dataframe(data):
+        if data is None or data.empty:
+            return frozenset()
+        active = data.copy()
+        if "source_actual_tonnes" in active:
+            tonnes = pd.to_numeric(
+                active["source_actual_tonnes"], errors="coerce"
+            ).fillna(0)
+            active = active[tonnes > Optimizer.SOLUTION_TOLERANCE]
+        signature = set()
+        for _, row in active.iterrows():
+            source_type = str(row.get("source_type") or "").strip().lower()
+            source = str(
+                row.get("source")
+                or row.get("source_id")
+                or ""
+            ).strip().upper()
+            if source:
+                signature.add(f"{source_type}:{source}")
+        return frozenset(signature)
+
+    def select_automatic_blend_option(self):
+        options = []
+        numeric_options = pd.to_numeric(
+            self.decision_point_results["blend_option"],
+            errors="coerce",
+        ).dropna()
+        for option in sorted(set(numeric_options.astype(int).tolist())):
+            rows = self.decision_point_results[
+                self.decision_point_results["blend_option"] == option
+            ]
+            signature = self.blend_signature_from_dataframe(rows)
+            reuse_count = sum(
+                signature == reserved
+                for reserved in self.reserved_blend_signatures
+            )
+            options.append((reuse_count, option, signature))
+
+        if not options:
+            return 1
+        reuse_count, option, signature = min(
+            options, key=lambda candidate: (candidate[0], candidate[1])
+        )
+        if reuse_count:
+            self.contingency_reuse_fallbacks += 1
+            print(
+                f"{self.plan_id}: all feasible blends in steady state "
+                f"{self.steady_state_tracker} were already used by an "
+                "earlier plan; selecting the least-reused option."
+            )
+        elif self.reserved_blend_signatures:
+            print(
+                f"{self.plan_id}: selected the highest-ranked unused "
+                f"blend option {option}."
+            )
+        if signature:
+            self.selected_blend_signatures.add(signature)
+        return option
+
+    def selected_plan_blend_signatures(self):
+        signatures = set(self.selected_blend_signatures)
+        if self.results is None or self.results.empty:
+            return signatures
+        if "steady_state_number" not in self.results:
+            return signatures
+        for _, group in self.results.groupby(
+            "steady_state_number", sort=False, dropna=False
+        ):
+            signature = self.blend_signature_from_dataframe(group)
+            if signature:
+                signatures.add(signature)
+        return signatures
+
     def publish_decision_options(self):
         display_columns = [
             "steady_state_number",
@@ -839,7 +982,18 @@ class CaseModeller:
         )
         option_count = len(blend_options)
         if self.user_interaction_mode == 1:
-            print(f"Auto select mode: Blend option 1 will be selected from {option_count} feasible option(s). Higher solver score is better.")
+            if self.reserved_blend_signatures:
+                print(
+                    f"Contingency auto mode: the highest-ranked unused "
+                    f"blend will be selected from {option_count} feasible "
+                    "option(s)."
+                )
+            else:
+                print(
+                    f"Auto select mode: Blend option 1 will be selected "
+                    f"from {option_count} feasible option(s). Higher solver "
+                    "score is better."
+                )
         elif self.user_interaction_mode == 2:
             print("Manual mode: choose a blend option from the table. Higher solver score is better.")
 
@@ -926,7 +1080,7 @@ class CaseModeller:
 
         periods = self.periods.get_periods()
         remaining_capacity = 0.0
-        for period_name in ("preplan", "period_1", "period_2"):
+        for period_name in self.configured_period_keys():
             period_end = periods.get(f"{period_name}_end")
             if period_end is None or self.current_time >= period_end:
                 continue
@@ -1401,11 +1555,11 @@ class CaseModeller:
             raise ValueError("Steady state duration is zero; cannot advance optimisation time.")
         self.current_time += timedelta(hours=steady_state_duration)
 
-        # Switch periods if needed
-        if self.current_time >= self.periods.get_periods()["preplan_end"] and self.period_tracker == "preplan":
-            self.period_tracker = "period_1"
-        elif self.current_time >= self.periods.get_periods()["period_1_end"] and self.period_tracker == "period_1":
-            self.period_tracker = "period_2"
+        # A shortened steady state can land exactly on any configured
+        # period boundary, so resolve the tracker from the shared calendar.
+        active_period = self.period_for_time(self.current_time)
+        if active_period is not None:
+            self.period_tracker = active_period
 
     def record_results(self, result):
         """Record results from an optimization run into the main DataFrame."""
@@ -1773,11 +1927,10 @@ class CaseModeller:
        
     def calculate_initial_steady_state_duration(self):
         """Calculate initial steady state duration based on the current time and periods."""
-        if self.current_time >= self.periods.get_periods()["preplan_start"] and self.current_time < self.periods.get_periods()["preplan_end"]: 
-            return (self.periods.get_periods()["preplan_end"] - self.current_time).total_seconds() / 3600
-        elif self.current_time >= self.periods.get_periods()["period_1_start"] and self.current_time < self.periods.get_periods()["period_1_end"]:
-            return (self.periods.get_periods()["period_1_end"] - self.current_time).total_seconds() / 3600
-        elif self.current_time >= self.periods.get_periods()["period_2_start"] and self.current_time < self.periods.get_periods()["period_2_end"]:
-            return (self.periods.get_periods()["period_2_end"] - self.current_time).total_seconds() / 3600
-        else:
+        period_key = self.period_for_time(self.current_time)
+        if period_key is None:
             return 0
+        return (
+            self.periods.get_periods()[f"{period_key}_end"]
+            - self.current_time
+        ).total_seconds() / 3600

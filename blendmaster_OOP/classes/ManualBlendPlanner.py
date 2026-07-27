@@ -77,14 +77,30 @@ class ManualBlendPlanner:
         configured_rates = self.calendar_inputs.get("crusher_rate", {})
         if not isinstance(configured_rates, Mapping):
             configured_rates = {}
+        self.period_keys = self._configured_period_keys()
+        self.period_labels = [
+            "Preplan" if key == "preplan" else key.title()
+            for key in self.period_keys
+        ]
         self.crusher_rates = {
             period: self._positive_number(
                 configured_rates.get(period, self.crusher_rate),
                 f"{period.replace('_', ' ')} crusher rate",
             )
-            for period in ("Preplan", "Period_1", "Period_2")
+            for period in self.period_labels
         }
         self._inventory_template = self._build_inventory()
+
+    def _configured_period_keys(self):
+        keys = []
+        index = 0
+        while True:
+            key = "preplan" if index == 0 else f"period_{index}"
+            if f"{key}_start" not in self.periods:
+                break
+            keys.append(key)
+            index += 1
+        return keys or ["preplan", "period_1", "period_2"]
 
     @staticmethod
     def _number(value, default=0.0):
@@ -218,8 +234,11 @@ class ManualBlendPlanner:
     def _period_boundaries(self):
         values = []
         for key in (
-            "preplan_end", "period_1_start", "period_1_end",
-            "period_2_start", "period_2_end",
+            boundary
+            for period_key in self.period_keys
+            for boundary in (
+                f"{period_key}_start", f"{period_key}_end"
+            )
         ):
             value = self.periods.get(key)
             if value is not None:
@@ -227,22 +246,18 @@ class ManualBlendPlanner:
         return sorted(set(values))
 
     def _period_number(self, at_time):
-        period_1_start = self.periods.get("period_1_start")
-        period_2_start = self.periods.get("period_2_start")
-        if period_2_start is not None and at_time >= self._datetime(
-            period_2_start, "period_2_start"
+        for index, period_key in reversed(
+            list(enumerate(self.period_keys))
         ):
-            return 2
-        if period_1_start is not None and at_time >= self._datetime(
-            period_1_start, "period_1_start"
-        ):
-            return 1
+            period_start = self.periods.get(f"{period_key}_start")
+            if period_start is not None and at_time >= self._datetime(
+                period_start, f"{period_key}_start"
+            ):
+                return index
         return 0
 
     def _crusher_rate_for(self, at_time):
-        period = {
-            0: "Preplan", 1: "Period_1", 2: "Period_2"
-        }[self._period_number(at_time)]
+        period = self.period_labels[self._period_number(at_time)]
         return self.crusher_rates.get(period, self.crusher_rate)
 
     @staticmethod
@@ -530,9 +545,11 @@ class ManualBlendPlanner:
 
     def _target_values(self, period):
         result = {}
-        period_name = {
-            0: "Preplan", 1: "Period_1", 2: "Period_2"
-        }.get(period, "Preplan")
+        period_name = (
+            self.period_labels[period]
+            if 0 <= period < len(self.period_labels)
+            else "Preplan"
+        )
         for grade in self.GRADES:
             for bound in ("min", "max"):
                 value = None

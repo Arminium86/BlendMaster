@@ -4,6 +4,7 @@ import builtins, pandas as pd, traceback, copy
 from classes.CaseModeller import CaseModeller
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
+from classes.ProductBuildProgress import ProductBuildProgress
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
 from database.SQLiteDatabase import DatabaseManager
@@ -57,7 +58,41 @@ class Run:
 
     def is_abort_requested(self):
         return bool(self.abort_requested)
-    
+
+    def _run_case_modeller(self, case_modeller):
+        self.case_modeller = case_modeller
+        original_print = builtins.print
+        original_input = builtins.input
+        try:
+            builtins.print = self.case_bridge.print
+            builtins.input = self.case_bridge.input
+            case_modeller.run()
+        finally:
+            builtins.print = original_print
+            builtins.input = original_input
+
+    @staticmethod
+    def _case_blend_report(case_modeller):
+        results = case_modeller.results.copy()
+        if (
+            "source_actual_tonnes" in results
+            and "crusher_actual_tonnes" in results
+        ):
+            source_tonnes = pd.to_numeric(
+                results["source_actual_tonnes"], errors="coerce"
+            ).fillna(0)
+            crusher_tonnes = pd.to_numeric(
+                results["crusher_actual_tonnes"], errors="coerce"
+            ).fillna(0)
+            results = results[
+                ((source_tonnes != 0) & (crusher_tonnes != 0))
+                | ((source_tonnes == 0) & (crusher_tonnes == 0))
+            ]
+        results = case_modeller.group_grade_block_rows(results)
+        return ProductBuildProgress.annotate(
+            results, case_modeller.product_build_settings
+        )
+
     def execute(
         self,
         start_time,
@@ -76,6 +111,7 @@ class Run:
         site_context=None,
         two_wp_file_path=None,
         selected_24hr_agents=None,
+        planning_period_count=3,
     ):
         self.abort_requested = False
 
@@ -84,8 +120,10 @@ class Run:
         #requirements.install_requirements()
 
         # Initialize periods
-        periods = PeriodManager()
+        periods = PeriodManager(planning_period_count)
         periods.calculate_periods(start_time)
+        calendar_inputs = calendar_inputs or {}
+        calendar_inputs["planning_period_count"] = periods.period_count
 
         # 24HR supplies movement timing/tonnes/grades. The 2WP supplies every
         # stockpile destination, including full-horizon split ratios.
@@ -137,6 +175,24 @@ class Run:
         solver_config["product_builds_configured"] = bool(
             (calendar_inputs or {}).get("product_build_settings")
         )
+        try:
+            contingency_plan_count = max(
+                int(solver_config.get("contingency_plan_count", 0) or 0),
+                0,
+            )
+        except (TypeError, ValueError):
+            contingency_plan_count = 0
+        contingency_plan_count = min(contingency_plan_count, 10)
+        solver_config["contingency_plan_count"] = contingency_plan_count
+        solver_config["max_blend_options_per_steady_state"] = max(
+            int(
+                solver_config.get(
+                    "max_blend_options_per_steady_state", 12
+                )
+                or 12
+            ),
+            contingency_plan_count + 1,
+        )
 
         if user_interaction_mode == 2 and file_path:
 
@@ -165,46 +221,51 @@ class Run:
             min_stockpile_contribution_ratio
         )
 
-        # Initialise and run CaseModeller
-        self.case_modeller = CaseModeller(
-            stockpiles=stockpile_data_objects,
-            grade_blocks=grade_block_data_objects,
-            equipment=equipment_data_objects,
-            crusher_targets=crusher_target_data,
-            expit_payload_transactions=expit_payload_transactions,
-            periods=periods,
-            user_interaction_mode=blend_mode,
-            hex_sequence_table=hex_sequence_table,
-            min_stockpiles=min_stockpiles,
-            max_stockpiles=max_stockpiles,
-            min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
-            solver_config=solver_config,
-            product_build_settings=(calendar_inputs or {}).get("product_build_settings", []),
-            abort_callback=self.is_abort_requested,
+        # Every plan starts from an identical deep-copied model state.
+        model_seed = {
+            "stockpiles": copy.deepcopy(stockpile_data_objects),
+            "grade_blocks": copy.deepcopy(grade_block_data_objects),
+            "equipment": copy.deepcopy(equipment_data_objects),
+            "crusher_targets": copy.deepcopy(crusher_target_data),
+        }
+
+        def create_case_modeller(
+            plan_id,
+            interaction_mode,
+            reserved_blend_signatures=None,
+        ):
+            return CaseModeller(
+                stockpiles=copy.deepcopy(model_seed["stockpiles"]),
+                grade_blocks=copy.deepcopy(model_seed["grade_blocks"]),
+                equipment=copy.deepcopy(model_seed["equipment"]),
+                crusher_targets=copy.deepcopy(model_seed["crusher_targets"]),
+                expit_payload_transactions=expit_payload_transactions.copy(),
+                periods=periods,
+                user_interaction_mode=interaction_mode,
+                hex_sequence_table=copy.deepcopy(hex_sequence_table),
+                min_stockpiles=min_stockpiles,
+                max_stockpiles=max_stockpiles,
+                min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
+                solver_config=copy.deepcopy(solver_config),
+                product_build_settings=(calendar_inputs or {}).get(
+                    "product_build_settings", []
+                ),
+                abort_callback=self.is_abort_requested,
+                plan_id=plan_id,
+                reserved_blend_signatures=reserved_blend_signatures,
+            )
+
+        primary_case_modeller = create_case_modeller(
+            "Primary", blend_mode
         )
-
-        # Monkey-patch print and input
-        original_print = builtins.print
-        original_input = builtins.input
-        run_exception = None
+        self.case_modellers = {"Primary": primary_case_modeller}
         try:
-            builtins.print = self.case_bridge.print
-            builtins.input = self.case_bridge.input
-            self.case_modeller.run()  # Run the CaseModeller logic
-        
-        except Exception as e:
-            run_exception = e
-        
-        finally:
-            # Restore the original print and input functions
-            builtins.print = original_print
-            builtins.input = original_input
-
-        if run_exception is not None:
-            stockpile_selection_error = self._stockpile_selection_error(run_exception)
+            self._run_case_modeller(primary_case_modeller)
+        except Exception as error:
+            stockpile_selection_error = self._stockpile_selection_error(error)
             if stockpile_selection_error is not None:
                 raise stockpile_selection_error
-            raise run_exception
+            raise
 
         self._validate_optimization_results()
         self._validate_stockpile_count_constraints(
@@ -214,6 +275,7 @@ class Run:
         )
 
         self.case_bridge.print("Optimisation complete. Writing database tables...")
+        database_manager.clear_optimisation_plan_results()
 
         if expit_payload_transactions_to_save is not None:
             self.case_bridge.print("Writing expit payload transactions to database...")
@@ -242,7 +304,128 @@ class Run:
         self.case_bridge.print("Writing product build report to database...")
         self.case_modeller.save_product_build_report()
 
-        self.case_bridge.print("Database tables written successfully.")
+        primary_blend_report = self._case_blend_report(
+            primary_case_modeller
+        )
+        database_manager.write_optimisation_plan_result(
+            "blend", primary_blend_report, "Primary", 0
+        )
+        database_manager.write_optimisation_plan_result(
+            "build", primary_case_modeller.build_report, "Primary", 0
+        )
+        database_manager.write_optimisation_plan_result(
+            "product_build",
+            primary_case_modeller.build_product_build_report(),
+            "Primary",
+            0,
+        )
+        plan_status_rows = [{
+            "plan_id": "Primary",
+            "plan_rank": 0,
+            "status": "complete",
+            "message": "Primary optimised plan completed.",
+            "reused_blend_fallbacks": 0,
+        }]
+        reserved_signatures = (
+            primary_case_modeller.selected_plan_blend_signatures()
+        )
+
+        for plan_rank in range(1, contingency_plan_count + 1):
+            plan_id = f"Contingency {plan_rank}"
+            self.case_bridge.print(
+                f"Running {plan_id} of {contingency_plan_count} using "
+                "the highest-ranked blends not used by earlier plans..."
+            )
+            contingency = create_case_modeller(
+                plan_id,
+                1,
+                reserved_signatures,
+            )
+            self.case_modellers[plan_id] = contingency
+            try:
+                self._run_case_modeller(contingency)
+                self._validate_optimization_results()
+                self._validate_stockpile_count_constraints(
+                    min_stockpiles,
+                    max_stockpiles,
+                    min_stockpile_contribution_ratio,
+                )
+                contingency.build_report = (
+                    contingency.balance_tracker.get_build_transactions()
+                )
+                blend_report = self._case_blend_report(contingency)
+                product_build_report = (
+                    contingency.build_product_build_report()
+                )
+                database_manager.write_optimisation_plan_result(
+                    "blend", blend_report, plan_id, plan_rank
+                )
+                database_manager.write_optimisation_plan_result(
+                    "build",
+                    contingency.build_report,
+                    plan_id,
+                    plan_rank,
+                )
+                database_manager.write_optimisation_plan_result(
+                    "product_build",
+                    product_build_report,
+                    plan_id,
+                    plan_rank,
+                )
+                database_manager.write_material_destination_plan_to_database(
+                    payload_transactions=expit_payload_transactions,
+                    blend_report=blend_report,
+                    plan_type="optimised",
+                    plan_id=plan_id,
+                    crusher_destination=(
+                        selected_aps_crusher
+                        or (site_context or {}).get("crusher")
+                    ),
+                    direct_tip_movement_rules=(site_context or {}).get(
+                        "direct_tip_movement_rules", []
+                    ),
+                )
+                reserved_signatures.update(
+                    contingency.selected_plan_blend_signatures()
+                )
+                fallback_count = contingency.contingency_reuse_fallbacks
+                message = (
+                    "Plan completed with reused blends where no unused "
+                    "feasible option existed."
+                    if fallback_count
+                    else "Plan completed using unused blend choices."
+                )
+                plan_status_rows.append({
+                    "plan_id": plan_id,
+                    "plan_rank": plan_rank,
+                    "status": "complete",
+                    "message": message,
+                    "reused_blend_fallbacks": fallback_count,
+                })
+            except Exception as error:
+                message = str(
+                    getattr(error, "user_message", None) or error
+                )
+                self.case_bridge.print(
+                    f"{plan_id} could not produce a compliant feasible "
+                    f"plan: {message}"
+                )
+                plan_status_rows.append({
+                    "plan_id": plan_id,
+                    "plan_rank": plan_rank,
+                    "status": "infeasible",
+                    "message": message,
+                    "reused_blend_fallbacks": (
+                        contingency.contingency_reuse_fallbacks
+                    ),
+                })
+
+        database_manager.write_optimisation_plan_status(plan_status_rows)
+        self.case_modeller = primary_case_modeller
+        self.case_bridge.print(
+            "Database tables written successfully. "
+            f"{len(plan_status_rows) - 1} contingency plan(s) processed."
+        )
 
         return periods
 
@@ -281,17 +464,20 @@ class Run:
         def ensure_build_only_calendar_defaults(stockpile_name):
             """Ensure APS build destinations always have a complete calendar record."""
             calendar_name = str(stockpile_name).strip().lower()
+            period_labels = PeriodManager.period_labels_for_count(
+                calendar_inputs.get("planning_period_count", 3)
+            )
             calendar_inputs.setdefault(
                 f"stockpiles_{calendar_name}_state",
-                {"Preplan": "Build", "Period_1": "Build", "Period_2": "Build"},
+                {period: "Build" for period in period_labels},
             )
             calendar_inputs.setdefault(
                 f"stockpiles_{calendar_name}_maximum_quantity",
-                {"Preplan": 100000, "Period_1": 100000, "Period_2": 100000},
+                {period: 100000 for period in period_labels},
             )
             calendar_inputs.setdefault(
                 f"stockpiles_{calendar_name}_cash",
-                {"Preplan": 0, "Period_1": 0, "Period_2": 0},
+                {period: 0 for period in period_labels},
             )
 
         existing_names = {str(key).strip().upper() for key in stockpile_data}

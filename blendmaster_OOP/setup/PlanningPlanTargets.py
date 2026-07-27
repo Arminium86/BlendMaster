@@ -132,6 +132,7 @@ class PlanningPlanTargets:
         configured_brands=None,
         opf=None,
         crusher_contribution_ratio=1.0,
+        planning_period_count=3,
     ):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
@@ -175,9 +176,9 @@ class PlanningPlanTargets:
         if data.empty:
             return []
 
-        periods = PeriodManager()
+        periods = PeriodManager(planning_period_count)
         periods.calculate_periods(start_time)
-        horizon_end = periods.get_periods()["period_2_end"]
+        horizon_end = periods.horizon_end()
         data["PERIOD_START"] = self._perth_wall_clock_series(data["PERIOD_START"])
         data["PERIOD_END"] = self._perth_wall_clock_series(data["PERIOD_END"])
         data = data[

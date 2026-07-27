@@ -32,6 +32,116 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    PLAN_RESULT_TABLES = {
+        "blend": "optimisation_plan_blend_report",
+        "build": "optimisation_plan_build_report",
+        "product_build": "optimisation_plan_product_build_report",
+        "manual": "manual_plan_blend_report",
+    }
+
+    def clear_optimisation_plan_results(self, database_name=None):
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            for table_name in (
+                self.PLAN_RESULT_TABLES["blend"],
+                self.PLAN_RESULT_TABLES["build"],
+                self.PLAN_RESULT_TABLES["product_build"],
+                "optimisation_plan_status",
+            ):
+                connection.execute(
+                    f'DROP TABLE IF EXISTS "{table_name}"'
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _plan_result_frame(results, plan_id, plan_rank):
+        frame = (
+            results.copy()
+            if isinstance(results, pd.DataFrame)
+            else pd.DataFrame(results or [])
+        )
+        frame.insert(0, "plan_rank", int(plan_rank))
+        frame.insert(0, "plan_id", str(plan_id))
+        for column in frame.columns:
+            if pd.api.types.is_datetime64_any_dtype(frame[column]):
+                frame[column] = pd.to_datetime(
+                    frame[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+        return frame
+
+    def write_optimisation_plan_result(
+        self,
+        result_type,
+        results,
+        plan_id,
+        plan_rank,
+        database_name=None,
+    ):
+        table_name = self.PLAN_RESULT_TABLES[result_type]
+        database_name = database_name or get_database_path()
+        frame = self._plan_result_frame(results, plan_id, plan_rank)
+        connection = sqlite3.connect(database_name)
+        try:
+            table_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                """,
+                (table_name,),
+            ).fetchone()
+            existing = (
+                pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
+                if table_exists
+                else pd.DataFrame()
+            )
+            if not existing.empty and "plan_id" in existing:
+                existing = existing[
+                    existing["plan_id"].astype(str) != str(plan_id)
+                ]
+            columns = list(dict.fromkeys([
+                *existing.columns.tolist(),
+                *frame.columns.tolist(),
+            ]))
+            combined = pd.concat(
+                [
+                    existing.reindex(columns=columns),
+                    frame.reindex(columns=columns),
+                ],
+                ignore_index=True,
+            )
+            combined.to_sql(
+                table_name,
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def write_optimisation_plan_status(
+        self, status_rows, database_name=None
+    ):
+        database_name = database_name or get_database_path()
+        status = pd.DataFrame(status_rows or [], columns=[
+            "plan_id", "plan_rank", "status", "message",
+            "reused_blend_fallbacks",
+        ])
+        connection = sqlite3.connect(database_name)
+        try:
+            status.to_sql(
+                "optimisation_plan_status",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def add_product_build_progress_to_existing_reports(
         self, product_build_settings, database_name=None
     ):
@@ -1098,7 +1208,7 @@ class StockpileProfileReport:
     def write_optimised_stockpile_profile_report_to_database(periods: PeriodManager):
         
         start_datetime = periods.get_periods()["preplan_start"]
-        end_datetime = periods.get_periods()["period_2_end"]
+        end_datetime = periods.horizon_end()
         
         # Connect to the SQLite database
         database_name = get_database_path()

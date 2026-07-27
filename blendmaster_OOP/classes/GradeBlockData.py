@@ -23,6 +23,7 @@ class GradeBlockData:
         agent=None,
         start_datetime=None,
         source=None,
+        period_values=None,
     ):
         self._name = name
         self._balance = balance
@@ -46,6 +47,7 @@ class GradeBlockData:
         self._agent = agent
         self._start_datetime = start_datetime
         self._source = source
+        self._period_values = dict(period_values or {})
     
     # Getters
     @property
@@ -228,7 +230,7 @@ class GradeBlockData:
  
     # Method to retrieve the original dictionary
     def to_dict(self):
-        return {
+        result = {
             "name": self._name,
             "balance": self._balance,
             "max_quantity_preplan": self._max_quantity_preplan,
@@ -250,5 +252,7 @@ class GradeBlockData:
             "destination": self._destination,
             "agent": self._agent,
             "start_datetime": self._start_datetime,
-            "source": self._source
+            "source": self._source,
         }
+        result.update(self._period_values)
+        return result

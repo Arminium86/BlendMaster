@@ -1,5 +1,5 @@
 class EquipmentData:
-    def __init__(self, name, priority_preplan, priority_period_1, priority_period_2, rate_preplan, rate_period_1, rate_period_2):
+    def __init__(self, name, priority_preplan, priority_period_1, priority_period_2, rate_preplan, rate_period_1, rate_period_2, period_values=None):
         self._name = name
         self._priority_preplan = priority_preplan
         self._priority_period_1 = priority_period_1
@@ -7,6 +7,7 @@ class EquipmentData:
         self._rate_preplan = rate_preplan
         self._rate_period_1 = rate_period_1
         self._rate_period_2 = rate_period_2
+        self._period_values = dict(period_values or {})
 
     # Getters
     @property
@@ -68,7 +69,7 @@ class EquipmentData:
 
     # Method to retrieve the original dictionary
     def to_dict(self):
-        return {
+        result = {
             "name": self._name,
             "priority_preplan": self._priority_preplan,
             "priority_period_1": self._priority_period_1,
@@ -77,3 +78,5 @@ class EquipmentData:
             "rate_period_1": self._rate_period_1,
             "rate_period_2": self._rate_period_2,
         }
+        result.update(self._period_values)
+        return result

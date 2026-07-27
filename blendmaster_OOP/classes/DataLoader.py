@@ -4,6 +4,7 @@ from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.HaulCycleDataHandler import HaulCycleDataHandler
+from classes.PeriodManager import PeriodManager
 from pandas import DataFrame
 
 class DataLoader:
@@ -15,6 +16,20 @@ class DataLoader:
         self.periods = periods
         self.solver_config = (calendar_inputs or {}).get("solver_config", {})
         self.direct_tip_enabled = bool(self.solver_config.get("direct_tip_enabled", True))
+
+    def period_keys(self):
+        if self.periods is not None:
+            return self.periods.period_keys()
+        return PeriodManager.period_keys_for_count(
+            (self.calendar_inputs or {}).get("planning_period_count", 3)
+        )
+
+    def period_labels(self):
+        if self.periods is not None:
+            return self.periods.period_labels()
+        return PeriodManager.period_labels_for_count(
+            (self.calendar_inputs or {}).get("planning_period_count", 3)
+        )
 
     def load_data(self):
         """Loads data from GUI and returns it in structured format."""
@@ -28,9 +43,7 @@ class DataLoader:
 
         if self.uses_stockpile_max_reclaim_rates():
             equipment_data = {
-                "Preplan": 0.0,
-                "Period_1": 0.0,
-                "Period_2": 0.0,
+                period: 0.0 for period in self.period_labels()
             }
         else:
             equipment_data = self.calendar_inputs['reclaim_equipment_max_reclaim_rate']
@@ -38,53 +51,27 @@ class DataLoader:
         equipment_data_objects = self.create_equipment_data_objects(equipment_data, crusher_rate_data)
 
         # Structure crusher target data as a nested dictionary
-        crusher_target_data = {
-            "preplan": {
-                "target_fe_min": self.calendar_inputs['crusher_target_fe_min']['Preplan'],
-                "target_fe_max": self.calendar_inputs['crusher_target_fe_max']['Preplan'],
-                "target_si_min": self.calendar_inputs['crusher_target_si_min']['Preplan'],
-                "target_si_max": self.calendar_inputs['crusher_target_si_max']['Preplan'],
-                "target_al_min": self.calendar_inputs['crusher_target_al_min']['Preplan'],
-                "target_al_max": self.calendar_inputs['crusher_target_al_max']['Preplan'],
-                "target_p_min": self.calendar_inputs['crusher_target_p_min']['Preplan'],
-                "target_p_max": self.calendar_inputs['crusher_target_p_max']['Preplan'],
-                "target_mn_min": self.calendar_inputs['crusher_target_mn_min']['Preplan'],
-                "target_mn_max": self.calendar_inputs['crusher_target_mn_max']['Preplan'],
-                "direct_feed_ratio_min": self.get_direct_feed_ratio('crusher_direct_feed_ratio_min', 'Preplan', 0),
-                "direct_feed_ratio_max": self.get_direct_feed_ratio('crusher_direct_feed_ratio_max', 'Preplan', 1),
-                "crusher_rate": self.calendar_inputs['crusher_rate']['Preplan']
-            },
-            "period_1": {
-                "target_fe_min": self.calendar_inputs['crusher_target_fe_min']['Period_1'],
-                "target_fe_max": self.calendar_inputs['crusher_target_fe_max']['Period_1'],
-                "target_si_min": self.calendar_inputs['crusher_target_si_min']['Period_1'],
-                "target_si_max": self.calendar_inputs['crusher_target_si_max']['Period_1'],
-                "target_al_min": self.calendar_inputs['crusher_target_al_min']['Period_1'],
-                "target_al_max": self.calendar_inputs['crusher_target_al_max']['Period_1'],
-                "target_p_min": self.calendar_inputs['crusher_target_p_min']['Period_1'],
-                "target_p_max": self.calendar_inputs['crusher_target_p_max']['Period_1'],
-                "target_mn_min": self.calendar_inputs['crusher_target_mn_min']['Period_1'],
-                "target_mn_max": self.calendar_inputs['crusher_target_mn_max']['Period_1'],
-                "direct_feed_ratio_min": self.get_direct_feed_ratio('crusher_direct_feed_ratio_min', 'Period_1', 0),
-                "direct_feed_ratio_max": self.get_direct_feed_ratio('crusher_direct_feed_ratio_max', 'Period_1', 1),
-                "crusher_rate": self.calendar_inputs['crusher_rate']['Period_1']
-            },
-            "period_2": {
-                "target_fe_min": self.calendar_inputs['crusher_target_fe_min']['Period_2'],
-                "target_fe_max": self.calendar_inputs['crusher_target_fe_max']['Period_2'],
-                "target_si_min": self.calendar_inputs['crusher_target_si_min']['Period_2'],
-                "target_si_max": self.calendar_inputs['crusher_target_si_max']['Period_2'],
-                "target_al_min": self.calendar_inputs['crusher_target_al_min']['Period_2'],
-                "target_al_max": self.calendar_inputs['crusher_target_al_max']['Period_2'],
-                "target_p_min": self.calendar_inputs['crusher_target_p_min']['Period_2'],
-                "target_p_max": self.calendar_inputs['crusher_target_p_max']['Period_2'],
-                "target_mn_min": self.calendar_inputs['crusher_target_mn_min']['Period_2'],
-                "target_mn_max": self.calendar_inputs['crusher_target_mn_max']['Period_2'],
-                "direct_feed_ratio_min": self.get_direct_feed_ratio('crusher_direct_feed_ratio_min', 'Period_2', 0),
-                "direct_feed_ratio_max": self.get_direct_feed_ratio('crusher_direct_feed_ratio_max', 'Period_2', 1),
-                "crusher_rate": self.calendar_inputs['crusher_rate']['Period_2']
+        crusher_target_data = {}
+        for period_key, period_label in zip(
+            self.period_keys(), self.period_labels()
+        ):
+            target = {
+                "direct_feed_ratio_min": self.get_direct_feed_ratio(
+                    "crusher_direct_feed_ratio_min", period_label, 0
+                ),
+                "direct_feed_ratio_max": self.get_direct_feed_ratio(
+                    "crusher_direct_feed_ratio_max", period_label, 1
+                ),
+                "crusher_rate": self.calendar_inputs["crusher_rate"][period_label],
             }
-        }
+            for grade in ("fe", "si", "al", "p", "mn"):
+                target[f"target_{grade}_min"] = self.calendar_inputs[
+                    f"crusher_target_{grade}_min"
+                ][period_label]
+                target[f"target_{grade}_max"] = self.calendar_inputs[
+                    f"crusher_target_{grade}_max"
+                ][period_label]
+            crusher_target_data[period_key] = target
 
         for target in crusher_target_data.values():
             if target["direct_feed_ratio_min"] > target["direct_feed_ratio_max"]:
@@ -158,6 +145,14 @@ class DataLoader:
         return stockpile_data
     
     def create_equipment_data_objects(self, equipment_data_dicts: dict, crusher_rate_dicts: dict):
+        labels = self.period_labels()
+
+        def dynamic_values(prefix, values):
+            return {
+                f"{prefix}_{key}": values[label]
+                for key, label in zip(self.period_keys(), labels)
+            }
+
         return [
             EquipmentData(
                 name="RC",
@@ -166,7 +161,11 @@ class DataLoader:
                 priority_period_2=0,
                 rate_preplan=equipment_data_dicts['Preplan'],
                 rate_period_1=equipment_data_dicts['Period_1'],
-                rate_period_2=equipment_data_dicts['Period_2']
+                rate_period_2=equipment_data_dicts['Period_2'],
+                period_values={
+                    **{f"priority_{key}": 0 for key in self.period_keys()},
+                    **dynamic_values("rate", equipment_data_dicts),
+                },
             ),
             EquipmentData(
                 name="EX",
@@ -175,7 +174,11 @@ class DataLoader:
                 priority_period_2=0,
                 rate_preplan=crusher_rate_dicts['Preplan'],
                 rate_period_1=crusher_rate_dicts['Period_1'],
-                rate_period_2=crusher_rate_dicts['Period_2']
+                rate_period_2=crusher_rate_dicts['Period_2'],
+                period_values={
+                    **{f"priority_{key}": 0 for key in self.period_keys()},
+                    **dynamic_values("rate", crusher_rate_dicts),
+                },
             )
         ]
     
@@ -192,9 +195,14 @@ class DataLoader:
         )
         for record, nested_record in stockpile_data.items():
             calendar_name = nested_record["name"]
+            states_by_period = calendar_inputs[
+                f"stockpiles_{calendar_name}_state"
+            ]
             states = [
-                calendar_inputs[f"stockpiles_{calendar_name}_state"][period]
-                for period in ("Preplan", "Period_1", "Period_2")
+                states_by_period[period] for period in self.period_labels()
+            ]
+            max_quantities = calendar_inputs[
+                f"stockpiles_{calendar_name}_maximum_quantity"
             ]
             max_reclaim_rate = nested_record.get("max_reclaim_rate")
             if use_stockpile_rates:
@@ -274,6 +282,27 @@ class DataLoader:
                 aps_brand_proportions=nested_record.get("aps_brand_proportions", {}),
                 aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {}),
                 max_reclaim_rate=max_reclaim_rate,
+                period_values={
+                    **{
+                        f"state_{key}": states_by_period[label]
+                        for key, label in zip(
+                            self.period_keys(), self.period_labels()
+                        )
+                    },
+                    **{
+                        f"max_quantity_{key}": max_quantities[label]
+                        for key, label in zip(
+                            self.period_keys(), self.period_labels()
+                        )
+                    },
+                    **{
+                        f"cost_{key}": derived_cost_per_tonne
+                        for key in self.period_keys()
+                    },
+                    **{
+                        f"cash_{key}": 0.0 for key in self.period_keys()
+                    },
+                },
 
             ))
         return stockpiles
@@ -327,6 +356,23 @@ class DataLoader:
                 agent=record.get("agent"),
                 start_datetime=record.get("start_datetime"),
                 source=record.get("source"),
+                period_values={
+                    **{
+                        f"max_quantity_{period_key}":
+                            self.payload_quantity_for_period(
+                                record, period_key
+                            )
+                        for period_key in self.period_keys()
+                    },
+                    **{
+                        f"cost_{period_key}": 0
+                        for period_key in self.period_keys()
+                    },
+                    **{
+                        f"cash_{period_key}": 0
+                        for period_key in self.period_keys()
+                    },
+                },
             )
             for record in payload_transactions.to_dict(orient="records")
         ]

@@ -159,10 +159,13 @@ class OptimisedToManualPlan:
         text = str(value or "").strip().lower().replace(" ", "_")
         if text in {"0", "preplan", "pre_plan"}:
             return "Preplan"
-        if text in {"1", "period_1", "period1"}:
-            return "Period_1"
-        if text in {"2", "period_2", "period2"}:
-            return "Period_2"
+        for prefix in ("period_", "period", "p"):
+            if text.startswith(prefix):
+                suffix = text[len(prefix):]
+                if suffix.isdigit() and int(suffix) > 0:
+                    return f"Period_{int(suffix)}"
+        if text.isdigit() and int(text) > 0:
+            return f"Period_{int(text)}"
         return "Preplan"
 
     def build(self):
