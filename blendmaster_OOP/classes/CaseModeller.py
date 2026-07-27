@@ -666,6 +666,11 @@ class CaseModeller:
             solver_config["target_product_build_state"] = dict(
                 self.product_build_runtime_states[current_product_build_index]
             )
+            solver_config["active_product_build_completes_within_horizon"] = (
+                self.active_product_build_completes_within_horizon(
+                    current_product_build_index
+                )
+            )
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
             self.previous_selected_stockpile_source_ids
         )
@@ -678,6 +683,49 @@ class CaseModeller:
             for source, stockpiles in self.grade_block_pair_locks.items()
         }
         return solver_config
+
+    def active_product_build_completes_within_horizon(self, build_index):
+        """Return whether remaining crusher capacity can finish the active build.
+
+        This deliberately uses the remaining configured planning horizon, rather
+        than just the current steady state. It is a capacity projection; source
+        availability and grade constraints are still checked by the optimiser.
+        """
+        if build_index is None or build_index >= len(self.product_build_settings):
+            return False
+
+        build = self.product_build_settings[build_index]
+        state = self.product_build_runtime_states[build_index]
+        remaining_tonnes = max(
+            float(build.get("target_tonnes") or 0)
+            - float(state.get("tonnes") or 0),
+            0.0,
+        )
+        if remaining_tonnes <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
+            return True
+
+        periods = self.periods.get_periods()
+        remaining_capacity = 0.0
+        for period_name in ("preplan", "period_1", "period_2"):
+            period_end = periods.get(f"{period_name}_end")
+            if period_end is None or self.current_time >= period_end:
+                continue
+            period_start = periods.get(f"{period_name}_start", self.current_time)
+            active_start = max(self.current_time, period_start)
+            hours = max((period_end - active_start).total_seconds() / 3600, 0.0)
+            try:
+                crusher_rate = float(
+                    (self.crusher_targets.get(period_name) or {}).get(
+                        "crusher_rate", 0
+                    ) or 0
+                )
+            except (TypeError, ValueError):
+                crusher_rate = 0.0
+            remaining_capacity += crusher_rate * hours
+
+        return remaining_tonnes <= (
+            remaining_capacity + self.PRODUCT_BUILD_TONNES_TOLERANCE
+        )
 
     def configured_min_grade_block_pair_duration_hours(self):
         try:

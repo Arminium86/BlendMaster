@@ -1681,7 +1681,12 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addLayout(blend_option_timeout_layout)
 
         self.allow_offspec_steady_states_checkbox = QCheckBox(
-            "Off-spec steady states are allowed if ultimate build is on spec"
+            "Allow off-spec build steady states only when the build can complete within the planning horizon"
+        )
+        self.allow_offspec_steady_states_checkbox.setToolTip(
+            "This relaxes product-build grade targets only while the active build is "
+            "projected to complete by the end of the planning horizon. It never relaxes "
+            "Calendar crusher-grade targets."
         )
         self.solver_config_layout.addWidget(self.allow_offspec_steady_states_checkbox)
 
@@ -2028,6 +2033,16 @@ class UserInputs(QMainWindow):
         layout.addWidget(self.timing_guidance_enabled_checkbox)
         layout.addWidget(self.active_blend_guidance_enabled_checkbox)
         layout.addWidget(self.rehandle_cycle_time_penalty_checkbox)
+
+        self.enforce_calendar_crusher_grade_targets_checkbox = QCheckBox(
+            "Enforce Calendar Crusher Grade Targets"
+        )
+        self.enforce_calendar_crusher_grade_targets_checkbox.setChecked(True)
+        self.enforce_calendar_crusher_grade_targets_checkbox.setToolTip(
+            "When selected, every steady state must meet the Calendar crusher min/max "
+            "grade targets. Clear only when those targets are intentionally advisory."
+        )
+        layout.addWidget(self.enforce_calendar_crusher_grade_targets_checkbox)
 
         direct_tip_section = QLabel("Direct Tip")
         direct_tip_section.setStyleSheet(
@@ -2623,6 +2638,7 @@ class UserInputs(QMainWindow):
             "low_fe_preference_incentive": 1.0,
             "low_fe_threshold": 58.0,
             "allow_offspec_steady_states_for_product_build": False,
+            "enforce_calendar_crusher_grade_targets": True,
             "brand_guidance_mode": "ignore",
             "brand_guidance_enabled": False,
             "brand_guidance_incentive": 0.0,
@@ -6498,6 +6514,7 @@ class UserInputs(QMainWindow):
             "source_selection_tie_break_penalty",
             "stockpile_feasibility_mode",
             "allow_offspec_steady_states_for_product_build",
+            "enforce_calendar_crusher_grade_targets",
             "brand_guidance_mode",
             "brand_guidance_enabled",
             "brand_guidance_incentive",
@@ -9243,6 +9260,9 @@ class UserInputs(QMainWindow):
         self.allow_offspec_steady_states_checkbox.setChecked(
             bool(solver_config.get("allow_offspec_steady_states_for_product_build", False))
         )
+        self.enforce_calendar_crusher_grade_targets_checkbox.setChecked(
+            bool(solver_config.get("enforce_calendar_crusher_grade_targets", True))
+        )
         self.brand_guidance_enabled_checkbox.setChecked(
             bool(solver_config.get("brand_guidance_enabled", False))
         )
@@ -9618,6 +9638,7 @@ class UserInputs(QMainWindow):
             "source_selection_tie_break_penalty": source_selection_tie_break_penalty,
             "stockpile_feasibility_mode": stockpile_feasibility_mode,
             "allow_offspec_steady_states_for_product_build": self.allow_offspec_steady_states_checkbox.isChecked(),
+            "enforce_calendar_crusher_grade_targets": self.enforce_calendar_crusher_grade_targets_checkbox.isChecked(),
             "brand_guidance_mode": brand_guidance_mode,
             "brand_guidance_enabled": brand_guidance_enabled,
             "brand_guidance_incentive": brand_guidance_incentive,

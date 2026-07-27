@@ -814,13 +814,15 @@ class Optimizer:
             A_eq = None
             b_eq = None
 
-        enforce_steady_state_grades = not (
-            solver_config.get("allow_offspec_steady_states_for_product_build", False)
-            and solver_config.get("product_builds_configured", False)
+        # Calendar crusher targets are independent from product-build guidance.
+        # In particular, allowing off-spec product-build steady states must not
+        # silently turn Calendar crusher targets into advisory targets.
+        enforce_calendar_crusher_grades = solver_config.get(
+            "enforce_calendar_crusher_grade_targets", True
         )
 
         # Minimum crusher grade (turned into an upper-bound inequality)
-        if enforce_steady_state_grades:
+        if enforce_calendar_crusher_grades:
             A_ub_min_crusher_grade_fe = [[-event.grade_fe + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
             b_ub_min_crusher_grade_fe = [0]
 
@@ -901,7 +903,7 @@ class Optimizer:
         stockpile_feasibility_mode = solver_config.get(
             "stockpile_feasibility_mode", "stockpile_must_be_feasible"
         )
-        if enforce_steady_state_grades and stockpile_feasibility_mode == "stockpile_must_be_feasible" and stockpile_indices:
+        if enforce_calendar_crusher_grades and stockpile_feasibility_mode == "stockpile_must_be_feasible" and stockpile_indices:
             grade_constraint_specs = [
                 ("grade_fe", "target_fe_min", "target_fe_max"),
                 ("grade_si", "target_si_min", "target_si_max"),
@@ -940,6 +942,31 @@ class Optimizer:
                 target_product_tonnes > Optimizer.SOLUTION_TOLERANCE
                 and remaining_product_tonnes <= steady_state_capacity + Optimizer.SOLUTION_TOLERANCE
             )
+            allow_offspec_build_state = bool(
+                solver_config.get(
+                    "allow_offspec_steady_states_for_product_build", False
+                )
+                and solver_config.get(
+                    "active_product_build_completes_within_horizon", False
+                )
+            )
+            # If the build is not capacity-projected to finish by the end of
+            # the planning horizon, do not relax its targets. Applying the
+            # build bounds to each state keeps every partial build on spec.
+            if not allow_offspec_build_state:
+                for grade_key in ["fe", "si", "al", "p", "mn"]:
+                    min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
+                    max_target = safe_float(target_product_build.get(f"target_{grade_key}_max"), 100.0)
+                    A_ub_product_build_grade.extend([
+                        [min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0)) for event in event_pool],
+                        [
+                            safe_float(
+                                getattr(event, f"grade_{grade_key}", 0.0)
+                            ) - max_target
+                            for event in event_pool
+                        ],
+                    ])
+                    b_ub_product_build_grade.extend([0, 0])
             if product_build_can_complete:
                 for grade_key in ["fe", "si", "al", "p", "mn"]:
                     min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
