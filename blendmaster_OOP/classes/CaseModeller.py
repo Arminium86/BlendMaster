@@ -48,6 +48,18 @@ class ProductBuildRepairFailed(Exception):
         self.user_message = message
         self.title = "No Compliant Product Build Plan"
 
+class NoDistinctContingencyBlend(Exception):
+    def __init__(self, plan_id, steady_state, acceptance_label):
+        message = (
+            f"{plan_id} has no feasible unused blend in steady state "
+            f"{steady_state} under the contingency acceptance rule "
+            f"'{acceptance_label}'."
+        )
+        super().__init__(message)
+        self.user_message = message
+        self.title = "No Distinct Contingency Blend"
+
+
 class CaseModeller:
     MAX_DECISION_BLEND_OPTIONS = 12
     PRODUCT_BUILD_TONNES_TOLERANCE = 0.1
@@ -877,8 +889,48 @@ class CaseModeller:
             self.decision_point_results = pd.DataFrame()
             self.blend_option = 1
     
+    CONTINGENCY_STOCKPILE_MIX_ONLY = "stockpile_mix_only"
+    CONTINGENCY_STOCKPILE_OR_GRADE_BLOCK = (
+        "stockpile_or_grade_block_pairing"
+    )
+    CONTINGENCY_ACCEPTANCE_LABELS = {
+        CONTINGENCY_STOCKPILE_MIX_ONLY: (
+            "Different Stockpile Mix Only (harder to find)"
+        ),
+        CONTINGENCY_STOCKPILE_OR_GRADE_BLOCK: (
+            "Different Stockpile Mix or Grade Block Pairing "
+            "(easier to find)"
+        ),
+    }
+
+    def configured_contingency_distinctness_mode(self):
+        solver_config = getattr(self, "solver_config", {}) or {}
+        mode = str(
+            solver_config.get(
+                "contingency_distinctness_mode",
+                self.CONTINGENCY_STOCKPILE_OR_GRADE_BLOCK,
+            )
+            or ""
+        ).strip()
+        if mode not in self.CONTINGENCY_ACCEPTANCE_LABELS:
+            return self.CONTINGENCY_STOCKPILE_OR_GRADE_BLOCK
+        return mode
+
     @staticmethod
-    def blend_signature_from_dataframe(data):
+    def contingency_source_type(row):
+        source_type = str(
+            row.get("source_type") or ""
+        ).strip().lower().replace(" ", "_")
+        if source_type in {"stockpile", "grade_block"}:
+            return source_type
+        equipment = str(row.get("equipment") or "").strip().upper()
+        if equipment.startswith("RC"):
+            return "stockpile"
+        if equipment.startswith("EX"):
+            return "grade_block"
+        return source_type
+
+    def blend_signature_from_dataframe(self, data):
         if data is None or data.empty:
             return frozenset()
         active = data.copy()
@@ -887,16 +939,30 @@ class CaseModeller:
                 active["source_actual_tonnes"], errors="coerce"
             ).fillna(0)
             active = active[tonnes > Optimizer.SOLUTION_TOLERANCE]
-        signature = set()
+        stockpile_signature = set()
+        grade_block_signature = set()
         for _, row in active.iterrows():
-            source_type = str(row.get("source_type") or "").strip().lower()
+            source_type = self.contingency_source_type(row)
             source = str(
                 row.get("source")
                 or row.get("source_id")
                 or ""
             ).strip().upper()
-            if source:
-                signature.add(f"{source_type}:{source}")
+            if not source:
+                continue
+            if source_type == "stockpile":
+                stockpile_signature.add(f"stockpile:{source}")
+            elif source_type == "grade_block":
+                grade_block_signature.add(f"grade_block:{source}")
+
+        if not stockpile_signature:
+            stockpile_signature.add("stockpile_mix:<none>")
+        signature = set(stockpile_signature)
+        if (
+            self.configured_contingency_distinctness_mode()
+            == self.CONTINGENCY_STOCKPILE_OR_GRADE_BLOCK
+        ):
+            signature.update(grade_block_signature)
         return frozenset(signature)
 
     def select_automatic_blend_option(self):
@@ -921,12 +987,12 @@ class CaseModeller:
         reuse_count, option, signature = min(
             options, key=lambda candidate: (candidate[0], candidate[1])
         )
-        if reuse_count:
-            self.contingency_reuse_fallbacks += 1
-            print(
-                f"{self.plan_id}: all feasible blends in steady state "
-                f"{self.steady_state_tracker} were already used by an "
-                "earlier plan; selecting the least-reused option."
+        if reuse_count and self.reserved_blend_signatures:
+            mode = self.configured_contingency_distinctness_mode()
+            raise NoDistinctContingencyBlend(
+                self.plan_id,
+                self.steady_state_tracker,
+                self.CONTINGENCY_ACCEPTANCE_LABELS[mode],
             )
         elif self.reserved_blend_signatures:
             print(

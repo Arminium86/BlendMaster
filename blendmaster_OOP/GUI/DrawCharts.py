@@ -1322,6 +1322,7 @@ class DrawGanttChart:
         """
         self.db_path = db_path
         self.port = port
+        self.plan_id = "Primary"
         self.stockpile_pastel_palette = [
             "#A8D5BA",  # pale green
             "#F6C28B",  # pale orange
@@ -1340,21 +1341,44 @@ class DrawGanttChart:
         self.app = dash.Dash(__name__)
         self.setup_layout()
 
+    def set_plan_id(self, plan_id):
+        self.plan_id = str(plan_id or "Primary").strip() or "Primary"
+
     def fetch_data(self):
-        """
-        Fetch data from the optimised_blend_report table in the SQLite database.
-        """
+        """Fetch the blend report for the currently selected optimised plan."""
+        connection = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            query = "SELECT * FROM optimised_blend_report"
-            data = pd.read_sql(query, conn)
-            conn.close()
-            self.debug_blend_ID(data)
-            self.push_results_to_database(data)
-            return data
-        except Exception as e:
-            print(f"Error fetching data: {e}")
+            connection = sqlite3.connect(self.db_path)
+            plan_id = str(getattr(self, "plan_id", "Primary") or "Primary")
+            table_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'optimisation_plan_blend_report'
+                """
+            ).fetchone()
+            if table_exists:
+                data = pd.read_sql_query(
+                    """
+                    SELECT * FROM optimisation_plan_blend_report
+                    WHERE plan_id = ?
+                    ORDER BY steady_state_number, source
+                    """,
+                    connection,
+                    params=(plan_id,),
+                )
+                if not data.empty or plan_id != "Primary":
+                    return data
+            return pd.read_sql_query(
+                "SELECT * FROM optimised_blend_report",
+                connection,
+            )
+        except Exception as error:
+            print(f"Error fetching data for {self.plan_id}: {error}")
             return pd.DataFrame()
+        finally:
+            if connection is not None:
+                connection.close()
 
     def prepare_gantt_data(self, data):
         """

@@ -176,6 +176,54 @@ class OptimisedToManualPlan:
         states = []
         pattern_ids = {}
         direct_tip_rows = []
+
+        def raw_blend_key(value):
+            try:
+                if pd.isna(value):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if not text:
+                return ""
+            try:
+                number = float(text)
+                if number.is_integer():
+                    return f"numeric:{int(number)}"
+            except (TypeError, ValueError):
+                pass
+            return f"text:{text}"
+
+        used_manual_ids = set()
+        optimised_blend_ids = {}
+        if "blend_ID" in data.columns:
+            for value in data["blend_ID"].tolist():
+                key = raw_blend_key(value)
+                if not key or key in optimised_blend_ids:
+                    continue
+                if key.startswith("numeric:"):
+                    numeric_value = int(key.split(":", 1)[1])
+                    if numeric_value > 0:
+                        manual_id = str(numeric_value)
+                        optimised_blend_ids[key] = manual_id
+                        used_manual_ids.add(manual_id)
+
+        next_manual_id = 1
+
+        def next_manual_blend_id():
+            nonlocal next_manual_id
+            while str(next_manual_id) in used_manual_ids:
+                next_manual_id += 1
+            result = str(next_manual_id)
+            used_manual_ids.add(result)
+            next_manual_id += 1
+            return result
+
+        if "blend_ID" in data.columns:
+            for value in data["blend_ID"].tolist():
+                key = raw_blend_key(value)
+                if key and key not in optimised_blend_ids:
+                    optimised_blend_ids[key] = next_manual_blend_id()
         blend_groups = defaultdict(list)
         period_totals = defaultdict(
             lambda: {"tonnes": 0.0, "hours": 0.0}
@@ -221,12 +269,16 @@ class OptimisedToManualPlan:
             direct_tip_state_tonnes = float(
                 grade_blocks["_tonnes"].sum()
             )
-            original_blend_id = str(
-                first.get("blend_ID") or ""
-            ).strip()
-            if original_blend_id:
-                blend_key = ("optimised_blend", original_blend_id)
-                manual_blend_id = original_blend_id
+            original_blend_key = raw_blend_key(
+                first.get("blend_ID")
+            )
+            if original_blend_key:
+                blend_key = (
+                    "optimised_blend", original_blend_key
+                )
+                manual_blend_id = optimised_blend_ids[
+                    original_blend_key
+                ]
             else:
                 direct_tip_sources = tuple(sorted(
                     grade_blocks["_source_name"].unique().tolist()
@@ -237,7 +289,7 @@ class OptimisedToManualPlan:
                     direct_tip_sources,
                 )
                 if blend_key not in pattern_ids:
-                    pattern_ids[blend_key] = str(len(pattern_ids) + 1)
+                    pattern_ids[blend_key] = next_manual_blend_id()
                 manual_blend_id = pattern_ids[blend_key]
 
             if crusher_tonnes <= self.TOLERANCE:

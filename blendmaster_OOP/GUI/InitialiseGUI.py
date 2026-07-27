@@ -2077,6 +2077,30 @@ class UserInputs(QMainWindow):
         contingency_layout.addStretch()
         layout.addLayout(contingency_layout)
 
+        contingency_acceptance_layout = QHBoxLayout()
+        contingency_acceptance_layout.addWidget(
+            QLabel("Contingency Acceptance:")
+        )
+        self.contingency_distinctness_combo = QComboBox()
+        self.contingency_distinctness_combo.addItems([
+            "Different Stockpile Mix Only (harder to find)",
+            (
+                "Different Stockpile Mix or Grade Block Pairing "
+                "(easier to find)"
+            ),
+        ])
+        self.contingency_distinctness_combo.setCurrentIndex(1)
+        self.contingency_distinctness_combo.setFixedWidth(430)
+        self.contingency_distinctness_combo.setToolTip(
+            "Choose whether a grade-block pairing change is enough to "
+            "make a contingency blend distinct from earlier plans."
+        )
+        contingency_acceptance_layout.addWidget(
+            self.contingency_distinctness_combo
+        )
+        contingency_acceptance_layout.addStretch()
+        layout.addLayout(contingency_acceptance_layout)
+
         feasibility_layout = QHBoxLayout()
         feasibility_layout.addWidget(QLabel("Stockpile Blend Feasibility:"))
         self.stockpile_feasibility_combo = QComboBox()
@@ -2690,6 +2714,9 @@ class UserInputs(QMainWindow):
             "blend_option_timeout_seconds": 30.0,
             "max_blend_options_per_steady_state": 12,
             "contingency_plan_count": 0,
+            "contingency_distinctness_mode": (
+                "stockpile_or_grade_block_pairing"
+            ),
             "min_grade_block_pair_duration_hours": 0.0,
             "stay_on_same_grade_block_pair_incentive": 0.0,
             "grade_block_lock_enabled": False,
@@ -9561,6 +9588,27 @@ class UserInputs(QMainWindow):
         self.contingency_plan_count_input.setText(str(
             solver_config.get("contingency_plan_count", 0)
         ))
+        contingency_acceptance_label = {
+            "stockpile_mix_only": (
+                "Different Stockpile Mix Only (harder to find)"
+            ),
+            "stockpile_or_grade_block_pairing": (
+                "Different Stockpile Mix or Grade Block Pairing "
+                "(easier to find)"
+            ),
+        }.get(
+            solver_config.get(
+                "contingency_distinctness_mode",
+                "stockpile_or_grade_block_pairing",
+            ),
+            (
+                "Different Stockpile Mix or Grade Block Pairing "
+                "(easier to find)"
+            ),
+        )
+        self.contingency_distinctness_combo.setCurrentText(
+            contingency_acceptance_label
+        )
         self.min_grade_block_pair_duration_input.setText(str(solver_config.get("min_grade_block_pair_duration_hours", 0.0)))
         self.stay_on_same_grade_block_pair_incentive_input.setText(str(solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0)))
         self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
@@ -9864,6 +9912,18 @@ class UserInputs(QMainWindow):
             "Stockpile blend must be feasible": "stockpile_must_be_feasible",
             "Stockpile blend can rely on grade blocks": "stockpile_can_rely_on_grade_blocks"
         }.get(self.stockpile_feasibility_combo.currentText(), "stockpile_must_be_feasible")
+        contingency_distinctness_mode = {
+            "Different Stockpile Mix Only (harder to find)": (
+                "stockpile_mix_only"
+            ),
+            (
+                "Different Stockpile Mix or Grade Block Pairing "
+                "(easier to find)"
+            ): "stockpile_or_grade_block_pairing",
+        }.get(
+            self.contingency_distinctness_combo.currentText(),
+            "stockpile_or_grade_block_pairing",
+        )
         brand_guidance_enabled = self.brand_guidance_enabled_checkbox.isChecked()
         brand_guidance_mode = "prefer_match" if brand_guidance_enabled else "ignore"
         rehandle_penalty_enabled = (
@@ -9903,6 +9963,9 @@ class UserInputs(QMainWindow):
             "blend_option_timeout_seconds": blend_option_timeout_seconds,
             "max_blend_options_per_steady_state": max_blend_options_per_steady_state,
             "contingency_plan_count": contingency_plan_count,
+            "contingency_distinctness_mode": (
+                contingency_distinctness_mode
+            ),
             "min_grade_block_pair_duration_hours": min_grade_block_pair_duration_hours,
             "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
             "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
@@ -10309,6 +10372,9 @@ class UserInputs(QMainWindow):
                 ": "
             )
         )
+        chart = getattr(self, "draw_gantt_chart", None)
+        if chart is not None:
+            chart.set_plan_id(plan_id)
         report = self.fetch_optimised_blend_report(plan_id)
         preview.clearContents()
         preview.setRowCount(min(len(report), 200))
@@ -10340,35 +10406,38 @@ class UserInputs(QMainWindow):
         self.load_AMT_map_first_call = False
 
     def load_gantt_chart(self):
+        plan_id = self.selected_optimisation_plan_id()
+        chart = getattr(self, "draw_gantt_chart", None)
+        if chart is not None:
+            chart.set_plan_id(plan_id)
         self.resize_results_chart_area()
-        # Load the Dash app into the QWebEngineView
-        self.gantt_chart_view.setUrl(QUrl("http://localhost:8050"))
+        # A unique query string forces QWebEngine to reload both Dash
+        # callbacks after changing the selected plan.
+        refresh_token = uuid.uuid4().hex
+        self.gantt_chart_view.setUrl(QUrl(
+            "http://localhost:8050/"
+            f"?plan={plan_id}&refresh={refresh_token}"
+        ))
 
     def resize_results_chart_area(self):
         desired_height = 520
 
-        conn = None
         try:
-            conn = sqlite3.connect(get_database_path())
-            data = pd.read_sql(
-                """
-                SELECT blend_ID, steady_state_number
-                FROM optimised_blend_report
-                """,
-                conn
+            data = self.fetch_optimised_blend_report(
+                self.selected_optimisation_plan_id()
             )
 
             if not data.empty:
                 blend_count = max(data["blend_ID"].nunique(), 1)
-                row_count = len(data.drop_duplicates())
+                row_count = len(
+                    data[["blend_ID", "steady_state_number"]]
+                    .drop_duplicates()
+                )
                 graph_height = min(max(280, 190 + (blend_count * 55)), 720)
                 table_height = min(360, 120 + (min(row_count, 8) * 34))
                 desired_height = graph_height + table_height + 90
         except Exception:
             desired_height = 520
-        finally:
-            if conn is not None:
-                conn.close()
 
         available_height = self.results_tab.height() - self.load_chart_button.sizeHint().height() - 92
         available_height = max(420, available_height)
@@ -11882,7 +11951,19 @@ class UserInputs(QMainWindow):
             for blend_id, weight in (
                 self.manual_blend_weights_for_row(row_idx).items()
             ):
-                blend_weights[blend_id] += weight
+                # During table hydration, a combo-box signal can arrive
+                # before a newly imported Blend ID has been added to the
+                # normal option list. Keep that transient state safe.
+                blend_weights[blend_id] = (
+                    blend_weights.get(blend_id, 0.0) + weight
+                )
+                if blend_id not in self.blend_data_from_config_table_inputs:
+                    self.blend_data_from_config_table_inputs[blend_id] = {
+                        "weights": [], "grades": [], "balances": [],
+                        "available": [], "sources": [],
+                        "source_ratios": [], "reclaim_rates": [],
+                    }
+                    blend_id_options.append(blend_id)
 
         # Aggregate data from blend configuration table
         for row_idx in range(self.blend_config_table.rowCount()):
