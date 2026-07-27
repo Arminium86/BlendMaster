@@ -898,6 +898,17 @@ class UserInputs(QMainWindow):
             getattr(self, "product_build_settings", []) or [],
             database_path,
         )
+        site_context = self.active_site_context()
+        DatabaseManager().ensure_material_destination_plan_reports(
+            database_name=database_path,
+            crusher_destination=(
+                getattr(self, "aps_direct_tip_crusher_choice", None)
+                or site_context.get("crusher")
+            ),
+            direct_tip_movement_rules=site_context.get(
+                "direct_tip_movement_rules", []
+            ),
+        )
 
     @staticmethod
     def snapshot_database(database_path):
@@ -8305,6 +8316,11 @@ class UserInputs(QMainWindow):
         DatabaseManager().write_manual_blend_report_to_database(
             self.manual_blend_report
         )
+        DatabaseManager().write_material_destination_plan_to_database(
+            payload_transactions=pd.DataFrame(),
+            blend_report=pd.DataFrame(),
+            plan_type="manual",
+        )
 
         if hasattr(self, "blend_config_table"):
             self._manual_blend_reset_in_progress = True
@@ -8465,6 +8481,7 @@ class UserInputs(QMainWindow):
         self.manual_steady_states = states
         self.manual_blend_report = report
         DatabaseManager().write_manual_blend_report_to_database(report)
+        self.write_manual_material_destination_plan(report)
 
         # Rebuild Setup Blends so every optimized source-to-ratio pattern is
         # visible, including plans containing more than five Blend IDs.
@@ -12536,8 +12553,24 @@ class UserInputs(QMainWindow):
         )
         return True
 
-    def manual_expit_payload_transactions(self):
-        if not self.is_direct_tip_enabled():
+    def write_manual_material_destination_plan(self, report):
+        """Persist final payload destinations for the current manual plan."""
+        site_context = self.active_site_context()
+        return DatabaseManager().write_material_destination_plan_to_database(
+            payload_transactions=self.manual_expit_payload_transactions(True),
+            blend_report=report,
+            plan_type="manual",
+            crusher_destination=(
+                getattr(self, "aps_direct_tip_crusher_choice", None)
+                or site_context.get("crusher")
+            ),
+            direct_tip_movement_rules=site_context.get(
+                "direct_tip_movement_rules", []
+            ),
+        )
+
+    def manual_expit_payload_transactions(self, include_all_destinations=False):
+        if not include_all_destinations and not self.is_direct_tip_enabled():
             return pd.DataFrame()
         schedule_path = str(
             getattr(self, "file_path_24hr_choice", "") or ""
@@ -12731,6 +12764,7 @@ class UserInputs(QMainWindow):
             states, allocations
         )
         DatabaseManager().write_manual_blend_report_to_database(report)
+        self.write_manual_material_destination_plan(report)
         self.refresh_sqlite_reports()
         if hasattr(self, "draw_grade_profile_chart"):
             self.draw_grade_profile_chart.update_data(

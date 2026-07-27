@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from classes.MaterialDestinationPlan import MaterialDestinationPlan
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
 from database.DatabaseContext import get_database_path
@@ -254,6 +255,172 @@ class DatabaseManager:
         finally:
             conn.close()
         print(f"Product build report saved to database {database_name}")
+
+    def write_material_destination_plan_to_database(
+        self,
+        payload_transactions,
+        blend_report,
+        plan_type,
+        plan_id="Primary",
+        crusher_destination=None,
+        direct_tip_movement_rules=None,
+        database_name=None,
+    ):
+        """Replace one plan's MDP rows while preserving other plan types."""
+        database_name = database_name or get_database_path()
+        material_destination_plan = MaterialDestinationPlan.build(
+            payload_transactions=payload_transactions,
+            blend_report=blend_report,
+            plan_type=plan_type,
+            plan_id=plan_id,
+            crusher_destination=crusher_destination,
+            direct_tip_movement_rules=direct_tip_movement_rules,
+        )
+        for column in (
+            "mining_start_datetime",
+            "delivered_datetime",
+        ):
+            if column in material_destination_plan.columns:
+                material_destination_plan[column] = pd.to_datetime(
+                    material_destination_plan[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        connection = sqlite3.connect(database_name)
+        try:
+            existing = pd.DataFrame(columns=MaterialDestinationPlan.COLUMNS)
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'material_destination_plan'
+                LIMIT 1
+                """
+            ).fetchone()
+            if table_exists:
+                existing = pd.read_sql(
+                    "SELECT * FROM material_destination_plan",
+                    connection,
+                ).reindex(columns=MaterialDestinationPlan.COLUMNS)
+                same_plan = (
+                    existing["plan_type"].astype(str).str.lower().eq(
+                        str(plan_type).strip().lower()
+                    )
+                    & existing["plan_id"].astype(str).eq(
+                        str(plan_id or "Primary")
+                    )
+                )
+                existing = existing[~same_plan]
+
+            combined = pd.concat(
+                [existing, material_destination_plan],
+                ignore_index=True,
+            ).reindex(columns=MaterialDestinationPlan.COLUMNS)
+            combined.to_sql(
+                "material_destination_plan",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        print(
+            "Material destination plan "
+            f"({plan_type}, {plan_id}) saved to database {database_name}"
+        )
+        return material_destination_plan
+
+    def write_material_destination_plan_from_database(
+        self,
+        blend_report,
+        plan_type,
+        plan_id="Primary",
+        crusher_destination=None,
+        direct_tip_movement_rules=None,
+        database_name=None,
+    ):
+        """Build MDP rows from the persisted payload population."""
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            try:
+                payload_transactions = pd.read_sql(
+                    "SELECT * FROM expit_payload_transactions",
+                    connection,
+                )
+            except (sqlite3.Error, pd.errors.DatabaseError):
+                payload_transactions = pd.DataFrame()
+        finally:
+            connection.close()
+
+        return self.write_material_destination_plan_to_database(
+            payload_transactions=payload_transactions,
+            blend_report=blend_report,
+            plan_type=plan_type,
+            plan_id=plan_id,
+            crusher_destination=crusher_destination,
+            direct_tip_movement_rules=direct_tip_movement_rules,
+            database_name=database_name,
+        )
+
+    def ensure_material_destination_plan_reports(
+        self,
+        database_name=None,
+        crusher_destination=None,
+        direct_tip_movement_rules=None,
+    ):
+        """Reconstruct MDP for a legacy project only when the table is absent."""
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+            if "material_destination_plan" in table_names:
+                return
+            reports = {}
+            for plan_type, table_name in (
+                ("optimised", "optimised_blend_report"),
+                ("manual", "manual_blend_report"),
+            ):
+                if table_name in table_names:
+                    report = pd.read_sql(
+                        f'SELECT * FROM "{table_name}"',
+                        connection,
+                    )
+                    if plan_type == "manual" and report.empty:
+                        continue
+                    reports[plan_type] = report
+        finally:
+            connection.close()
+
+        if not reports:
+            self.write_material_destination_plan_from_database(
+                pd.DataFrame(),
+                plan_type="optimised",
+                crusher_destination=crusher_destination,
+                direct_tip_movement_rules=direct_tip_movement_rules,
+                database_name=database_name,
+            )
+            return
+
+        for plan_type, report in reports.items():
+            self.write_material_destination_plan_from_database(
+                report,
+                plan_type=plan_type,
+                crusher_destination=crusher_destination,
+                direct_tip_movement_rules=direct_tip_movement_rules,
+                database_name=database_name,
+            )
 
     def write_build_report_to_database (self, results: pd.DataFrame):
         # Connect to the SQLite database or create it

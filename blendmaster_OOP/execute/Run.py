@@ -225,6 +225,20 @@ class Run:
         self.case_bridge.print("Writing optimised blend, depletion and profile reports to database...")
         self.case_modeller.save_optimised_blend_report()
 
+        self.case_bridge.print("Writing material destination plan to database...")
+        database_manager.write_material_destination_plan_to_database(
+            payload_transactions=expit_payload_transactions,
+            blend_report=self.case_modeller.results,
+            plan_type="optimised",
+            crusher_destination=(
+                selected_aps_crusher
+                or (site_context or {}).get("crusher")
+            ),
+            direct_tip_movement_rules=(site_context or {}).get(
+                "direct_tip_movement_rules", []
+            ),
+        )
+
         self.case_bridge.print("Writing product build report to database...")
         self.case_modeller.save_product_build_report()
 
