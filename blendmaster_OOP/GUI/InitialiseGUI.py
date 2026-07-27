@@ -1690,6 +1690,30 @@ class UserInputs(QMainWindow):
         )
         self.solver_config_layout.addWidget(self.allow_offspec_steady_states_checkbox)
 
+        self.product_build_repair_loop_checkbox = QCheckBox(
+            "Repair off-spec product builds by re-solving earlier steady states"
+        )
+        self.product_build_repair_loop_checkbox.setToolTip(
+            "Enabling this also enables the off-spec build option above. The "
+            "optimiser first runs normally. If the final cumulative build target "
+            "is infeasible or off spec, it retains earlier decisions and re-solves "
+            "from the latest off-spec contributing steady state, then progressively "
+            "moves earlier."
+        )
+        self.solver_config_layout.addWidget(self.product_build_repair_loop_checkbox)
+        self.product_build_repair_loop_checkbox.toggled.connect(
+            lambda checked: (
+                self.allow_offspec_steady_states_checkbox.setChecked(True)
+                if checked else None
+            )
+        )
+        self.allow_offspec_steady_states_checkbox.toggled.connect(
+            lambda checked: (
+                self.product_build_repair_loop_checkbox.setChecked(False)
+                if not checked else None
+            )
+        )
+
         self.enforce_calendar_crusher_grade_targets_checkbox = QCheckBox(
             "Enforce Calendar Crusher Grade Targets"
         )
@@ -2640,6 +2664,7 @@ class UserInputs(QMainWindow):
             "low_fe_preference_incentive": 1.0,
             "low_fe_threshold": 58.0,
             "allow_offspec_steady_states_for_product_build": False,
+            "enable_product_build_repair_loop": False,
             "enforce_calendar_crusher_grade_targets": True,
             "brand_guidance_mode": "ignore",
             "brand_guidance_enabled": False,
@@ -6525,6 +6550,7 @@ class UserInputs(QMainWindow):
             "source_selection_tie_break_penalty",
             "stockpile_feasibility_mode",
             "allow_offspec_steady_states_for_product_build",
+            "enable_product_build_repair_loop",
             "enforce_calendar_crusher_grade_targets",
             "brand_guidance_mode",
             "brand_guidance_enabled",
@@ -7539,6 +7565,9 @@ class UserInputs(QMainWindow):
             return True
         if key == "allow_offspec_steady_states_for_product_build":
             self.allow_offspec_steady_states_checkbox.setChecked(to_bool(value))
+            return True
+        if key == "enable_product_build_repair_loop":
+            self.product_build_repair_loop_checkbox.setChecked(to_bool(value))
             return True
         if key == "brand_guidance_mode":
             normalized = str(value or "").strip().lower().replace(" ", "_")
@@ -9293,6 +9322,9 @@ class UserInputs(QMainWindow):
         self.allow_offspec_steady_states_checkbox.setChecked(
             bool(solver_config.get("allow_offspec_steady_states_for_product_build", False))
         )
+        self.product_build_repair_loop_checkbox.setChecked(
+            bool(solver_config.get("enable_product_build_repair_loop", False))
+        )
         self.enforce_calendar_crusher_grade_targets_checkbox.setChecked(
             bool(solver_config.get("enforce_calendar_crusher_grade_targets", True))
         )
@@ -9654,6 +9686,7 @@ class UserInputs(QMainWindow):
             "source_selection_tie_break_penalty": source_selection_tie_break_penalty,
             "stockpile_feasibility_mode": stockpile_feasibility_mode,
             "allow_offspec_steady_states_for_product_build": self.allow_offspec_steady_states_checkbox.isChecked(),
+            "enable_product_build_repair_loop": self.product_build_repair_loop_checkbox.isChecked(),
             "enforce_calendar_crusher_grade_targets": self.enforce_calendar_crusher_grade_targets_checkbox.isChecked(),
             "brand_guidance_mode": brand_guidance_mode,
             "brand_guidance_enabled": brand_guidance_enabled,

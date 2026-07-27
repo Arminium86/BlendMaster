@@ -10,6 +10,7 @@ from classes.CrusherTarget import CrusherTarget
 from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
+import copy
 from datetime import timedelta
 from typing import Callable, List, Optional
 from types import SimpleNamespace
@@ -30,9 +31,38 @@ class ProductBuildCapacityComplete(Exception):
         self.user_message = message
         self.title = "Product Builds Complete"
 
+class ProductBuildRepairRequired(Exception):
+    def __init__(self, build_index, candidate_steady_states, reason):
+        super().__init__(reason)
+        self.build_index = build_index
+        self.candidate_steady_states = candidate_steady_states
+        self.reason = reason
+
+class ProductBuildRepairFailed(Exception):
+    def __init__(self, build_name, reason):
+        message = (
+            f"No compliant repair plan was found for {build_name}. "
+            f"{reason}"
+        )
+        super().__init__(message)
+        self.user_message = message
+        self.title = "No Compliant Product Build Plan"
+
 class CaseModeller:
     MAX_DECISION_BLEND_OPTIONS = 12
     PRODUCT_BUILD_TONNES_TOLERANCE = 0.1
+    MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS = 10
+    REPAIR_CHECKPOINT_ATTRIBUTES = (
+        "stockpiles", "grade_blocks", "equipment", "balance_tracker",
+        "event_pool", "results", "build_report", "current_time",
+        "period_tracker", "steady_state_tracker", "blend_option",
+        "user_blend_choice", "blend_ID", "decision_point_results",
+        "decision_point_results_to_display",
+        "decision_point_results_to_display_filtered_to_current_blend_choice",
+        "total_AMT_stockpile_balances", "product_build_runtime_states",
+        "optimization_diagnostics", "previous_selected_stockpile_source_ids",
+        "previous_selected_grade_block_pairs", "grade_block_pair_locks",
+    )
 
     def __init__(
         self,
@@ -91,6 +121,7 @@ class CaseModeller:
             }
             for _ in self.product_build_settings
         ]
+        self.product_build_repair_from_states = {}
         self.optimization_diagnostics = []
         self.previous_selected_stockpile_source_ids = set()
         self.previous_selected_grade_block_pairs = {}
@@ -142,11 +173,11 @@ class CaseModeller:
 
     def update_product_build_runtime_state(self, selected_results):
         if not self.product_build_settings or selected_results is None or selected_results.empty:
-            return
+            return None
 
         data = selected_results.copy()
         if "source_actual_tonnes" not in data or "crusher_actual_tonnes" not in data:
-            return
+            return None
         data["source_actual_tonnes"] = pd.to_numeric(data["source_actual_tonnes"], errors="coerce").fillna(0)
         data["crusher_actual_tonnes"] = pd.to_numeric(data["crusher_actual_tonnes"], errors="coerce").fillna(0)
         data = data[
@@ -154,19 +185,18 @@ class CaseModeller:
             & (data["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
         ]
         if data.empty:
-            return
+            return None
 
         crusher_tonnes = float(data["crusher_actual_tonnes"].iloc[0] or 0)
         build_index = self.current_product_build_index()
         if build_index is None:
-            return
+            return None
 
         build_setting = self.product_build_settings[build_index]
         build_state = self.product_build_runtime_states[build_index]
         capacity = build_setting["target_tonnes"] - build_state["tonnes"]
         if capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-            build_state["tonnes"] = build_setting["target_tonnes"]
-            return
+            return build_index
 
         allocation_tonnes = min(crusher_tonnes, capacity)
         allocation_fraction = allocation_tonnes / crusher_tonnes if crusher_tonnes else 0
@@ -176,6 +206,127 @@ class CaseModeller:
                 grade_value = float(row.get(f"source_grade_{grade}") or 0)
                 build_state[f"grade_{grade}_metal"] += source_to_build * grade_value
         build_state["tonnes"] += allocation_tonnes
+        if (
+            build_state["tonnes"]
+            >= build_setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE
+        ):
+            return build_index
+        return None
+
+    def product_build_repair_enabled(self):
+        return bool(
+            self.solver_config.get("enable_product_build_repair_loop", False)
+            and self.solver_config.get(
+                "allow_offspec_steady_states_for_product_build", False
+            )
+        )
+
+    def capture_product_build_repair_checkpoint(self):
+        state = {
+            attribute: getattr(self, attribute)
+            for attribute in self.REPAIR_CHECKPOINT_ATTRIBUTES
+        }
+        return copy.deepcopy(state)
+
+    def restore_product_build_repair_checkpoint(self, checkpoint):
+        for attribute, value in checkpoint.items():
+            setattr(self, attribute, value)
+
+    def product_build_offspec_steady_states(self, build_index):
+        if self.results is None or self.results.empty:
+            return []
+        report = ProductBuildProgress.annotate(
+            self.group_grade_block_rows(self.results),
+            self.product_build_settings,
+        )
+        required_columns = {
+            "product_build_id",
+            "product_build_current_on_spec",
+            "steady_state_number",
+        }
+        if report.empty or not required_columns.issubset(report.columns):
+            return []
+
+        build_id = self.product_build_settings[build_index]["build_id"]
+        build_rows = report[report["product_build_id"] == build_id].copy()
+        if build_rows.empty:
+            return []
+        on_spec = build_rows["product_build_current_on_spec"].fillna(False).astype(bool)
+        state_numbers = pd.to_numeric(
+            build_rows.loc[~on_spec, "steady_state_number"],
+            errors="coerce",
+        ).dropna()
+        return sorted({int(value) for value in state_numbers}, reverse=True)
+
+    def request_product_build_repair(self, build_index, reason):
+        if not self.product_build_repair_enabled():
+            return
+        candidate_states = self.product_build_offspec_steady_states(build_index)
+        build_name = self.product_build_settings[build_index]["build_name"]
+        if not candidate_states:
+            raise ProductBuildRepairFailed(
+                build_name,
+                f"{reason} No earlier off-spec steady state is available to re-solve.",
+            )
+        raise ProductBuildRepairRequired(
+            build_index,
+            candidate_states,
+            reason,
+        )
+
+    def request_repair_for_terminal_infeasibility(
+        self,
+        last_solver_result,
+        period_crusher_target,
+        steady_state_duration,
+    ):
+        if not self.product_build_repair_enabled():
+            return
+        if (
+            last_solver_result is not None
+            and last_solver_result.get("Linprog_result_object") is not None
+            and last_solver_result["Linprog_result_object"].success
+        ):
+            return
+
+        build_index = self.current_product_build_index()
+        if build_index is None:
+            return
+        build_state = self.product_build_runtime_states[build_index]
+        build_setting = self.product_build_settings[build_index]
+        repair_from_state = self.product_build_repair_from_states.get(build_index)
+        repair_constraint_active = (
+            repair_from_state is not None
+            and self.steady_state_tracker >= repair_from_state
+        )
+        terminal_constraint_active = (
+            build_state["tonnes"] > Optimizer.SOLUTION_TOLERANCE
+            and not self.product_build_grade_on_spec(build_state, build_setting)
+            and Optimizer.product_build_can_complete_in_steady_state(
+                build_setting["target_tonnes"],
+                build_state["tonnes"],
+                period_crusher_target.get("crusher_rate", 0.0),
+                steady_state_duration,
+            )
+        )
+        if not repair_constraint_active and not terminal_constraint_active:
+            return
+
+        self.request_product_build_repair(
+            build_index,
+            "A cumulative build-grade repair constraint was infeasible.",
+        )
+
+    def validate_completed_product_build(self, build_index):
+        if build_index is None or not self.product_build_repair_enabled():
+            return
+        build_state = self.product_build_runtime_states[build_index]
+        build_setting = self.product_build_settings[build_index]
+        if not self.product_build_grade_on_spec(build_state, build_setting):
+            self.request_product_build_repair(
+                build_index,
+                "The independently accumulated completed build was off spec.",
+            )
 
     def request_abort(self):
         self.abort_requested = True
@@ -197,12 +348,64 @@ class CaseModeller:
             f"Max Blend Options per Steady State = "
             f"{self.configured_max_decision_blend_options()}."
         )
+        repair_checkpoints = {}
+        repair_attempts = 0
         while self.current_time < self.periods.get_periods()["period_2_end"]:
             self.check_abort_requested()
             if self.product_build_settings and self.current_product_build_index() is None:
                 raise ProductBuildCapacityComplete()
+            if self.product_build_repair_enabled():
+                repair_checkpoints[self.steady_state_tracker] = (
+                    self.capture_product_build_repair_checkpoint()
+                )
             # Run optimization and only advance time if successful
-            self.run_optimization_step()
+            try:
+                self.run_optimization_step()
+            except ProductBuildRepairRequired as repair:
+                current_repair_state = self.product_build_repair_from_states.get(
+                    repair.build_index
+                )
+                candidate_states = [
+                    state
+                    for state in repair.candidate_steady_states
+                    if state in repair_checkpoints
+                    and (
+                        current_repair_state is None
+                        or state < current_repair_state
+                    )
+                ]
+                build_name = self.product_build_settings[
+                    repair.build_index
+                ]["build_name"]
+                if (
+                    not candidate_states
+                    or repair_attempts >= self.MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS
+                ):
+                    raise ProductBuildRepairFailed(
+                        build_name,
+                        (
+                            f"{repair.reason} The bounded latest-first repair loop "
+                            "exhausted its feasible repair points."
+                        ),
+                    )
+
+                repair_state = max(candidate_states)
+                checkpoint = repair_checkpoints[repair_state]
+                self.restore_product_build_repair_checkpoint(checkpoint)
+                self.product_build_repair_from_states[
+                    repair.build_index
+                ] = repair_state
+                repair_checkpoints = {
+                    state: saved_checkpoint
+                    for state, saved_checkpoint in repair_checkpoints.items()
+                    if state < repair_state
+                }
+                repair_attempts += 1
+                print(
+                    f"Repairing {build_name} from steady state {repair_state} "
+                    f"(attempt {repair_attempts}/{self.MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS})."
+                )
+                continue
             self.steady_state_tracker += 1
             self.check_abort_requested()
 
@@ -427,6 +630,17 @@ class CaseModeller:
                 ).fillna(0)
             )
 
+        has_positive_feed = (
+            "source_actual_tonnes" in self.decision_point_results
+            and (self.decision_point_results["source_actual_tonnes"] > 0).any()
+        )
+        if not has_positive_feed:
+            self.request_repair_for_terminal_infeasibility(
+                last_solver_result,
+                period_crusher_target,
+                initial_steady_state_duration,
+            )
+
         if (
             "source_actual_tonnes" in self.decision_point_results
             and (self.decision_point_results["source_actual_tonnes"] > 0).any()
@@ -531,7 +745,10 @@ class CaseModeller:
                 filtered_decision_point_results_to_user_choice
             )
             self.update_grade_block_pair_memory(filtered_decision_point_results_to_user_choice)
-            self.update_product_build_runtime_state(filtered_decision_point_results_to_user_choice)
+            completed_build_index = self.update_product_build_runtime_state(
+                filtered_decision_point_results_to_user_choice
+            )
+            self.validate_completed_product_build(completed_build_index)
 
             # Prepare for next cycle
             
@@ -653,6 +870,7 @@ class CaseModeller:
     def solver_config_for_current_step(self):
         solver_config = dict(self.solver_config or {})
         solver_config["current_steady_state_datetime"] = self.current_time
+        solver_config["enforce_cumulative_product_build_grade"] = False
         current_product_build_index = self.current_product_build_index()
         if current_product_build_index is not None:
             current_product_build = self.product_build_settings[current_product_build_index]
@@ -665,6 +883,13 @@ class CaseModeller:
                 self.active_product_build_completes_within_horizon(
                     current_product_build_index
                 )
+            )
+            repair_from_state = self.product_build_repair_from_states.get(
+                current_product_build_index
+            )
+            solver_config["enforce_cumulative_product_build_grade"] = (
+                repair_from_state is not None
+                and self.steady_state_tracker >= repair_from_state
             )
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
             self.previous_selected_stockpile_source_ids

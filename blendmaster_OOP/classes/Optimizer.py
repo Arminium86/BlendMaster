@@ -946,8 +946,9 @@ class Optimizer:
         # Product-build grade targeting. When the active product build can be
         # completed inside this steady state, constrain the cumulative build
         # inventory plus the candidate feed so the build is on spec at target
-        # tonnes. Earlier off-spec steady states are allowed only until the
-        # build is close enough to complete.
+        # tonnes. A repair pass can apply the same cumulative constraint from
+        # an earlier checkpoint after the normal rolling pass proves that the
+        # terminal state is infeasible or off spec.
         A_ub_product_build_grade = []
         b_ub_product_build_grade = []
         target_product_build = solver_config.get("target_product_build") or {}
@@ -986,7 +987,10 @@ class Optimizer:
                         ],
                     ])
                     b_ub_product_build_grade.extend([0, 0])
-            if product_build_can_complete:
+            enforce_cumulative_build_grade = bool(
+                solver_config.get("enforce_cumulative_product_build_grade", False)
+            )
+            if product_build_can_complete or enforce_cumulative_build_grade:
                 for grade_key in ["fe", "si", "al", "p", "mn"]:
                     min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
                     max_target = safe_float(target_product_build.get(f"target_{grade_key}_max"), 100.0)
