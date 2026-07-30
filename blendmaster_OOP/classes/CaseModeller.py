@@ -361,30 +361,53 @@ class CaseModeller:
             setattr(self, attribute, value)
 
     def product_build_offspec_steady_states(self, build_index):
-        if self.results is None or self.results.empty:
-            return []
-        report = ProductBuildProgress.annotate(
-            self.group_grade_block_rows(self.results),
-            self.product_build_settings,
-        )
-        required_columns = {
-            "product_build_id",
-            "product_build_current_on_spec",
-            "steady_state_number",
-        }
-        if report.empty or not required_columns.issubset(report.columns):
-            return []
+        candidate_states = set()
+        if self.results is not None and not self.results.empty:
+            report = ProductBuildProgress.annotate(
+                self.group_grade_block_rows(self.results),
+                self.product_build_settings,
+            )
+            required_columns = {
+                "product_build_id",
+                "product_build_current_on_spec",
+                "steady_state_number",
+            }
+            if not report.empty and required_columns.issubset(report.columns):
+                build_id = self.product_build_settings[build_index]["build_id"]
+                build_rows = report[
+                    report["product_build_id"] == build_id
+                ].copy()
+                if not build_rows.empty:
+                    on_spec = (
+                        build_rows["product_build_current_on_spec"]
+                        .fillna(False)
+                        .astype(bool)
+                    )
+                    state_numbers = pd.to_numeric(
+                        build_rows.loc[~on_spec, "steady_state_number"],
+                        errors="coerce",
+                    ).dropna()
+                    candidate_states.update(
+                        int(value) for value in state_numbers
+                    )
 
-        build_id = self.product_build_settings[build_index]["build_id"]
-        build_rows = report[report["product_build_id"] == build_id].copy()
-        if build_rows.empty:
-            return []
-        on_spec = build_rows["product_build_current_on_spec"].fillna(False).astype(bool)
-        state_numbers = pd.to_numeric(
-            build_rows.loc[~on_spec, "steady_state_number"],
-            errors="coerce",
-        ).dropna()
-        return sorted({int(value) for value in state_numbers}, reverse=True)
+        # Final compliance is validated from the independent runtime
+        # accumulator, not from ProductBuildProgress annotations. If that
+        # accumulator says the build is currently off spec, the checkpoint at
+        # the start of this state is necessarily a valid repair point even if
+        # report annotation failed to rediscover the visible off-spec state.
+        if 0 <= build_index < len(self.product_build_runtime_states):
+            build_state = self.product_build_runtime_states[build_index]
+            build_setting = self.product_build_settings[build_index]
+            if (
+                build_state["tonnes"] > Optimizer.SOLUTION_TOLERANCE
+                and not self.product_build_grade_on_spec(
+                    build_state, build_setting
+                )
+            ):
+                candidate_states.add(int(self.steady_state_tracker))
+
+        return sorted(candidate_states, reverse=True)
 
     def request_product_build_repair(self, build_index, reason):
         if not self.product_build_repair_enabled():
@@ -394,7 +417,8 @@ class CaseModeller:
         if not candidate_states:
             raise ProductBuildRepairFailed(
                 build_name,
-                f"{reason} No earlier off-spec steady state is available to re-solve.",
+                f"{reason} No saved repair checkpoint could be associated "
+                "with an off-spec accumulated build state.",
             )
         raise ProductBuildRepairRequired(
             build_index,
@@ -1226,7 +1250,9 @@ class CaseModeller:
                     current_product_build_index
                 )
             )
-            repair_from_state = self.product_build_repair_from_states.get(
+            repair_from_state = getattr(
+                self, "product_build_repair_from_states", {}
+            ).get(
                 current_product_build_index
             )
             solver_config["enforce_cumulative_product_build_grade"] = (
