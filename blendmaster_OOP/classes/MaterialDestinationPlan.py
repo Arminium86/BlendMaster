@@ -53,6 +53,14 @@ class MaterialDestinationPlan:
         return str(value).strip().lower() in {"true", "1", "yes"}
 
     @classmethod
+    def _tonnage_tolerance(cls, *values):
+        """Allow harmless solver/database rounding, not material shortfalls."""
+        scale = max(
+            [abs(cls._number(value)) for value in values] + [1.0]
+        )
+        return max(cls.TOLERANCE, scale * 1e-6)
+
+    @classmethod
     def _payload_ids(cls, value):
         return [
             item.strip()
@@ -177,6 +185,7 @@ class MaterialDestinationPlan:
         report_row,
         payloads,
         remaining_by_id,
+        requested_tonnes=0.0,
     ):
         known_ids = set(payloads["direct_tip_id"])
         identifiers = [
@@ -185,9 +194,24 @@ class MaterialDestinationPlan:
             if identifier in known_ids
             and remaining_by_id[identifier] > cls.TOLERANCE
         ]
-        if identifiers:
+        requested_tonnes = cls._number(requested_tonnes)
+        identified_tonnes = sum(
+            remaining_by_id[identifier] for identifier in identifiers
+        )
+        if (
+            identifiers
+            and identified_tonnes
+            + cls._tonnage_tolerance(identified_tonnes, requested_tonnes)
+            >= requested_tonnes
+        ):
             return identifiers
 
+        # Grade-block rows are grouped for reporting by source. In that
+        # process the displayed source_id list can occasionally omit one of
+        # the payload IDs even though its tonnes remain in the grouped total.
+        # Keep the explicit IDs first, then supplement them from payloads for
+        # the same source and steady-state window when they cannot cover the
+        # reported tonnes.
         source = cls._text(report_row.get("source"))
         candidates = payloads[
             payloads["source"].astype(str).str.strip().eq(source)
@@ -211,10 +235,15 @@ class MaterialDestinationPlan:
             if not in_state.empty:
                 candidates = in_state
 
-        return [
+        source_identifiers = [
             identifier
             for identifier in candidates["direct_tip_id"].tolist()
             if remaining_by_id[identifier] > cls.TOLERANCE
+        ]
+        return identifiers + [
+            identifier
+            for identifier in source_identifiers
+            if identifier not in identifiers
         ]
 
     @classmethod
@@ -283,12 +312,16 @@ class MaterialDestinationPlan:
                     report_row,
                     payloads,
                     remaining_by_id,
+                    requested,
                 )
                 available = sum(
                     remaining_by_id[identifier]
                     for identifier in identifiers
                 )
-                if requested > available + cls.TOLERANCE:
+                reconciliation_tolerance = cls._tonnage_tolerance(
+                    requested, available
+                )
+                if requested > available + reconciliation_tolerance:
                     raise ValueError(
                         "Direct-tip tonnes in the blend report exceed the "
                         f"available payload tonnes for "

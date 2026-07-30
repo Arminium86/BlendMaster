@@ -125,14 +125,19 @@ class Run:
         calendar_inputs = calendar_inputs or {}
         calendar_inputs["planning_period_count"] = periods.period_count
 
-        # 24HR supplies movement timing/tonnes/grades. The 2WP supplies every
-        # stockpile destination, including full-horizon split ratios.
+        # 24HR supplies movement timing/tonnes/grades. The 2WP supplies the
+        # stockpile destination selected by normalized source, nearest date,
+        # then greatest tonnes.
         if file_path:
             reference_path = two_wp_file_path or file_path
             destination_guidance = (site_context or {}).get(
                 "aps_destination_guidance"
             )
-            if not destination_guidance:
+            if (
+                not destination_guidance
+                or destination_guidance.get("matching_version")
+                != ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+            ):
                 destination_guidance = (
                     ExpitDataHandler.build_2wp_destination_guidance(reference_path)
                 )

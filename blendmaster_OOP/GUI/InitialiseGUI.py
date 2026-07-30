@@ -4589,6 +4589,14 @@ class UserInputs(QMainWindow):
             tuple(self.product_brand_options()),
         )
         cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
+        if (
+            cached_map is not None
+            and cached_map.get("destination_guidance", {}).get(
+                "matching_version"
+            )
+            != ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+        ):
+            cached_map = None
         if cached_map is not None:
             cached_guidance = copy.deepcopy(cached_map)
             if "brand_guidance" in cached_guidance:
@@ -13351,7 +13359,11 @@ class UserInputs(QMainWindow):
             destination_guidance = context.get(
                 "aps_destination_guidance"
             ) or {}
-            if not destination_guidance:
+            if (
+                not destination_guidance
+                or destination_guidance.get("matching_version")
+                != ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+            ):
                 reference_path = str(
                     getattr(self, "file_path_choice", "")
                     or schedule_path

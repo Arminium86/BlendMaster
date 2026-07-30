@@ -8,6 +8,7 @@ from pandas import DataFrame
 from classes.PeriodManager import PeriodManager
 
 class ExpitDataHandler:
+    DESTINATION_GUIDANCE_VERSION = 2
     TRANSACTION_COLUMNS = {
         "Agent.Name",
         "Source.Type",
@@ -58,11 +59,12 @@ class ExpitDataHandler:
         )
         self.use_destination_guidance = destination_guidance is not None
         self.destination_guidance = destination_guidance or {}
+        source_destination_lookup = (
+            self.destination_guidance.get("source_destinations", {}) or {}
+        )
         self._source_destination_lookup = {
             str(key).strip().upper(): value
-            for key, value in (
-                self.destination_guidance.get("source_destinations", {}) or {}
-            ).items()
+            for key, value in source_destination_lookup.items()
         }
         self._pit_destination_lookup = {
             str(key).strip().upper(): value
@@ -480,9 +482,25 @@ class ExpitDataHandler:
             return parts[2]
         return ""
 
+    @staticmethod
+    def destination_guidance_source_key(source_full_name):
+        """Ignore the APS instance suffix on the final grade-block part."""
+        source = str(source_full_name or "").strip().replace("\\", "/")
+        source = re.sub(r"/+", "/", source).rstrip("/")
+        if not source:
+            return ""
+        prefix, separator, final_part = source.rpartition("/")
+        final_part = re.sub(r"_\d+$", "", final_part)
+        normalized = (
+            f"{prefix}{separator}{final_part}"
+            if separator
+            else final_part
+        )
+        return normalized.upper()
+
     @classmethod
     def build_2wp_destination_guidance(cls, input_data):
-        """Build full-horizon grade-block destination ratios and fallbacks."""
+        """Build dated grade-block destination candidates and fallbacks."""
         required_columns = {
             "Source.Type",
             "Source.FullName",
@@ -500,6 +518,7 @@ class ExpitDataHandler:
         )
         if data.empty:
             return {
+                "matching_version": cls.DESTINATION_GUIDANCE_VERSION,
                 "source_destinations": {},
                 "pit_destinations": {},
                 "last_destination": {},
@@ -525,6 +544,7 @@ class ExpitDataHandler:
         ].copy()
         if stockpile_rows.empty:
             return {
+                "matching_version": cls.DESTINATION_GUIDANCE_VERSION,
                 "source_destinations": {},
                 "pit_destinations": {},
                 "last_destination": {},
@@ -533,6 +553,9 @@ class ExpitDataHandler:
         stockpile_rows["_row_order"] = range(len(stockpile_rows))
         stockpile_rows["source"] = (
             stockpile_rows["Source.FullName"].astype("string").str.strip()
+        )
+        stockpile_rows["source_key"] = stockpile_rows["source"].map(
+            cls.destination_guidance_source_key
         )
         stockpile_rows["pit"] = [
             cls._source_pit(pit, source)
@@ -550,46 +573,46 @@ class ExpitDataHandler:
         stockpile_rows["tonnes"] = pd.to_numeric(
             stockpile_rows["Mining.wetTonnes"], errors="coerce"
         ).fillna(0.0)
+        stockpile_rows["guidance_datetime"] = cls._parse_datetime_column(
+            stockpile_rows["Time.StartTime"],
+            "Time.StartTime",
+        )
         stockpile_rows = stockpile_rows[
             stockpile_rows["source"].notna()
             & stockpile_rows["source"].ne("")
+            & stockpile_rows["source_key"].ne("")
             & stockpile_rows["destination"].notna()
             & stockpile_rows["destination"].ne("")
             & (stockpile_rows["tonnes"] > 0)
         ].copy()
         if stockpile_rows.empty:
             return {
+                "matching_version": cls.DESTINATION_GUIDANCE_VERSION,
                 "source_destinations": {},
                 "pit_destinations": {},
                 "last_destination": {},
             }
 
-        source_totals = (
-            stockpile_rows
-            .groupby(
-                ["source", "pit", "destination", "destination_name"],
-                as_index=False,
-                dropna=False,
-            )["tonnes"]
-            .sum()
-        )
         source_destinations = {}
-        for source, group in source_totals.groupby("source", sort=False):
-            total_tonnes = float(group["tonnes"].sum())
-            if total_tonnes <= 0:
-                continue
-            source_destinations[str(source)] = [
+        for source_key, group in stockpile_rows.groupby(
+            "source_key", sort=False
+        ):
+            source_destinations[str(source_key)] = [
                 {
                     "destination": str(row["destination"]),
                     "destination_name": str(row["destination_name"]),
-                    "ratio": float(row["tonnes"]) / total_tonnes,
+                    "ratio": 1.0,
                     "two_wp_tonnes": float(row["tonnes"]),
                     "pit": str(row["pit"]),
+                    "guidance_datetime": (
+                        row["guidance_datetime"].isoformat()
+                        if pd.notna(row["guidance_datetime"])
+                        else ""
+                    ),
+                    "source": str(row["source"]),
+                    "row_order": int(row["_row_order"]),
                 }
-                for _, row in group.sort_values(
-                    ["tonnes", "destination"],
-                    ascending=[False, True],
-                ).iterrows()
+                for _, row in group.sort_values("_row_order").iterrows()
             ]
 
         pit_destinations = {}
@@ -643,6 +666,7 @@ class ExpitDataHandler:
             "pit": str(last_row["pit"]),
         }
         return {
+            "matching_version": cls.DESTINATION_GUIDANCE_VERSION,
             "source_destinations": source_destinations,
             "pit_destinations": pit_destinations,
             "last_destination": last_destination,
@@ -1000,11 +1024,64 @@ class ExpitDataHandler:
     def _destination_allocations_for_row(self, row):
         source = str(row.get("Source.FullName", "") or "").strip()
         pit = self._source_pit(row.get("Source.Pit", ""), source)
-        exact = getattr(self, "_source_destination_lookup", {}).get(
+        source_key = self.destination_guidance_source_key(source)
+        source_lookup = getattr(self, "_source_destination_lookup", {})
+        exact = source_lookup.get(source_key) or source_lookup.get(
             source.upper()
         )
         if exact:
-            return exact, "exact_2wp"
+            # Version 1 guidance stored full-horizon destination ratios and
+            # no row dates. Preserve that behaviour only for old saved
+            # projects whose 2WP file is no longer available to rebuild.
+            if not any(
+                allocation.get("guidance_datetime")
+                for allocation in exact
+            ):
+                return exact, "exact_2wp"
+
+            candidates = list(exact)
+            if len(candidates) > 1:
+                transaction_datetime = self._parse_datetime_column(
+                    pd.Series([row.get("Time.StartTime")]),
+                    "Time.StartTime",
+                ).iloc[0]
+                dated_candidates = []
+                if pd.notna(transaction_datetime):
+                    transaction_date = transaction_datetime.normalize()
+                    for allocation in candidates:
+                        guidance_datetime = pd.to_datetime(
+                            allocation.get("guidance_datetime"),
+                            errors="coerce",
+                        )
+                        if pd.notna(guidance_datetime):
+                            dated_candidates.append(
+                                (
+                                    abs(
+                                        (
+                                            guidance_datetime.normalize()
+                                            - transaction_date
+                                        ).days
+                                    ),
+                                    allocation,
+                                )
+                            )
+                if dated_candidates:
+                    closest_days = min(
+                        distance for distance, _ in dated_candidates
+                    )
+                    candidates = [
+                        allocation
+                        for distance, allocation in dated_candidates
+                        if distance == closest_days
+                    ]
+
+            selected = max(
+                candidates,
+                key=lambda allocation: float(
+                    allocation.get("two_wp_tonnes", 0.0) or 0.0
+                ),
+            )
+            return [{**selected, "ratio": 1.0}], "exact_2wp"
         pit_destination = getattr(self, "_pit_destination_lookup", {}).get(
             pit.upper()
         )
