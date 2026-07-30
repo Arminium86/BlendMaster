@@ -63,7 +63,6 @@ class NoDistinctContingencyBlend(Exception):
 class CaseModeller:
     MAX_DECISION_BLEND_OPTIONS = 12
     PRODUCT_BUILD_TONNES_TOLERANCE = 0.1
-    MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS = 10
     REPAIR_CHECKPOINT_ATTRIBUTES = (
         "stockpiles", "grade_blocks", "equipment", "balance_tracker",
         "event_pool", "results", "build_report", "current_time",
@@ -426,6 +425,44 @@ class CaseModeller:
             reason,
         )
 
+    def product_build_repair_checkpoint_states(
+        self,
+        repair_checkpoints,
+        build_index,
+        before_state=None,
+    ):
+        """Return earlier checkpoints where the requested build is active.
+
+        A terminal build may need grade buffer created in a state that was
+        cumulatively on spec. Restricting retries to already-off-spec states
+        prevents that recovery, so the bounded fallback can progressively
+        expand through all checkpoints for the same active build.
+        """
+        eligible = []
+        for state_number, checkpoint in repair_checkpoints.items():
+            if before_state is not None and state_number >= before_state:
+                continue
+            runtime_states = checkpoint.get(
+                "product_build_runtime_states", []
+            )
+            if build_index >= len(runtime_states):
+                continue
+
+            prior_builds_complete = all(
+                runtime_states[index]["tonnes"]
+                >= self.product_build_settings[index]["target_tonnes"]
+                - self.PRODUCT_BUILD_TONNES_TOLERANCE
+                for index in range(build_index)
+            )
+            requested_build_incomplete = (
+                runtime_states[build_index]["tonnes"]
+                < self.product_build_settings[build_index]["target_tonnes"]
+                - self.PRODUCT_BUILD_TONNES_TOLERANCE
+            )
+            if prior_builds_complete and requested_build_incomplete:
+                eligible.append(int(state_number))
+        return sorted(set(eligible), reverse=True)
+
     def request_repair_for_terminal_infeasibility(
         self,
         last_solver_result,
@@ -583,22 +620,36 @@ class CaseModeller:
                         or state < current_repair_state
                     )
                 ]
+                expanded_search = False
+                if not candidate_states:
+                    candidate_states = (
+                        self.product_build_repair_checkpoint_states(
+                            repair_checkpoints,
+                            repair.build_index,
+                            before_state=current_repair_state,
+                        )
+                    )
+                    expanded_search = bool(candidate_states)
                 build_name = self.product_build_settings[
                     repair.build_index
                 ]["build_name"]
-                if (
-                    not candidate_states
-                    or repair_attempts >= self.MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS
-                ):
+                if not candidate_states:
                     raise ProductBuildRepairFailed(
                         build_name,
                         (
-                            f"{repair.reason} The bounded latest-first repair loop "
-                            "exhausted its feasible repair points."
+                            f"{repair.reason} The latest-first repair loop "
+                            "tried every saved checkpoint for this build "
+                            "without finding a compliant feasible plan."
                         ),
                     )
 
                 repair_state = max(candidate_states)
+                if expanded_search:
+                    print(
+                        f"Expanding {build_name} repair into earlier "
+                        f"checkpoint steady state {repair_state} to create "
+                        "additional cumulative grade buffer."
+                    )
                 checkpoint = repair_checkpoints[repair_state]
                 self.restore_product_build_repair_checkpoint(checkpoint)
                 self.product_build_repair_from_states[
@@ -612,7 +663,7 @@ class CaseModeller:
                 repair_attempts += 1
                 print(
                     f"Repairing {build_name} from steady state {repair_state} "
-                    f"(attempt {repair_attempts}/{self.MAX_PRODUCT_BUILD_REPAIR_ATTEMPTS})."
+                    f"(attempt {repair_attempts})."
                 )
                 continue
             self.steady_state_tracker += 1
