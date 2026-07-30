@@ -143,6 +143,7 @@ class CaseModeller:
             for _ in self.product_build_settings
         ]
         self.product_build_repair_from_states = {}
+        self.product_build_hard_repair_from_states = {}
         self.optimization_diagnostics = []
         self.previous_selected_stockpile_source_ids = set()
         self.previous_selected_grade_block_pairs = {}
@@ -583,6 +584,8 @@ class CaseModeller:
             self.selected_blend_signatures = set()
         if not hasattr(self, "contingency_reuse_fallbacks"):
             self.contingency_reuse_fallbacks = 0
+        if not hasattr(self, "product_build_hard_repair_from_states"):
+            self.product_build_hard_repair_from_states = {}
         print(
             "Active solver configuration: "
             f"Min Grade Block Pair Duration = "
@@ -634,12 +637,48 @@ class CaseModeller:
                     repair.build_index
                 ]["build_name"]
                 if not candidate_states:
+                    hard_repair_states = (
+                        self.product_build_repair_checkpoint_states(
+                            repair_checkpoints,
+                            repair.build_index,
+                        )
+                    )
+                    hard_repair_already_active = (
+                        repair.build_index
+                        in self.product_build_hard_repair_from_states
+                    )
+                    if hard_repair_states and not hard_repair_already_active:
+                        repair_state = min(hard_repair_states)
+                        checkpoint = repair_checkpoints[repair_state]
+                        self.restore_product_build_repair_checkpoint(
+                            checkpoint
+                        )
+                        self.product_build_repair_from_states[
+                            repair.build_index
+                        ] = repair_state
+                        self.product_build_hard_repair_from_states[
+                            repair.build_index
+                        ] = repair_state
+                        repair_checkpoints = {
+                            state: saved_checkpoint
+                            for state, saved_checkpoint
+                            in repair_checkpoints.items()
+                            if state < repair_state
+                        }
+                        repair_attempts += 1
+                        print(
+                            f"Cumulative repair did not produce a compliant "
+                            f"{build_name}. Restarting that build from steady "
+                            f"state {repair_state} with every build state "
+                            "forced on spec."
+                        )
+                        continue
                     raise ProductBuildRepairFailed(
                         build_name,
                         (
-                            f"{repair.reason} The latest-first repair loop "
-                            "tried every saved checkpoint for this build "
-                            "without finding a compliant feasible plan."
+                            f"{repair.reason} Cumulative repair and the final "
+                            "all-states-on-spec fallback both failed across "
+                            "the saved checkpoints for this build."
                         ),
                     )
 
@@ -1309,6 +1348,13 @@ class CaseModeller:
             solver_config["enforce_cumulative_product_build_grade"] = (
                 repair_from_state is not None
                 and self.steady_state_tracker >= repair_from_state
+            )
+            hard_repair_from_state = getattr(
+                self, "product_build_hard_repair_from_states", {}
+            ).get(current_product_build_index)
+            solver_config["force_product_build_state_grades_on_spec"] = (
+                hard_repair_from_state is not None
+                and self.steady_state_tracker >= hard_repair_from_state
             )
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
             self.previous_selected_stockpile_source_ids

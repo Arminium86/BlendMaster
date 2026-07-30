@@ -966,6 +966,9 @@ class Optimizer:
                 and solver_config.get(
                     "active_product_build_completes_within_horizon", False
                 )
+                and not solver_config.get(
+                    "force_product_build_state_grades_on_spec", False
+                )
             )
             # If the build is not capacity-projected to finish by the end of
             # the planning horizon, do not relax its targets. Applying the
