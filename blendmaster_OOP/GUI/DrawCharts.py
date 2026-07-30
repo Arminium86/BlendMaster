@@ -2138,6 +2138,100 @@ class DrawAMTStockpile:
             if not (isinstance(entry, dict) and entry.get("footprint") == footprint)
         ]
 
+    def clear_footprint_chunking(self, footprint, table_data=None):
+        """Remove generated chunks and every derived direction for a footprint."""
+        table_data = self.remove_footprint_chunks(footprint, table_data)
+        self.direction_clicks.pop(footprint, None)
+        self.reclaim_directions.pop(footprint, None)
+        self.cut_directions.pop(footprint, None)
+        self.dig_paths.pop(footprint, None)
+        self.update_sequence_counter()
+        return table_data
+
+    def automatic_directions_for_footprint(self, footprint):
+        """Return short-axis reclaim and long-axis cut directions from hex geometry."""
+        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        if filtered_data.empty:
+            return None, None, "No AMT hexagons were found for this footprint."
+
+        for column in ("long", "lat"):
+            filtered_data[column] = pd.to_numeric(
+                filtered_data[column], errors="coerce"
+            )
+        filtered_data = filtered_data.dropna(subset=["long", "lat"])
+        coordinates = filtered_data[["long", "lat"]].drop_duplicates().to_numpy()
+        if len(coordinates) < 3:
+            return (
+                None,
+                None,
+                "At least three positioned hexagons are required to calculate stockpile axes.",
+            )
+
+        # Longitude degrees contract with latitude.  Work in a locally scaled
+        # coordinate system, then convert direction endpoints back to the map
+        # coordinates consumed by the existing chunk generator.
+        centre = coordinates.mean(axis=0)
+        longitude_scale = max(
+            abs(np.cos(np.deg2rad(float(centre[1])))), 1e-6
+        )
+        local_coordinates = coordinates.copy()
+        local_coordinates[:, 0] = (
+            local_coordinates[:, 0] - centre[0]
+        ) * longitude_scale
+        local_coordinates[:, 1] = local_coordinates[:, 1] - centre[1]
+
+        covariance = np.cov(local_coordinates, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        if (
+            not np.isfinite(eigenvalues).all()
+            or float(np.max(eigenvalues)) <= 1e-16
+        ):
+            return None, None, "The footprint geometry does not define usable axes."
+
+        short_vector = eigenvectors[:, int(np.argmin(eigenvalues))]
+        long_vector = eigenvectors[:, int(np.argmax(eigenvalues))]
+
+        def map_axis(vector):
+            projection = local_coordinates @ vector
+            minimum = float(projection.min())
+            maximum = float(projection.max())
+            if maximum - minimum <= 1e-12:
+                return None
+            local_start = vector * minimum
+            local_end = vector * maximum
+            return {
+                "start": (
+                    float(centre[0] + local_start[0] / longitude_scale),
+                    float(centre[1] + local_start[1]),
+                ),
+                "end": (
+                    float(centre[0] + local_end[0] / longitude_scale),
+                    float(centre[1] + local_end[1]),
+                ),
+            }
+
+        reclaim_direction = map_axis(short_vector)
+        cut_direction = map_axis(long_vector)
+        if not reclaim_direction or not cut_direction:
+            return None, None, "The footprint geometry does not define two usable axes."
+        return reclaim_direction, cut_direction, ""
+
+    def auto_generate_chunks_for_footprint(self, footprint, table_data):
+        reclaim_direction, cut_direction, error_message = (
+            self.automatic_directions_for_footprint(footprint)
+        )
+        if error_message:
+            return table_data, error_message
+        self.reclaim_directions[footprint] = reclaim_direction
+        self.cut_directions[footprint] = cut_direction
+        table_data, status_message = self.generate_chunks_from_directions(
+            footprint, table_data
+        )
+        return (
+            table_data,
+            f"Auto-detected short-axis reclaim and long-axis cut directions. {status_message}",
+        )
+
     def build_chunk_row(self, footprint, sequence, chunk_rows, chunk_size):
         total_tonnes = sum(row["_positive_balance"] for row in chunk_rows)
         member_hexes = [row["hex"] for row in chunk_rows if row.get("hex") is not None]
@@ -2516,7 +2610,13 @@ class DrawAMTStockpile:
                                 style={**button_style, "backgroundColor": "#15803d", "borderColor": "#15803d", "color": "#ffffff"}
                             ),
                             dbc.Button(
-                                "Clear Footprint Chunks",
+                                "Auto Directions & Chunks",
+                                id="auto-generate-chunks-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#7c3aed", "borderColor": "#7c3aed", "color": "#ffffff"}
+                            ),
+                            dbc.Button(
+                                "Clear Current Chunking",
                                 id="clear-footprint-button",
                                 size="sm",
                                 style={**button_style, "backgroundColor": "#f59e0b", "borderColor": "#f59e0b", "color": "#172033"}
@@ -2624,13 +2724,15 @@ class DrawAMTStockpile:
             Input("digitize-direction-button", "n_clicks"),
             Input("digitize-cut-direction-button", "n_clicks"),
             Input("generate-chunks-button", "n_clicks"),
+            Input("auto-generate-chunks-button", "n_clicks"),
             Input("clear-footprint-button", "n_clicks")],
             [State("selected-table", "data"),
             State("scatter-plot", "figure"),
             State("scatter-plot", "relayoutData")]
         )
         def update_table_and_plot(click_data, selected_footprint, hex_size, dxf_contents,
-                                digitize_clicks, digitize_cut_clicks, generate_clicks, clear_clicks,
+                                digitize_clicks, digitize_cut_clicks, generate_clicks,
+                                auto_generate_clicks, clear_clicks,
                                 table_data, current_fig, relayout_data):
             triggered = dash.callback_context.triggered_id
             status_message = self.status_message
@@ -2651,14 +2753,22 @@ class DrawAMTStockpile:
                 status_message = f"Click two hexagons on {selected_footprint} to define the cut direction."
 
             if triggered == "clear-footprint-button":
-                table_data = self.remove_footprint_chunks(selected_footprint, table_data)
-                self.direction_clicks.pop(selected_footprint, None)
-                self.dig_paths.pop(selected_footprint, None)
-                self.update_sequence_counter()
-                status_message = f"Cleared chunks for {selected_footprint}."
+                table_data = self.clear_footprint_chunking(
+                    selected_footprint, table_data
+                )
+                status_message = (
+                    f"Cleared chunks and directions for {selected_footprint}."
+                )
 
             if triggered == "generate-chunks-button":
                 table_data, status_message = self.generate_chunks_from_directions(selected_footprint, table_data)
+
+            if triggered == "auto-generate-chunks-button":
+                table_data, status_message = (
+                    self.auto_generate_chunks_for_footprint(
+                        selected_footprint, table_data
+                    )
+                )
 
             # Handle direction digitizing from map clicks.
             if triggered == "scatter-plot" and click_data:

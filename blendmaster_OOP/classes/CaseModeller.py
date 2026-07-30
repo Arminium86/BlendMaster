@@ -21,6 +21,16 @@ class SolverRunAborted(Exception):
         self.user_message = message
         self.title = "Run Aborted"
 
+class SteadyStateInfeasible(Exception):
+    def __init__(self, steady_state, message="No feasible blend was found."):
+        detail = (
+            f"Optimisation stopped at steady state {steady_state}. {message} "
+            "All earlier successfully solved steady states remain available."
+        )
+        super().__init__(detail)
+        self.user_message = detail
+        self.title = "Partial Plan - Infeasible Steady State"
+
 class ProductBuildCapacityComplete(Exception):
     def __init__(self):
         message = (
@@ -955,6 +965,10 @@ class CaseModeller:
                 period_crusher_target,
                 initial_steady_state_duration,
             )
+            raise SteadyStateInfeasible(
+                self.steady_state_tracker,
+                no_selected_blend_message,
+            )
 
         if (
             "source_actual_tonnes" in self.decision_point_results
@@ -1225,10 +1239,13 @@ class CaseModeller:
         )
         if reuse_count and self.reserved_blend_signatures:
             mode = self.configured_contingency_distinctness_mode()
-            raise NoDistinctContingencyBlend(
-                self.plan_id,
-                self.steady_state_tracker,
-                self.CONTINGENCY_ACCEPTANCE_LABELS[mode],
+            self.contingency_reuse_fallbacks += 1
+            print(
+                f"{self.plan_id}: no unused blend satisfying "
+                f"'{self.CONTINGENCY_ACCEPTANCE_LABELS[mode]}' was feasible "
+                f"in steady state {self.steady_state_tracker}. Reusing the "
+                f"least-reused feasible blend option {option}; later steady "
+                "states will continue searching for a distinct mix."
             )
         elif self.reserved_blend_signatures:
             print(
@@ -1314,9 +1331,14 @@ class CaseModeller:
         return value if value > Optimizer.SOLUTION_TOLERANCE else None
 
     def configured_max_decision_blend_options(self):
+        config_key = (
+            "contingency_max_blend_options_per_steady_state"
+            if str(getattr(self, "plan_id", "Primary")) != "Primary"
+            else "max_blend_options_per_steady_state"
+        )
         try:
             value = int(self.solver_config.get(
-                "max_blend_options_per_steady_state",
+                config_key,
                 self.MAX_DECISION_BLEND_OPTIONS,
             ) or self.MAX_DECISION_BLEND_OPTIONS)
         except (TypeError, ValueError):

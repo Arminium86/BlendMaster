@@ -1,7 +1,13 @@
 # This is the control centre in which user and inventory data are imported and the program is executed
 from PyQt5.QtCore import QObject, pyqtSignal, QEventLoop
 import builtins, pandas as pd, traceback, copy
-from classes.CaseModeller import CaseModeller
+from classes.CaseModeller import (
+    CaseModeller,
+    ProductBuildCapacityComplete,
+    ProductBuildRepairFailed,
+    SolverRunAborted,
+    SteadyStateInfeasible,
+)
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
@@ -93,6 +99,37 @@ class Run:
             results, case_modeller.product_build_settings
         )
 
+    @staticmethod
+    def _completed_offspec_product_build_names(case_modeller):
+        names = []
+        settings = getattr(case_modeller, "product_build_settings", []) or []
+        states = getattr(
+            case_modeller, "product_build_runtime_states", []
+        ) or []
+        for index, build_setting in enumerate(settings):
+            if index >= len(states):
+                continue
+            build_state = states[index]
+            completed = (
+                float(build_state.get("tonnes", 0) or 0)
+                >= float(build_setting.get("target_tonnes", 0) or 0)
+                - case_modeller.PRODUCT_BUILD_TONNES_TOLERANCE
+            )
+            if (
+                completed
+                and not case_modeller.product_build_grade_on_spec(
+                    build_state, build_setting
+                )
+            ):
+                names.append(
+                    str(
+                        build_setting.get("build_name")
+                        or build_setting.get("brand")
+                        or f"Build {index + 1}"
+                    )
+                )
+        return names
+
     def execute(
         self,
         start_time,
@@ -114,6 +151,9 @@ class Run:
         planning_period_count=3,
     ):
         self.abort_requested = False
+        self.case_bridge.print(
+            "Preparing schedules and model inputs for the first steady state..."
+        )
 
         # Install required libraries
         #requirements = Requirements()
@@ -189,6 +229,7 @@ class Run:
             contingency_plan_count = 0
         contingency_plan_count = min(contingency_plan_count, 10)
         solver_config["contingency_plan_count"] = contingency_plan_count
+        # Enumeration depth is independent for primary and contingency plans.
         solver_config["max_blend_options_per_steady_state"] = max(
             int(
                 solver_config.get(
@@ -196,7 +237,19 @@ class Run:
                 )
                 or 12
             ),
-            contingency_plan_count + 1,
+            1,
+        )
+        solver_config[
+            "contingency_max_blend_options_per_steady_state"
+        ] = max(
+            int(
+                solver_config.get(
+                    "contingency_max_blend_options_per_steady_state",
+                    solver_config["max_blend_options_per_steady_state"],
+                )
+                or 12
+            ),
+            1,
         )
 
         if user_interaction_mode == 2 and file_path:
@@ -264,22 +317,83 @@ class Run:
             "Primary", blend_mode
         )
         self.case_modellers = {"Primary": primary_case_modeller}
+        primary_outcome_error = None
         try:
+            self.case_bridge.print(
+                "Model inputs prepared. Starting the primary optimisation..."
+            )
             self._run_case_modeller(primary_case_modeller)
+        except ProductBuildCapacityComplete as outcome:
+            primary_outcome_error = outcome
+            self.case_bridge.print(str(outcome))
+        except (
+            ProductBuildRepairFailed,
+            SolverRunAborted,
+            SteadyStateInfeasible,
+        ) as outcome:
+            primary_outcome_error = outcome
+            self.case_bridge.print(
+                f"{outcome.title}: {outcome.user_message}"
+            )
         except Exception as error:
             stockpile_selection_error = self._stockpile_selection_error(error)
             if stockpile_selection_error is not None:
                 raise stockpile_selection_error
             raise
 
-        self._validate_optimization_results()
-        self._validate_stockpile_count_constraints(
-            min_stockpiles,
-            max_stockpiles,
-            min_stockpile_contribution_ratio,
+        completed_offspec_builds = (
+            self._completed_offspec_product_build_names(
+                primary_case_modeller
+            )
         )
+        if completed_offspec_builds:
+            offspec_message = (
+                "Completed product build(s) are off specification: "
+                + ", ".join(completed_offspec_builds)
+                + "."
+            )
+            if primary_outcome_error is None or isinstance(
+                primary_outcome_error, ProductBuildCapacityComplete
+            ):
+                primary_outcome_error = BlendMasterRunError(
+                    offspec_message,
+                    title="Off-Spec Product Build",
+                )
+            elif offspec_message not in str(primary_outcome_error):
+                primary_outcome_error.user_message = (
+                    str(
+                        getattr(
+                            primary_outcome_error,
+                            "user_message",
+                            primary_outcome_error,
+                        )
+                    )
+                    + " "
+                    + offspec_message
+                )
 
-        self.case_bridge.print("Optimisation complete. Writing database tables...")
+        if primary_outcome_error is None:
+            try:
+                self._validate_optimization_results()
+                self._validate_stockpile_count_constraints(
+                    min_stockpiles,
+                    max_stockpiles,
+                    min_stockpile_contribution_ratio,
+                )
+            except InfeasibleRunError as outcome:
+                primary_outcome_error = outcome
+                self.case_bridge.print(
+                    f"{outcome.title}: {outcome.user_message}"
+                )
+
+        self.case_bridge.print(
+            (
+                "Optimisation complete. Writing database tables..."
+                if primary_outcome_error is None
+                else "Optimisation stopped. Preserving solved steady states "
+                "and writing database tables..."
+            )
+        )
         database_manager.clear_optimisation_plan_results()
 
         self.case_bridge.print(
@@ -331,18 +445,43 @@ class Run:
             "Primary",
             0,
         )
+        primary_status = "complete"
+        primary_message = "Primary optimised plan completed."
+        if primary_outcome_error is not None:
+            primary_message = str(
+                getattr(primary_outcome_error, "user_message", None)
+                or primary_outcome_error
+            )
+            if isinstance(primary_outcome_error, ProductBuildCapacityComplete):
+                primary_status = "complete"
+            elif isinstance(primary_outcome_error, SolverRunAborted):
+                primary_status = "aborted"
+            elif (
+                isinstance(primary_outcome_error, ProductBuildRepairFailed)
+                or getattr(primary_outcome_error, "title", "")
+                == "Off-Spec Product Build"
+            ):
+                primary_status = "off_spec"
+            else:
+                primary_status = "partial"
+
         plan_status_rows = [{
             "plan_id": "Primary",
             "plan_rank": 0,
-            "status": "complete",
-            "message": "Primary optimised plan completed.",
+            "status": primary_status,
+            "message": primary_message,
             "reused_blend_fallbacks": 0,
         }]
         reserved_signatures = (
             primary_case_modeller.selected_plan_blend_signatures()
         )
 
-        for plan_rank in range(1, contingency_plan_count + 1):
+        contingency_runs = (
+            contingency_plan_count
+            if primary_status == "complete"
+            else 0
+        )
+        for plan_rank in range(1, contingency_runs + 1):
             plan_id = f"Contingency {plan_rank}"
             self.case_bridge.print(
                 f"Running {plan_id} of {contingency_plan_count} using "
@@ -418,6 +557,47 @@ class Run:
                 message = str(
                     getattr(error, "user_message", None) or error
                 )
+                if (
+                    contingency.results is not None
+                    and not contingency.results.empty
+                ):
+                    contingency.build_report = (
+                        contingency.balance_tracker.get_build_transactions()
+                    )
+                    partial_blend_report = self._case_blend_report(
+                        contingency
+                    )
+                    database_manager.write_optimisation_plan_result(
+                        "blend",
+                        partial_blend_report,
+                        plan_id,
+                        plan_rank,
+                    )
+                    database_manager.write_optimisation_plan_result(
+                        "build",
+                        contingency.build_report,
+                        plan_id,
+                        plan_rank,
+                    )
+                    database_manager.write_optimisation_plan_result(
+                        "product_build",
+                        contingency.build_product_build_report(),
+                        plan_id,
+                        plan_rank,
+                    )
+                    database_manager.write_material_destination_plan_to_database(
+                        payload_transactions=expit_payload_transactions,
+                        blend_report=partial_blend_report,
+                        plan_type="optimised",
+                        plan_id=plan_id,
+                        crusher_destination=(
+                            selected_aps_crusher
+                            or (site_context or {}).get("crusher")
+                        ),
+                        direct_tip_movement_rules=(site_context or {}).get(
+                            "direct_tip_movement_rules", []
+                        ),
+                    )
                 self.case_bridge.print(
                     f"{plan_id} could not produce a compliant feasible "
                     f"plan: {message}"
@@ -439,6 +619,15 @@ class Run:
             f"{len(plan_status_rows) - 1} contingency plan(s) processed."
         )
 
+        periods.run_outcome = {
+            "status": primary_status,
+            "title": str(
+                getattr(primary_outcome_error, "title", "")
+                or "Optimisation Complete"
+            ),
+            "message": primary_message,
+            "off_spec_builds": completed_offspec_builds,
+        }
         return periods
 
     def _include_aps_destination_stockpiles(

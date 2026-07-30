@@ -883,6 +883,37 @@ class UserInputs(QMainWindow):
             if connection is not None:
                 connection.close()
 
+    @staticmethod
+    def database_has_saved_optimisation_results(database_path):
+        """Return True when a restored scenario contains a usable saved plan."""
+        if not database_path or not os.path.exists(database_path):
+            return False
+        connection = None
+        try:
+            connection = sqlite3.connect(database_path)
+            for table_name in (
+                "optimisation_plan_blend_report",
+                "optimised_blend_report",
+                "optimisation_plan_status",
+            ):
+                exists = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ? LIMIT 1
+                    """,
+                    (table_name,),
+                ).fetchone()
+                if exists and connection.execute(
+                    f'SELECT 1 FROM "{table_name}" LIMIT 1'
+                ).fetchone():
+                    return True
+            return False
+        except sqlite3.Error:
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
     def seed_active_scenario_database(self, force=False):
         """Recreate opening inventory tables when a scenario DB is new or restored."""
         database_path = get_database_path()
@@ -2090,9 +2121,18 @@ class UserInputs(QMainWindow):
         )
         self.max_blend_options_input.setFixedWidth(90)
         blend_options_layout.addWidget(
-            QLabel("Max Blend Options per Steady State:")
+            QLabel("Primary Plan Max Blend Options per Steady State:")
         )
         blend_options_layout.addWidget(self.max_blend_options_input)
+        self.contingency_max_blend_options_input = QLineEdit("12")
+        self.contingency_max_blend_options_input.setValidator(
+            QIntValidator(1, 1000, self)
+        )
+        self.contingency_max_blend_options_input.setFixedWidth(90)
+        blend_options_layout.addWidget(QLabel("Contingency Plan Max:"))
+        blend_options_layout.addWidget(
+            self.contingency_max_blend_options_input
+        )
         blend_options_layout.addStretch()
         layout.addLayout(blend_options_layout)
 
@@ -2753,6 +2793,7 @@ class UserInputs(QMainWindow):
             "stay_on_same_blend_incentive": 0.0,
             "blend_option_timeout_seconds": 30.0,
             "max_blend_options_per_steady_state": 12,
+            "contingency_max_blend_options_per_steady_state": 12,
             "contingency_plan_count": 0,
             "contingency_distinctness_mode": (
                 "stockpile_or_grade_block_pairing"
@@ -2798,6 +2839,10 @@ class UserInputs(QMainWindow):
 
         merged = copy.deepcopy(defaults)
         incoming = copy.deepcopy(incoming)
+        if "contingency_max_blend_options_per_steady_state" not in incoming:
+            incoming["contingency_max_blend_options_per_steady_state"] = (
+                incoming.get("max_blend_options_per_steady_state", 12)
+            )
         contaminant_thresholds = incoming.pop("contaminant_thresholds", None)
         merged.update(incoming)
         if isinstance(contaminant_thresholds, dict):
@@ -4216,7 +4261,10 @@ class UserInputs(QMainWindow):
     def current_site_start_time(self):
         if hasattr(self, "time_mode") and self.time_mode.currentIndex() == 1:
             return self.start_time.dateTime().toPyDateTime()
-        return datetime.now()
+        # "Now" is resolved once, when Site Configuration is submitted.  A
+        # loaded project must continue using that saved instant rather than
+        # silently moving its horizon to the project-load time.
+        return getattr(self, "start_time_choice", None) or datetime.now()
 
     def selected_two_wp_product_crusher_names(self):
         if not hasattr(self, "two_wp_product_crusher_input"):
@@ -6973,6 +7021,7 @@ class UserInputs(QMainWindow):
             "stay_on_same_blend_incentive",
             "blend_option_timeout_seconds",
             "max_blend_options_per_steady_state",
+            "contingency_max_blend_options_per_steady_state",
             "min_grade_block_pair_duration_hours",
             "stay_on_same_grade_block_pair_incentive",
             "grade_block_lock_enabled",
@@ -8032,6 +8081,11 @@ class UserInputs(QMainWindow):
             return True
         if key == "max_blend_options_per_steady_state":
             set_line_edit(self.max_blend_options_input, value)
+            return True
+        if key == "contingency_max_blend_options_per_steady_state":
+            set_line_edit(
+                self.contingency_max_blend_options_input, value
+            )
             return True
         if key == "min_grade_block_pair_duration_hours":
             set_line_edit(self.min_grade_block_pair_duration_input, value)
@@ -9946,6 +10000,12 @@ class UserInputs(QMainWindow):
         self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
         self.blend_option_timeout_input.setText(str(solver_config.get("blend_option_timeout_seconds", 30.0)))
         self.max_blend_options_input.setText(str(solver_config.get("max_blend_options_per_steady_state", 12)))
+        self.contingency_max_blend_options_input.setText(str(
+            solver_config.get(
+                "contingency_max_blend_options_per_steady_state",
+                solver_config.get("max_blend_options_per_steady_state", 12),
+            )
+        ))
         self.contingency_plan_count_input.setText(str(
             solver_config.get("contingency_plan_count", 0)
         ))
@@ -10196,8 +10256,15 @@ class UserInputs(QMainWindow):
         )
         max_blend_options_per_steady_state = parse_positive_int_input(
             self.max_blend_options_input,
-            "Max Blend Options per Steady State",
+            "Primary Plan Max Blend Options per Steady State",
             12,
+        )
+        contingency_max_blend_options_per_steady_state = (
+            parse_positive_int_input(
+                self.contingency_max_blend_options_input,
+                "Contingency Plan Max Blend Options per Steady State",
+                12,
+            )
         )
         contingency_plan_count = int(
             self.contingency_plan_count_input.text().strip() or 0
@@ -10256,6 +10323,7 @@ class UserInputs(QMainWindow):
             or stay_on_same_blend_incentive is None
             or blend_option_timeout_seconds is None
             or max_blend_options_per_steady_state is None
+            or contingency_max_blend_options_per_steady_state is None
             or min_grade_block_pair_duration_hours is None
             or stay_on_same_grade_block_pair_incentive is None
             or brand_guidance_incentive is None
@@ -10326,6 +10394,9 @@ class UserInputs(QMainWindow):
             "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
             "blend_option_timeout_seconds": blend_option_timeout_seconds,
             "max_blend_options_per_steady_state": max_blend_options_per_steady_state,
+            "contingency_max_blend_options_per_steady_state": (
+                contingency_max_blend_options_per_steady_state
+            ),
             "contingency_plan_count": contingency_plan_count,
             "contingency_distinctness_mode": (
                 contingency_distinctness_mode
@@ -10532,6 +10603,29 @@ class UserInputs(QMainWindow):
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
         self.show_page(self.results_tab_index)
+
+        run_outcome = getattr(periods, "run_outcome", {}) or {}
+        outcome_status = str(run_outcome.get("status") or "complete")
+        if outcome_status != "complete":
+            message = str(run_outcome.get("message") or "").strip()
+            off_spec_builds = (
+                run_outcome.get("off_spec_builds") or []
+            )
+            if outcome_status == "off_spec" or off_spec_builds:
+                message += (
+                    "\n\nThe completed build is off specification. "
+                    "Do not release this plan."
+                )
+            if outcome_status != "off_spec":
+                message += (
+                    "\n\nThe successfully solved portion has been saved and "
+                    "is available in Results and Reports."
+                )
+            QMessageBox.information(
+                self,
+                run_outcome.get("title") or "Partial Optimisation Result",
+                message,
+            )
 
         if self.project_load_continuation_pending:
             self.project_load_continuation_pending = False
@@ -14612,6 +14706,21 @@ class UserInputs(QMainWindow):
         self.project_load_restore_in_progress = False
         if any((self.stockpile_data_AMT_column or {}).values()):
             self.store_hex_sequence_table()
+        if self.database_has_saved_optimisation_results(get_database_path()):
+            periods = PeriodManager(self.planning_period_count())
+            periods.calculate_periods(
+                self.start_time_choice or datetime.now()
+            )
+            self.set_start_and_end_datetime(periods)
+            self.update_decision_point_tab_state()
+            self.activate_manual_setup_tab()
+            self.refresh_sqlite_reports()
+            self.refresh_optimisation_plan_selectors()
+            self.start_dash_optimised_charts_thread()
+            self.save_active_scenario_state()
+            self.project_load_continuation_pending = False
+            self.finish_project_load_ui(success=True)
+            return
         self.project_load_continuation_pending = True
         self.store_calendar_inputs()
         
