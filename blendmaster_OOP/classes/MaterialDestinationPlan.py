@@ -11,20 +11,16 @@ class MaterialDestinationPlan:
     COLUMNS = [
         "plan_type",
         "plan_id",
-        "payload_id",
         "grade_block",
-        "mining_start_datetime",
-        "delivered_datetime",
-        "payload_tonnes",
         "planned_2wp_destination",
         "fallback_destination",
         "two_wp_destination_resolution",
         "assigned_destination",
         "assigned_destination_type",
+        "source_tonnes",
         "assigned_tonnes",
         "assigned_ratio",
         "assignment_source",
-        "steady_state_number",
     ]
 
     @staticmethod
@@ -94,11 +90,6 @@ class MaterialDestinationPlan:
         default_destination,
         movement_rules,
     ):
-        planned_type = cls._text(payload.get("destination_type")).lower()
-        planned_destination = cls._text(payload.get("planned_destination"))
-        if planned_type == "crusher" and planned_destination:
-            return planned_destination
-
         source = cls._text(payload.get("source")).upper()
         for source_pattern, destination in movement_rules:
             if source_pattern in source:
@@ -110,8 +101,18 @@ class MaterialDestinationPlan:
                 for value in default_destination
                 if cls._text(value)
             ]
-            return choices[0] if choices else "Crusher"
-        return cls._text(default_destination) or "Crusher"
+            if choices:
+                return choices[0]
+        else:
+            selected_destination = cls._text(default_destination)
+            if selected_destination:
+                return selected_destination
+
+        planned_type = cls._text(payload.get("destination_type")).lower()
+        planned_destination = cls._text(payload.get("planned_destination"))
+        if planned_type == "crusher" and planned_destination:
+            return planned_destination
+        return "Crusher"
 
     @classmethod
     def _destination_columns(cls, payload):
@@ -381,16 +382,61 @@ class MaterialDestinationPlan:
                     "steady_state_number": None,
                 })
 
-        result = pd.DataFrame(rows, columns=cls.COLUMNS)
-        if result.empty:
-            return result
-        return result.sort_values(
-            [
-                "mining_start_datetime",
-                "payload_id",
-                "assigned_destination_type",
-                "steady_state_number",
-            ],
-            kind="stable",
-            na_position="last",
-        ).reset_index(drop=True)
+        if not rows:
+            return pd.DataFrame(columns=cls.COLUMNS)
+
+        # The report is a source-to-destination plan, not a payload or
+        # steady-state audit. Retain payload detail only while reconciling
+        # direct-tip tonnes above, then aggregate it away here.
+        result = pd.DataFrame(rows)
+        group_columns = [
+            "plan_type",
+            "plan_id",
+            "grade_block",
+            "planned_2wp_destination",
+            "fallback_destination",
+            "two_wp_destination_resolution",
+            "assigned_destination",
+            "assigned_destination_type",
+            "assignment_source",
+        ]
+        result = (
+            result.groupby(group_columns, dropna=False, as_index=False)[
+                "assigned_tonnes"
+            ]
+            .sum()
+        )
+
+        source_totals = (
+            payloads.assign(
+                grade_block=payloads["source"].map(cls._text)
+            )
+            .groupby("grade_block", dropna=False)["payload"]
+            .sum()
+            .to_dict()
+        )
+        result["source_tonnes"] = result["grade_block"].map(
+            lambda source: cls._number(source_totals.get(source))
+        )
+        result["assigned_ratio"] = result.apply(
+            lambda row: (
+                cls._number(row["assigned_tonnes"])
+                / cls._number(row["source_tonnes"])
+                if cls._number(row["source_tonnes"]) > cls.TOLERANCE
+                else 0.0
+            ),
+            axis=1,
+        )
+        return (
+            result.reindex(columns=cls.COLUMNS)
+            .sort_values(
+                [
+                    "grade_block",
+                    "assigned_destination_type",
+                    "assigned_destination",
+                ],
+                kind="stable",
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )

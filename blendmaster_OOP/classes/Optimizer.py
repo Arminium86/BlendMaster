@@ -1140,19 +1140,23 @@ class Optimizer:
         A_ub_max_quantity = []
         b_ub_max_quantity = []
 
-        for event_index in range(len(event_pool)):
+        for event_index, event in enumerate(event_pool):
             # Create a row filled with zeros
             A_ub_row = [0] * len(event_pool)
-            
-            # Set the diagonal element (where row index matches column index)
-            if event_index in source_indices:
+
+            # Stockpile maximum quantity is a period-level reclaim limit, so
+            # it is prorated to the steady-state duration. A delivered
+            # grade-block payload is already an available inventory parcel;
+            # prorating its payload tonnes across the calendar period would
+            # make less than one payload available and conflict with the
+            # optional minimum-payload commitment.
+            if event.is_stockpile and event_index in source_indices:
                 A_ub_row[event_index] = 1 / steady_state_duration
-                
-            A_ub_max_quantity.append(A_ub_row)
-        
-        for event in event_pool:
-            # Create the corresponding entry for b_ub for this event
-            b_ub_max_quantity.append(event.max_quantity / periods.get_periods()[f"{period_tracker}_duration"])
+                A_ub_max_quantity.append(A_ub_row)
+                b_ub_max_quantity.append(
+                    event.max_quantity
+                    / periods.get_periods()[f"{period_tracker}_duration"]
+                )
 
         # Step 6: Run the optimization using PuLP
 
@@ -1201,26 +1205,52 @@ class Optimizer:
             for i in range(len(event_pool))
         ]
 
-        # Direct-tip grade-block events represent individual expit payload
-        # transactions.  This optional operational rule makes each payload
-        # indivisible: it is either selected in full or not selected at all.
-        # Stockpile reclaim remains continuous.  When a whole payload exceeds
-        # the available capacity in this steady state, the existing x upper
-        # bound forces its binary selection to zero.
+        # Optional minimum direct-tip commitment. Payload transactions remain
+        # continuous, but a grade-block source must contribute either zero
+        # tonnes or at least one payload. This permits selections such as 1.5
+        # payloads while rejecting a 0.5-payload blend.
         if direct_tip_enabled and require_whole_direct_tip_payloads:
+            payload_indices_by_source = {}
             for event_index, event in enumerate(event_pool):
-                if not event.is_grade_block:
-                    continue
-                payload_tonnes = max(safe_float(event.balance), 0.0)
-                payload_selected = LpVariable(
-                    f"y_whole_payload_{event_index}", cat=LpBinary
-                )
-                if payload_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                    prob += payload_selected == 0
-                else:
-                    prob += x_vars[event_index] == (
-                        payload_tonnes * payload_selected
+                if event.is_grade_block:
+                    payload_indices_by_source.setdefault(
+                        Optimizer.selection_source_name(event), []
+                    ).append(event_index)
+
+            for source_index, indices in enumerate(
+                payload_indices_by_source.values()
+            ):
+                positive_payload_tonnes = [
+                    safe_float(
+                        event_pool[index].max_quantity,
+                        safe_float(event_pool[index].balance),
                     )
+                    for index in indices
+                    if safe_float(
+                        event_pool[index].max_quantity,
+                        safe_float(event_pool[index].balance),
+                    )
+                    > Optimizer.SOLUTION_TOLERANCE
+                ]
+                source_capacity = sum(bounds[index][1] for index in indices)
+                source_selected = LpVariable(
+                    f"y_min_payload_{source_index}", cat=LpBinary
+                )
+                source_feed = lpSum(x_vars[index] for index in indices)
+                if (
+                    not positive_payload_tonnes
+                    or source_capacity <= Optimizer.SOLUTION_TOLERANCE
+                ):
+                    prob += source_selected == 0
+                    prob += source_feed == 0
+                    continue
+
+                minimum_payload_tonnes = min(positive_payload_tonnes)
+                prob += source_feed <= source_capacity * source_selected
+                prob += (
+                    source_feed
+                    >= minimum_payload_tonnes * source_selected
+                )
 
         objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
         fewer_stockpiles_incentive = max(

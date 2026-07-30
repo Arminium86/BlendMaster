@@ -481,10 +481,80 @@ class DatabaseManager:
                 """
             ).fetchone()
             if table_exists:
-                existing = pd.read_sql(
+                existing_raw = pd.read_sql(
                     "SELECT * FROM material_destination_plan",
                     connection,
-                ).reindex(columns=MaterialDestinationPlan.COLUMNS)
+                )
+                # Migrate payload-granular rows from older projects before
+                # preserving their other plan types.
+                if (
+                    "source_tonnes" not in existing_raw.columns
+                    and {"payload_id", "payload_tonnes"}.issubset(
+                        existing_raw.columns
+                    )
+                ):
+                    payload_totals = (
+                        existing_raw[
+                            [
+                                "plan_type", "plan_id", "grade_block",
+                                "payload_id", "payload_tonnes",
+                            ]
+                        ]
+                        .drop_duplicates(
+                            [
+                                "plan_type", "plan_id", "grade_block",
+                                "payload_id",
+                            ]
+                        )
+                        .groupby(
+                            ["plan_type", "plan_id", "grade_block"],
+                            dropna=False,
+                        )["payload_tonnes"]
+                        .sum()
+                    )
+                    existing_raw["source_tonnes"] = existing_raw.apply(
+                        lambda row: payload_totals.get(
+                            (
+                                row.get("plan_type"),
+                                row.get("plan_id"),
+                                row.get("grade_block"),
+                            ),
+                            0.0,
+                        ),
+                        axis=1,
+                    )
+                existing = existing_raw.reindex(
+                    columns=MaterialDestinationPlan.COLUMNS
+                )
+                group_columns = [
+                    column
+                    for column in MaterialDestinationPlan.COLUMNS
+                    if column not in {
+                        "source_tonnes", "assigned_tonnes",
+                        "assigned_ratio",
+                    }
+                ]
+                if not existing.empty:
+                    existing = (
+                        existing.groupby(
+                            group_columns, dropna=False, as_index=False
+                        )
+                        .agg({
+                            "source_tonnes": "max",
+                            "assigned_tonnes": "sum",
+                        })
+                    )
+                    existing["assigned_ratio"] = (
+                        pd.to_numeric(
+                            existing["assigned_tonnes"], errors="coerce"
+                        ).fillna(0.0)
+                        / pd.to_numeric(
+                            existing["source_tonnes"], errors="coerce"
+                        ).replace(0, np.nan)
+                    ).fillna(0.0)
+                    existing = existing.reindex(
+                        columns=MaterialDestinationPlan.COLUMNS
+                    )
                 same_plan = (
                     existing["plan_type"].astype(str).str.lower().eq(
                         str(plan_type).strip().lower()

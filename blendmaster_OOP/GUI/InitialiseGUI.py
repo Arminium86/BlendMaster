@@ -1896,12 +1896,12 @@ class UserInputs(QMainWindow):
         self.solver_config_layout.addWidget(self.grade_block_lock_checkbox)
 
         self.require_whole_direct_tip_payloads_checkbox = QCheckBox(
-            "Require whole expit payloads for Direct Tip"
+            "Require at least one payload per Direct Tip source"
         )
         self.require_whole_direct_tip_payloads_checkbox.setToolTip(
-            "When enabled, each direct-tip payload is either selected in full "
-            "or not selected. A payload that cannot be fully processed within "
-            "the steady state is not eligible for a partial direct tip."
+            "When enabled, a grade-block source may contribute zero tonnes or "
+            "at least one payload. Quantities above one payload remain "
+            "continuous, so 1.5 payloads is allowed but 0.5 is not."
         )
         self.solver_config_layout.addWidget(
             self.require_whole_direct_tip_payloads_checkbox
