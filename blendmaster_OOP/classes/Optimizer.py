@@ -138,8 +138,8 @@ class Optimizer:
             )
             if product_build_controller_source is not None:
                 # Product-build completion is a time boundary only. Do not add
-                # the depleted-source equality constraint used for stockpile or
-                # grade-block depletion boundaries.
+                # the depleted-source equality constraint used for stockpile
+                # depletion boundaries.
                 steady_state_controller_source = None
                 steady_state_controller_tonnes = None
 
@@ -281,7 +281,12 @@ class Optimizer:
 
     @staticmethod
     def update_steady_state_duration(selected_events, steady_state_duration, start_of_steady_state_datetime, stockpile_data: List[StockpileData], period_tracker):
-        """Update steady state duration if any source is depleted early."""
+        """Apply stockpile depletion/turnover boundaries to a steady state.
+
+        Delivered grade-block payloads are inventory choices within the
+        already-defined window. Their arrival or selection must not shorten
+        the window or create another decision point.
+        """
         end_of_steady_state_datetime = start_of_steady_state_datetime + timedelta(hours=steady_state_duration)
         updated_duration = steady_state_duration
         updated_duration_auto_turnover = steady_state_duration
@@ -289,9 +294,7 @@ class Optimizer:
         source_tonnes = "Null"
         minimum_duration = 0.016666667
 
-        grade_block_groups = {}
-
-        def apply_depletion_boundary(source, opening_balance, actual_tonnes, rate, depletion_duration=None):
+        def apply_depletion_boundary(source, opening_balance, actual_tonnes, rate):
             nonlocal updated_duration, source_name, source_tonnes
 
             balance_tolerance = max(0.01, abs(opening_balance) * 1e-6)
@@ -304,11 +307,7 @@ class Optimizer:
             if not depletes_source:
                 return
 
-            time_to_depletion = (
-                float(depletion_duration)
-                if depletion_duration is not None
-                else float(opening_balance / rate)
-            )
+            time_to_depletion = float(opening_balance / rate)
             effective_duration = max(time_to_depletion, minimum_duration)
 
             # If a source will deplete sooner than the current steady state duration, then update the steady state duration
@@ -323,34 +322,8 @@ class Optimizer:
             rate = float(selected_event.get("equipment_rate_input") or 0)
 
             if selected_event.get("source_type") == "grade_block":
-                if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                    continue
-
-                delivered_datetime = pd.to_datetime(
-                    selected_event.get("estimated_delivery_datetime"),
-                    errors="coerce",
-                )
-                if pd.isna(delivered_datetime):
-                    continue
-
-                grade_block_source = (
-                    selected_event.get("source")
-                    or selected_event.get("source_id")
-                    or "Unknown grade block"
-                )
-                group = grade_block_groups.setdefault(
-                    grade_block_source,
-                    {
-                        "opening_balance": 0.0,
-                        "actual_tonnes": 0.0,
-                        "rate": 0.0,
-                        "delivered_datetimes": [],
-                    },
-                )
-                group["opening_balance"] += opening_balance
-                group["actual_tonnes"] += actual_tonnes
-                group["rate"] = max(group["rate"], rate)
-                group["delivered_datetimes"].append(delivered_datetime.to_pydatetime())
+                # Payloads are aggregated direct-tip inventory for this
+                # window, not steady-state boundary events.
                 continue
 
             apply_depletion_boundary(
@@ -358,22 +331,6 @@ class Optimizer:
                 opening_balance,
                 actual_tonnes,
                 rate,
-            )
-
-        for grade_block_source, group in grade_block_groups.items():
-            depletion_duration = Optimizer.calculate_grouped_payload_depletion_duration(
-                group["delivered_datetimes"],
-                start_of_steady_state_datetime,
-            )
-            if depletion_duration is None:
-                continue
-
-            apply_depletion_boundary(
-                grade_block_source,
-                group["opening_balance"],
-                group["actual_tonnes"],
-                group["rate"],
-                depletion_duration,
             )
 
         for stockpile in stockpile_data:
@@ -394,31 +351,6 @@ class Optimizer:
             return updated_duration, source_name, source_tonnes
         else: return updated_duration_auto_turnover, "Null", "Null"
 
-    @staticmethod
-    def calculate_grouped_payload_depletion_duration(delivered_datetimes, start_of_steady_state_datetime):
-        """Return hours until a selected grade-block payload group is exhausted.
-
-        Grade-block payloads are grouped by source for the selected blend. The
-        boundary is the latest selected payload delivery time, plus a tiny
-        buffer so the app's [start, end) window includes a payload delivered
-        exactly at the boundary. This is not crusher residence time.
-        """
-        valid_datetimes = [
-            delivered_datetime
-            for delivered_datetime in delivered_datetimes
-            if delivered_datetime is not None
-        ]
-        if not valid_datetimes:
-            return None
-
-        latest_delivery_datetime = max(valid_datetimes) + timedelta(seconds=1)
-        return max(
-            (
-                latest_delivery_datetime - start_of_steady_state_datetime
-            ).total_seconds() / 3600,
-            0,
-        )
-    
     @staticmethod
     def run_blending_optimization(
         event_pool: List[EventData],
@@ -878,22 +810,17 @@ class Optimizer:
             for cost in base_costs
         ]
 
-        # Equality constraint is only used when there is source that is depleted early in a steady state. This tries to force that source to deplete fully
-        # in a subsequent, updated (shortened) steady state. There is a fail safe mechanism in the run_with_dynamic_steady_state method should this rigid
-        # constraint fail the optimization
+        # Equality constraint is only used when a stockpile is depleted early
+        # in a steady state. This tries to force that stockpile to deplete fully
+        # in the subsequent shortened-state solve. There is a fail-safe in
+        # run_with_dynamic_steady_state if this rigid constraint is infeasible.
         if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
             indices = [
                 i
                 for i, event in enumerate(event_pool)
                 if (
-                    (event.is_stockpile and event.stockpile == steady_state_controller_source)
-                    or (
-                        event.is_grade_block
-                        and (
-                            event.grade_block == steady_state_controller_source
-                            or event.source_name == steady_state_controller_source
-                        )
-                    )
+                    event.is_stockpile
+                    and event.stockpile == steady_state_controller_source
                 )
             ]
             A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
