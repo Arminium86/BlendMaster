@@ -6,15 +6,24 @@ from classes.GradeBlockData import GradeBlockData
 from typing import List
 from pandas import DataFrame
 class BalanceTracker:
+    @staticmethod
+    def _numeric_grade(value, fallback=0.0):
+        """Normalise legacy/missing grade values before weighted averaging."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+        return float(fallback) if pd.isna(numeric) else numeric
+
     def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], period_tracker, hex_sequence_table):
         self.state = {item.name: item.to_dict().get(f"state_{period_tracker}", 0) for item in stockpiles}
         self.grade_block_names = {item.name for item in grade_blocks}
         self.balance = {item.name: item.balance for item in stockpiles + grade_blocks}
-        self.grade_fe = {item.name: item.grade_fe for item in stockpiles + grade_blocks}
-        self.grade_si = {item.name: item.grade_si for item in stockpiles + grade_blocks}
-        self.grade_al = {item.name: item.grade_al for item in stockpiles + grade_blocks}
-        self.grade_p = {item.name: item.grade_p for item in stockpiles + grade_blocks}
-        self.grade_mn = {item.name: item.grade_mn for item in stockpiles + grade_blocks}
+        self.grade_fe = {item.name: self._numeric_grade(item.grade_fe) for item in stockpiles + grade_blocks}
+        self.grade_si = {item.name: self._numeric_grade(item.grade_si) for item in stockpiles + grade_blocks}
+        self.grade_al = {item.name: self._numeric_grade(item.grade_al) for item in stockpiles + grade_blocks}
+        self.grade_p = {item.name: self._numeric_grade(item.grade_p) for item in stockpiles + grade_blocks}
+        self.grade_mn = {item.name: self._numeric_grade(item.grade_mn) for item in stockpiles + grade_blocks}
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
         self.balance_copy = self.balance.copy()
         self.build_report = [] # Store transactions that meet the condition
@@ -81,23 +90,23 @@ class BalanceTracker:
                         updated_balance = current_balance + payload
                         
                         self.grade_fe[name] = (
-                            (self.grade_fe[name] * current_balance + transaction["source_grade_fe"] * payload)
+                            (self.grade_fe[name] * current_balance + self._numeric_grade(transaction.get("source_grade_fe"), self.grade_fe[name]) * payload)
                             / updated_balance
                         )
                         self.grade_si[name] = (
-                            (self.grade_si[name] * current_balance + transaction["source_grade_si"] * payload)
+                            (self.grade_si[name] * current_balance + self._numeric_grade(transaction.get("source_grade_si"), self.grade_si[name]) * payload)
                             / updated_balance
                         )
                         self.grade_al[name] = (
-                            (self.grade_al[name] * current_balance + transaction["source_grade_al"] * payload)
+                            (self.grade_al[name] * current_balance + self._numeric_grade(transaction.get("source_grade_al"), self.grade_al[name]) * payload)
                             / updated_balance
                         )
                         self.grade_p[name] = (
-                            (self.grade_p[name] * current_balance + transaction["source_grade_p"] * payload)
+                            (self.grade_p[name] * current_balance + self._numeric_grade(transaction.get("source_grade_p"), self.grade_p[name]) * payload)
                             / updated_balance
                         )
                         self.grade_mn[name] = (
-                            (self.grade_mn[name] * current_balance + transaction["source_grade_mn"] * payload)
+                            (self.grade_mn[name] * current_balance + self._numeric_grade(transaction.get("source_grade_mn"), self.grade_mn[name]) * payload)
                             / updated_balance
                         )
                         

@@ -1132,6 +1132,12 @@ class UserInputs(QMainWindow):
             "selected_haul_cycle_crushers": copy.deepcopy(getattr(
                 self, "selected_haul_cycle_crushers", []
             )),
+            "haul_cycle_crusher_mapping": getattr(
+                self, "haul_cycle_crusher_mapping_choice", ""
+            ),
+            "two_wp_product_crushers": copy.deepcopy(getattr(
+                self, "selected_two_wp_product_crushers", []
+            )),
         }
 
     def capture_scenario_state(self):
@@ -1163,6 +1169,9 @@ class UserInputs(QMainWindow):
             "haul_cycle_file_path_choice",
             "available_haul_cycle_crushers",
             "selected_haul_cycle_crushers", "haul_cycle_routes",
+            "haul_cycle_crusher_mapping_choice",
+            "available_two_wp_product_crushers",
+            "selected_two_wp_product_crushers",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "auto_load_2wp_targets_choice",
@@ -1356,6 +1365,17 @@ class UserInputs(QMainWindow):
             self.haul_cycle_routes = copy.deepcopy(
                 state.get("haul_cycle_routes") or {}
             )
+            saved_mapping = state.get("haul_cycle_crusher_mapping_choice") or state.get("haul_cycle_crusher_mapping") or []
+            self.haul_cycle_crusher_mapping_choice = (
+                [saved_mapping] if isinstance(saved_mapping, str) else list(saved_mapping)
+            )
+            self.available_two_wp_product_crushers = self.normalized_expit_agent_names(
+                state.get("available_two_wp_product_crushers") or []
+            )
+            self.selected_two_wp_product_crushers = self.normalized_expit_agent_names(
+                state.get("selected_two_wp_product_crushers")
+                or state.get("two_wp_product_crushers") or []
+            )
             self.blend_mode_choice = state.get("blend_mode_choice") or 1
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 state.get("product_brand_labels_choice") or self.default_product_brand_labels()
@@ -1487,6 +1507,10 @@ class UserInputs(QMainWindow):
             self.set_haul_cycle_crusher_items(
                 self.available_haul_cycle_crushers,
                 self.selected_haul_cycle_crushers,
+            )
+            self.set_two_wp_product_crusher_items(
+                self.available_two_wp_product_crushers,
+                self.selected_two_wp_product_crushers,
             )
             self.load_ratio_controls_from_state()
             self.set_direct_tip_movement_options(
@@ -1870,6 +1894,18 @@ class UserInputs(QMainWindow):
 
         self.grade_block_lock_checkbox = QCheckBox("Lock grade block to selected stockpile mix")
         self.solver_config_layout.addWidget(self.grade_block_lock_checkbox)
+
+        self.require_whole_direct_tip_payloads_checkbox = QCheckBox(
+            "Require whole expit payloads for Direct Tip"
+        )
+        self.require_whole_direct_tip_payloads_checkbox.setToolTip(
+            "When enabled, each direct-tip payload is either selected in full "
+            "or not selected. A payload that cannot be fully processed within "
+            "the steady state is not eligible for a partial direct tip."
+        )
+        self.solver_config_layout.addWidget(
+            self.require_whole_direct_tip_payloads_checkbox
+        )
 
         preference_label = QLabel("Tie-Break Preferences")
         preference_label.setStyleSheet("font-weight: bold; margin-top: 12px;")
@@ -2688,6 +2724,10 @@ class UserInputs(QMainWindow):
             self.stay_on_same_grade_block_pair_incentive_input.setEnabled(direct_tip_enabled)
         if hasattr(self, "grade_block_lock_checkbox"):
             self.grade_block_lock_checkbox.setEnabled(direct_tip_enabled)
+        if hasattr(self, "require_whole_direct_tip_payloads_checkbox"):
+            self.require_whole_direct_tip_payloads_checkbox.setEnabled(
+                direct_tip_enabled
+            )
 
     def update_rehandle_cycle_time_input_state(self, checked=None):
         if not hasattr(self, "haulage_cost_per_hour_input"):
@@ -2720,6 +2760,7 @@ class UserInputs(QMainWindow):
             "min_grade_block_pair_duration_hours": 0.0,
             "stay_on_same_grade_block_pair_incentive": 0.0,
             "grade_block_lock_enabled": False,
+            "require_whole_direct_tip_payloads": False,
             "prefer_fewer_stockpiles": False,
             "fewer_stockpiles_incentive": 10.0,
             "balance_preference": "none",
@@ -3215,22 +3256,7 @@ class UserInputs(QMainWindow):
         )
         layout.addRow(planning_period_label, self.planning_period_count_input)
 
-        # --- Input 2: Expit Transactions ---
-        expit_label = QLabel("Expit Transactions (optional):")
-        expit_label.setStyleSheet("font-weight: bold;")
-        self.expit_mode = QComboBox()
-        self.expit_mode.addItems(["Use Original Expit Transactions", "Update Transactions on Current Time"])
-        self.expit_mode.setFixedWidth(300)
-
-        # Expit options are active only when time starts at "Now"
-        self.expit_mode.setEnabled(False)
-        self.time_mode.currentIndexChanged.connect(
-            lambda: self.expit_mode.setEnabled(self.time_mode.currentIndex() == 0)
-        )
-
-        guidance_layout.addRow(expit_label, self.expit_mode)
-
-        # --- Input 3: Select 2WP and 24HR schedules ---
+        # --- Input 2: Select 2WP and 24HR schedules ---
         file_label = QLabel("Select 2WP Mining.csv (optional):")
         file_label.setStyleSheet("font-weight: bold;")
         self.file_path = QLineEdit()
@@ -3254,6 +3280,32 @@ class UserInputs(QMainWindow):
         crusher_ratio_label.setStyleSheet("font-weight: bold;")
         guidance_layout.addRow(crusher_ratio_label, crusher_ratio_layout)
 
+        self.two_wp_product_crusher_button = QPushButton("Get Product Crushers")
+        self.two_wp_product_crusher_button.setMinimumWidth(185)
+        self.two_wp_product_crusher_button.clicked.connect(
+            lambda: self.load_two_wp_product_crusher_names(True)
+        )
+        self.two_wp_product_crusher_input = QListWidget()
+        self.two_wp_product_crusher_input.setSelectionMode(
+            QAbstractItemView.MultiSelection
+        )
+        self.two_wp_product_crusher_input.setMinimumWidth(420)
+        self.two_wp_product_crusher_input.setMaximumHeight(105)
+        product_crusher_layout = QVBoxLayout()
+        product_crusher_header = QHBoxLayout()
+        product_crusher_header.addWidget(self.two_wp_product_crusher_button)
+        product_crusher_header.addWidget(QLabel(
+            "These selections filter 2WP brand, timing and active-blend guidance."
+        ))
+        product_crusher_header.addStretch()
+        product_crusher_layout.addLayout(product_crusher_header)
+        product_crusher_layout.addWidget(self.two_wp_product_crusher_input)
+        product_crusher_label = QLabel(
+            "Select All Product Crushers in Haul Infinity:"
+        )
+        product_crusher_label.setStyleSheet("font-weight: bold;")
+        guidance_layout.addRow(product_crusher_label, product_crusher_layout)
+
         file_24hr_label = QLabel("Select 24HR Mining.csv (optional):")
         file_24hr_label.setStyleSheet("font-weight: bold;")
         self.file_path_24hr = QLineEdit()
@@ -3268,6 +3320,18 @@ class UserInputs(QMainWindow):
         file_24hr_layout.addWidget(self.file_path_24hr)
         file_24hr_layout.addWidget(self.file_24hr_button)
         guidance_layout.addRow(file_24hr_label, file_24hr_layout)
+
+        # Expit mode is only meaningful after a 24HR schedule has been chosen.
+        expit_label = QLabel("Expit Transactions (optional):")
+        expit_label.setStyleSheet("font-weight: bold;")
+        self.expit_mode = QComboBox()
+        self.expit_mode.addItems([
+            "Use Original Expit Transactions",
+            "Update Transactions on Current Time",
+        ])
+        self.expit_mode.setFixedWidth(300)
+        guidance_layout.addRow(expit_label, self.expit_mode)
+        self.update_expit_mode_state()
 
         self.expit_agent_button = QPushButton("Get Agent Names")
         self.expit_agent_button.setMinimumWidth(150)
@@ -3404,12 +3468,36 @@ class UserInputs(QMainWindow):
         haul_cycle_crusher_layout.addWidget(
             self.haul_cycle_crusher_input
         )
-        haul_cycle_crusher_label = QLabel("Haul Cycle Crushers:")
+        haul_cycle_crusher_label = QLabel(
+            "Select All Tipping Point Crushers in Haul Infinity:"
+        )
         haul_cycle_crusher_label.setStyleSheet("font-weight: bold;")
         guidance_layout.addRow(
             haul_cycle_crusher_label,
             haul_cycle_crusher_layout,
         )
+
+        self.haul_cycle_crusher_mapping_input = QListWidget()
+        self.haul_cycle_crusher_mapping_input.setSelectionMode(
+            QAbstractItemView.MultiSelection
+        )
+        self.haul_cycle_crusher_mapping_input.setMinimumWidth(300)
+        self.haul_cycle_crusher_mapping_input.setMaximumHeight(105)
+        self.haul_cycle_crusher_mapping_input.itemSelectionChanged.connect(
+            self.handle_haul_cycle_mapping_changed
+        )
+        mapping_label = QLabel(
+            "Select Planned Tipping Point Crusher(s) in this Scenario:"
+        )
+        mapping_label.setStyleSheet("font-weight: bold;")
+        mapping_help = QLabel(
+            "Select one or more Cycles.csv destination nodes for the active scenario crusher."
+        )
+        mapping_layout = QHBoxLayout()
+        mapping_layout.addWidget(self.haul_cycle_crusher_mapping_input)
+        mapping_layout.addWidget(mapping_help)
+        mapping_layout.addStretch()
+        guidance_layout.addRow(mapping_label, mapping_layout)
 
         self.guidance_schedules_submit_button = QPushButton("Submit")
         self.guidance_schedules_submit_button.setObjectName(
@@ -3512,9 +3600,14 @@ class UserInputs(QMainWindow):
         self.aps_ratio_crusher_input.itemSelectionChanged.connect(self.derive_active_crusher_ratio)
         self.aps_ratio_crusher_input.itemSelectionChanged.connect(self.validate_form)
         self.time_mode.currentIndexChanged.connect(self.validate_form)
+        self.time_mode.currentIndexChanged.connect(self.update_expit_mode_state)
         self.start_time.dateTimeChanged.connect(self.validate_form)
         self.file_path.textChanged.connect(self.toggle_crusher_ratio_controls)
         self.file_path.textChanged.connect(self.validate_form)
+        self.two_wp_product_crusher_input.itemSelectionChanged.connect(
+            self.validate_form
+        )
+        self.file_path_24hr.textChanged.connect(self.update_expit_mode_state)
         self.file_path_24hr.textChanged.connect(self.validate_form)
         self.expit_agent_input.itemSelectionChanged.connect(self.validate_form)
         self.haul_cycle_file_path.textChanged.connect(self.validate_form)
@@ -3567,6 +3660,10 @@ class UserInputs(QMainWindow):
             not self.haul_cycle_file_path.text().strip()
             or bool(self.selected_haul_cycle_crusher_names())
         )
+        product_guidance_ready = (
+            not self.file_path.text().strip()
+            or bool(self.selected_two_wp_product_crusher_names())
+        )
         site_fields_populated = (
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
@@ -3581,6 +3678,7 @@ class UserInputs(QMainWindow):
             and schedule_paths_ready
             and expit_agents_ready
             and haul_cycles_ready
+            and product_guidance_ready
         )
         self.submit_button.setEnabled(site_fields_populated)
         self.guidance_schedules_submit_button.setEnabled(
@@ -3590,6 +3688,23 @@ class UserInputs(QMainWindow):
         self.save_button.setEnabled(
             site_fields_populated and guidance_fields_populated
         )
+
+    def update_expit_mode_state(self, *_args):
+        """Enable Expit transaction mode only for an imported 24HR schedule."""
+        if not hasattr(self, "expit_mode"):
+            return
+        has_24hr_schedule = bool(
+            hasattr(self, "file_path_24hr")
+            and self.file_path_24hr.text().strip()
+        )
+        starts_now = (
+            not hasattr(self, "time_mode")
+            or self.time_mode.currentIndex() == 0
+        )
+        enabled = has_24hr_schedule and starts_now
+        self.expit_mode.setEnabled(enabled)
+        if not enabled:
+            self.expit_mode.setCurrentIndex(0)
 
     def show_progress_dialog(self, message, cancel_callback=None):
         if self.progress_dialog:
@@ -3694,6 +3809,8 @@ class UserInputs(QMainWindow):
         )
         if file_path:
             self.file_path.setText(file_path)
+            self.set_two_wp_product_crusher_items([], [])
+            self.load_two_wp_product_crusher_names(False)
             if hasattr(self, "aps_crusher_input"):
                 self.aps_crusher_input.clear()
             if hasattr(self, "aps_ratio_crusher_input"):
@@ -3794,6 +3911,10 @@ class UserInputs(QMainWindow):
         retained = [name for name in previous if name in crusher_names]
         selected = retained or crusher_names
         self.set_haul_cycle_crusher_items(crusher_names, selected)
+        self.set_haul_cycle_crusher_mapping_items(
+            crusher_names,
+            getattr(self, "haul_cycle_crusher_mapping_choice", ""),
+        )
         self.refresh_haul_cycle_routes(show_errors=True)
         if getattr(self, "stockpile_data", None):
             self.setup_stockpile_table()
@@ -3813,6 +3934,64 @@ class UserInputs(QMainWindow):
         self.validate_form()
 
     def handle_haul_cycle_selection_changed(self):
+        self.refresh_haul_cycle_routes(show_errors=False)
+        if getattr(self, "stockpile_data", None):
+            self.setup_stockpile_table()
+        self.validate_form()
+
+    def default_haul_cycle_crusher_nodes(self, names=None):
+        names = list(names or [])
+        crusher = str(
+            getattr(self, "crusher_input_choice", "")
+            or (self.site_crusher_input.currentText() if hasattr(self, "site_crusher_input") else "")
+        ).strip().upper().replace("-", "_")
+        aliases = {
+            "OPF02_PC": ("RCH",),
+            "OPF01_PC": ("OPF1 CRUSHER", "OPF01 CRUSHER", "OPF1"),
+            "HAL_PC": ("HAL CRUSHER", "HAL"),
+        }
+        normalized = {
+            str(name).strip().upper().replace("\\", "/").rsplit("/", 1)[-1].replace("-", "_"): name
+            for name in names
+        }
+        for alias in aliases.get(crusher, ()):
+            for key, original in normalized.items():
+                if key == alias.replace("-", "_") or key.endswith(alias.replace("-", "_")):
+                    return [original]
+        if "TOTAL_FEED_PC" in crusher:
+            return names
+        return names if len(names) == 1 else []
+
+    def set_haul_cycle_crusher_mapping_items(self, names, selected=None):
+        if not hasattr(self, "haul_cycle_crusher_mapping_input"):
+            return
+        names = [str(name).strip() for name in names or [] if str(name).strip()]
+        if isinstance(selected, str):
+            selected = [selected] if selected.strip() else []
+        selected = [str(value).strip() for value in selected or [] if str(value).strip()]
+        if not any(value in names for value in selected):
+            selected = self.default_haul_cycle_crusher_nodes(names)
+        self.haul_cycle_crusher_mapping_input.blockSignals(True)
+        self.haul_cycle_crusher_mapping_input.clear()
+        self.haul_cycle_crusher_mapping_input.addItems(names)
+        for row in range(self.haul_cycle_crusher_mapping_input.count()):
+            item = self.haul_cycle_crusher_mapping_input.item(row)
+            item.setSelected(item.text().strip() in selected)
+        self.haul_cycle_crusher_mapping_input.blockSignals(False)
+        self.haul_cycle_crusher_mapping_choice = selected
+
+    def current_haul_cycle_crusher_node(self):
+        if hasattr(self, "haul_cycle_crusher_mapping_input"):
+            return [
+                item.text().strip()
+                for item in self.haul_cycle_crusher_mapping_input.selectedItems()
+                if item.text().strip()
+            ]
+        selected = getattr(self, "haul_cycle_crusher_mapping_choice", []) or []
+        return [selected] if isinstance(selected, str) and selected else list(selected)
+
+    def handle_haul_cycle_mapping_changed(self, *_args):
+        self.haul_cycle_crusher_mapping_choice = self.current_haul_cycle_crusher_node()
         self.refresh_haul_cycle_routes(show_errors=False)
         if getattr(self, "stockpile_data", None):
             self.setup_stockpile_table()
@@ -4038,6 +4217,70 @@ class UserInputs(QMainWindow):
         if hasattr(self, "time_mode") and self.time_mode.currentIndex() == 1:
             return self.start_time.dateTime().toPyDateTime()
         return datetime.now()
+
+    def selected_two_wp_product_crusher_names(self):
+        if not hasattr(self, "two_wp_product_crusher_input"):
+            return list(getattr(self, "selected_two_wp_product_crushers", []) or [])
+        return sorted(
+            item.text().strip()
+            for item in self.two_wp_product_crusher_input.selectedItems()
+            if item.text().strip()
+        )
+
+    def available_two_wp_product_crusher_names(self):
+        if not hasattr(self, "two_wp_product_crusher_input"):
+            return list(getattr(self, "available_two_wp_product_crushers", []) or [])
+        return sorted(
+            self.two_wp_product_crusher_input.item(row).text().strip()
+            for row in range(self.two_wp_product_crusher_input.count())
+            if self.two_wp_product_crusher_input.item(row).text().strip()
+        )
+
+    def set_two_wp_product_crusher_items(self, names, selected=None):
+        if not hasattr(self, "two_wp_product_crusher_input"):
+            return
+        names = self.normalized_expit_agent_names(names)
+        selected = set(self.normalized_expit_agent_names(selected))
+        self.two_wp_product_crusher_input.blockSignals(True)
+        try:
+            self.two_wp_product_crusher_input.clear()
+            self.two_wp_product_crusher_input.addItems(names)
+            for row in range(self.two_wp_product_crusher_input.count()):
+                item = self.two_wp_product_crusher_input.item(row)
+                item.setSelected(item.text().strip() in selected)
+        finally:
+            self.two_wp_product_crusher_input.blockSignals(False)
+
+    def load_two_wp_product_crusher_names(self, show_messages=True):
+        file_path = self.file_path.text().strip() if hasattr(self, "file_path") else ""
+        if not file_path:
+            if show_messages:
+                QMessageBox.information(
+                    self, "BlendMaster",
+                    "Select a 2WP Mining.csv file before loading product crushers.",
+                )
+            return
+        try:
+            names = ExpitDataHandler.get_distinct_2wp_guidance_crushers(file_path)
+        except Exception as exc:
+            if show_messages:
+                QMessageBox.warning(
+                    self, "BlendMaster",
+                    f"Unable to read 2WP product crushers: {exc}",
+                )
+            return
+        previous = self.selected_two_wp_product_crusher_names()
+        retained = [name for name in previous if name in names]
+        selected = retained or names
+        self.set_two_wp_product_crusher_items(names, selected)
+        self.available_two_wp_product_crushers = names
+        self.selected_two_wp_product_crushers = selected
+        if show_messages:
+            QMessageBox.information(
+                self, "BlendMaster",
+                f"Found {len(names)} 2WP product crusher destination(s).",
+            )
+        self.validate_form()
 
     def load_aps_crusher_names(self):
         file_path = self.file_path.text().strip() if hasattr(self, "file_path") else ""
@@ -4339,6 +4582,10 @@ class UserInputs(QMainWindow):
             str(getattr(self, "mine_input_choice", "") or "").strip().upper(),
             str(getattr(self, "opf_input_choice", "") or "").strip().upper(),
             str(getattr(self, "crusher_input_choice", "") or "").strip().upper(),
+            tuple(
+                str(value).strip().upper()
+                for value in self.selected_two_wp_product_crusher_names()
+            ),
             tuple(self.product_brand_options()),
         )
         cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
@@ -4373,6 +4620,9 @@ class UserInputs(QMainWindow):
                 ),
                 operational_opf=getattr(
                     self, "opf_input_choice", None
+                ),
+                operational_crusher_node=(
+                    self.selected_two_wp_product_crusher_names()
                 ),
             )
             guidance["destination_guidance"] = (
@@ -4630,6 +4880,11 @@ class UserInputs(QMainWindow):
         valid_ratio, ratio_message = self.validate_active_ratio_group_for_run()
         if not valid_ratio:
             return False, ratio_message
+        if self.file_path_choice and not self.selected_two_wp_product_crushers:
+            return False, (
+                "Load and select at least one product crusher to filter "
+                "2WP brand, timing and active-blend guidance."
+            )
         if self.file_path_24hr_choice and not self.file_path_choice:
             return False, (
                 "Select a 2WP Mining.csv reference before importing a "
@@ -4697,6 +4952,12 @@ class UserInputs(QMainWindow):
         )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.available_two_wp_product_crushers = (
+            self.available_two_wp_product_crusher_names()
+        )
+        self.selected_two_wp_product_crushers = (
+            self.selected_two_wp_product_crusher_names()
+        )
         self.available_24hr_expit_agents = (
             self.available_24hr_expit_agent_names()
         )
@@ -4746,6 +5007,12 @@ class UserInputs(QMainWindow):
         )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.available_two_wp_product_crushers = (
+            self.available_two_wp_product_crusher_names()
+        )
+        self.selected_two_wp_product_crushers = (
+            self.selected_two_wp_product_crusher_names()
+        )
         self.available_24hr_expit_agents = (
             self.available_24hr_expit_agent_names()
         )
@@ -4761,6 +5028,7 @@ class UserInputs(QMainWindow):
         self.selected_haul_cycle_crushers = (
             self.selected_haul_cycle_crusher_names()
         )
+        self.haul_cycle_crusher_mapping_choice = self.current_haul_cycle_crusher_node()
         self.direct_tip_grade_block_sources = [
             self.direct_tip_grade_block_source_input.item(row).text().strip()
             for row in range(
@@ -4811,6 +5079,19 @@ class UserInputs(QMainWindow):
             getattr(self, "available_haul_cycle_crushers", []),
             getattr(self, "selected_haul_cycle_crushers", []),
         )
+        self.set_haul_cycle_crusher_mapping_items(
+            getattr(self, "available_haul_cycle_crushers", []),
+            getattr(self, "haul_cycle_crusher_mapping_choice", ""),
+        )
+        self.set_two_wp_product_crusher_items(
+            getattr(self, "available_two_wp_product_crushers", []),
+            getattr(self, "selected_two_wp_product_crushers", []),
+        )
+        if (
+            getattr(self, "file_path_choice", "")
+            and not self.available_two_wp_product_crusher_names()
+        ):
+            self.load_two_wp_product_crusher_names(False)
         self.load_ratio_controls_from_state()
         self.set_direct_tip_movement_options(
             getattr(self, "direct_tip_grade_block_sources", []),
@@ -6687,6 +6968,7 @@ class UserInputs(QMainWindow):
             "min_grade_block_pair_duration_hours",
             "stay_on_same_grade_block_pair_incentive",
             "grade_block_lock_enabled",
+            "require_whole_direct_tip_payloads",
             "prefer_fewer_stockpiles",
             "fewer_stockpiles_incentive",
             "balance_preference",
@@ -7752,6 +8034,11 @@ class UserInputs(QMainWindow):
         if key == "grade_block_lock_enabled":
             self.grade_block_lock_checkbox.setChecked(to_bool(value))
             return True
+        if key == "require_whole_direct_tip_payloads":
+            self.require_whole_direct_tip_payloads_checkbox.setChecked(
+                to_bool(value)
+            )
+            return True
         if key == "prefer_fewer_stockpiles":
             self.prefer_fewer_stockpiles_checkbox.setChecked(to_bool(value))
             return True
@@ -7944,6 +8231,49 @@ class UserInputs(QMainWindow):
                 return column
         return None
 
+    @staticmethod
+    def normalized_crusher_display_name(value):
+        text = str(value or "").strip().upper()
+        if "/" in text:
+            text = text.rsplit("/", 1)[-1]
+        return text
+
+    def default_stockpile_use_for_active_crusher(self, stockpile_data):
+        """Select only stockpiles whose resolved nearest crusher is active."""
+        mapped_nodes = {
+            self.normalized_crusher_display_name(value)
+            for value in self.current_haul_cycle_crusher_node()
+        }
+        if not mapped_nodes:
+            mapped_nodes = {
+                self.normalized_crusher_display_name(
+                    getattr(self, "crusher_input_choice", None)
+                    or (self.site_crusher_input.currentText() if hasattr(self, "site_crusher_input") else "")
+                )
+            }
+        nearest_values = [
+            str(
+                attributes.get("nearest_crusher", attributes.get("NEAREST_CRUSHER", ""))
+                or ""
+            ).strip()
+            for attributes in (stockpile_data or {}).values()
+            if isinstance(attributes, dict)
+        ]
+        if not any(mapped_nodes) or not any(nearest_values):
+            return None
+        return {
+            stockpile_name: (
+                self.normalized_crusher_display_name(
+                    attributes.get(
+                        "nearest_crusher",
+                        attributes.get("NEAREST_CRUSHER", ""),
+                    )
+                )
+                in mapped_nodes
+            )
+            for stockpile_name, attributes in (stockpile_data or {}).items()
+        }
+
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
         headers = self.stockpile_inventory_headers()
@@ -7963,6 +8293,14 @@ class UserInputs(QMainWindow):
         # Set Table Dimensions
         self.stockpile_table.setRowCount(len(self.stockpile_data))
 
+        default_use_by_stockpile = None
+        if not self.stockpile_data_use_column:
+            default_use_by_stockpile = self.default_stockpile_use_for_active_crusher(
+                data_source
+            )
+            if default_use_by_stockpile is not None:
+                self.stockpile_data_use_column.update(default_use_by_stockpile)
+
         # Populate Stockpile Data
         for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
            
@@ -7978,7 +8316,11 @@ class UserInputs(QMainWindow):
                 AMT_checkbox.setChecked(self.stockpile_data_AMT_column.get(stockpile_name, False))  # Default to checked if not found
 
             else:
-                use_checkbox.setChecked(True)  # Default to checked
+                use_checkbox.setChecked(
+                    default_use_by_stockpile.get(stockpile_name, True)
+                    if default_use_by_stockpile is not None
+                    else True
+                )
                 AMT_checkbox.setChecked(False)
 
             # Center the checkbox using a QWidget and layout
@@ -9623,6 +9965,9 @@ class UserInputs(QMainWindow):
         self.min_grade_block_pair_duration_input.setText(str(solver_config.get("min_grade_block_pair_duration_hours", 0.0)))
         self.stay_on_same_grade_block_pair_incentive_input.setText(str(solver_config.get("stay_on_same_grade_block_pair_incentive", 0.0)))
         self.grade_block_lock_checkbox.setChecked(bool(solver_config.get("grade_block_lock_enabled", False)))
+        self.require_whole_direct_tip_payloads_checkbox.setChecked(
+            bool(solver_config.get("require_whole_direct_tip_payloads", False))
+        )
         self.update_direct_tip_input_state()
         self.prefer_fewer_stockpiles_checkbox.setChecked(bool(solver_config.get("prefer_fewer_stockpiles", False)))
         self.fewer_stockpiles_incentive_input.setText(str(
@@ -9980,6 +10325,9 @@ class UserInputs(QMainWindow):
             "min_grade_block_pair_duration_hours": min_grade_block_pair_duration_hours,
             "stay_on_same_grade_block_pair_incentive": stay_on_same_grade_block_pair_incentive,
             "grade_block_lock_enabled": self.grade_block_lock_checkbox.isChecked(),
+            "require_whole_direct_tip_payloads": (
+                self.require_whole_direct_tip_payloads_checkbox.isChecked()
+            ),
             "prefer_fewer_stockpiles": self.prefer_fewer_stockpiles_checkbox.isChecked(),
             "fewer_stockpiles_incentive": fewer_stockpiles_incentive,
             "balance_preference": balance_preference,
@@ -10160,6 +10508,14 @@ class UserInputs(QMainWindow):
 
     def finish_run_program(self, periods):
         self.set_start_and_end_datetime(periods=periods)
+        # Re-write the derived schedule in the active scenario database on
+        # the UI thread.  The optimisation worker writes this too, but this
+        # finalisation step guarantees that the report is present in the same
+        # scenario database selected by the Results > Reports view.
+        DatabaseManager().write_two_wp_active_blend_report_to_database(
+            getattr(self, "aps_active_blend_guidance", []) or [],
+            database_name=get_database_path(),
+        )
         self.update_decision_point_tab_state()
         self.activate_manual_setup_tab()
         self.prepopulate_manual_from_optimised_result(automatic=True)
@@ -10167,6 +10523,7 @@ class UserInputs(QMainWindow):
         self.refresh_optimisation_plan_selectors()
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
+        self.show_page(self.results_tab_index)
 
         if self.project_load_continuation_pending:
             self.project_load_continuation_pending = False
@@ -10897,10 +11254,9 @@ class UserInputs(QMainWindow):
         self.start_dash_AMT_map_thread_first_call = False
     
     def update_decision_point_tab_state(self):
-        """Enable or disable the Decision Point tab based on blend_mode."""
+        """Enable the Decision Point tab while a calendar run is executing."""
         if self.blend_mode_choice == 2:
             self.set_page_enabled(self.decision_point_tab_index, True)
-            self.show_page(self.decision_point_tab_index)
             self.decision_input.setEnabled(True) # Enable the input
             self.enter_button.setEnabled(True) # Enable the button
             self.decision_select_button.setEnabled(True)
@@ -10918,7 +11274,9 @@ class UserInputs(QMainWindow):
             self.set_page_enabled(self.profiles_tab_index, True)
             self.set_page_enabled(self.sqlite_reports_tab_index, True)
             self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
-            self.show_page(self.results_tab_index)  # Switch to Results (optimised) tab
+        # Calendar submission always lands on Decision Point. Completed runs
+        # are routed to Results by finish_run_program.
+        self.show_page(self.decision_point_tab_index)
 
     def handle_decision_input(self):
         """Send input from the Decision Point tab to the CaseModellerBridge."""
@@ -14094,6 +14452,17 @@ class UserInputs(QMainWindow):
         self.haul_cycle_routes = copy.deepcopy(
             loaded_state.get("haul_cycle_routes") or {}
         )
+        saved_mapping = loaded_state.get("haul_cycle_crusher_mapping_choice") or loaded_state.get("haul_cycle_crusher_mapping") or []
+        self.haul_cycle_crusher_mapping_choice = (
+            [saved_mapping] if isinstance(saved_mapping, str) else list(saved_mapping)
+        )
+        self.available_two_wp_product_crushers = self.normalized_expit_agent_names(
+            loaded_state.get("available_two_wp_product_crushers") or []
+        )
+        self.selected_two_wp_product_crushers = self.normalized_expit_agent_names(
+            loaded_state.get("selected_two_wp_product_crushers")
+            or loaded_state.get("two_wp_product_crushers") or []
+        )
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             loaded_state.get("product_brand_labels_choice", self.default_product_brand_labels())
         )
@@ -14268,6 +14637,9 @@ class UserInputs(QMainWindow):
         self.available_haul_cycle_crushers = []
         self.selected_haul_cycle_crushers = []
         self.haul_cycle_routes = {}
+        self.haul_cycle_crusher_mapping_choice = ""
+        self.available_two_wp_product_crushers = []
+        self.selected_two_wp_product_crushers = []
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True

@@ -187,12 +187,33 @@ class ExpitDataHandler:
 
     @staticmethod
     def crusher_destination_names_match(left, right):
-        """Compare APS crusher names whether supplied as short or full paths."""
-        def normalized(value):
-            value = str(value or "").strip().upper().replace("\\", "/")
-            return value.rsplit("/", 1)[-1]
+        """Compare Haul Infinity nodes with APS destination paths.
 
-        return normalized(left) == normalized(right)
+        APS may store a node as ``RCH``, ``Crushers/RCH``, or inside a
+        deeper destination path such as ``Crushers/RCH/Product``.  Port
+        suffixes (``:In``/``:Out``), separators, case and punctuation are
+        not part of the logical node identity.
+        """
+        generic_path_parts = {
+            "CRUSHER", "CRUSHERS", "DESTINATION", "DESTINATIONS",
+            "IN", "OUT", "INPUT", "OUTPUT",
+        }
+
+        def normalized_parts(value):
+            text = str(value or "").strip().upper().replace("\\", "/")
+            parts = set()
+            for raw_part in text.split("/"):
+                part = re.sub(r":(?:IN|OUT|INPUT|OUTPUT)$", "", raw_part.strip())
+                compact = "".join(
+                    character for character in part if character.isalnum()
+                )
+                if compact and compact not in generic_path_parts:
+                    parts.add(compact)
+            return parts
+
+        left_parts = normalized_parts(left)
+        right_parts = normalized_parts(right)
+        return bool(left_parts and right_parts and left_parts.intersection(right_parts))
 
     @staticmethod
     def _planning_window(start_time, planning_period_count=3):
@@ -259,6 +280,43 @@ class ExpitDataHandler:
             .dropna()
         )
         return sorted(name for name in crusher_names.unique() if name)
+
+    @classmethod
+    def get_distinct_2wp_guidance_crushers(cls, input_data):
+        """Return product-crusher paths eligible for 2WP guidance."""
+        columns = {
+            "Destination.Type", "Destination.Name", "Destination.FullName",
+            "Agent.Name", "Source.Type",
+        }
+        data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in columns,
+        )
+        required = {"Destination.Type", "Agent.Name", "Source.Type"}
+        if data.empty or not required.issubset(data.columns):
+            return []
+
+        filtered = data[
+            data["Destination.Type"].astype("string").str.strip().str.lower().eq("crusher")
+            & data["Agent.Name"].astype("string").str.strip().str.lower().eq("plantagent")
+            & data["Source.Type"].astype("string").str.strip().str.lower().eq("flow")
+        ].copy()
+        if filtered.empty:
+            return []
+
+        if "Destination.FullName" in filtered.columns:
+            names = filtered["Destination.FullName"].astype("string").fillna("").str.strip()
+            if "Destination.Name" in filtered.columns:
+                fallback_names = (
+                    filtered["Destination.Name"]
+                    .astype("string").fillna("").str.strip()
+                )
+                names = names.mask(names.eq(""), fallback_names)
+        elif "Destination.Name" in filtered.columns:
+            names = filtered["Destination.Name"].astype("string").fillna("").str.strip()
+        else:
+            return []
+        return sorted({name for name in names.tolist() if name})
 
     @classmethod
     def get_distinct_stockpile_destinations(cls, input_data):
@@ -598,6 +656,7 @@ class ExpitDataHandler:
         operational_mine=None,
         operational_crusher=None,
         operational_opf=None,
+        operational_crusher_node=None,
     ):
         required_columns = {
             "Destination.Type",
@@ -648,7 +707,23 @@ class ExpitDataHandler:
             filtered.loc[missing_full_name, "Destination.Name"]
             .astype("string").fillna("").str.strip()
         )
-        if operational_mine and operational_crusher:
+        if operational_crusher_node:
+            mapped_nodes = operational_crusher_node if isinstance(
+                operational_crusher_node, (list, tuple, set)
+            ) else [operational_crusher_node]
+            mapped_nodes = {
+                str(node).strip().upper().replace("\\", "/")
+                for node in mapped_nodes
+                if str(node).strip()
+            }
+            destination_matches = filtered["destination_full_name"].apply(
+                lambda destination: any(
+                    cls.crusher_destination_names_match(destination, node)
+                    for node in mapped_nodes
+                )
+            )
+            filtered = filtered[destination_matches].copy()
+        elif operational_mine and operational_crusher:
             destination_matches = filtered[
                 "destination_full_name"
             ].apply(
@@ -884,6 +959,7 @@ class ExpitDataHandler:
         operational_mine=None,
         operational_crusher=None,
         operational_opf=None,
+        operational_crusher_node=None,
     ):
         """Read crusher-scoped 2WP rows once for all guidance layers."""
         rows = cls._read_2wp_feed_guidance_rows(
@@ -892,6 +968,7 @@ class ExpitDataHandler:
             operational_mine,
             operational_crusher,
             operational_opf,
+            operational_crusher_node,
         )
         return {
             "brand_guidance": cls._stockpile_brand_guidance_from_rows(rows),

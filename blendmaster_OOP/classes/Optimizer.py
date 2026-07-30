@@ -14,6 +14,7 @@ optimizer.
 """
 
 from datetime import timedelta
+import time
 from typing import List, Optional
 from types import SimpleNamespace
 
@@ -32,6 +33,27 @@ from pulp import (
 
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
+
+
+class RetryingCBCSolver(PULP_CBC_CMD):
+    """CBC solver that tolerates Windows file-handle cleanup races.
+
+    CBC can finish solving while another short-lived process still has the
+    generated MPS/SOL file open.  PuLP normally deletes those files
+    immediately and lets the resulting ``PermissionError`` abort the run.
+    Retrying briefly preserves the solver result; if Windows still reports a
+    lock, leaving the temporary file behind is safe and preferable to failing
+    an otherwise completed optimisation.
+    """
+
+    def delete_tmp_files(self, *args):
+        for attempt in range(5):
+            try:
+                return super().delete_tmp_files(*args)
+            except PermissionError:
+                if attempt == 4:
+                    return
+                time.sleep(0.1 * (attempt + 1))
 
 class Optimizer:
     MIN_SELECTED_STOCKPILE_BLEND_RATIO = 0.01
@@ -67,9 +89,22 @@ class Optimizer:
         excluded_stockpile_sets: Optional[List[set]] = None,
     ):
         """Runs blending optimization and adjusts steady state if needed."""
-        
+        # A blend option can require a second solve after the initial solution
+        # identifies an earlier depletion/build boundary (and a third fallback
+        # solve if that boundary constraint is infeasible).  Treat the user
+        # timeout as a budget for the *whole option*, not for each of those
+        # internal solves.
+        solver_config = dict(solver_config or {})
+        try:
+            option_timeout = float(solver_config.get("blend_option_timeout_seconds") or 0.0)
+        except (TypeError, ValueError):
+            option_timeout = 0.0
+        if option_timeout > Optimizer.SOLUTION_TOLERANCE:
+            solver_config["blend_option_deadline_monotonic"] = time.monotonic() + option_timeout
+
         steady_state_controller_source = None
         steady_state_controller_tonnes = None
+        initial_duration = steady_state_duration
         filtered_event_pool = self.filter_events_by_steady_state_window(
             event_pool, current_time, steady_state_duration
         )
@@ -107,6 +142,13 @@ class Optimizer:
                 # grade-block depletion boundaries.
                 steady_state_controller_source = None
                 steady_state_controller_tonnes = None
+
+            # The first solution already applies to the requested window.  A
+            # second MILP solve is only necessary when a depletion, turnover,
+            # or product-build boundary actually shortened that window.
+            if abs(steady_state_duration - initial_duration) <= Optimizer.SOLUTION_TOLERANCE:
+                return result
+
             filtered_event_pool = self.filter_events_by_steady_state_window(
                 event_pool, current_time, steady_state_duration
             )
@@ -410,7 +452,22 @@ class Optimizer:
             blend_option_timeout_seconds = 0.0
         if blend_option_timeout_seconds <= Optimizer.SOLUTION_TOLERANCE:
             blend_option_timeout_seconds = None
+        else:
+            deadline = solver_config.get("blend_option_deadline_monotonic")
+            if deadline is not None:
+                try:
+                    remaining_seconds = float(deadline) - time.monotonic()
+                except (TypeError, ValueError):
+                    remaining_seconds = None
+                if remaining_seconds is not None:
+                    # CBC accepts fractional seconds.  Keep a very small
+                    # positive allowance so it exits cleanly with a solver
+                    # status rather than treating zero as "no limit".
+                    blend_option_timeout_seconds = max(remaining_seconds, 0.01)
         direct_tip_enabled = bool(solver_config.get("direct_tip_enabled", True))
+        require_whole_direct_tip_payloads = bool(
+            solver_config.get("require_whole_direct_tip_payloads", False)
+        )
         direct_tip_cash_incentive = 0.0
         if direct_tip_enabled:
             try:
@@ -1144,6 +1201,27 @@ class Optimizer:
             for i in range(len(event_pool))
         ]
 
+        # Direct-tip grade-block events represent individual expit payload
+        # transactions.  This optional operational rule makes each payload
+        # indivisible: it is either selected in full or not selected at all.
+        # Stockpile reclaim remains continuous.  When a whole payload exceeds
+        # the available capacity in this steady state, the existing x upper
+        # bound forces its binary selection to zero.
+        if direct_tip_enabled and require_whole_direct_tip_payloads:
+            for event_index, event in enumerate(event_pool):
+                if not event.is_grade_block:
+                    continue
+                payload_tonnes = max(safe_float(event.balance), 0.0)
+                payload_selected = LpVariable(
+                    f"y_whole_payload_{event_index}", cat=LpBinary
+                )
+                if payload_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                    prob += payload_selected == 0
+                else:
+                    prob += x_vars[event_index] == (
+                        payload_tonnes * payload_selected
+                    )
+
         objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
         fewer_stockpiles_incentive = max(
             safe_float(
@@ -1328,7 +1406,7 @@ class Optimizer:
         prob += objective
 
         # Solve the problem
-        prob.solve(PULP_CBC_CMD(msg=False, timeLimit=blend_option_timeout_seconds))
+        prob.solve(RetryingCBCSolver(msg=False, timeLimit=blend_option_timeout_seconds))
 
         solver_status = LpStatus[prob.status]
         success = solver_status == "Optimal"
