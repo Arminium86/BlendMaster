@@ -163,6 +163,11 @@ class CaseModeller:
 
     def normalized_product_build_settings(self, product_build_settings):
         normalized = []
+        configured_brands = [
+            str(brand).strip().upper()
+            for brand in (self.solver_config.get("configured_product_brands", []) or [])
+            if str(brand).strip()
+        ]
         for index, setting in enumerate(product_build_settings or []):
             if not isinstance(setting, dict):
                 continue
@@ -172,10 +177,21 @@ class CaseModeller:
                 target_tonnes = 0
             if target_tonnes <= 0:
                 continue
+            build_name = str(setting.get("build_name") or f"Build {index + 1}")
+            explicit_brand = str(setting.get("brand") or "").strip().upper()
+            if not explicit_brand:
+                compact_build_name = "".join(character for character in build_name.upper() if character.isalnum())
+                explicit_brand = next(
+                    (
+                        brand for brand in sorted(configured_brands, key=len, reverse=True)
+                        if "".join(character for character in brand if character.isalnum()) in compact_build_name
+                    ),
+                    "",
+                )
             normalized.append({
                 "build_id": int(setting.get("build_id") or index + 1),
-                "build_name": str(setting.get("build_name") or f"Build {index + 1}"),
-                "brand": str(setting.get("brand") or "").strip().upper(),
+                "build_name": build_name,
+                "brand": explicit_brand,
                 "target_tonnes": target_tonnes,
                 "target_fe_min": float(setting.get("target_fe_min", 0) or 0),
                 "target_fe_max": float(setting.get("target_fe_max", 100) or 100),
@@ -1378,6 +1394,9 @@ class CaseModeller:
                 hard_repair_from_state is not None
                 and self.steady_state_tracker >= hard_repair_from_state
             )
+        else:
+            period_target = (self.crusher_targets or {}).get(self.period_tracker, {}) or {}
+            solver_config["target_product_brand"] = period_target.get("brand", "")
         solver_config["previous_blend_stockpile_source_ids"] = sorted(
             self.previous_selected_stockpile_source_ids
         )
@@ -1990,6 +2009,9 @@ class CaseModeller:
                     "source_grade_al": transaction["grade_al"],
                     "source_grade_p": transaction["grade_p"],
                     "source_grade_mn": transaction["grade_mn"],
+                    "selected_grade_stream": transaction.get("selected_grade_stream", ""),
+                    "selected_grade_brand": transaction.get("selected_grade_brand", ""),
+                    "grade_stream_warnings": str(transaction.get("grade_stream_warnings") or ""),
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],
                     "equipment_rate_output": transaction["equipment_rate_output"],

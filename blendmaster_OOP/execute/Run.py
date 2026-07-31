@@ -13,6 +13,7 @@ from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
+from classes.GradeStreams import configured_brands, resolve_grade_vector
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
 from pandas import DataFrame
@@ -193,6 +194,8 @@ class Run:
                 ),
                 destination_guidance=destination_guidance,
                 selected_agent_names=selected_24hr_agents,
+                grade_field_mappings=(site_context or {}).get("aps_grade_field_mappings", {}),
+                configured_product_brands=(site_context or {}).get("product_brands", []),
             )
             expit_payload_transactions = expit_data_handler.process_transactions()
             expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
@@ -239,6 +242,12 @@ class Run:
             ),
             1,
         )
+        solver_config["selected_data_stream"] = (
+            (site_context or {}).get("selected_data_stream") or "adjusted_product"
+        )
+        solver_config["configured_product_brands"] = list(
+            (site_context or {}).get("product_brands", []) or []
+        )
         solver_config[
             "contingency_max_blend_options_per_steady_state"
         ] = max(
@@ -274,6 +283,34 @@ class Run:
         input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table, periods)
 
         stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+
+        for warning in (site_context or {}).get("historical_recon_warnings", []) or []:
+            self.case_bridge.print(f"Data stream warning: {warning}")
+        expected_brands = configured_brands((site_context or {}).get("product_brands", []))
+        fallback_messages = []
+        for source in [*stockpile_data_objects, *grade_block_data_objects]:
+            brands_to_check = expected_brands or [""]
+            for brand in brands_to_check:
+                _grades, fallbacks = resolve_grade_vector(
+                    getattr(source, "grade_streams", None),
+                    (site_context or {}).get("selected_data_stream", "adjusted_product"),
+                    brand,
+                    source,
+                )
+                if fallbacks:
+                    analytes = ", ".join(item["analyte"] for item in fallbacks)
+                    fallback_messages.append(
+                        f"{source.name} / {brand or 'unbranded'}: {analytes}"
+                    )
+        if fallback_messages:
+            preview = "; ".join(fallback_messages[:12])
+            remainder = len(fallback_messages) - 12
+            if remainder > 0:
+                preview += f"; and {remainder} more"
+            self.case_bridge.print(
+                "Data stream warning: selected-grade fallback will be applied independently per analyte for "
+                + preview
+            )
 
         min_stockpile_contribution_ratio = self._normalize_stockpile_contribution_ratio(
             min_stockpile_contribution_ratio

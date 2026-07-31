@@ -1,5 +1,6 @@
 import snowflake.connector
 import sqlite3
+import json
 from datetime import datetime
 import os
 import snowflake.connector
@@ -16,7 +17,7 @@ class OpeningStockpileInventories:
         start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
         
         # SQL Query
-        query = f"""
+        query = """
         SELECT 
         
         STOCKPILENAME AS name,
@@ -27,6 +28,26 @@ class OpeningStockpileInventories:
         AL2O3_INSITU_WTAVG AS grade_al, 
         P_INSITU_WTAVG AS grade_p, 
         MN_INSITU_WTAVG AS grade_mn
+        ,FE_ROM_WTAVG AS fe_rom
+        ,SIO2_ROM_WTAVG AS si_rom
+        ,AL2O3_ROM_WTAVG AS al_rom
+        ,P_ROM_WTAVG AS p_rom
+        ,MN_ROM_WTAVG AS mn_rom
+        ,FE_PROD1_WTAVG AS fe_prod1
+        ,SIO2_PROD1_WTAVG AS si_prod1
+        ,AL2O3_PROD1_WTAVG AS al_prod1
+        ,P_PROD1_WTAVG AS p_prod1
+        ,MN_PROD1_WTAVG AS mn_prod1
+        ,FE_PROD2_WTAVG AS fe_prod2
+        ,SIO2_PROD2_WTAVG AS si_prod2
+        ,AL2O3_PROD2_WTAVG AS al_prod2
+        ,P_PROD2_WTAVG AS p_prod2
+        ,MN_PROD2_WTAVG AS mn_prod2
+        ,FE_PROD3_WTAVG AS fe_prod3
+        ,SIO2_PROD3_WTAVG AS si_prod3
+        ,AL2O3_PROD3_WTAVG AS al_prod3
+        ,P_PROD3_WTAVG AS p_prod3
+        ,MN_PROD3_WTAVG AS mn_prod3
         
         FROM (
             SELECT *, 
@@ -34,14 +55,16 @@ class OpeningStockpileInventories:
             
             FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS
             
-            WHERE TRANSACTIONDATETIME <= '{start_time}'
+            WHERE TRANSACTIONDATETIME <= %s
+              AND TRANSACTIONDIRECTION IN ('Stack', 'Reclaim')
+              AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT'))
+              AND HUB = %s
+              AND AREANAME = %s
         ) ranked
 
         WHERE rn = 1 
         AND TRANSACTIONDIRECTION IN ('Stack', 'Reclaim') 
         AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT')) 
-        AND HUB = '{hub}'
-        AND AREANAME = '{area_name}'
         
         ORDER BY 
             HUB,
@@ -52,7 +75,7 @@ class OpeningStockpileInventories:
         try:
             # Execute query
             cursor = conn.cursor()
-            cursor.execute(query)
+            cursor.execute(query, (start_time, hub, area_name))
             result = cursor.fetchall()
 
             # Fetch column names
@@ -250,9 +273,26 @@ class OpeningStockpileInventories:
             grade_si REAL,
             grade_al REAL,
             grade_p REAL,
-            grade_mn REAL
+            grade_mn REAL,
+            fe_rom REAL, si_rom REAL, al_rom REAL, p_rom REAL, mn_rom REAL,
+            fe_prod1 REAL, si_prod1 REAL, al_prod1 REAL, p_prod1 REAL, mn_prod1 REAL,
+            fe_prod2 REAL, si_prod2 REAL, al_prod2 REAL, p_prod2 REAL, mn_prod2 REAL,
+            fe_prod3 REAL, si_prod3 REAL, al_prod3 REAL, p_prod3 REAL, mn_prod3 REAL,
+            grade_streams_json TEXT
         )
         ''')
+
+        cursor.execute("PRAGMA table_info(opening_stockpile_inventories)")
+        existing_columns = {column[1] for column in cursor.fetchall()}
+        extra_columns = [
+            f"{analyte}_{stream}"
+            for stream in ("rom", "prod1", "prod2", "prod3")
+            for analyte in ("fe", "si", "al", "p", "mn")
+        ] + ["grade_streams_json"]
+        for column in extra_columns:
+            if column not in existing_columns:
+                column_type = "TEXT" if column == "grade_streams_json" else "REAL"
+                cursor.execute(f"ALTER TABLE opening_stockpile_inventories ADD COLUMN {column} {column_type}")
 
         # Clear the table
         cursor.execute('DELETE FROM opening_stockpile_inventories')
@@ -268,7 +308,13 @@ class OpeningStockpileInventories:
                 "grade_si": row.get("GRADE_SI", None),
                 "grade_al": row.get("GRADE_AL", None),
                 "grade_p": row.get("GRADE_P", None),
-                "grade_mn": row.get("GRADE_MN", None)
+                "grade_mn": row.get("GRADE_MN", None),
+                **{
+                    f"{analyte}_{stream}": row.get(f"{analyte}_{stream}".upper())
+                    for stream in ("rom", "prod1", "prod2", "prod3")
+                    for analyte in ("fe", "si", "al", "p", "mn")
+                },
+                "grade_streams_json": json.dumps(row.get("GRADE_STREAMS")) if row.get("GRADE_STREAMS") else None,
             }
 
             # Skip insertion if mandatory fields (e.g., name) are missing
@@ -277,8 +323,19 @@ class OpeningStockpileInventories:
                 continue
 
             cursor.execute('''
-            INSERT INTO opening_stockpile_inventories (name, build, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn)
-            VALUES (:name, :build, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn)
+            INSERT INTO opening_stockpile_inventories (
+                name, build, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn,
+                fe_rom, si_rom, al_rom, p_rom, mn_rom,
+                fe_prod1, si_prod1, al_prod1, p_prod1, mn_prod1,
+                fe_prod2, si_prod2, al_prod2, p_prod2, mn_prod2,
+                fe_prod3, si_prod3, al_prod3, p_prod3, mn_prod3, grade_streams_json
+            ) VALUES (
+                :name, :build, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn,
+                :fe_rom, :si_rom, :al_rom, :p_rom, :mn_rom,
+                :fe_prod1, :si_prod1, :al_prod1, :p_prod1, :mn_prod1,
+                :fe_prod2, :si_prod2, :al_prod2, :p_prod2, :mn_prod2,
+                :fe_prod3, :si_prod3, :al_prod3, :p_prod3, :mn_prod3, :grade_streams_json
+            )
             ''', mapped_row)
 
         # Commit and close the connection
@@ -308,7 +365,8 @@ class OpeningStockpileInventories:
             northing REAL,
             easting REAL,
             last_update TEXT,
-            hex_updated TEXT
+            hex_updated TEXT,
+            grade_streams_json TEXT
         )
         ''')
 
@@ -316,6 +374,8 @@ class OpeningStockpileInventories:
         existing_columns = {column[1] for column in cursor.fetchall()}
         if "last_update" not in existing_columns:
             cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
+        if "grade_streams_json" not in existing_columns:
+            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN grade_streams_json TEXT")
 
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
@@ -338,7 +398,8 @@ class OpeningStockpileInventories:
                     "northing": row.get("SOURCEHEXNORTHING", None),
                     "easting": row.get("SOURCEHEXEASTING", None),
                     "last_update": row.get("LAST_UPDATE", None),
-                    "hex_updated": row.get("HEX_UPDATED", None)
+                    "hex_updated": row.get("HEX_UPDATED", None),
+                    "grade_streams_json": json.dumps(row.get("GRADE_STREAMS")) if row.get("GRADE_STREAMS") else None,
                 }
 
                 # Skip insertion if mandatory fields (e.g., footprint) are missing
@@ -347,8 +408,8 @@ class OpeningStockpileInventories:
                     continue
 
                 cursor.execute('''
-                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, last_update, hex_updated)
-                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :last_update, :hex_updated)
+                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, last_update, hex_updated, grade_streams_json)
+                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :last_update, :hex_updated, :grade_streams_json)
                 ''', mapped_row)
 
         # Commit and close the connection

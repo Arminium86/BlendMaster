@@ -18,6 +18,7 @@ from collections import defaultdict
 from datetime import datetime
 from math import sqrt
 from database.DatabaseContext import get_database_path
+from classes.GradeStreams import weighted_merge_grade_streams
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -1999,7 +2000,7 @@ class DrawGanttChart:
 class DrawAMTStockpile:
     AMT_COLUMNS = [
         "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
-        "lat", "long", "northing", "easting", "last_update", "hex_updated"
+        "lat", "long", "northing", "easting", "last_update", "hex_updated", "grade_streams_json"
     ]
     SELECTED_TABLE_COLUMNS = [
         "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
@@ -2237,6 +2238,8 @@ class DrawAMTStockpile:
         member_hexes = [row["hex"] for row in chunk_rows if row.get("hex") is not None]
         chunk_id = f"{footprint}_CHUNK_{sequence:03d}"
         weighted_grades = {}
+        weighted_streams = None
+        accumulated_tonnes = 0.0
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             if total_tonnes > 0:
@@ -2245,6 +2248,16 @@ class DrawAMTStockpile:
                 )
             else:
                 weighted_grades[grade] = 0
+
+        for row in chunk_rows:
+            row_tonnes = row["_positive_balance"]
+            weighted_streams = weighted_merge_grade_streams(
+                weighted_streams,
+                accumulated_tonnes,
+                row.get("grade_streams"),
+                row_tonnes,
+            )
+            accumulated_tonnes += row_tonnes
 
         return {
             "footprint": footprint,
@@ -2256,7 +2269,8 @@ class DrawAMTStockpile:
             "chunk_size": round(chunk_size, 3),
             "average_reclaim_rate": self.get_chunk_setting(footprint, "average_reclaim_rate"),
             "chunk_reclaim_hours": self.get_chunk_setting(footprint, "chunk_reclaim_hours"),
-            "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes)
+            "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
+            "grade_streams": weighted_streams,
         }
 
     def direction_vector(self, start_point, end_point):
@@ -2508,6 +2522,16 @@ class DrawAMTStockpile:
             data = pd.read_sql(query, conn)
             if data.empty:
                 return self.empty_amt_dataframe()
+            if "grade_streams_json" in data.columns:
+                def decode_streams(value):
+                    if not isinstance(value, str) or not value.strip():
+                        return None
+                    try:
+                        decoded = json.loads(value)
+                        return decoded if isinstance(decoded, dict) else None
+                    except (TypeError, ValueError):
+                        return None
+                data["grade_streams"] = data["grade_streams_json"].map(decode_streams)
             return data
         except Exception as e:
             if "opening_AMT_stockpile_inventories" not in str(e):

@@ -24,6 +24,7 @@ class GradeBlockData:
         start_datetime=None,
         source=None,
         period_values=None,
+        grade_streams=None,
     ):
         self._name = name
         self._balance = balance
@@ -48,6 +49,7 @@ class GradeBlockData:
         self._start_datetime = start_datetime
         self._source = source
         self._period_values = dict(period_values or {})
+        self._grade_streams = grade_streams
     
     # Getters
     @property
@@ -137,6 +139,10 @@ class GradeBlockData:
     @property
     def source(self):
         return self._source
+
+    @property
+    def grade_streams(self):
+        return self._grade_streams
     
 
     # Setters
@@ -227,6 +233,10 @@ class GradeBlockData:
     @source.setter
     def source(self, value):
         self._source = value
+
+    @grade_streams.setter
+    def grade_streams(self, value):
+        self._grade_streams = value
  
     # Method to retrieve the original dictionary
     def to_dict(self):
@@ -253,6 +263,7 @@ class GradeBlockData:
             "agent": self._agent,
             "start_datetime": self._start_datetime,
             "source": self._source,
+            "grade_streams": self._grade_streams,
         }
         result.update(self._period_values)
         return result

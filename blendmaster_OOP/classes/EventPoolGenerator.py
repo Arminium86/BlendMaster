@@ -53,7 +53,8 @@ class EventPoolGenerator:
                             "is_amt": stockpile.is_AMT,
                             "source_name": stockpile.name,
                             "aps_brand": stockpile.aps_brand,
-                            "aps_brand_proportions": stockpile.aps_brand_proportions
+                            "aps_brand_proportions": stockpile.aps_brand_proportions,
+                            "grade_streams": stockpile.grade_streams,
                         })
 
         for grade_block in self.grade_blocks:
@@ -90,7 +91,8 @@ class EventPoolGenerator:
                         "balance": grade_block.balance,
                         "max_quantity": grade_block_max_quantity,
                         "source_name": grade_block.source or grade_block.name,
-                        "delivered_datetime": delivered_datetime
+                        "delivered_datetime": delivered_datetime,
+                        "grade_streams": grade_block.grade_streams,
                     })
 
         return events
@@ -153,8 +155,10 @@ class EventPoolGenerator:
         for event in event_pool:
             if event.is_stockpile:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p  = balance_tracker.get_balance(event.stockpile)
+                event.grade_streams = balance_tracker.get_grade_streams(event.stockpile)
             elif event.is_grade_block:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p = balance_tracker.get_balance(event.grade_block)
+                event.grade_streams = balance_tracker.get_grade_streams(event.grade_block)
     
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
@@ -208,7 +212,8 @@ class EventPoolGenerator:
                 source_name=record.get("source_name"),
                 delivered_datetime=record.get("delivered_datetime"),
                 aps_brand=record.get("aps_brand"),
-                aps_brand_proportions=record.get("aps_brand_proportions")
+                aps_brand_proportions=record.get("aps_brand_proportions"),
+                grade_streams=record.get("grade_streams"),
 
             )
             for record in event_data_dicts

@@ -33,6 +33,7 @@ from pulp import (
 
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
+from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
 
 
 class RetryingCBCSolver(PULP_CBC_CMD):
@@ -459,6 +460,14 @@ class Optimizer:
                 return default
 
         target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
+        selected_data_stream = str(
+            solver_config.get("selected_data_stream") or DEFAULT_STREAM
+        ).strip().lower()
+        # Grade compliance and objectives consume the single stream selected
+        # for this run. Resolution is per analyte so incomplete upstream data
+        # falls back without discarding otherwise valid grades.
+        for event in event_pool:
+            apply_selected_stream(event, selected_data_stream, target_product_brand)
         brand_guidance_mode = solver_config.get("brand_guidance_mode", "ignore")
         brand_guidance_enabled = bool(
             solver_config.get(
@@ -1424,6 +1433,9 @@ class Optimizer:
                             "grade_al": event.grade_al,
                             "grade_p": event.grade_p,
                             "grade_mn": event.grade_mn,
+                            "selected_grade_stream": event.selected_grade_stream,
+                            "selected_grade_brand": event.selected_grade_brand,
+                            "grade_stream_warnings": event.grade_stream_warnings,
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,
                             "equipment_rate_output": result.x[i]

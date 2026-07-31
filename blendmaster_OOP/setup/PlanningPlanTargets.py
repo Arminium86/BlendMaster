@@ -45,7 +45,7 @@ class PlanningPlanTargets:
             P,
             MN
         FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.PLANNING_PLAN_DATA
-        WHERE CONTAINS(PLANNING_CATEGORY, 'OPF Feed')
+        WHERE CONTAINS(PLANNING_CATEGORY, %s)
           AND CONTAINS(HORIZON, '2 Week')
           AND CONTAINS(SCENARIO, %s)
         ORDER BY ALL
@@ -133,6 +133,7 @@ class PlanningPlanTargets:
         opf=None,
         crusher_contribution_ratio=1.0,
         planning_period_count=3,
+        planning_category="OPF Feed",
     ):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
@@ -159,7 +160,18 @@ class PlanningPlanTargets:
         try:
             cursor = connection.cursor()
             try:
-                cursor.execute(self.QUERY, (scenario,))
+                planning_category = str(planning_category or "OPF Feed")
+                if planning_category == "OPF Feed":
+                    # Retain the legacy execution contract for existing
+                    # integrations while allowing product-stream categories
+                    # to be supplied explicitly.
+                    query = self.QUERY.replace(
+                        "CONTAINS(PLANNING_CATEGORY, %s)",
+                        "CONTAINS(PLANNING_CATEGORY, 'OPF Feed')",
+                    )
+                    cursor.execute(query, (scenario,))
+                else:
+                    cursor.execute(self.QUERY, (planning_category, scenario))
                 rows = cursor.fetchall()
                 columns = [column[0].upper() for column in cursor.description]
             finally:

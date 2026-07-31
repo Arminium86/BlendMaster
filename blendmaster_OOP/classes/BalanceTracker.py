@@ -5,6 +5,11 @@ from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from typing import List
 from pandas import DataFrame
+from classes.GradeStreams import (
+    legacy_grade_streams,
+    normalise_grade_streams,
+    weighted_merge_grade_streams,
+)
 class BalanceTracker:
     @staticmethod
     def _numeric_grade(value, fallback=0.0):
@@ -24,6 +29,12 @@ class BalanceTracker:
         self.grade_al = {item.name: self._numeric_grade(item.grade_al) for item in stockpiles + grade_blocks}
         self.grade_p = {item.name: self._numeric_grade(item.grade_p) for item in stockpiles + grade_blocks}
         self.grade_mn = {item.name: self._numeric_grade(item.grade_mn) for item in stockpiles + grade_blocks}
+        self.grade_streams = {
+            item.name: normalise_grade_streams(
+                getattr(item, "grade_streams", None), item
+            )
+            for item in stockpiles + grade_blocks
+        }
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
         self.balance_copy = self.balance.copy()
         self.build_report = [] # Store transactions that meet the condition
@@ -109,6 +120,18 @@ class BalanceTracker:
                             (self.grade_mn[name] * current_balance + self._numeric_grade(transaction.get("source_grade_mn"), self.grade_mn[name]) * payload)
                             / updated_balance
                         )
+                        incoming_streams = transaction.get("grade_streams")
+                        if not isinstance(incoming_streams, dict):
+                            incoming_streams = legacy_grade_streams({
+                                f"grade_{analyte}": transaction.get(f"source_grade_{analyte}")
+                                for analyte in ("fe", "si", "al", "p", "mn")
+                            })
+                        self.grade_streams[name] = weighted_merge_grade_streams(
+                            self.grade_streams.get(name),
+                            current_balance,
+                            incoming_streams,
+                            payload,
+                        )
                         
                         # Update the balance
                         self.balance_copy[name] = updated_balance
@@ -129,7 +152,8 @@ class BalanceTracker:
                             "grade_si": self.grade_si[name],
                             "grade_al": self.grade_al[name],
                             "grade_p": self.grade_p[name],
-                            "grade_mn": self.grade_mn[name]
+                            "grade_mn": self.grade_mn[name],
+                            "grade_streams": copy.deepcopy(self.grade_streams.get(name)),
                             
                         })
                     
@@ -209,6 +233,9 @@ class BalanceTracker:
     def get_balance(self, name):
         """Retrieve the current balance for a stockpile or grade block."""
         return self.balance_copy.get(name, 0), self.grade_fe.get(name, 0), self.grade_si.get(name, 0), self.grade_al.get(name, 0), self.grade_mn.get(name, 0), self.grade_p.get(name, 0)
+
+    def get_grade_streams(self, name):
+        return copy.deepcopy(self.grade_streams.get(name))
     
     def process_hex_sequence(self, name, reclaimed_tonnes):
         # Filter the hex sequence table for entries matching the stockpile name
@@ -252,6 +279,9 @@ class BalanceTracker:
                         getattr(self, key)[name] = value
                     else:
                         print(f"Warning: {key} is not a dictionary, skipping update")
+            self.grade_streams[name] = normalise_grade_streams(
+                next_hex.get("grade_streams"), next_hex
+            )
         else:
             self.balance_copy[name] = 0
 

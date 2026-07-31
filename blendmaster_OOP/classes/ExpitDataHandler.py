@@ -6,6 +6,7 @@ import snowflake.connector
 from datetime import datetime
 from pandas import DataFrame
 from classes.PeriodManager import PeriodManager
+from classes.GradeStreams import aps_grade_streams, weighted_merge_grade_streams
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 2
@@ -45,6 +46,8 @@ class ExpitDataHandler:
         direct_tip_movement_rules=None,
         destination_guidance=None,
         selected_agent_names=None,
+        grade_field_mappings=None,
+        configured_product_brands=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
@@ -73,9 +76,21 @@ class ExpitDataHandler:
             ).items()
         }
         self.source_stockpile_fallbacks = {}
+        self.grade_field_mappings = grade_field_mappings or {}
+        self.configured_product_brands = configured_product_brands or []
+        mapped_grade_columns = set()
+        rom_mappings = self.grade_field_mappings.get("rom", {})
+        if isinstance(rom_mappings, dict):
+            mapped_grade_columns.update(value for value in rom_mappings.values() if value)
+        product_mappings = self.grade_field_mappings.get("product", {})
+        if isinstance(product_mappings, dict):
+            for brand_mappings in product_mappings.values():
+                if isinstance(brand_mappings, dict):
+                    mapped_grade_columns.update(value for value in brand_mappings.values() if value)
+        self.mapped_grade_columns = mapped_grade_columns
         self.data = pd.read_csv(
             input_data,
-            usecols=lambda column: column in self.TRANSACTION_COLUMNS,
+            usecols=lambda column: column in self.TRANSACTION_COLUMNS or column in self.mapped_grade_columns,
         )
         if not self.data.empty:
             self._preprocess_data()
@@ -294,6 +309,12 @@ class ExpitDataHandler:
             input_data,
             usecols=lambda column: column in columns,
         )
+        missing_mapped_columns = sorted(self.mapped_grade_columns - set(self.data.columns))
+        if missing_mapped_columns:
+            raise ValueError(
+                "APS 24HR grade field mapping column(s) were not found: "
+                + ", ".join(missing_mapped_columns)
+            )
         required = {"Destination.Type", "Agent.Name", "Source.Type"}
         if data.empty or not required.issubset(data.columns):
             return []
@@ -1389,14 +1410,7 @@ class ExpitDataHandler:
         self.data = pd.concat([self.data, weighted_rate.rename("WeightedRate")], axis=1)
 
         # Perform basic aggregation
-        aggregated_data = self.data.groupby(
-            [
-                "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
-                "Destination.Name", "Destination.FullName",
-                "two_wp_destination_resolution", "two_wp_destination_ratio",
-            ],
-            as_index=False
-        ).agg({
+        aggregation = {
             "Time.StartTime": "first",  # First row's start time
             "Time.EndTime": "last",    # Last row's end time
             "HaulageResult.Times.Dumping": "mean",
@@ -1406,13 +1420,25 @@ class ExpitDataHandler:
             "HaulageResult.TruckPayload": "mean",
             "HaulageResult.NumberOfTrips": "sum",  # Sum trips
             "Mining.wetTonnes": "sum",            # Sum wet tonnes
-            "Mining.grades_fe": "mean",           # Simple average of grades
+            "Mining.grades_fe": "mean",
             "Mining.grades_si": "mean",
             "Mining.grades_al": "mean",
             "Mining.grades_mn": "mean",
             "Mining.grades_p": "mean",
-            "WeightedRate": "sum"  # Sum of weighted rates
+            "WeightedRate": "sum",
+        }
+        aggregation.update({
+            column: "mean" for column in self.mapped_grade_columns
+            if column in self.data.columns and column not in aggregation
         })
+        aggregated_data = self.data.groupby(
+            [
+                "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
+                "Destination.Name", "Destination.FullName",
+                "two_wp_destination_resolution", "two_wp_destination_ratio",
+            ],
+            as_index=False
+        ).agg(aggregation)
 
         # Calculate weighted average of LoaderProductionRate.Wtph
         aggregated_data["HaulageResult.LoaderProductionRate.Wtph"] = (
@@ -1471,6 +1497,9 @@ class ExpitDataHandler:
                     destination = row["Destination.FullName"]
                     source_name = row["Source.FullName"]
                     destination_metadata = self._payload_destination_metadata(row)
+                    row_grade_streams = aps_grade_streams(
+                        row.to_dict(), self.grade_field_mappings, self.configured_product_brands
+                    )
                     num_trips = tonnes / payload
                     int_trips = int(num_trips)
                     delivery_time = None
@@ -1506,6 +1535,7 @@ class ExpitDataHandler:
                             "source_grade_al": row["Mining.grades_al"],
                             "source_grade_mn": row["Mining.grades_mn"],
                             "source_grade_p": row["Mining.grades_p"],
+                            "grade_streams": row_grade_streams,
                             "delivered_datetime": delivery_time,
                             **destination_metadata,
                         })
@@ -1519,6 +1549,7 @@ class ExpitDataHandler:
                         "Grade_mn": row["Mining.grades_mn"],
                         "Grade_p": row["Mining.grades_p"]
                     }  # Default to current row's grades in case no top-up happens
+                    weighted_grade_streams = row_grade_streams
 
                     if fractional_tonnes > 0:
                         next_row = group.iloc[i + 1] if i + 1 < len(group) else None
@@ -1544,6 +1575,15 @@ class ExpitDataHandler:
                                     "Grade_p": (row["Mining.grades_p"] * group.at[i, "Mining.wetTonnes"] +
                                                 next_row["Mining.grades_p"] * top_up_tonnes) / total_tonnes,
                                 }
+                                next_grade_streams = aps_grade_streams(
+                                    next_row.to_dict(), self.grade_field_mappings, self.configured_product_brands
+                                )
+                                weighted_grade_streams = weighted_merge_grade_streams(
+                                    row_grade_streams,
+                                    group.at[i, "Mining.wetTonnes"],
+                                    next_grade_streams,
+                                    top_up_tonnes,
+                                )
 
                                 # Update the next row's tonnes
                                 group.at[i + 1, "Mining.wetTonnes"] -= top_up_tonnes
@@ -1602,6 +1642,7 @@ class ExpitDataHandler:
                             "source_grade_al": weighted_grades["Grade_al"],
                             "source_grade_mn": weighted_grades["Grade_mn"],
                             "source_grade_p": weighted_grades["Grade_p"],
+                            "grade_streams": weighted_grade_streams,
                             "delivered_datetime": delivery_time,
                             **destination_metadata,
                         })

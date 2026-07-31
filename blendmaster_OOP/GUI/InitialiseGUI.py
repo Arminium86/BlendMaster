@@ -25,6 +25,19 @@ from GUI.ManualSteadyStateDialog import ManualSteadyStateDialog
 from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
+from setup.DataStreamReconciliation import DataStreamReconciliation
+from classes.GradeStreams import (
+    ANALYTES,
+    DEFAULT_STREAM,
+    STREAMS,
+    STREAM_LABELS,
+    amt_grade_streams,
+    configured_brands,
+    internal_product_slot,
+    inventory_grade_streams,
+    is_dry_plant,
+    numeric,
+)
 import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -283,6 +296,7 @@ class UserInputs(QMainWindow):
 
         # Add Site Configuration Tab
         self.setup_site_configuration()
+        self.setup_data_streams()
 
         # Add Stockpile Tab
         self.stockpile_tab = QWidget()
@@ -586,6 +600,8 @@ class UserInputs(QMainWindow):
 
         # Disable tabs initially
         for page_id in (
+            self.data_streams_tab_index,
+            self.guidance_schedules_tab_index,
             self.stockpile_tab_index,
             self.AMT_stockpile_tab_index,
             self.solver_config_tab_index,
@@ -925,6 +941,13 @@ class UserInputs(QMainWindow):
             force or not self.database_contains_table(database_path, "opening_AMT_stockpile_inventories")
         ):
             self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
+        if getattr(self, "historical_recon_factors", None):
+            self.data_stream_reconciliation.save_to_database(
+                getattr(self, "opf_input_choice", ""),
+                getattr(self, "start_time_choice", datetime.now()),
+                self.historical_recon_factors,
+                getattr(self, "historical_recon_warnings", []),
+            )
         DatabaseManager().add_product_build_progress_to_existing_reports(
             getattr(self, "product_build_settings", []) or [],
             database_path,
@@ -1169,11 +1192,38 @@ class UserInputs(QMainWindow):
             "two_wp_product_crushers": copy.deepcopy(getattr(
                 self, "selected_two_wp_product_crushers", []
             )),
+            "product_brands": copy.deepcopy(getattr(
+                self, "product_brand_labels_choice", []
+            )),
+            "selected_data_stream": getattr(
+                self, "selected_data_stream", DEFAULT_STREAM
+            ),
+            "aps_grade_field_mappings": copy.deepcopy(getattr(
+                self, "aps_grade_field_mappings", {}
+            )),
+            "historical_recon_factors": copy.deepcopy(getattr(
+                self, "historical_recon_factors", {}
+            )),
+            "historical_recon_warnings": copy.deepcopy(getattr(
+                self, "historical_recon_warnings", []
+            )),
+            "data_stream_planning_categories": copy.deepcopy(getattr(
+                self, "data_stream_planning_categories", {}
+            )),
         }
 
     def capture_scenario_state(self):
         self.capture_stockpile_table_choices()
         self.capture_active_manual_plan_state()
+        if hasattr(self, "data_stream_selector"):
+            self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
+            self.data_stream_planning_categories = {
+                "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
+                "product": self.product_planning_category_input.text().strip(),
+            }
+            self.capture_aps_grade_mapping_table()
+            if self.historical_recon_factors:
+                self.capture_recon_factor_table()
         if hasattr(self, "auto_load_2wp_targets_checkbox"):
             self.auto_load_2wp_targets_choice = (
                 self.auto_load_2wp_targets_checkbox.isChecked()
@@ -1205,6 +1255,9 @@ class UserInputs(QMainWindow):
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
+            "selected_data_stream", "aps_grade_field_mappings",
+            "historical_recon_factors", "historical_recon_warnings",
+            "data_stream_planning_categories",
             "auto_load_2wp_targets_choice",
             "group_2wp_build_targets_by_brand_choice",
             "reevaluate_aps_direct_tip_choice", "aps_direct_tip_crusher_choice",
@@ -1249,6 +1302,7 @@ class UserInputs(QMainWindow):
 
     def reset_workflow_tabs_for_scenario(self):
         for tab_index in [
+            self.data_streams_tab_index, self.guidance_schedules_tab_index,
             self.stockpile_tab_index, self.AMT_stockpile_tab_index,
             self.solver_config_tab_index, self.product_build_tab_index,
             self.decision_levers_tab_index,
@@ -1411,6 +1465,22 @@ class UserInputs(QMainWindow):
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 state.get("product_brand_labels_choice") or self.default_product_brand_labels()
             )
+            self.selected_data_stream = str(
+                state.get("selected_data_stream") or DEFAULT_STREAM
+            )
+            self.aps_grade_field_mappings = copy.deepcopy(
+                state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+            )
+            self.historical_recon_factors = copy.deepcopy(
+                state.get("historical_recon_factors") or {}
+            )
+            self.historical_recon_warnings = copy.deepcopy(
+                state.get("historical_recon_warnings") or []
+            )
+            self.data_stream_planning_categories = copy.deepcopy(
+                state.get("data_stream_planning_categories")
+                or {"rom": "OPF Feed", "product": ""}
+            )
             self.product_build_settings = copy.deepcopy(state.get("product_build_settings") or [])
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
@@ -1565,6 +1635,20 @@ class UserInputs(QMainWindow):
             self.expit_mode.setCurrentIndex(max(self.expit_mode_choice - 1, 0))
             self.blend_mode.setCurrentIndex(max(self.blend_mode_choice - 1, 0))
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
+            stream_index = self.data_stream_selector.findData(self.selected_data_stream)
+            self.data_stream_selector.setCurrentIndex(max(stream_index, 0))
+            self.rom_planning_category_input.setText(
+                self.data_stream_planning_categories.get("rom", "OPF Feed")
+            )
+            self.product_planning_category_input.setText(
+                self.data_stream_planning_categories.get("product", "")
+            )
+            self.populate_aps_grade_mapping_table()
+            self.populate_recon_factor_table()
+            warning_text = "\n".join(self.historical_recon_warnings)
+            self.data_stream_warning_label.setText(warning_text)
+            self.data_stream_warning_label.setVisible(bool(warning_text))
+            self.set_page_enabled(self.data_streams_tab_index, bool(self.stockpile_data))
             self.auto_load_2wp_targets_checkbox.setChecked(
                 self.auto_load_2wp_targets_choice
             )
@@ -2969,6 +3053,451 @@ class UserInputs(QMainWindow):
                 border-color: #134e4a;
             }
         """)
+
+    def setup_data_streams(self):
+        """Set up grade stream selection, APS mappings and OPF factors."""
+        self.data_streams_tab = QWidget()
+        self.data_streams_tab.setObjectName("dataStreamsTab")
+        self.data_streams_tab_index = self.register_page(
+            "data_streams",
+            self.setup_tabs,
+            self.data_streams_tab,
+            "Data Streams",
+            position=1,
+        )
+        self.set_page_enabled(self.data_streams_tab_index, False)
+
+        root = QVBoxLayout(self.data_streams_tab)
+        root.setContentsMargins(12, 10, 12, 12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+
+        title = QLabel("Data Streams")
+        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
+        subtitle = QLabel(
+            "Select the single grade stream used by optimisation, map APS 24HR grade fields, "
+            "and review or override historical OPF reconciliation factors."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #607080;")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        selection_card = QFrame()
+        selection_card.setFrameShape(QFrame.StyledPanel)
+        selection_layout = QFormLayout(selection_card)
+        self.data_stream_selector = QComboBox()
+        for stream in STREAMS:
+            self.data_stream_selector.addItem(STREAM_LABELS[stream], stream)
+        selected_index = self.data_stream_selector.findData(self.selected_data_stream)
+        self.data_stream_selector.setCurrentIndex(max(selected_index, 0))
+        self.data_stream_selector.currentIndexChanged.connect(
+            self.schedule_data_stream_refresh
+        )
+        selection_layout.addRow("Optimiser Grade Stream:", self.data_stream_selector)
+
+        self.rom_planning_category_input = QLineEdit(
+            self.data_stream_planning_categories.get("rom", "OPF Feed")
+        )
+        self.product_planning_category_input = QLineEdit(
+            self.data_stream_planning_categories.get("product", "")
+        )
+        self.product_planning_category_input.setPlaceholderText("To be confirmed")
+        self.product_planning_category_input.setToolTip(
+            "The product-stream Planning Plan category is configurable until the authoritative value is confirmed."
+        )
+        self.rom_planning_category_input.editingFinished.connect(
+            self.schedule_data_stream_refresh
+        )
+        self.product_planning_category_input.editingFinished.connect(
+            self.schedule_data_stream_refresh
+        )
+        selection_layout.addRow("ROM Planning Category:", self.rom_planning_category_input)
+        selection_layout.addRow("Product Planning Category:", self.product_planning_category_input)
+        layout.addWidget(selection_card)
+
+        mapping_label = QLabel("APS 24HR ROM and Product Header Mappings")
+        mapping_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(mapping_label)
+        self.aps_grade_mapping_table = QTableWidget()
+        self.aps_grade_mapping_table.setColumnCount(7)
+        self.aps_grade_mapping_table.setHorizontalHeaderLabels(
+            ["Stream", "Brand", "Fe", "SiO₂", "Al₂O₃", "P", "Mn"]
+        )
+        self.aps_grade_mapping_table.verticalHeader().setVisible(False)
+        self.aps_grade_mapping_table.setMinimumHeight(180)
+        self.aps_grade_mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.aps_grade_mapping_table)
+
+        factor_label = QLabel("Historical OPF Reconciliation Factors")
+        factor_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(factor_label)
+        factor_help = QLabel(
+            "Calculated values are read-only. Effective factors may be edited; EW/FT regression is fixed at 1.0. "
+            "The shortest successful 7/14/21/28/30-day window is retained independently per brand and analyte."
+        )
+        factor_help.setWordWrap(True)
+        factor_help.setStyleSheet("color: #607080;")
+        layout.addWidget(factor_help)
+        self.recon_factor_table = QTableWidget()
+        factor_headers = ["Brand", "Factor", "Source Brand", "Window"]
+        for label in ("Fe", "SiO₂", "Al₂O₃", "P", "Mn"):
+            factor_headers.extend([f"{label} Calc", f"{label} Effective"])
+        self.recon_factor_table.setColumnCount(len(factor_headers))
+        self.recon_factor_table.setHorizontalHeaderLabels(factor_headers)
+        self.recon_factor_table.verticalHeader().setVisible(False)
+        self.recon_factor_table.setMinimumHeight(230)
+        self.recon_factor_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        layout.addWidget(self.recon_factor_table)
+
+        self.data_stream_warning_label = QLabel("")
+        self.data_stream_warning_label.setWordWrap(True)
+        self.data_stream_warning_label.setStyleSheet(
+            "color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 8px;"
+        )
+        self.data_stream_warning_label.hide()
+        layout.addWidget(self.data_stream_warning_label)
+
+        button_row = QHBoxLayout()
+        self.refresh_data_streams_button = QPushButton("Refresh Snowflake Factors")
+        self.refresh_data_streams_button.clicked.connect(self.prepare_data_streams)
+        self.data_streams_submit_button = QPushButton("Submit")
+        self.data_streams_submit_button.setEnabled(False)
+        self.data_streams_submit_button.clicked.connect(self.handle_data_streams_submit)
+        button_row.addWidget(self.refresh_data_streams_button)
+        button_row.addWidget(self.data_streams_submit_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+        layout.addStretch()
+        scroll.setWidget(content)
+        root.addWidget(scroll)
+        self.populate_aps_grade_mapping_table()
+
+    def populate_aps_grade_mapping_table(self):
+        table = getattr(self, "aps_grade_mapping_table", None)
+        if table is None:
+            return
+        brands = configured_brands(self.product_brand_labels_choice)
+        mappings = self.aps_grade_field_mappings or {"rom": {}, "product": {}}
+        rows = [("ROM", "All", mappings.get("rom", {}))]
+        rows.extend(
+            ("Product", brand, (mappings.get("product", {}) or {}).get(brand, {}))
+            for brand in brands
+        )
+        table.setRowCount(len(rows))
+        for row_index, (stream_label, brand, fields) in enumerate(rows):
+            for column, value in enumerate((stream_label, brand)):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(row_index, column, item)
+            for offset, analyte in enumerate(ANALYTES, start=2):
+                table.setItem(row_index, offset, QTableWidgetItem(str((fields or {}).get(analyte, "") or "")))
+
+    def capture_aps_grade_mapping_table(self):
+        mappings = {"rom": {}, "product": {}}
+        table = self.aps_grade_mapping_table
+        for row in range(table.rowCount()):
+            stream = str(table.item(row, 0).text() if table.item(row, 0) else "").lower()
+            brand = str(table.item(row, 1).text() if table.item(row, 1) else "").strip().upper()
+            fields = {
+                analyte: str(table.item(row, column).text() if table.item(row, column) else "").strip()
+                for column, analyte in enumerate(ANALYTES, start=2)
+            }
+            if stream == "rom":
+                mappings["rom"] = fields
+            elif brand:
+                mappings["product"][brand] = fields
+        self.aps_grade_field_mappings = mappings
+
+    def populate_recon_factor_table(self):
+        table = self.recon_factor_table
+        factors = self.historical_recon_factors or {}
+        table.setRowCount(len(factors) * 2)
+        row = 0
+        for brand in configured_brands(self.product_brand_labels_choice):
+            record = factors.get(brand, {})
+            for factor_type in ("blend", "regression"):
+                source_by_analyte = record.get("source_brand_by_analyte", {}) or {}
+                source_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+                source_brand = ", ".join(
+                    f"{source_labels[analyte]} "
+                    f"{(source_by_analyte.get(analyte, {}) or {}).get(factor_type, record.get('source_brand', brand))}"
+                    for analyte in ANALYTES
+                )
+                windows = record.get("lookback_days", {}) or {}
+                window_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+                window_text = ", ".join(
+                    f"{window_labels[analyte]} "
+                    + (
+                        f"{(windows.get(analyte, {}) or {}).get(factor_type)}d"
+                        if (windows.get(analyte, {}) or {}).get(factor_type)
+                        else "Default"
+                    )
+                    for analyte in ANALYTES
+                )
+                for column, text_value in enumerate(
+                    (brand, factor_type.title(), source_brand, window_text)
+                ):
+                    item = QTableWidgetItem(str(text_value))
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    table.setItem(row, column, item)
+                values = record.get(factor_type, {}) or {}
+                for analyte_index, analyte in enumerate(ANALYTES):
+                    value_record = values.get(analyte, {}) or {}
+                    calculated = float(value_record.get("calculated", 1.0) or 1.0)
+                    effective = float(value_record.get("effective", calculated) or calculated)
+                    calc_item = QTableWidgetItem(f"{calculated:.4f}")
+                    calc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    table.setItem(row, 4 + analyte_index * 2, calc_item)
+                    effective_item = QTableWidgetItem(f"{effective:.4f}")
+                    effective_item.setData(Qt.UserRole, (brand, factor_type, analyte))
+                    locked = bool(value_record.get("locked", False))
+                    if locked:
+                        effective_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        effective_item.setToolTip("Dry-plant regression is fixed at 1.0.")
+                    table.setItem(row, 5 + analyte_index * 2, effective_item)
+                row += 1
+
+    def capture_recon_factor_table(self):
+        for row in range(self.recon_factor_table.rowCount()):
+            for analyte_index, _analyte in enumerate(ANALYTES):
+                item = self.recon_factor_table.item(row, 5 + analyte_index * 2)
+                if item is None:
+                    continue
+                key = item.data(Qt.UserRole)
+                if not key:
+                    continue
+                brand, factor_type, analyte = key
+                value_record = self.historical_recon_factors[brand][factor_type][analyte]
+                if value_record.get("locked"):
+                    value_record["effective"] = 1.0
+                    continue
+                try:
+                    value = float(item.text())
+                except (TypeError, ValueError):
+                    value = 1.0
+                if not math.isfinite(value) or value <= 0:
+                    value = 1.0
+                    self.historical_recon_warnings.append(
+                        f"{brand} / {factor_type} / {analyte}: invalid override defaulted to 1.0."
+                    )
+                value_record["effective"] = value
+
+    def selected_planning_category(self):
+        stream = self.selected_data_stream
+        category_key = "product" if stream in {"modelled_product", "adjusted_product"} else "rom"
+        if category_key == "product":
+            return str(self.data_stream_planning_categories.get("product") or "").strip()
+        return str(self.data_stream_planning_categories.get("rom") or "OPF Feed").strip()
+
+    def schedule_data_stream_refresh(self, *_args):
+        if (
+            not getattr(self, "stockpile_data", None)
+            or getattr(self, "scenario_switch_in_progress", False)
+            or getattr(self, "project_load_restore_in_progress", False)
+        ):
+            return
+        QTimer.singleShot(50, self.prepare_data_streams)
+
+    def prepare_data_streams(self):
+        if not self.stockpile_data:
+            return
+        self.capture_aps_grade_mapping_table()
+        overrides = {}
+        if self.historical_recon_factors:
+            self.capture_recon_factor_table()
+            for brand, record in self.historical_recon_factors.items():
+                for factor_type in ("blend", "regression"):
+                    for analyte, factor_record in (record.get(factor_type, {}) or {}).items():
+                        overrides[(brand, factor_type, analyte)] = factor_record.get("effective")
+        self.data_stream_effective_overrides = overrides
+        self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
+        self.data_stream_planning_categories = {
+            "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
+            "product": self.product_planning_category_input.text().strip(),
+        }
+        self.data_streams_submit_button.setEnabled(False)
+        self.run_background_task(
+            "Calculating OPF blend and regression reconciliation factors...",
+            self.fetch_data_stream_inputs,
+            self.finish_data_stream_inputs,
+            self.handle_data_stream_inputs_error,
+        )
+
+    def fetch_data_stream_inputs(self):
+        try:
+            factors, warnings = self.data_stream_reconciliation.fetch(
+                self.start_time_choice,
+                self.opf_input_choice,
+                self.product_brand_labels_choice,
+            )
+        except Exception as exc:
+            factors, warnings = self.data_stream_reconciliation.default_factors(
+                self.opf_input_choice,
+                self.product_brand_labels_choice,
+                f"Snowflake reconciliation unavailable; factors defaulted to 1.0. {exc}",
+            )
+        build_targets = {crusher: [] for crusher in self.selected_site_crushers}
+        target_errors = {}
+        if self.auto_load_2wp_targets_choice:
+            planning_category = self.selected_planning_category()
+            if not planning_category:
+                target_errors["Planning Category"] = (
+                    "Product-stream 2WP Planning Category is not configured; "
+                    "automatic targets were skipped. Enter the confirmed category or use manual builds."
+                )
+            for crusher in self.selected_site_crushers:
+                if not planning_category:
+                    continue
+                try:
+                    targets = self.planning_plan_targets.fetch(
+                        self.mine_input_choice,
+                        crusher,
+                        self.start_time_choice,
+                        self.product_brand_labels_choice,
+                        opf=self.opf_input_choice,
+                        crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
+                        planning_period_count=self.planning_period_count(),
+                        planning_category=planning_category,
+                    )
+                    if self.group_2wp_build_targets_by_brand_choice:
+                        targets = self.planning_plan_targets.group_builds_by_brand(targets)
+                    build_targets[crusher] = targets
+                except Exception as exc:
+                    target_errors[crusher] = str(exc)
+        return {
+            "factors": factors,
+            "warnings": warnings,
+            "build_targets": build_targets,
+            "target_errors": target_errors,
+        }
+
+    def finish_data_stream_inputs(self, result):
+        self.historical_recon_factors = result.get("factors", {})
+        for (brand, factor_type, analyte), effective in getattr(
+            self, "data_stream_effective_overrides", {}
+        ).items():
+            value_record = (
+                self.historical_recon_factors.get(brand, {})
+                .get(factor_type, {})
+                .get(analyte)
+            )
+            if value_record and not value_record.get("locked") and numeric(effective) not in (None, 0):
+                value_record["effective"] = float(effective)
+        self.historical_recon_warnings = result.get("warnings", [])
+        self.data_stream_pending_build_targets = result.get("build_targets", {})
+        self.data_stream_target_errors = result.get("target_errors", {})
+        self.populate_recon_factor_table()
+        display_warnings = list(self.historical_recon_warnings)
+        display_warnings.extend(
+            f"2WP targets ({crusher}): {message}"
+            for crusher, message in self.data_stream_target_errors.items()
+        )
+        warning_text = "\n".join(display_warnings)
+        self.data_stream_warning_label.setText(warning_text)
+        self.data_stream_warning_label.setVisible(bool(warning_text))
+        self.data_streams_submit_button.setEnabled(True)
+        if getattr(self, "agent_workflow_after_data_streams", False):
+            self.agent_workflow_after_data_streams = False
+            self.agent_workflow_after_site_config = False
+            self.handle_data_streams_submit()
+            QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
+
+    def handle_data_stream_inputs_error(self, error_message):
+        factors, warnings = self.data_stream_reconciliation.default_factors(
+            self.opf_input_choice,
+            self.product_brand_labels_choice,
+            f"Data Streams setup failed; factors defaulted to 1.0. {error_message}",
+        )
+        self.finish_data_stream_inputs({
+            "factors": factors,
+            "warnings": warnings,
+            "build_targets": {},
+            "target_errors": {},
+        })
+
+    def apply_grade_streams_to_inventory(self):
+        for name, row in (self.stockpile_data or {}).items():
+            streams = inventory_grade_streams(
+                row,
+                self.product_brand_labels_choice,
+                self.historical_recon_factors,
+                self.opf_input_choice,
+            )
+            row["GRADE_STREAMS"] = streams
+            row["grade_streams"] = streams
+            self.historical_recon_warnings.extend(
+                self.inventory_stream_warnings(name, row)
+            )
+        self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
+
+    def inventory_stream_warnings(self, name, row):
+        row = row or {}
+
+        def present(*names):
+            return any(
+                numeric(row.get(candidate)) is not None
+                for name_value in names
+                for candidate in (name_value, name_value.upper())
+            )
+
+        missing_rom = [
+            analyte for analyte in ANALYTES
+            if not present(f"{analyte}_rom", f"rom_{analyte}")
+        ]
+        messages = []
+        if missing_rom:
+            messages.append(
+                f"{name}: missing inventory ROM for {', '.join(missing_rom)}; falling back to insitu with factor 1.0."
+            )
+        slot = internal_product_slot(self.opf_input_choice)
+        if slot is None and not is_dry_plant(self.opf_input_choice):
+            messages.append(
+                f"{name}: OPF product mapping is not confirmed; product streams fall back to Adjusted ROM."
+            )
+        if slot and not is_dry_plant(self.opf_input_choice):
+            missing_product = [
+                analyte for analyte in ANALYTES
+                if not present(f"{analyte}_{slot}", f"{slot}_{analyte}")
+            ]
+            if missing_product:
+                messages.append(
+                    f"{name}: missing inventory {slot.upper()} for {', '.join(missing_product)}; product falls back independently to ROM."
+                )
+        return messages
+
+    def handle_data_streams_submit(self):
+        self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
+        self.data_stream_planning_categories = {
+            "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
+            "product": self.product_planning_category_input.text().strip(),
+        }
+        self.capture_aps_grade_mapping_table()
+        self.capture_recon_factor_table()
+        self.apply_grade_streams_to_inventory()
+        if self.data_stream_pending_build_targets:
+            self.register_submitted_site_scenarios(self.data_stream_pending_build_targets)
+        else:
+            self.save_active_scenario_state()
+        # Scenario registration clears/initialises the scenario database, so
+        # persist the auditable factors and enriched opening inventory after it.
+        self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
+        self.data_stream_reconciliation.save_to_database(
+            self.opf_input_choice,
+            self.start_time_choice,
+            self.historical_recon_factors,
+            self.historical_recon_warnings,
+        )
+        self.save_active_scenario_state()
+        self.setup_stockpile_table()
+        self.set_page_enabled(self.data_streams_tab_index, True)
+        self.set_page_enabled(self.guidance_schedules_tab_index, True)
+        self.show_page(self.guidance_schedules_tab_index, force=True)
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -5240,11 +5769,7 @@ class UserInputs(QMainWindow):
             return
 
         self.submit_button.setEnabled(False)
-        progress_message = (
-            "Fetching stockpile inventories and ratio-adjusted 2WP build targets from Snowflake..."
-            if self.auto_load_2wp_targets_choice
-            else "Fetching stockpile inventories from Snowflake..."
-        )
+        progress_message = "Fetching stockpile inventories from Snowflake..."
         self.run_background_task(
             progress_message,
             self.fetch_site_configuration_data,
@@ -5260,32 +5785,10 @@ class UserInputs(QMainWindow):
 
     def fetch_site_configuration_data(self):
         stockpile_data = self.fetch_stockpile_data()
-        build_targets = {crusher: [] for crusher in self.selected_site_crushers}
-        target_errors = {}
-        if self.auto_load_2wp_targets_choice:
-            for crusher in self.selected_site_crushers:
-                try:
-                    build_targets[crusher] = self.planning_plan_targets.fetch(
-                        self.mine_input_choice,
-                        crusher,
-                        self.start_time_choice,
-                        self.product_brand_labels_choice,
-                        opf=self.opf_input_choice,
-                        crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
-                        planning_period_count=self.planning_period_count(),
-                    )
-                    if self.group_2wp_build_targets_by_brand_choice:
-                        build_targets[crusher] = (
-                            self.planning_plan_targets.group_builds_by_brand(
-                                build_targets[crusher]
-                            )
-                        )
-                except Exception as exc:
-                    target_errors[crusher] = str(exc)
         return {
             "stockpile_data": stockpile_data,
-            "build_targets": build_targets,
-            "target_errors": target_errors,
+            "build_targets": {},
+            "target_errors": {},
             "automatic_2wp_targets": self.auto_load_2wp_targets_choice,
         }
 
@@ -5297,6 +5800,10 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
         self.AMT_chunk_settings = {}
+        self.historical_recon_factors = {}
+        self.historical_recon_warnings = []
+        self.data_stream_pending_build_targets = {}
+        self.data_stream_target_errors = {}
         self.hex_sequence_table = []
         self.hex_sequence_table_argument = []
         self.calendar_inputs = {}
@@ -5406,17 +5913,23 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "BlendMaster", message)
 
         self.setup_stockpile_table()
+        self.populate_aps_grade_mapping_table()
+        self.populate_recon_factor_table()
+        self.set_page_enabled(self.data_streams_tab_index, True)
         self.set_page_enabled(
             self.stockpile_tab_index,
             restoring_project,
         )
         if not restoring_project:
-            self.show_page(self.guidance_schedules_tab_index)
+            self.set_page_enabled(self.guidance_schedules_tab_index, False)
+            self.show_page(self.data_streams_tab_index)
+            QTimer.singleShot(100, self.prepare_data_streams)
+        else:
+            self.apply_grade_streams_to_inventory()
         self.validate_form()
 
         if getattr(self, "agent_workflow_after_site_config", False):
-            self.agent_workflow_after_site_config = False
-            QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
+            self.agent_workflow_after_data_streams = True
 
     def handle_guidance_schedules_submit(self):
         """Apply optional schedule guidance before stockpile selection."""
@@ -7135,6 +7648,7 @@ class UserInputs(QMainWindow):
         self.agent_workflow_active = True
         self.agent_workflow_payload = copy.deepcopy(payload)
         self.agent_workflow_after_site_config = False
+        self.agent_workflow_after_data_streams = False
         self.agent_workflow_waiting_for_amt = False
         self.append_agent_console("Starting guided agent apply through the normal UI workflow.")
         QTimer.singleShot(0, self.agent_workflow_apply_site_configuration)
@@ -7142,6 +7656,7 @@ class UserInputs(QMainWindow):
     def stop_agent_workflow_apply(self, message):
         self.agent_workflow_active = False
         self.agent_workflow_after_site_config = False
+        self.agent_workflow_after_data_streams = False
         self.agent_workflow_waiting_for_amt = False
         self.append_agent_console(message)
 
@@ -7693,6 +8208,22 @@ class UserInputs(QMainWindow):
             loaded_state["product_brand_labels_choice"] = self.default_product_brand_labels()
         loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
             loaded_state.get("product_brand_labels_choice")
+        )
+        loaded_state["selected_data_stream"] = str(
+            loaded_state.get("selected_data_stream") or DEFAULT_STREAM
+        )
+        loaded_state["aps_grade_field_mappings"] = copy.deepcopy(
+            loaded_state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+        )
+        loaded_state["historical_recon_factors"] = copy.deepcopy(
+            loaded_state.get("historical_recon_factors") or {}
+        )
+        loaded_state["historical_recon_warnings"] = list(
+            loaded_state.get("historical_recon_warnings") or []
+        )
+        loaded_state["data_stream_planning_categories"] = copy.deepcopy(
+            loaded_state.get("data_stream_planning_categories")
+            or {"rom": "OPF Feed", "product": ""}
         )
         if loaded_state.get("product_build_settings") is None:
             loaded_state["product_build_settings"] = []
@@ -9242,7 +9773,9 @@ class UserInputs(QMainWindow):
             "AMT Stockpiles",
             "Average Reclaim Rate (t/h)",
             "Chunk Reclaim Hours",
-            "Chunk Size (WMT)"
+            "Chunk Size (WMT)",
+            "Internal Blend Recon",
+            "Internal Upgrade",
         ]
         self.AMT_stockpile_table.setColumnCount(len(headers))
         self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
@@ -9328,7 +9861,10 @@ class UserInputs(QMainWindow):
         self.show_error_popup(error_message)
 
     def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
-        self.AMT_stockpile_data = AMT_stockpile_data or {}
+        self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
+            data_source, AMT_stockpile_data or {}
+        )
+        self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
         self.start_dash_AMT_map_thread()
         self.refresh_AMT_map_data_from_database()
 
@@ -9364,11 +9900,21 @@ class UserInputs(QMainWindow):
                 chunk_size_item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row_idx, 3, chunk_size_item)
 
+                inventory_row = (self.stockpile_data or {}).get(stockpile_name, attributes)
+                blend_summary, upgrade_summary = self.inventory_internal_factor_summary(inventory_row)
+                for column, summary in ((4, blend_summary), (5, upgrade_summary)):
+                    factor_item = QTableWidgetItem(summary)
+                    factor_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    factor_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    self.AMT_stockpile_table.setItem(row_idx, column, factor_item)
+
         # Resize Columns
         self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.store_AMT_chunk_settings()
 
         if self.setup_AMT_stockpile_table_first_call:
@@ -9417,6 +9963,82 @@ class UserInputs(QMainWindow):
             self.AMT_stockpile_tab_layout.addLayout(self.AMT_stockpile_tab_vertical_layout, stretch=1)
             
             self.setup_AMT_stockpile_table_first_call = False  
+
+    def inventory_internal_factor_summary(self, row):
+        row = row or {}
+
+        def value(*names):
+            for name in names:
+                candidate = numeric(row.get(name))
+                if candidate is None:
+                    candidate = numeric(row.get(name.upper()))
+                if candidate is not None:
+                    return candidate
+            return None
+
+        slot = internal_product_slot(self.opf_input_choice)
+        blend_values = []
+        upgrade_values = []
+        labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+        for analyte in ANALYTES:
+            insitu = value(f"grade_{analyte}", f"{analyte}_insitu")
+            rom = value(f"{analyte}_rom", f"rom_{analyte}")
+            product = value(f"{analyte}_{slot}", f"{slot}_{analyte}") if slot else None
+            blend = rom / insitu if rom is not None and insitu not in (None, 0) else 1.0
+            upgrade = product / rom if product is not None and rom not in (None, 0) else 1.0
+            blend_values.append(f"{labels[analyte]} {blend:.4f}")
+            upgrade_values.append(f"{labels[analyte]} {upgrade:.4f}")
+        if is_dry_plant(self.opf_input_choice) or slot is None:
+            return ", ".join(blend_values), "ROM only"
+        return ", ".join(blend_values), ", ".join(upgrade_values)
+
+    def enrich_AMT_grade_streams(self, data_source, amt_data):
+        """Attach the matching inventory build's internal factors to every hex."""
+        enriched = copy.deepcopy(amt_data or {})
+        inventory_by_name = {
+            str(name).strip().upper(): (self.stockpile_data or {}).get(name, attributes)
+            for name, attributes in (data_source or {}).items()
+        }
+
+        def compact(value):
+            return "".join(character for character in str(value or "").upper() if character.isalnum())
+
+        for footprint, rows in enriched.items():
+            footprint_key = compact(footprint)
+            inventory_row = None
+            for name, candidate in inventory_by_name.items():
+                build = compact((candidate or {}).get("BUILD") or (candidate or {}).get("build"))
+                name_key = compact(name)
+                if name_key == footprint_key or name_key in footprint_key or footprint_key in name_key or (build and build in footprint_key):
+                    inventory_row = candidate
+                    break
+            inventory_row = inventory_row or {}
+            if not inventory_row:
+                self.historical_recon_warnings.append(
+                    f"{footprint}: no matching inventory build was found; internal factors defaulted to 1.0."
+                )
+            else:
+                self.historical_recon_warnings.extend(
+                    self.inventory_stream_warnings(footprint, inventory_row)
+                )
+            for row in rows or []:
+                insitu = {
+                    "grade_fe": row.get("FE"),
+                    "grade_si": row.get("SIO2"),
+                    "grade_al": row.get("AL2O3"),
+                    "grade_p": row.get("P"),
+                    "grade_mn": row.get("MN"),
+                }
+                streams = amt_grade_streams(
+                    insitu,
+                    inventory_row,
+                    self.product_brand_labels_choice,
+                    self.historical_recon_factors,
+                    self.opf_input_choice,
+                )
+                row["GRADE_STREAMS"] = streams
+        self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
+        return enriched
 
     def refresh_AMT_map_data_from_database(self):
         draw_AMT_map = getattr(self, "draw_AMT_map", None)
@@ -9503,6 +10125,8 @@ class UserInputs(QMainWindow):
             if stockpile_reclaim_rates
             else ["1000"] * period_count
         )
+        configured_calendar_brands = configured_brands(self.product_brand_labels_choice)
+        calendar_brand_default = configured_calendar_brands[0] if configured_calendar_brands else ""
 
         self.calendar_rows.extend([
             ("Reclaim Equipment", [False] * period_count, "green", [""] * period_count),
@@ -9514,6 +10138,7 @@ class UserInputs(QMainWindow):
             )},
 
             ("Crusher", [False] * period_count, "blue", [""] * period_count),
+            {"crusher_brand": ("  Brand", [True] * period_count, "blue", [calendar_brand_default] * period_count)},
             {"crusher_rate": ("  Rate", [True] * period_count, "blue", ["1000"] * period_count)},
             ("  Direct Tip Ratio", [False] * period_count, "blue", [""] * period_count),
             {"crusher_direct_tip_ratio_min": ("    Min", direct_tip_editables, "blue", ["0"] * period_count)},
@@ -9689,6 +10314,19 @@ class UserInputs(QMainWindow):
 
             # Editable and Non-Editable Cells with Default Values
             for col_idx, (is_editable, default_value) in enumerate(zip(editables, default_values), start=1):
+                if row_key == "crusher_brand":
+                    brand_combo = QComboBox()
+                    brand_combo.setProperty("useCurrentData", True)
+                    if self.product_build_settings:
+                        brand_combo.addItem("From Product Build", "")
+                        brand_combo.setEnabled(False)
+                    else:
+                        for brand in configured_brands(self.product_brand_labels_choice):
+                            brand_combo.addItem(brand, brand)
+                        brand_index = brand_combo.findData(str(default_value or "").strip().upper())
+                        brand_combo.setCurrentIndex(max(brand_index, 0))
+                    self.main_table.setCellWidget(row_idx, col_idx, brand_combo)
+                    continue
                 if is_editable and row_key and row_key.endswith("_state"):
                     state_combo = QComboBox()
                     state_options = ["Auto", "Build", "Reclaim"]
@@ -9783,22 +10421,30 @@ class UserInputs(QMainWindow):
                     )
                 ),
             )
-            self.calendar_rows[3]["crusher_rate"] = ("  Rate", [True] * period_count, "blue", calendar_values("crusher_rate", thousand_defaults))
-            self.calendar_rows[5]["crusher_direct_tip_ratio_min"] = ("    Min", direct_tip_editables, "blue", direct_tip_min_values)
-            self.calendar_rows[6]["crusher_direct_tip_ratio_max"] = ("    Max", direct_tip_editables, "blue", direct_tip_max_values)
-            self.calendar_rows[9]["crusher_target_fe_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_fe_min", zero_defaults))
-            self.calendar_rows[10]["crusher_target_fe_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_fe_max", hundred_defaults))
-            self.calendar_rows[12]["crusher_target_si_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_si_min", zero_defaults))
-            self.calendar_rows[13]["crusher_target_si_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_si_max", hundred_defaults))
-            self.calendar_rows[15]["crusher_target_al_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_al_min", zero_defaults))
-            self.calendar_rows[16]["crusher_target_al_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_al_max", hundred_defaults))
-            self.calendar_rows[18]["crusher_target_p_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_p_min", zero_defaults))
-            self.calendar_rows[19]["crusher_target_p_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_p_max", hundred_defaults))
-            self.calendar_rows[21]["crusher_target_mn_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_mn_min", zero_defaults))
-            self.calendar_rows[22]["crusher_target_mn_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
+            brand_defaults = {
+                period: (configured_brands(self.product_brand_labels_choice) or [""])[0]
+                for period in period_labels
+            }
+            self.calendar_rows[3]["crusher_brand"] = (
+                "  Brand", [True] * period_count, "blue",
+                calendar_values("crusher_brand", brand_defaults),
+            )
+            self.calendar_rows[4]["crusher_rate"] = ("  Rate", [True] * period_count, "blue", calendar_values("crusher_rate", thousand_defaults))
+            self.calendar_rows[6]["crusher_direct_tip_ratio_min"] = ("    Min", direct_tip_editables, "blue", direct_tip_min_values)
+            self.calendar_rows[7]["crusher_direct_tip_ratio_max"] = ("    Max", direct_tip_editables, "blue", direct_tip_max_values)
+            self.calendar_rows[10]["crusher_target_fe_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_fe_min", zero_defaults))
+            self.calendar_rows[11]["crusher_target_fe_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_fe_max", hundred_defaults))
+            self.calendar_rows[13]["crusher_target_si_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_si_min", zero_defaults))
+            self.calendar_rows[14]["crusher_target_si_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_si_max", hundred_defaults))
+            self.calendar_rows[16]["crusher_target_al_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_al_min", zero_defaults))
+            self.calendar_rows[17]["crusher_target_al_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_al_max", hundred_defaults))
+            self.calendar_rows[19]["crusher_target_p_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_p_min", zero_defaults))
+            self.calendar_rows[20]["crusher_target_p_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_p_max", hundred_defaults))
+            self.calendar_rows[22]["crusher_target_mn_min"] = ("      Min", [True] * period_count, "blue", calendar_values("crusher_target_mn_min", zero_defaults))
+            self.calendar_rows[23]["crusher_target_mn_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
 
             
-            start_index = 24
+            start_index = 25
             calendar_index = start_index  # Start populating calendar_rows after the static crusher rows
 
             for stockpile in getattr(self, "calendar_stockpile_names", self.updated_stockpile_data_keys):
@@ -9833,6 +10479,8 @@ class UserInputs(QMainWindow):
     def get_main_table_cell_text(self, row_idx, col_idx):
         widget = self.main_table.cellWidget(row_idx, col_idx)
         if isinstance(widget, QComboBox):
+            if widget.property("useCurrentData"):
+                return str(widget.currentData() or "").strip()
             return widget.currentText().strip()
 
         item = self.main_table.item(row_idx, col_idx)
@@ -14207,7 +14855,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 10,
+                "project_format_version": 11,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -14236,6 +14884,11 @@ class UserInputs(QMainWindow):
                 "selected_haul_cycle_crushers": self.selected_haul_cycle_crushers,
                 "haul_cycle_routes": self.haul_cycle_routes,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
+                "selected_data_stream": self.selected_data_stream,
+                "aps_grade_field_mappings": self.aps_grade_field_mappings,
+                "historical_recon_factors": self.historical_recon_factors,
+                "historical_recon_warnings": self.historical_recon_warnings,
+                "data_stream_planning_categories": self.data_stream_planning_categories,
                 "product_build_settings": self.product_build_settings,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
@@ -14572,6 +15225,22 @@ class UserInputs(QMainWindow):
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             loaded_state.get("product_brand_labels_choice", self.default_product_brand_labels())
         )
+        self.selected_data_stream = str(
+            loaded_state.get("selected_data_stream") or DEFAULT_STREAM
+        )
+        self.aps_grade_field_mappings = copy.deepcopy(
+            loaded_state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+        )
+        self.historical_recon_factors = copy.deepcopy(
+            loaded_state.get("historical_recon_factors") or {}
+        )
+        self.historical_recon_warnings = list(
+            loaded_state.get("historical_recon_warnings") or []
+        )
+        self.data_stream_planning_categories = copy.deepcopy(
+            loaded_state.get("data_stream_planning_categories")
+            or {"rom": "OPF Feed", "product": ""}
+        )
         self.product_build_settings = self.normalized_agent_product_build_settings(
             loaded_state.get("product_build_settings", []) or []
         )
@@ -14762,6 +15431,18 @@ class UserInputs(QMainWindow):
         self.available_two_wp_product_crushers = []
         self.selected_two_wp_product_crushers = []
         self.product_brand_labels_choice = self.default_product_brand_labels()
+        self.selected_data_stream = DEFAULT_STREAM
+        self.aps_grade_field_mappings = {"rom": {}, "product": {}}
+        self.historical_recon_factors = {}
+        self.historical_recon_warnings = []
+        self.data_stream_planning_categories = {
+            "rom": "OPF Feed",
+            # Temporary compatibility default until the authoritative product
+            # planning category is confirmed for each APS model.
+            "product": "",
+        }
+        self.data_stream_pending_build_targets = {}
+        self.data_stream_target_errors = {}
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
@@ -14786,6 +15467,7 @@ class UserInputs(QMainWindow):
         self.agent_workflow_active = False
         self.agent_workflow_payload = {}
         self.agent_workflow_after_site_config = False
+        self.agent_workflow_after_data_streams = False
         self.agent_workflow_waiting_for_amt = False
         self.mine_input_choice = None
         self.hub_input_choice = None
@@ -14800,6 +15482,7 @@ class UserInputs(QMainWindow):
         self.direct_tip_crusher_destinations = []
         self.direct_tip_movement_rules = []
         self.planning_plan_targets = PlanningPlanTargets()
+        self.data_stream_reconciliation = DataStreamReconciliation()
         self.opening_stockpile_inventories = None
         self.saved_blends_for_schedule = None
         self.start_time_choice = None

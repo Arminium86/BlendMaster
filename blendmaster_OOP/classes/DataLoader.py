@@ -1,4 +1,5 @@
 # This loads the data from external sources (currently an Excel file with multiple tabs which represents the combined user input and opening inventories)
+import json
 import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
@@ -30,6 +31,18 @@ class DataLoader:
         return PeriodManager.period_labels_for_count(
             (self.calendar_inputs or {}).get("planning_period_count", 3)
         )
+
+    @staticmethod
+    def coerce_grade_streams(value):
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                decoded = json.loads(value)
+                return decoded if isinstance(decoded, dict) else None
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def load_data(self):
         """Loads data from GUI and returns it in structured format."""
@@ -63,6 +76,7 @@ class DataLoader:
                     "crusher_direct_feed_ratio_max", period_label, 1
                 ),
                 "crusher_rate": self.calendar_inputs["crusher_rate"][period_label],
+                "brand": (self.calendar_inputs.get("crusher_brand", {}) or {}).get(period_label, ""),
             }
             for grade in ("fe", "si", "al", "p", "mn"):
                 target[f"target_{grade}_min"] = self.calendar_inputs[
@@ -282,6 +296,7 @@ class DataLoader:
                 aps_brand_proportions=nested_record.get("aps_brand_proportions", {}),
                 aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {}),
                 max_reclaim_rate=max_reclaim_rate,
+                grade_streams=self.coerce_grade_streams(nested_record.get("grade_streams")),
                 period_values={
                     **{
                         f"state_{key}": states_by_period[label]
@@ -356,6 +371,7 @@ class DataLoader:
                 agent=record.get("agent"),
                 start_datetime=record.get("start_datetime"),
                 source=record.get("source"),
+                grade_streams=self.coerce_grade_streams(record.get("grade_streams")),
                 period_values={
                     **{
                         f"max_quantity_{period_key}":
@@ -419,5 +435,7 @@ class DataLoader:
                     for key in corresponding_hex:
                         if key.startswith('grade_'):
                             stockpile_data[key] = corresponding_hex[key]
+                    if corresponding_hex.get("grade_streams") is not None:
+                        stockpile_data["grade_streams"] = corresponding_hex.get("grade_streams")
 
 

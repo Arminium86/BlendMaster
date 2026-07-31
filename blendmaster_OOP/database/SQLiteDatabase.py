@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -276,6 +277,9 @@ class DatabaseManager:
             source_grade_al REAL,
             source_grade_p REAL,
             source_grade_mn REAL,
+            selected_grade_stream TEXT,
+            selected_grade_brand TEXT,
+            grade_stream_warnings TEXT,
             equipment TEXT,
             equipment_rate_input REAL,
             equipment_rate_output REAL,
@@ -308,6 +312,9 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN source_type TEXT")
         if "actual_direct_tip_ratio" not in existing_columns:
             cursor.execute("ALTER TABLE optimised_blend_report ADD COLUMN actual_direct_tip_ratio REAL")
+        for column in ("selected_grade_stream", "selected_grade_brand", "grade_stream_warnings"):
+            if column not in existing_columns:
+                cursor.execute(f"ALTER TABLE optimised_blend_report ADD COLUMN {column} TEXT")
         two_wp_report_columns = {
             "two_wp_active_blend": "TEXT",
             "two_wp_active_blend_product_brand": "TEXT",
@@ -766,7 +773,8 @@ class DatabaseManager:
             fallback_destination TEXT,
             aps_direct_tip_candidate INTEGER,
             two_wp_destination_resolution TEXT,
-            two_wp_destination_ratio REAL
+            two_wp_destination_ratio REAL,
+            grade_streams_json TEXT
         )
         ''')
 
@@ -780,6 +788,7 @@ class DatabaseManager:
             "aps_direct_tip_candidate": "INTEGER",
             "two_wp_destination_resolution": "TEXT",
             "two_wp_destination_ratio": "REAL",
+            "grade_streams_json": "TEXT",
         }
         for column_name, column_type in optional_columns.items():
             if column_name not in existing_columns:
@@ -802,6 +811,14 @@ class DatabaseManager:
                     if column_name == "two_wp_destination_ratio"
                     else ""
                 )
+        if "grade_streams" in results.columns:
+            results["grade_streams_json"] = results["grade_streams"].map(
+                lambda value: json.dumps(value or {})
+            )
+        elif "grade_streams_json" in results.columns:
+            results["grade_streams_json"] = results["grade_streams_json"].map(
+                lambda value: value if isinstance(value, str) else json.dumps(value or {})
+            )
         results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
@@ -830,7 +847,8 @@ class DatabaseManager:
                 fallback_destination,
                 aps_direct_tip_candidate,
                 two_wp_destination_resolution,
-                two_wp_destination_ratio
+                two_wp_destination_ratio,
+                grade_streams_json
             ) VALUES (
                 :agent, 
                 :source, 
@@ -849,7 +867,8 @@ class DatabaseManager:
                 :fallback_destination,
                 :aps_direct_tip_candidate,
                 :two_wp_destination_resolution,
-                :two_wp_destination_ratio
+                :two_wp_destination_ratio,
+                :grade_streams_json
             )
             ''', row.to_dict())
 

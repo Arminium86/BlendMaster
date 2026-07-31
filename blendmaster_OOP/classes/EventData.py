@@ -23,6 +23,7 @@ class EventData:
         delivered_datetime=None,
         aps_brand=None,
         aps_brand_proportions=None,
+        grade_streams=None,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -46,6 +47,10 @@ class EventData:
         self._delivered_datetime = delivered_datetime
         self._aps_brand = aps_brand or ""
         self._aps_brand_proportions = aps_brand_proportions or {}
+        self._grade_streams = grade_streams
+        self._selected_grade_stream = None
+        self._selected_grade_brand = None
+        self._grade_stream_warnings = []
 
     # Getters
     @property
@@ -136,6 +141,22 @@ class EventData:
     def aps_brand_proportions(self):
         return self._aps_brand_proportions
 
+    @property
+    def grade_streams(self):
+        return self._grade_streams
+
+    @property
+    def selected_grade_stream(self):
+        return self._selected_grade_stream
+
+    @property
+    def selected_grade_brand(self):
+        return self._selected_grade_brand
+
+    @property
+    def grade_stream_warnings(self):
+        return self._grade_stream_warnings
+
     # Setters
     @stockpile.setter
     def stockpile(self, value):
@@ -224,6 +245,22 @@ class EventData:
     @aps_brand_proportions.setter
     def aps_brand_proportions(self, value):
         self._aps_brand_proportions = value or {}
+
+    @grade_streams.setter
+    def grade_streams(self, value):
+        self._grade_streams = value
+
+    @selected_grade_stream.setter
+    def selected_grade_stream(self, value):
+        self._selected_grade_stream = value
+
+    @selected_grade_brand.setter
+    def selected_grade_brand(self, value):
+        self._selected_grade_brand = value
+
+    @grade_stream_warnings.setter
+    def grade_stream_warnings(self, value):
+        self._grade_stream_warnings = value or []
     
      # Boolean methods
     @property
@@ -265,4 +302,8 @@ class EventData:
             "delivered_datetime": self._delivered_datetime,
             "aps_brand": self._aps_brand,
             "aps_brand_proportions": self._aps_brand_proportions,
+            "grade_streams": self._grade_streams,
+            "selected_grade_stream": self._selected_grade_stream,
+            "selected_grade_brand": self._selected_grade_brand,
+            "grade_stream_warnings": self._grade_stream_warnings,
         }
