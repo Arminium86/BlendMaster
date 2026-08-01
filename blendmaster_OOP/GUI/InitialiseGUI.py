@@ -39,6 +39,7 @@ from classes.GradeStreams import (
     is_dry_plant,
     format_grade_stream_vector,
     flatten_grade_streams,
+    normalise_grade_streams,
     normalise_aps_grade_field_mappings,
     normalise_planning_categories,
     numeric,
@@ -1614,7 +1615,7 @@ class UserInputs(QMainWindow):
             self.update_opf_dropdown(self.opf_input_choice)
             self.update_site_crusher_options(self.selected_site_crushers)
             self.file_path.setText(self.file_path_choice)
-            self.file_path_24hr.setText(self.file_path_24hr_choice)
+            self.set_24hr_mining_path(self.file_path_24hr_choice)
             self.set_24hr_expit_agent_items(
                 self.available_24hr_expit_agents,
                 self.selected_24hr_expit_agents,
@@ -3093,9 +3094,10 @@ class UserInputs(QMainWindow):
         title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
         description = QLabel(
             "Audit the selected inventory stockpiles, selected AMT chunks, and "
-            "APS 24HR payloads inside the configured planning horizon. The wide "
-            "table exposes raw grades, every calculated grade stream, the grades "
-            "resolved for each configured brand, and per-analyte fallback provenance."
+            "APS 24HR grade blocks inside the configured planning horizon. Each "
+            "grade block is consolidated to one row. The table focuses on source "
+            "tonnes, raw grades, every calculated grade stream, and per-analyte "
+            "fallback provenance."
         )
         description.setWordWrap(True)
         description.setStyleSheet("color: #607080;")
@@ -3109,12 +3111,12 @@ class UserInputs(QMainWindow):
             "Inventory Stockpile",
             "AMT Chunk",
             "AMT Stockpile - No Chunks",
-            "APS Grade Block Payload",
+            "APS Grade Block",
         ):
             self.database_view_source_filter.addItem(source_type, source_type)
         self.database_view_search = QLineEdit()
         self.database_view_search.setPlaceholderText(
-            "Filter source, stockpile, destination, period, warning..."
+            "Filter source, stockpile, build, grade, warning..."
         )
         self.database_view_source_filter.currentIndexChanged.connect(
             self.apply_database_view_filters
@@ -3235,7 +3237,7 @@ class UserInputs(QMainWindow):
                 warning["analyte"]: warning for warning in fallbacks
             }
             for analyte in ANALYTES:
-                record[f"optimiser_{brand_key}_{analyte}"] = grades[analyte]
+                record[f"selected_{brand_key}_{analyte}"] = grades[analyte]
                 warning = fallback_by_analyte.get(analyte)
                 if warning:
                     provenance = (
@@ -3280,10 +3282,8 @@ class UserInputs(QMainWindow):
                         {
                             "source_type": "AMT Stockpile - No Chunks",
                             "source_id": stockpile_name,
-                            "source": stockpile_name,
                             "parent_stockpile": stockpile_name,
                             "tonnes": 0.0,
-                            "optimiser_source": False,
                         },
                         attributes.get("grade_streams")
                         or attributes.get("GRADE_STREAMS"),
@@ -3303,12 +3303,10 @@ class UserInputs(QMainWindow):
                         {
                             "source_type": "AMT Chunk",
                             "source_id": chunk.get("hex", ""),
-                            "source": chunk.get("hex", ""),
                             "parent_stockpile": stockpile_name,
                             "build_or_chunk": chunk.get("hex", ""),
                             "sequence": chunk.get("sequence"),
                             "tonnes": numeric(chunk.get("balance")) or 0.0,
-                            "optimiser_source": True,
                             "internal_recon_matched": provenance.get(
                                 "internal_recon_matched",
                                 provenance.get("INTERNAL_RECON_MATCHED", ""),
@@ -3339,11 +3337,9 @@ class UserInputs(QMainWindow):
                 {
                     "source_type": "Inventory Stockpile",
                     "source_id": stockpile_name,
-                    "source": stockpile_name,
                     "parent_stockpile": stockpile_name,
                     "build_or_chunk": attributes.get("build", ""),
                     "tonnes": numeric(attributes.get("balance")) or 0.0,
-                    "optimiser_source": True,
                 },
                 attributes.get("grade_streams")
                 or attributes.get("GRADE_STREAMS"),
@@ -3354,8 +3350,100 @@ class UserInputs(QMainWindow):
             ))
         return records
 
+    def database_view_grade_block_rows(self, transactions):
+        """Consolidate APS payload movements to one tonnes/grades row per block."""
+        if transactions is None or transactions.empty:
+            return []
+
+        grouped = {}
+        for transaction in transactions.to_dict(orient="records"):
+            source = str(
+                transaction.get("source")
+                or transaction.get("direct_tip_id")
+                or "Unidentified grade block"
+            ).strip()
+            tonnes = max(numeric(transaction.get("payload")) or 0.0, 0.0)
+            group = grouped.setdefault(source, {
+                "tonnes": 0.0,
+                "raw_mass": {analyte: 0.0 for analyte in ANALYTES},
+                "raw_tonnes": {analyte: 0.0 for analyte in ANALYTES},
+                "stream_mass": {},
+                "stream_tonnes": {},
+            })
+            group["tonnes"] += tonnes
+
+            fallback = {
+                f"grade_{analyte}": transaction.get(
+                    f"source_grade_{analyte}"
+                )
+                for analyte in ANALYTES
+            }
+            for analyte in ANALYTES:
+                value = numeric(fallback.get(f"grade_{analyte}"))
+                if value is not None and tonnes > 0:
+                    group["raw_mass"][analyte] += value * tonnes
+                    group["raw_tonnes"][analyte] += tonnes
+
+            streams = normalise_grade_streams(
+                transaction.get("grade_streams"), fallback
+            )
+            for stream_name, brand_values in streams.items():
+                for brand, grades in (brand_values or {}).items():
+                    for analyte in ANALYTES:
+                        value = numeric((grades or {}).get(analyte))
+                        if value is None or tonnes <= 0:
+                            continue
+                        key = (stream_name, str(brand), analyte)
+                        group["stream_mass"][key] = (
+                            group["stream_mass"].get(key, 0.0)
+                            + value * tonnes
+                        )
+                        group["stream_tonnes"][key] = (
+                            group["stream_tonnes"].get(key, 0.0)
+                            + tonnes
+                        )
+
+        rows = []
+        for source, group in grouped.items():
+            fallback = {
+                f"grade_{analyte}": (
+                    group["raw_mass"][analyte]
+                    / group["raw_tonnes"][analyte]
+                    if group["raw_tonnes"][analyte] > 0
+                    else None
+                )
+                for analyte in ANALYTES
+            }
+            streams = {stream: {} for stream in STREAMS}
+            for (stream_name, brand, analyte), grade_mass in group[
+                "stream_mass"
+            ].items():
+                grade_tonnes = group["stream_tonnes"].get(
+                    (stream_name, brand, analyte), 0.0
+                )
+                streams.setdefault(stream_name, {}).setdefault(brand, {})[
+                    analyte
+                ] = (
+                    grade_mass / grade_tonnes
+                    if grade_tonnes > 0
+                    else None
+                )
+            rows.append(self.database_view_record_with_streams(
+                {
+                    "source_type": "APS Grade Block",
+                    "source_id": source,
+                    "parent_stockpile": "",
+                    "build_or_chunk": "",
+                    "sequence": "",
+                    "tonnes": group["tonnes"],
+                },
+                streams,
+                fallback,
+            ))
+        return rows
+
     def prepare_database_view_data(self):
-        """Build local sources and the exact APS snapshot on a worker thread."""
+        """Build source tonnes/grades and retain the exact APS run snapshot."""
         records = self.database_view_stockpile_rows()
         warnings = []
         transactions = pd.DataFrame()
@@ -3386,10 +3474,6 @@ class UserInputs(QMainWindow):
             except Exception as exc:
                 warnings.append(f"APS 24HR payload preparation failed: {exc}")
                 transactions = pd.DataFrame()
-
-        self.apply_database_view_stockpile_calculations(
-            records, transactions
-        )
 
         periods = self.database_view_periods()
         window_start = pd.Timestamp(
@@ -3423,58 +3507,9 @@ class UserInputs(QMainWindow):
                     f"{window_end}).{observed_range}"
                 )
 
-        for transaction in horizon_transactions.to_dict(orient="records"):
-            delivered = pd.to_datetime(
-                transaction.get("delivered_datetime"), errors="coerce"
-            )
-            period_key = (
-                periods.period_for_datetime(delivered.to_pydatetime())
-                if pd.notna(delivered)
-                else None
-            )
-            direct_tip_eligible = str(
-                transaction.get("direct_tip_eligible", False)
-            ).strip().lower() in {"true", "1", "yes"}
-            fallback = {
-                f"grade_{analyte}": transaction.get(f"source_grade_{analyte}")
-                for analyte in ANALYTES
-            }
-            records.append(self.database_view_record_with_streams(
-                {
-                    "source_type": "APS Grade Block Payload",
-                    "source_id": transaction.get("direct_tip_id", ""),
-                    "source": transaction.get("source", ""),
-                    "parent_stockpile": "",
-                    "build_or_chunk": transaction.get("direct_tip_id", ""),
-                    "sequence": "",
-                    "period": period_key or "Outside horizon",
-                    "tonnes": numeric(transaction.get("payload")) or 0.0,
-                    "optimiser_source": bool(
-                        direct_tip_eligible and self.is_direct_tip_enabled()
-                    ),
-                    "direct_tip_eligible": direct_tip_eligible,
-                    "destination": transaction.get("destination", ""),
-                    "planned_destination": transaction.get(
-                        "planned_destination", ""
-                    ),
-                    "fallback_destination": transaction.get(
-                        "fallback_destination", ""
-                    ),
-                    "agent": transaction.get("agent", ""),
-                    "start_datetime": transaction.get("start_datetime", ""),
-                    "delivered_datetime": transaction.get(
-                        "delivered_datetime", ""
-                    ),
-                    "two_wp_destination_resolution": transaction.get(
-                        "two_wp_destination_resolution", ""
-                    ),
-                    "two_wp_destination_ratio": transaction.get(
-                        "two_wp_destination_ratio", ""
-                    ),
-                },
-                transaction.get("grade_streams"),
-                fallback,
-            ))
+        records.extend(
+            self.database_view_grade_block_rows(horizon_transactions)
+        )
 
         return {
             "records": records,
@@ -3686,12 +3721,9 @@ class UserInputs(QMainWindow):
         self.database_view_signature_snapshot = (
             self.database_view_input_signature()
         )
-        self.database_view_calendar_inputs = (
-            self.capture_calendar_table_inputs()
-        )
         self.database_view_refresh_button.setEnabled(False)
         self.database_view_summary_label.setText(
-            "Preparing selected stockpiles, AMT chunks, and APS payloads..."
+            "Preparing selected stockpiles, AMT chunks, and APS grade blocks..."
         )
         self.run_background_task(
             "Preparing Database View model inputs...",
@@ -3709,24 +3741,6 @@ class UserInputs(QMainWindow):
         )
         self.database_view_snapshot_signature = result.get("signature")
         warnings = result.get("warnings", []) or []
-        opening_stockpiles = [
-            record for record in self.database_view_rows
-            if record.get("source_type")
-            in {"Inventory Stockpile", "AMT Chunk"}
-            and record.get("available_at_scenario_start") is True
-        ]
-        preplan_grade_blocks = [
-            record for record in self.database_view_rows
-            if record.get("source_type") == "APS Grade Block Payload"
-            and record.get("period") == "preplan"
-            and record.get("optimiser_source") is True
-        ]
-        if not opening_stockpiles and not preplan_grade_blocks:
-            warnings.append(
-                "No stockpile is available at the scenario start and no "
-                "direct-tip APS payload is available in Preplan. The first "
-                "steady state will have no source options."
-            )
         self.database_view_warning_label.setText("\n".join(warnings))
         self.database_view_warning_label.setVisible(bool(warnings))
         self.populate_database_view_table()
@@ -3741,26 +3755,10 @@ class UserInputs(QMainWindow):
             f"{source_type}: {count}"
             for source_type, count in counts.items()
         ) or "No source rows"
-        min_stockpiles = getattr(self, "min_stockpiles", None)
-        max_stockpiles = getattr(self, "max_stockpiles", None)
-        min_contribution = numeric(
-            getattr(self, "min_stockpile_contribution_ratio", None)
-        )
-        source_rule = (
-            f"Stockpile rule: min {min_stockpiles or 'not set'}, "
-            f"max {max_stockpiles or 'not set'}, min contribution "
-            + (
-                f"{min_contribution:.1%}"
-                if min_contribution is not None
-                else "not set"
-            )
-        )
         self.database_view_summary_label.setText(
             f"Planning window: {result.get('window_start')} to "
             f"{result.get('window_end')} | {count_text} | "
-            f"Available at start: {len(opening_stockpiles)} stockpile(s); "
-            f"Preplan direct-tip payloads: {len(preplan_grade_blocks)} | "
-            f"Displayed source tonnes: {tonnes:,.1f} | {source_rule}"
+            f"Displayed source tonnes: {tonnes:,.1f}"
         )
 
     def handle_database_view_error(self, error_message):
@@ -3774,22 +3772,10 @@ class UserInputs(QMainWindow):
 
     def database_view_headers(self):
         fixed = [
-            "source_type", "source_id", "source", "parent_stockpile",
-            "build_or_chunk", "sequence", "period", "tonnes",
-            "optimiser_source", "available_at_scenario_start",
-            "direct_tip_eligible", "destination",
-            "planned_destination", "fallback_destination", "agent",
-            "start_datetime", "delivered_datetime", "selected_stream",
-            "opening_model_balance", "total_selected_stockpile_tonnes",
-            "aps_incoming_tonnes", "aps_incoming_tonnes_in_horizon",
-            "aps_incoming_tonnes_outside_horizon",
-            "projected_balance_after_aps",
-            "reclaim_threshold", "auto_turnover_datetime",
-            "is_ready_after_aps", "calendar_state_preplan",
-            "calendar_max_tonnes_preplan",
+            "source_type", "source_id", "parent_stockpile",
+            "build_or_chunk", "sequence", "tonnes", "selected_stream",
             "internal_recon_matched", "matched_inventory_stockpile",
             "matched_inventory_build", "matched_inventory_time",
-            "two_wp_destination_resolution", "two_wp_destination_ratio",
             *[f"grade_{analyte}" for analyte in ANALYTES],
         ]
         dynamic = sorted({
@@ -3815,7 +3801,10 @@ class UserInputs(QMainWindow):
                     display = ""
                 elif header == "tonnes":
                     display = f"{float(value):,.2f}"
-                elif header.startswith("grade_") or header.startswith("optimiser_"):
+                elif header.startswith("grade_") or (
+                    header.startswith("selected_")
+                    and header != "selected_stream"
+                ):
                     display = f"{float(value):.6f}" if numeric(value) is not None else ""
                 else:
                     display = str(value)
@@ -3825,7 +3814,13 @@ class UserInputs(QMainWindow):
                 if header.startswith("fallback_") and display:
                     item.setBackground(QColor("#fff3cd"))
                 elif (
-                    (header.startswith("grade_") or header.startswith("optimiser_"))
+                    (
+                        header.startswith("grade_")
+                        or (
+                            header.startswith("selected_")
+                            and header != "selected_stream"
+                        )
+                    )
                     and not display
                 ):
                     item.setBackground(QColor("#fee2e2"))
@@ -3928,6 +3923,26 @@ class UserInputs(QMainWindow):
         selection_layout.addRow("Product Planning Category:", self.product_planning_category_input)
         layout.addWidget(selection_card)
 
+        aps_file_card = QFrame()
+        aps_file_card.setFrameShape(QFrame.StyledPanel)
+        aps_file_layout = QFormLayout(aps_file_card)
+        self.data_streams_file_path_24hr = QLineEdit()
+        self.data_streams_file_path_24hr.setReadOnly(True)
+        self.data_streams_file_path_24hr.setText(str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ))
+        self.data_streams_file_path_24hr.setMinimumWidth(400)
+        self.data_streams_file_24hr_button = QPushButton("Browse")
+        self.data_streams_file_24hr_button.setFixedWidth(100)
+        self.data_streams_file_24hr_button.clicked.connect(
+            self.browse_24hr_file
+        )
+        aps_file_row = QHBoxLayout()
+        aps_file_row.addWidget(self.data_streams_file_path_24hr, stretch=1)
+        aps_file_row.addWidget(self.data_streams_file_24hr_button)
+        aps_file_layout.addRow("Select 24HR Mining.csv:", aps_file_row)
+        layout.addWidget(aps_file_card)
+
         mapping_label = QLabel("APS 24HR ROM and Product Grade Field Mappings")
         mapping_label.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(mapping_label)
@@ -4022,14 +4037,47 @@ class UserInputs(QMainWindow):
         self.refresh_aps_grade_field_headers()
 
     def current_24hr_aps_path(self):
-        widget_path = (
-            self.file_path_24hr.text().strip()
-            if hasattr(self, "file_path_24hr")
-            else ""
-        )
-        return widget_path or str(
+        for widget_name in (
+            "data_streams_file_path_24hr",
+            "file_path_24hr",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget_path = widget.text().strip()
+                if widget_path:
+                    return widget_path
+        return str(getattr(self, "file_path_24hr_choice", "") or "").strip()
+
+    def set_24hr_mining_path(
+        self,
+        file_path,
+        reset_agents=False,
+        show_mapping_errors=False,
+    ):
+        """Keep the Data Streams and Guidance 24HR selectors in sync."""
+        normalized_path = str(file_path or "").strip()
+        previous_path = str(
             getattr(self, "file_path_24hr_choice", "") or ""
         ).strip()
+        self.file_path_24hr_choice = normalized_path
+
+        for widget_name in (
+            "data_streams_file_path_24hr",
+            "file_path_24hr",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and widget.text() != normalized_path:
+                widget.setText(normalized_path)
+
+        if reset_agents and normalized_path != previous_path:
+            if hasattr(self, "expit_agent_input"):
+                self.set_24hr_expit_agent_items([], [])
+            self.available_24hr_expit_agents = []
+            self.selected_24hr_expit_agents = []
+
+        self.refresh_aps_grade_field_headers(
+            show_errors=show_mapping_errors
+        )
 
     @staticmethod
     def distinct_aps_csv_headers(path):
@@ -4884,6 +4932,9 @@ class UserInputs(QMainWindow):
         self.file_path_24hr = QLineEdit()
         self.file_path_24hr.setReadOnly(True)
         self.file_path_24hr.setFixedWidth(400)
+        self.file_path_24hr.setText(str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ))
 
         self.file_24hr_button = QPushButton("Browse")
         self.file_24hr_button.setFixedWidth(100)
@@ -5406,10 +5457,11 @@ class UserInputs(QMainWindow):
             "APS Mining.csv (*.csv);;All Files (*)",
         )
         if file_path:
-            self.file_path_24hr.setText(file_path)
-            self.set_24hr_expit_agent_items([], [])
-            self.file_path_24hr_choice = file_path
-            self.refresh_aps_grade_field_headers(show_errors=True)
+            self.set_24hr_mining_path(
+                file_path,
+                reset_agents=True,
+                show_mapping_errors=True,
+            )
 
     def browse_haul_cycle_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -5421,9 +5473,15 @@ class UserInputs(QMainWindow):
         if file_path:
             self.haul_cycle_file_path.setText(file_path)
             self.set_haul_cycle_crusher_items([], [])
+            self.set_haul_cycle_crusher_mapping_items(
+                [], [], use_default=False
+            )
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
-            self.load_haul_cycle_crusher_names(show_messages=False)
+            self.load_haul_cycle_crusher_names(
+                show_messages=False,
+                reset_selection=True,
+            )
 
     def selected_haul_cycle_crusher_names(self):
         if not hasattr(self, "haul_cycle_crusher_input"):
@@ -5464,7 +5522,11 @@ class UserInputs(QMainWindow):
         finally:
             self.haul_cycle_crusher_input.blockSignals(False)
 
-    def load_haul_cycle_crusher_names(self, show_messages=True):
+    def load_haul_cycle_crusher_names(
+        self,
+        show_messages=True,
+        reset_selection=True,
+    ):
         file_path = self.haul_cycle_file_path.text().strip()
         if not file_path:
             QMessageBox.information(
@@ -5484,13 +5546,23 @@ class UserInputs(QMainWindow):
                 f"Unable to read haul-cycle crusher names: {exc}",
             )
             return
-        # Nearest Crusher must be resolved across every available tipping
-        # point. The separate mapping list identifies the planned crusher for
-        # this scenario.
-        self.set_haul_cycle_crusher_items(crusher_names, crusher_names)
+        selected_crushers = (
+            []
+            if reset_selection
+            else self.selected_haul_cycle_crusher_names()
+        )
+        selected_mapping = (
+            []
+            if reset_selection
+            else getattr(self, "haul_cycle_crusher_mapping_choice", "")
+        )
+        self.set_haul_cycle_crusher_items(
+            crusher_names, selected_crushers
+        )
         self.set_haul_cycle_crusher_mapping_items(
             crusher_names,
-            getattr(self, "haul_cycle_crusher_mapping_choice", ""),
+            selected_mapping,
+            use_default=not reset_selection,
         )
         self.refresh_haul_cycle_routes(show_errors=True)
         if getattr(self, "stockpile_data", None):
@@ -5500,7 +5572,7 @@ class UserInputs(QMainWindow):
                 self,
                 "BlendMaster",
                 f"Found {len(crusher_names)} crusher destination(s). "
-                "All are selected by default.",
+                "Select the crusher nodes to use for this scenario.",
             )
         elif show_messages:
             QMessageBox.information(
@@ -5539,14 +5611,19 @@ class UserInputs(QMainWindow):
             return names
         return names if len(names) == 1 else []
 
-    def set_haul_cycle_crusher_mapping_items(self, names, selected=None):
+    def set_haul_cycle_crusher_mapping_items(
+        self,
+        names,
+        selected=None,
+        use_default=True,
+    ):
         if not hasattr(self, "haul_cycle_crusher_mapping_input"):
             return
         names = [str(name).strip() for name in names or [] if str(name).strip()]
         if isinstance(selected, str):
             selected = [selected] if selected.strip() else []
         selected = [str(value).strip() for value in selected or [] if str(value).strip()]
-        if not any(value in names for value in selected):
+        if use_default and not any(value in names for value in selected):
             selected = self.default_haul_cycle_crusher_nodes(names)
         self.haul_cycle_crusher_mapping_input.blockSignals(True)
         self.haul_cycle_crusher_mapping_input.clear()
@@ -6662,7 +6739,7 @@ class UserInputs(QMainWindow):
             or [getattr(self, "crusher_input_choice", "")]
         )
         self.file_path.setText(str(self.file_path_choice or ""))
-        self.file_path_24hr.setText(str(self.file_path_24hr_choice or ""))
+        self.set_24hr_mining_path(self.file_path_24hr_choice)
         self.set_24hr_expit_agent_items(
             getattr(self, "available_24hr_expit_agents", []),
             getattr(self, "selected_24hr_expit_agents", []),
@@ -8770,7 +8847,7 @@ class UserInputs(QMainWindow):
             or site_config.get("24hr_mining_csv")
         )
         if twenty_four_hour_path:
-            self.file_path_24hr.setText(str(twenty_four_hour_path))
+            self.set_24hr_mining_path(str(twenty_four_hour_path))
         if any(key in site_config for key in (
             "selected_24hr_expit_agents",
             "expit_dig_circuits",
@@ -9958,6 +10035,22 @@ class UserInputs(QMainWindow):
                 )
                 AMT_checkbox.setChecked(False)
 
+            # AMT is a representation of a selected stockpile, not a second
+            # independent source.  Keep the two controls consistent so an AMT
+            # selection cannot be silently ignored because Use remained clear.
+            if AMT_checkbox.isChecked():
+                use_checkbox.setChecked(True)
+            AMT_checkbox.toggled.connect(
+                lambda checked, use=use_checkbox: (
+                    use.setChecked(True) if checked else None
+                )
+            )
+            use_checkbox.toggled.connect(
+                lambda checked, amt=AMT_checkbox: (
+                    amt.setChecked(False) if not checked else None
+                )
+            )
+
             # Center the checkbox using a QWidget and layout
             checkbox_widget = QWidget()
             layout = QHBoxLayout(checkbox_widget)
@@ -10343,20 +10436,13 @@ class UserInputs(QMainWindow):
             self.save_active_scenario_state()
             # Enable the next tab (Calendar Tab)
             self.setup_calendar()
-            has_AMT_stockpiles = any(value.get("amt", False) for value in self.updated_stockpile_data.values())
-
-            if has_AMT_stockpiles:
-                self.setup_AMT_stockpile_table()
-                self.set_page_enabled(self.AMT_stockpile_tab_index, True)
-                self.show_page(self.AMT_stockpile_tab_index)  # Switch to AMT tab
-            else:
-                self.hex_sequence_table = []
-                self.hex_sequence_table_argument = []
-                if getattr(self, "project_load_restore_in_progress", False):
-                    self.set_page_enabled(self.database_view_tab_index, True)
-                    self.database_view_refresh_pending = True
-                else:
-                    self.open_database_view()
+            # Database View is deliberately gated by the AMT Stockpiles step.
+            # Even an inventory-only scenario passes through that page so the
+            # setup sequence remains Stockpile Inventories -> AMT Stockpiles ->
+            # Database View and the audit cannot be opened prematurely.
+            self.setup_AMT_stockpile_table()
+            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+            self.show_page(self.AMT_stockpile_tab_index)
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -10980,7 +11066,6 @@ class UserInputs(QMainWindow):
             )
             return
 
-        QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
         self.opening_stockpile_inventories.clear_AMT_stockpile_database()
         self.finish_AMT_stockpile_table(data_source, {})
 
