@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from classes.MaterialDestinationPlan import MaterialDestinationPlan
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.GradeStreams import ANALYTES, STREAMS
 from database.DatabaseContext import get_database_path
 
 class DatabaseManager:
@@ -315,6 +316,14 @@ class DatabaseManager:
         for column in ("selected_grade_stream", "selected_grade_brand", "grade_stream_warnings"):
             if column not in existing_columns:
                 cursor.execute(f"ALTER TABLE optimised_blend_report ADD COLUMN {column} TEXT")
+        for stream in STREAMS:
+            for analyte in ANALYTES:
+                column = f"source_grade_{stream}_{analyte}"
+                if column not in existing_columns:
+                    cursor.execute(
+                        f'ALTER TABLE optimised_blend_report '
+                        f'ADD COLUMN "{column}" REAL'
+                    )
         two_wp_report_columns = {
             "two_wp_active_blend": "TEXT",
             "two_wp_active_blend_product_brand": "TEXT",

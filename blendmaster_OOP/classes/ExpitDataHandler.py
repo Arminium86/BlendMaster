@@ -6,7 +6,11 @@ import snowflake.connector
 from datetime import datetime
 from pandas import DataFrame
 from classes.PeriodManager import PeriodManager
-from classes.GradeStreams import aps_grade_streams, weighted_merge_grade_streams
+from classes.GradeStreams import (
+    aps_grade_streams,
+    normalise_aps_grade_field_mappings,
+    weighted_merge_grade_streams,
+)
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 2
@@ -76,12 +80,18 @@ class ExpitDataHandler:
             ).items()
         }
         self.source_stockpile_fallbacks = {}
-        self.grade_field_mappings = grade_field_mappings or {}
         self.configured_product_brands = configured_product_brands or []
+        self.grade_field_mappings = normalise_aps_grade_field_mappings(
+            grade_field_mappings, self.configured_product_brands
+        )
         mapped_grade_columns = set()
         rom_mappings = self.grade_field_mappings.get("rom", {})
         if isinstance(rom_mappings, dict):
-            mapped_grade_columns.update(value for value in rom_mappings.values() if value)
+            for brand_mappings in rom_mappings.values():
+                if isinstance(brand_mappings, dict):
+                    mapped_grade_columns.update(
+                        value for value in brand_mappings.values() if value
+                    )
         product_mappings = self.grade_field_mappings.get("product", {})
         if isinstance(product_mappings, dict):
             for brand_mappings in product_mappings.values():
@@ -92,6 +102,14 @@ class ExpitDataHandler:
             input_data,
             usecols=lambda column: column in self.TRANSACTION_COLUMNS or column in self.mapped_grade_columns,
         )
+        missing_mapped_columns = sorted(
+            self.mapped_grade_columns - set(self.data.columns)
+        )
+        if missing_mapped_columns:
+            raise ValueError(
+                "APS 24HR grade field mapping column(s) were not found: "
+                + ", ".join(missing_mapped_columns)
+            )
         if not self.data.empty:
             self._preprocess_data()
             self._group_data()
@@ -309,12 +327,6 @@ class ExpitDataHandler:
             input_data,
             usecols=lambda column: column in columns,
         )
-        missing_mapped_columns = sorted(self.mapped_grade_columns - set(self.data.columns))
-        if missing_mapped_columns:
-            raise ValueError(
-                "APS 24HR grade field mapping column(s) were not found: "
-                + ", ".join(missing_mapped_columns)
-            )
         required = {"Destination.Type", "Agent.Name", "Source.Type"}
         if data.empty or not required.issubset(data.columns):
             return []
@@ -1409,6 +1421,35 @@ class ExpitDataHandler:
         # Concatenate the new column with the existing DataFrame
         self.data = pd.concat([self.data, weighted_rate.rename("WeightedRate")], axis=1)
 
+        grade_columns = [
+            column for column in [
+                "Mining.grades_fe",
+                "Mining.grades_si",
+                "Mining.grades_al",
+                "Mining.grades_mn",
+                "Mining.grades_p",
+                *sorted(self.mapped_grade_columns),
+            ]
+            if column in self.data.columns
+        ]
+        weighted_grade_columns = {}
+        weighted_grade_frames = []
+        for index, column in enumerate(grade_columns):
+            numerator = f"__grade_mass_{index}"
+            denominator = f"__grade_tonnes_{index}"
+            numeric_grades = pd.to_numeric(self.data[column], errors="coerce")
+            numeric_tonnes = pd.to_numeric(
+                self.data["Mining.wetTonnes"], errors="coerce"
+            ).fillna(0)
+            valid_tonnes = numeric_tonnes.where(numeric_grades.notna(), 0.0)
+            weighted_grade_frames.extend([
+                (numeric_grades.fillna(0.0) * valid_tonnes).rename(numerator),
+                valid_tonnes.rename(denominator),
+            ])
+            weighted_grade_columns[column] = (numerator, denominator)
+        if weighted_grade_frames:
+            self.data = pd.concat([self.data, *weighted_grade_frames], axis=1)
+
         # Perform basic aggregation
         aggregation = {
             "Time.StartTime": "first",  # First row's start time
@@ -1420,16 +1461,12 @@ class ExpitDataHandler:
             "HaulageResult.TruckPayload": "mean",
             "HaulageResult.NumberOfTrips": "sum",  # Sum trips
             "Mining.wetTonnes": "sum",            # Sum wet tonnes
-            "Mining.grades_fe": "mean",
-            "Mining.grades_si": "mean",
-            "Mining.grades_al": "mean",
-            "Mining.grades_mn": "mean",
-            "Mining.grades_p": "mean",
             "WeightedRate": "sum",
         }
         aggregation.update({
-            column: "mean" for column in self.mapped_grade_columns
-            if column in self.data.columns and column not in aggregation
+            weighted_column: "sum"
+            for pair in weighted_grade_columns.values()
+            for weighted_column in pair
         })
         aggregated_data = self.data.groupby(
             [
@@ -1445,8 +1482,21 @@ class ExpitDataHandler:
             aggregated_data["WeightedRate"] / aggregated_data["Mining.wetTonnes"]
         )
 
-        # Drop the intermediate WeightedRate column
-        aggregated_data = aggregated_data.drop(columns=["WeightedRate"])
+        for column, (numerator, denominator) in weighted_grade_columns.items():
+            aggregated_data[column] = (
+                aggregated_data[numerator]
+                / aggregated_data[denominator].replace(0, pd.NA)
+            )
+
+        # Drop intermediate mass/tonnage columns.
+        aggregated_data = aggregated_data.drop(columns=[
+            "WeightedRate",
+            *[
+                weighted_column
+                for pair in weighted_grade_columns.values()
+                for weighted_column in pair
+            ],
+        ])
 
         # Sort the aggregated data
         self.data = aggregated_data.sort_values(
@@ -1552,6 +1602,7 @@ class ExpitDataHandler:
                     weighted_grade_streams = row_grade_streams
 
                     if fractional_tonnes > 0:
+                        current_fractional_tonnes = fractional_tonnes
                         next_row = group.iloc[i + 1] if i + 1 < len(group) else None
                         if next_row is not None:
                             next_start_time = next_row["Time.StartTime"]
@@ -1561,18 +1612,19 @@ class ExpitDataHandler:
                                 top_up_tonnes = min(payload - fractional_tonnes, group.at[i + 1, "Mining.wetTonnes"])
                                 fractional_tonnes += top_up_tonnes
 
-                                # Weighted average grades for the top-up
-                                total_tonnes = group.at[i, "Mining.wetTonnes"] + top_up_tonnes
+                                # Only the partial payload from the current row
+                                # is mixed with the next row's top-up tonnes.
+                                total_tonnes = current_fractional_tonnes + top_up_tonnes
                                 weighted_grades = {
-                                    "Grade_fe": (row["Mining.grades_fe"] * group.at[i, "Mining.wetTonnes"] +
+                                    "Grade_fe": (row["Mining.grades_fe"] * current_fractional_tonnes +
                                                 next_row["Mining.grades_fe"] * top_up_tonnes) / total_tonnes,
-                                    "Grade_si": (row["Mining.grades_si"] * group.at[i, "Mining.wetTonnes"] +
+                                    "Grade_si": (row["Mining.grades_si"] * current_fractional_tonnes +
                                                 next_row["Mining.grades_si"] * top_up_tonnes) / total_tonnes,
-                                    "Grade_al": (row["Mining.grades_al"] * group.at[i, "Mining.wetTonnes"] +
+                                    "Grade_al": (row["Mining.grades_al"] * current_fractional_tonnes +
                                                 next_row["Mining.grades_al"] * top_up_tonnes) / total_tonnes,
-                                    "Grade_mn": (row["Mining.grades_mn"] * group.at[i, "Mining.wetTonnes"] +
+                                    "Grade_mn": (row["Mining.grades_mn"] * current_fractional_tonnes +
                                                 next_row["Mining.grades_mn"] * top_up_tonnes) / total_tonnes,
-                                    "Grade_p": (row["Mining.grades_p"] * group.at[i, "Mining.wetTonnes"] +
+                                    "Grade_p": (row["Mining.grades_p"] * current_fractional_tonnes +
                                                 next_row["Mining.grades_p"] * top_up_tonnes) / total_tonnes,
                                 }
                                 next_grade_streams = aps_grade_streams(
@@ -1580,7 +1632,7 @@ class ExpitDataHandler:
                                 )
                                 weighted_grade_streams = weighted_merge_grade_streams(
                                     row_grade_streams,
-                                    group.at[i, "Mining.wetTonnes"],
+                                    current_fractional_tonnes,
                                     next_grade_streams,
                                     top_up_tonnes,
                                 )

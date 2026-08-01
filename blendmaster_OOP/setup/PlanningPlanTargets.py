@@ -45,9 +45,14 @@ class PlanningPlanTargets:
             P,
             MN
         FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.PLANNING_PLAN_DATA
-        WHERE CONTAINS(PLANNING_CATEGORY, %s)
-          AND CONTAINS(HORIZON, '2 Week')
+        WHERE UPPER(TRIM(PLANNING_CATEGORY)) = UPPER(TRIM(%s))
+          AND UPPER(TRIM(HORIZON)) = '2 WEEK'
           AND CONTAINS(SCENARIO, %s)
+          AND PERIOD_START < %s
+          AND PERIOD_END > %s
+        QUALIFY COALESCE(VERSION, 0) = MAX(COALESCE(VERSION, 0)) OVER (
+            PARTITION BY SCENARIO, PLANNING_CATEGORY, HORIZON
+        )
         ORDER BY ALL
     """
 
@@ -153,6 +158,9 @@ class PlanningPlanTargets:
             raise ValueError("Crusher contribution ratio must be greater than 0 and no more than 100%.")
 
         scenario = self.latest_wednesday_scenario(start_time)
+        periods = PeriodManager(planning_period_count)
+        periods.calculate_periods(start_time)
+        horizon_end = periods.horizon_end()
         connection = self.inventory_loader.connect_snowflake_with_service_account()
         if connection is None:
             raise ConnectionError("Unable to connect to Snowflake for 2WP product-build targets.")
@@ -161,17 +169,10 @@ class PlanningPlanTargets:
             cursor = connection.cursor()
             try:
                 planning_category = str(planning_category or "OPF Feed")
-                if planning_category == "OPF Feed":
-                    # Retain the legacy execution contract for existing
-                    # integrations while allowing product-stream categories
-                    # to be supplied explicitly.
-                    query = self.QUERY.replace(
-                        "CONTAINS(PLANNING_CATEGORY, %s)",
-                        "CONTAINS(PLANNING_CATEGORY, 'OPF Feed')",
-                    )
-                    cursor.execute(query, (scenario,))
-                else:
-                    cursor.execute(self.QUERY, (planning_category, scenario))
+                cursor.execute(
+                    self.QUERY,
+                    (planning_category, scenario, horizon_end, start_time),
+                )
                 rows = cursor.fetchall()
                 columns = [column[0].upper() for column in cursor.description]
             finally:
@@ -188,9 +189,6 @@ class PlanningPlanTargets:
         if data.empty:
             return []
 
-        periods = PeriodManager(planning_period_count)
-        periods.calculate_periods(start_time)
-        horizon_end = periods.horizon_end()
         data["PERIOD_START"] = self._perth_wall_clock_series(data["PERIOD_START"])
         data["PERIOD_END"] = self._perth_wall_clock_series(data["PERIOD_END"])
         data = data[

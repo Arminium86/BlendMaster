@@ -96,7 +96,17 @@ class DataStreamReconciliation:
         warnings = []
         for brand in requested_brands:
             source_brand = brand
-            brand_frame = frame[frame["BRAND"] == brand] if not frame.empty else frame
+            matching_brands = [
+                available
+                for available in available_brands
+                if available == brand or available.endswith(brand)
+            ]
+            if len(matching_brands) == 1:
+                source_brand = matching_brands[0]
+            brand_frame = (
+                frame[frame["BRAND"] == source_brand]
+                if not frame.empty else frame
+            )
             substituted = False
             if brand_frame.empty and available_brands:
                 # Random as requested, but seeded to make the choice reproducible

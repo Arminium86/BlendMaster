@@ -30,6 +30,67 @@ STREAM_LABELS = {
 }
 DEFAULT_STREAM = "adjusted_product"
 UNBRANDED = "*"
+DEFAULT_PLANNING_CATEGORIES = {
+    "rom": "OPF Feed",
+    "product": "OPF Production",
+}
+
+
+def normalise_planning_categories(value: Any = None) -> Dict[str, str]:
+    """Apply confirmed defaults while preserving configured overrides."""
+    value = value if isinstance(value, Mapping) else {}
+    return {
+        key: str(value.get(key) or default).strip() or default
+        for key, default in DEFAULT_PLANNING_CATEGORIES.items()
+    }
+
+
+def normalise_aps_grade_field_mappings(
+    value: Any = None, brands: Iterable[str] = ()
+) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """Return brand-keyed ROM/product APS header mappings.
+
+    Projects created before brand-aware ROM mapping stored ``rom`` directly as
+    an analyte/header dictionary. Replicate that mapping for every configured
+    brand so those projects continue to produce the same grades.
+    """
+    value = value if isinstance(value, Mapping) else {}
+    configured = configured_brands(brands)
+
+    def analyte_fields(fields: Any) -> Dict[str, str]:
+        fields = fields if isinstance(fields, Mapping) else {}
+        return {
+            analyte: str(fields.get(analyte) or "").strip()
+            for analyte in ANALYTES
+        }
+
+    raw_rom = value.get("rom", {})
+    raw_rom = raw_rom if isinstance(raw_rom, Mapping) else {}
+    legacy_rom = any(analyte in raw_rom for analyte in ANALYTES)
+    raw_product = value.get("product", {})
+    raw_product = raw_product if isinstance(raw_product, Mapping) else {}
+
+    if not configured:
+        nested_brands = [
+            normalise_brand(brand)
+            for section in (raw_rom, raw_product)
+            for brand, fields in section.items()
+            if isinstance(fields, Mapping) and normalise_brand(brand) != UNBRANDED
+        ]
+        configured = list(dict.fromkeys(nested_brands)) or [UNBRANDED]
+
+    rom = {}
+    product = {}
+    for brand in configured:
+        rom_fields = raw_rom if legacy_rom else (
+            raw_rom.get(brand) or raw_rom.get(brand.lower()) or {}
+        )
+        product_fields = (
+            raw_product.get(brand) or raw_product.get(brand.lower()) or {}
+        )
+        rom[brand] = analyte_fields(rom_fields)
+        product[brand] = analyte_fields(product_fields)
+    return {"rom": rom, "product": product}
 
 
 def normalise_brand(value: Any) -> str:
@@ -114,6 +175,91 @@ def normalise_grade_streams(value: Any, fallback: Any = None):
     if not any(result[stream] for stream in STREAMS):
         return legacy_grade_streams(fallback or {})
     return result
+
+
+def grade_stream_vector(
+    grade_streams: Any,
+    stream: str,
+    brand: Any = None,
+    fallback: Any = None,
+) -> Dict[str, Optional[float]]:
+    """Return one raw stream vector without falling through other streams.
+
+    Brand-specific values are preferred, while the unbranded vector remains
+    valid for common streams such as inventory/AMT insitu and modelled ROM.
+    This is intentionally different from :func:`resolve_grade_vector`, which
+    performs the operational fallback chain used by the optimiser.
+    """
+    streams = normalise_grade_streams(grade_streams, fallback)
+    if stream not in STREAMS:
+        return grade_vector()
+    requested_brand = normalise_brand(brand)
+    brand_map = streams.get(stream, {}) or {}
+    candidates = (
+        (requested_brand, UNBRANDED)
+        if requested_brand != UNBRANDED
+        else (UNBRANDED,)
+    )
+    for candidate_brand in candidates:
+        values = brand_map.get(candidate_brand)
+        if isinstance(values, Mapping):
+            return grade_vector(values)
+    return grade_vector()
+
+
+def grade_stream_audit_fields(
+    grade_streams: Any,
+    brand: Any = None,
+    prefix: str = "source_grade_",
+    fallback: Any = None,
+) -> Dict[str, Optional[float]]:
+    """Flatten all five raw vectors for a selected brand into report fields."""
+    return {
+        f"{prefix}{stream}_{analyte}": value
+        for stream in STREAMS
+        for analyte, value in grade_stream_vector(
+            grade_streams, stream, brand, fallback
+        ).items()
+    }
+
+
+def flatten_grade_streams(
+    grade_streams: Any,
+) -> Dict[str, Optional[float]]:
+    """Flatten every stored stream/brand/analyte for SQLite audit tables."""
+    streams = normalise_grade_streams(grade_streams)
+    flattened: Dict[str, Optional[float]] = {}
+    for stream in STREAMS:
+        for brand, values in (streams.get(stream, {}) or {}).items():
+            brand_suffix = ""
+            if brand != UNBRANDED:
+                safe_brand = re.sub(r"[^a-z0-9]+", "_", brand.lower()).strip("_")
+                brand_suffix = f"_{safe_brand}" if safe_brand else ""
+            for analyte, value in grade_vector(values).items():
+                flattened[f"grade_{stream}{brand_suffix}_{analyte}"] = value
+    return flattened
+
+
+def format_grade_stream_vector(
+    grade_streams: Any,
+    stream: str,
+    brand: Any = None,
+) -> str:
+    """Return a compact five-analyte vector for inventory/AMT UI tables."""
+    values = grade_stream_vector(grade_streams, stream, brand)
+    labels = {
+        "fe": "Fe",
+        "si": "SiO₂",
+        "al": "Al₂O₃",
+        "p": "P",
+        "mn": "Mn",
+    }
+    parts = []
+    for analyte in ANALYTES:
+        value = values.get(analyte)
+        rendered = "—" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
+        parts.append(f"{labels[analyte]} {rendered}")
+    return " | ".join(parts)
 
 
 FALLBACK_ORDER = {
@@ -375,22 +521,32 @@ def aps_grade_streams(
     row: Mapping[str, Any], mappings: Any, brands: Iterable[str]
 ):
     """Build authoritative APS ROM/product streams from exact user mappings."""
-    mappings = mappings if isinstance(mappings, Mapping) else {}
-    rom_mapping = mappings.get("rom", {}) if isinstance(mappings.get("rom", {}), Mapping) else {}
-    product_mapping = mappings.get("product", {}) if isinstance(mappings.get("product", {}), Mapping) else {}
+    brands = configured_brands(brands) or [UNBRANDED]
+    mappings = normalise_aps_grade_field_mappings(mappings, brands)
+    rom_mapping = mappings["rom"]
+    product_mapping = mappings["product"]
     insitu = legacy_vector(row)
-    rom = {a: _row_value(row, str(rom_mapping.get(a, ""))) for a in ANALYTES}
-    for a in ANALYTES:
-        if rom[a] is None:
-            rom[a] = insitu[a]
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
-    result["modelled_rom"][UNBRANDED] = copy.deepcopy(rom)
-    result["adjusted_rom"][UNBRANDED] = copy.deepcopy(rom)
-    for brand in configured_brands(brands):
-        fields = product_mapping.get(brand, product_mapping.get(brand.lower(), {}))
-        fields = fields if isinstance(fields, Mapping) else {}
-        product = {a: _row_value(row, str(fields.get(a, ""))) for a in ANALYTES}
+    for brand in brands:
+        rom_fields = rom_mapping.get(brand, {})
+        rom = {
+            analyte: _row_value(row, str(rom_fields.get(analyte, "")))
+            for analyte in ANALYTES
+        }
+        for analyte in ANALYTES:
+            if rom[analyte] is None:
+                rom[analyte] = insitu[analyte]
+        result["modelled_rom"][brand] = copy.deepcopy(rom)
+        result["adjusted_rom"][brand] = copy.deepcopy(rom)
+
+        product_fields = product_mapping.get(brand, {})
+        product = {
+            analyte: _row_value(
+                row, str(product_fields.get(analyte, ""))
+            )
+            for analyte in ANALYTES
+        }
         result["modelled_product"][brand] = copy.deepcopy(product)
         result["adjusted_product"][brand] = copy.deepcopy(product)
     return result
@@ -425,4 +581,3 @@ def weighted_merge_grade_streams(
 
 def grade_streams_to_legacy(streams: Any, selected_stream: str, brand: Any = None):
     return {f"grade_{a}": v for a, v in resolve_grade_vector(streams, selected_stream, brand)[0].items()}
-

@@ -14,6 +14,7 @@ optimizer.
 """
 
 from datetime import timedelta
+from copy import deepcopy
 import time
 from typing import List, Optional
 from types import SimpleNamespace
@@ -1436,6 +1437,7 @@ class Optimizer:
                             "selected_grade_stream": event.selected_grade_stream,
                             "selected_grade_brand": event.selected_grade_brand,
                             "grade_stream_warnings": event.grade_stream_warnings,
+                            "grade_streams": deepcopy(event.grade_streams),
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,
                             "equipment_rate_output": result.x[i]

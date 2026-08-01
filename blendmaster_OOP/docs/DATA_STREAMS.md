@@ -15,9 +15,10 @@ when fallback occurs.
 
 ## Source calculations
 
-APS grade blocks use the exact ROM and brand-specific product headers mapped on
-the Data Streams page. APS grades are authoritative, so no OPF factor is
-applied.
+APS grade blocks use the exact brand-specific ROM and product headers mapped on
+the Data Streams page. Legacy projects with one all-brand ROM mapping replicate
+that mapping across configured brands. APS grades are authoritative, so no OPF
+factor is applied.
 
 Inventory stockpiles use:
 
@@ -49,6 +50,19 @@ weighted by PROD_WMT. Missing brand/analyte results use an available OPF brand
 when possible, otherwise factor 1.0 with a warning. Calculated and user-edited
 effective factors are stored separately.
 
-The product-stream Planning Plan category is intentionally configurable and has
-no default until its authoritative value is confirmed. ROM streams continue to
-default to `OPF Feed`.
+The product-stream Planning Plan category defaults to `OPF Production`; ROM
+streams default to `OPF Feed`. Both remain configurable for APS model variants.
+
+## Audit and reporting
+
+Inventory and AMT setup views show the calculated streams for every configured
+brand. AMT rows also retain whether an inventory instance was matched, the
+matched stockpile/build/timestamp, the match rule, and the internal blend and
+upgrade factors used for the calculation.
+
+Optimised and manual blend reports retain the selected stream and brand, the
+five grades actually used by the solver, and all five analytes for every raw
+stream as `source_grade_<stream>_<analyte>`. The Optimised Blend Sequence
+transaction table exposes the same fields, allowing a reported decision to be
+traced back through adjusted product, modelled product, adjusted ROM, modelled
+ROM and insitu values without re-running the model.

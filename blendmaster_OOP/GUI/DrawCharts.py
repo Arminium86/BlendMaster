@@ -18,7 +18,14 @@ from collections import defaultdict
 from datetime import datetime
 from math import sqrt
 from database.DatabaseContext import get_database_path
-from classes.GradeStreams import weighted_merge_grade_streams
+from classes.GradeStreams import (
+    ANALYTES,
+    STREAMS,
+    UNBRANDED,
+    format_grade_stream_vector,
+    normalise_grade_streams,
+    weighted_merge_grade_streams,
+)
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -1543,8 +1550,43 @@ class DrawGanttChart:
             "crusher_actual_grade_si": "Grade Si (%)",
             "crusher_actual_grade_al": "Grade Al (%)",
             "crusher_actual_grade_p": "Grade P (%)",
-            "crusher_actual_grade_mn": "Grade Mn (%)"
+            "crusher_actual_grade_mn": "Grade Mn (%)",
+            "source": "Source Transaction",
+            "source_type": "Source Type",
+            "selected_grade_stream": "Selected Grade Stream",
+            "selected_grade_brand": "Selected Grade Brand",
         }
+        report_columns = list(self.fetch_data().columns)
+        source_grade_columns = [
+            column for column in report_columns
+            if column.startswith("source_grade_")
+        ]
+        for column in source_grade_columns:
+            column_aliases[column] = (
+                column.replace("source_grade_", "")
+                .replace("_", " ")
+                .title()
+            )
+        self.property_table_columns = [
+            column for column in [
+                "start_datetime", "end_datetime", "blend_ID", "lane",
+                "steady_state_number", "steady_state_duration",
+                "stockpile_component", "source", "source_type",
+                "source_agg", "source_blend_ratio_agg",
+                "selected_grade_stream", "selected_grade_brand",
+                "actual_direct_tip_ratio", "crusher_actual_tonnes",
+                "crusher_rate_output",
+                *source_grade_columns,
+                *[
+                    column for column in report_columns
+                    if column.startswith("crusher_actual_grade_")
+                ],
+            ]
+            if column in report_columns or column in {
+                "lane", "stockpile_component", "source_agg",
+                "source_blend_ratio_agg",
+            }
+        ]
         self.app.layout = html.Div(
             style={
                 'display': 'flex',
@@ -1628,12 +1670,7 @@ class DrawGanttChart:
                             id="property-table",
                             columns=[
                                 {"name": column_aliases.get(col, col), "id": col}  
-                                for col in [
-                                    "start_datetime", "end_datetime", "blend_ID", "lane", "steady_state_number",
-                                    "steady_state_duration", "stockpile_component", "source_agg",
-                                    "source_blend_ratio_agg", "actual_direct_tip_ratio", "crusher_actual_tonnes",
-                                    "crusher_rate_output"
-                                ] + [col for col in self.fetch_data().columns if col.startswith("crusher_actual_grade_")]
+                                for col in self.property_table_columns
                             ],
                             data=[],  # Initially empty
                             style_table={
@@ -1856,24 +1893,31 @@ class DrawGanttChart:
                 return []
             
             # Select only the property table columns
-            data = data[[
-                "start_datetime", "end_datetime", "blend_ID", "lane", "steady_state_number",
-                "steady_state_duration", "stockpile_component", "source_agg",
-                "source_blend_ratio_agg", "actual_direct_tip_ratio", "crusher_actual_tonnes",
-                "crusher_rate_output", "crusher_actual_grade_fe", "crusher_actual_grade_si",
-                "crusher_actual_grade_al", "crusher_actual_grade_p", "crusher_actual_grade_mn",
-            ]].copy()
+            visible_columns = [
+                column for column in self.property_table_columns
+                if column in data.columns
+            ]
+            data = data[visible_columns].copy()
             
             # Apply rounding to specific numeric columns
-            data["steady_state_duration"] = data["steady_state_duration"].round(2)
-            data["actual_direct_tip_ratio"] = data["actual_direct_tip_ratio"].round(2)
-            data["crusher_actual_tonnes"] = data["crusher_actual_tonnes"].round(1)  # Round to 1 decimal point
-            data["crusher_rate_output"] = data["crusher_rate_output"].round(1)  # Round to 1 decimal point
-            data["crusher_actual_grade_fe"] = data["crusher_actual_grade_fe"].round(2)  # Round to 2 decimal points
-            data["crusher_actual_grade_si"] = data["crusher_actual_grade_si"].round(2)
-            data["crusher_actual_grade_al"] = data["crusher_actual_grade_al"].round(2)
-            data["crusher_actual_grade_p"] = data["crusher_actual_grade_p"].round(2)
-            data["crusher_actual_grade_mn"] = data["crusher_actual_grade_mn"].round(2)
+            for column, decimals in {
+                "steady_state_duration": 2,
+                "actual_direct_tip_ratio": 2,
+                "crusher_actual_tonnes": 1,
+                "crusher_rate_output": 1,
+            }.items():
+                if column in data:
+                    data[column] = pd.to_numeric(
+                        data[column], errors="coerce"
+                    ).round(decimals)
+            for column in [
+                value for value in data.columns
+                if value.startswith("source_grade_")
+                or value.startswith("crusher_actual_grade_")
+            ]:
+                data[column] = pd.to_numeric(
+                    data[column], errors="coerce"
+                ).round(4)
             
             data = data.drop_duplicates()
 
@@ -2000,11 +2044,19 @@ class DrawGanttChart:
 class DrawAMTStockpile:
     AMT_COLUMNS = [
         "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
-        "lat", "long", "northing", "easting", "last_update", "hex_updated", "grade_streams_json"
+        "lat", "long", "northing", "easting", "last_update", "hex_updated", "grade_streams_json",
+        "internal_recon_matched", "internal_recon_inventory_stockpile",
+        "internal_recon_inventory_build", "internal_recon_match_rule",
+        "internal_recon_warning", "internal_recon_inventory_transaction_datetime",
     ]
     SELECTED_TABLE_COLUMNS = [
         "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
-        "grade_p", "grade_mn", "hex_count", "chunk_size"
+        "grade_p", "grade_mn", "hex_count", "chunk_size",
+        "inventory_match", "matched_inventory_stockpile", "matched_inventory_build",
+        "matched_inventory_time", "inventory_match_rule",
+        "internal_blend_recon", "internal_upgrade",
+        "modelled_rom_grades", "adjusted_rom_grades",
+        "modelled_product_grades", "adjusted_product_grades",
     ]
 
     def __init__(self, db_path, port, hex_sequence_table, chunk_settings=None):
@@ -2069,8 +2121,49 @@ class DrawAMTStockpile:
         for entry in rows if rows is not None else self.selected_points:
             if not isinstance(entry, dict):
                 continue
+            streams = entry.get("grade_streams") or entry.get("GRADE_STREAMS")
+            normalised = normalise_grade_streams(streams)
+
+            def stream_summary(stream):
+                brand_map = normalised.get(stream, {}) or {}
+                brands = [brand for brand in brand_map if brand != UNBRANDED]
+                if not brands:
+                    return format_grade_stream_vector(normalised, stream)
+                return "; ".join(
+                    f"{brand}: {format_grade_stream_vector(normalised, stream, brand)}"
+                    for brand in brands
+                )
+
+            def factor_summary(prefix):
+                labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+                return " | ".join(
+                    f"{labels[analyte]} {self.to_float(entry.get(f'{prefix}_{analyte}'), 1.0):.4f}"
+                    for analyte in ANALYTES
+                )
+
+            derived = {
+                "inventory_match": (
+                    "Matched" if bool(entry.get("internal_recon_matched"))
+                    else "Not matched - factors 1.0"
+                ),
+                "matched_inventory_stockpile": entry.get("internal_recon_inventory_stockpile", ""),
+                "matched_inventory_build": entry.get("internal_recon_inventory_build", ""),
+                "matched_inventory_time": entry.get(
+                    "internal_recon_inventory_transaction_datetime", ""
+                ),
+                "inventory_match_rule": entry.get("internal_recon_match_rule", ""),
+                "internal_blend_recon": factor_summary("internal_blend_recon"),
+                "internal_upgrade": factor_summary("internal_upgrade"),
+                **{
+                    f"{stream}_grades": stream_summary(stream)
+                    for stream in STREAMS
+                    if stream != "insitu"
+                },
+            }
             display_rows.append({
-                column: self.dash_table_scalar(entry.get(column))
+                column: self.dash_table_scalar(
+                    derived.get(column, entry.get(column))
+                )
                 for column in self.SELECTED_TABLE_COLUMNS
             })
         return display_rows
@@ -2259,6 +2352,24 @@ class DrawAMTStockpile:
             )
             accumulated_tonnes += row_tonnes
 
+        provenance = {}
+        if chunk_rows:
+            first_row = chunk_rows[0]
+            for key in (
+                "internal_recon_matched",
+                "internal_recon_inventory_stockpile",
+                "internal_recon_inventory_build",
+                "internal_recon_inventory_transaction_datetime",
+                "internal_recon_match_rule",
+                "internal_recon_warning",
+            ):
+                provenance[key] = first_row.get(key)
+            for prefix in ("internal_blend_recon", "internal_upgrade"):
+                for analyte in ANALYTES:
+                    provenance[f"{prefix}_{analyte}"] = first_row.get(
+                        f"{prefix}_{analyte}"
+                    )
+
         return {
             "footprint": footprint,
             "sequence": sequence,
@@ -2271,6 +2382,7 @@ class DrawAMTStockpile:
             "chunk_reclaim_hours": self.get_chunk_setting(footprint, "chunk_reclaim_hours"),
             "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
             "grade_streams": weighted_streams,
+            **provenance,
         }
 
     def direction_vector(self, start_point, end_point):
@@ -2460,10 +2572,11 @@ class DrawAMTStockpile:
         if chunk_rows:
             table_data = self.remove_footprint_chunks(footprint, table_data)
             self.selected_points.extend(chunk_rows)
-            table_data.extend(chunk_rows)
             self.update_sequence_counter()
 
-        return table_data, status_message
+        # Keep rich chunk metadata (including grade_streams) only in the
+        # Python model. Dash DataTable accepts scalar cell values exclusively.
+        return self.selected_table_data(), status_message
 
     def member_hexes_from_entry(self, entry):
         member_hexes = entry.get("member_hexes")
@@ -2764,7 +2877,7 @@ class DrawAMTStockpile:
             if not selected_footprint:
                 status_message = "Select a footprint to digitize reclaim and cut directions."
                 self.status_message = status_message
-                return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
+                return self.selected_table_data(), self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
 
             table_data = table_data or []
 
@@ -2915,7 +3028,7 @@ class DrawAMTStockpile:
                     status_message = f"Error processing overlay: {e}"
 
             self.status_message = status_message
-            return table_data, self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
+            return self.selected_table_data(), self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
 
     def generate_scatter_plot(self, selected_footprint, relayout_data, existing_fig, hex_size=15):
 

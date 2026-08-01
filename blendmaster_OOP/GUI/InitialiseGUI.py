@@ -28,6 +28,7 @@ from setup.PlanningPlanTargets import PlanningPlanTargets
 from setup.DataStreamReconciliation import DataStreamReconciliation
 from classes.GradeStreams import (
     ANALYTES,
+    DEFAULT_PLANNING_CATEGORIES,
     DEFAULT_STREAM,
     STREAMS,
     STREAM_LABELS,
@@ -36,6 +37,9 @@ from classes.GradeStreams import (
     internal_product_slot,
     inventory_grade_streams,
     is_dry_plant,
+    format_grade_stream_vector,
+    normalise_aps_grade_field_mappings,
+    normalise_planning_categories,
     numeric,
 )
 import pandas as pd, sqlite3
@@ -1217,10 +1221,10 @@ class UserInputs(QMainWindow):
         self.capture_active_manual_plan_state()
         if hasattr(self, "data_stream_selector"):
             self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
-            self.data_stream_planning_categories = {
-                "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
-                "product": self.product_planning_category_input.text().strip(),
-            }
+            self.data_stream_planning_categories = normalise_planning_categories({
+                "rom": self.rom_planning_category_input.text(),
+                "product": self.product_planning_category_input.text(),
+            })
             self.capture_aps_grade_mapping_table()
             if self.historical_recon_factors:
                 self.capture_recon_factor_table()
@@ -1468,8 +1472,9 @@ class UserInputs(QMainWindow):
             self.selected_data_stream = str(
                 state.get("selected_data_stream") or DEFAULT_STREAM
             )
-            self.aps_grade_field_mappings = copy.deepcopy(
-                state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+            self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
+                state.get("aps_grade_field_mappings"),
+                self.product_brand_labels_choice,
             )
             self.historical_recon_factors = copy.deepcopy(
                 state.get("historical_recon_factors") or {}
@@ -1477,9 +1482,8 @@ class UserInputs(QMainWindow):
             self.historical_recon_warnings = copy.deepcopy(
                 state.get("historical_recon_warnings") or []
             )
-            self.data_stream_planning_categories = copy.deepcopy(
+            self.data_stream_planning_categories = normalise_planning_categories(
                 state.get("data_stream_planning_categories")
-                or {"rom": "OPF Feed", "product": ""}
             )
             self.product_build_settings = copy.deepcopy(state.get("product_build_settings") or [])
             self.auto_load_2wp_targets_choice = bool(
@@ -1641,7 +1645,9 @@ class UserInputs(QMainWindow):
                 self.data_stream_planning_categories.get("rom", "OPF Feed")
             )
             self.product_planning_category_input.setText(
-                self.data_stream_planning_categories.get("product", "")
+                self.data_stream_planning_categories.get(
+                    "product", DEFAULT_PLANNING_CATEGORIES["product"]
+                )
             )
             self.populate_aps_grade_mapping_table()
             self.populate_recon_factor_table()
@@ -3105,11 +3111,12 @@ class UserInputs(QMainWindow):
             self.data_stream_planning_categories.get("rom", "OPF Feed")
         )
         self.product_planning_category_input = QLineEdit(
-            self.data_stream_planning_categories.get("product", "")
+            self.data_stream_planning_categories.get(
+                "product", DEFAULT_PLANNING_CATEGORIES["product"]
+            )
         )
-        self.product_planning_category_input.setPlaceholderText("To be confirmed")
         self.product_planning_category_input.setToolTip(
-            "The product-stream Planning Plan category is configurable until the authoritative value is confirmed."
+            "Defaults to OPF Production and can be overridden for a different APS model."
         )
         self.rom_planning_category_input.editingFinished.connect(
             self.schedule_data_stream_refresh
@@ -3121,7 +3128,7 @@ class UserInputs(QMainWindow):
         selection_layout.addRow("Product Planning Category:", self.product_planning_category_input)
         layout.addWidget(selection_card)
 
-        mapping_label = QLabel("APS 24HR ROM and Product Header Mappings")
+        mapping_label = QLabel("APS 24HR ROM and Product Grade Field Mappings")
         mapping_label.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(mapping_label)
         self.aps_grade_mapping_table = QTableWidget()
@@ -3183,8 +3190,14 @@ class UserInputs(QMainWindow):
         if table is None:
             return
         brands = configured_brands(self.product_brand_labels_choice)
-        mappings = self.aps_grade_field_mappings or {"rom": {}, "product": {}}
-        rows = [("ROM", "All", mappings.get("rom", {}))]
+        mappings = normalise_aps_grade_field_mappings(
+            self.aps_grade_field_mappings, brands
+        )
+        self.aps_grade_field_mappings = copy.deepcopy(mappings)
+        rows = [
+            ("ROM", brand, (mappings.get("rom", {}) or {}).get(brand, {}))
+            for brand in brands
+        ]
         rows.extend(
             ("Product", brand, (mappings.get("product", {}) or {}).get(brand, {}))
             for brand in brands
@@ -3208,11 +3221,13 @@ class UserInputs(QMainWindow):
                 analyte: str(table.item(row, column).text() if table.item(row, column) else "").strip()
                 for column, analyte in enumerate(ANALYTES, start=2)
             }
-            if stream == "rom":
-                mappings["rom"] = fields
-            elif brand:
+            if stream == "rom" and brand:
+                mappings["rom"][brand] = fields
+            elif stream == "product" and brand:
                 mappings["product"][brand] = fields
-        self.aps_grade_field_mappings = mappings
+        self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
+            mappings, self.product_brand_labels_choice
+        )
 
     def populate_recon_factor_table(self):
         table = self.recon_factor_table
@@ -3292,8 +3307,14 @@ class UserInputs(QMainWindow):
         stream = self.selected_data_stream
         category_key = "product" if stream in {"modelled_product", "adjusted_product"} else "rom"
         if category_key == "product":
-            return str(self.data_stream_planning_categories.get("product") or "").strip()
-        return str(self.data_stream_planning_categories.get("rom") or "OPF Feed").strip()
+            return str(
+                self.data_stream_planning_categories.get("product")
+                or DEFAULT_PLANNING_CATEGORIES["product"]
+            ).strip()
+        return str(
+            self.data_stream_planning_categories.get("rom")
+            or DEFAULT_PLANNING_CATEGORIES["rom"]
+        ).strip()
 
     def schedule_data_stream_refresh(self, *_args):
         if (
@@ -3317,10 +3338,10 @@ class UserInputs(QMainWindow):
                         overrides[(brand, factor_type, analyte)] = factor_record.get("effective")
         self.data_stream_effective_overrides = overrides
         self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
-        self.data_stream_planning_categories = {
-            "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
-            "product": self.product_planning_category_input.text().strip(),
-        }
+        self.data_stream_planning_categories = normalise_planning_categories({
+            "rom": self.rom_planning_category_input.text(),
+            "product": self.product_planning_category_input.text(),
+        })
         self.data_streams_submit_button.setEnabled(False)
         self.run_background_task(
             "Calculating OPF blend and regression reconciliation factors...",
@@ -3394,6 +3415,7 @@ class UserInputs(QMainWindow):
         self.data_stream_target_errors = result.get("target_errors", {})
         self.populate_recon_factor_table()
         display_warnings = list(self.historical_recon_warnings)
+        display_warnings.extend(self.aps_grade_mapping_warnings())
         display_warnings.extend(
             f"2WP targets ({crusher}): {message}"
             for crusher, message in self.data_stream_target_errors.items()
@@ -3422,6 +3444,32 @@ class UserInputs(QMainWindow):
         })
 
     def apply_grade_streams_to_inventory(self):
+        source_prefixes = tuple(
+            f"{name}:" for name in (self.stockpile_data or {})
+        )
+
+        def obsolete_brand_alias_warning(warning):
+            marker = ": no history in 30 days; using "
+            text = str(warning or "")
+            if marker not in text:
+                return False
+            requested = text.split(marker, 1)[0].rsplit(" / ", 1)[-1].strip().upper()
+            source = text.split(marker, 1)[1].rstrip(".").strip().upper()
+            return bool(requested and source.endswith(requested))
+
+        self.historical_recon_warnings = [
+            warning
+            for warning in (self.historical_recon_warnings or [])
+            if (
+                (not source_prefixes or not str(warning).startswith(source_prefixes))
+                and not str(warning).startswith("APS 24HR grade mapping:")
+                and not obsolete_brand_alias_warning(warning)
+            )
+        ]
+        self.historical_recon_warnings.extend(
+            self.aps_grade_mapping_warnings()
+        )
+        self.data_stream_source_warnings = {}
         for name, row in (self.stockpile_data or {}).items():
             streams = inventory_grade_streams(
                 row,
@@ -3431,10 +3479,34 @@ class UserInputs(QMainWindow):
             )
             row["GRADE_STREAMS"] = streams
             row["grade_streams"] = streams
-            self.historical_recon_warnings.extend(
-                self.inventory_stream_warnings(name, row)
-            )
-        self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
+            warnings = self.inventory_stream_warnings(name, row)
+            row["GRADE_STREAM_WARNINGS"] = warnings
+            row["grade_stream_warnings"] = warnings
+            if warnings:
+                self.data_stream_source_warnings[name] = warnings
+
+    def aps_grade_mapping_warnings(self):
+        """Summarise missing APS fields without flooding Decision Point logs."""
+        if not str(getattr(self, "file_path_24hr_choice", "") or "").strip():
+            return []
+        mappings = normalise_aps_grade_field_mappings(
+            getattr(self, "aps_grade_field_mappings", None),
+            self.product_brand_labels_choice,
+        )
+        warnings = []
+        for brand in configured_brands(self.product_brand_labels_choice):
+            for stream, label in (("rom", "ROM"), ("product", "Product")):
+                fields = (mappings.get(stream, {}) or {}).get(brand, {}) or {}
+                missing = [
+                    analyte for analyte in ANALYTES
+                    if not str(fields.get(analyte) or "").strip()
+                ]
+                if missing:
+                    warnings.append(
+                        f"APS 24HR grade mapping: {brand} {label} is missing "
+                        f"{', '.join(missing)}; APS sources fall back independently per analyte."
+                    )
+        return warnings
 
     def inventory_stream_warnings(self, name, row):
         row = row or {}
@@ -3473,10 +3545,10 @@ class UserInputs(QMainWindow):
 
     def handle_data_streams_submit(self):
         self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
-        self.data_stream_planning_categories = {
-            "rom": self.rom_planning_category_input.text().strip() or "OPF Feed",
-            "product": self.product_planning_category_input.text().strip(),
-        }
+        self.data_stream_planning_categories = normalise_planning_categories({
+            "rom": self.rom_planning_category_input.text(),
+            "product": self.product_planning_category_input.text(),
+        })
         self.capture_aps_grade_mapping_table()
         self.capture_recon_factor_table()
         self.apply_grade_streams_to_inventory()
@@ -4021,7 +4093,7 @@ class UserInputs(QMainWindow):
         self.haul_cycle_crusher_button = QPushButton("Get Crusher Names")
         self.haul_cycle_crusher_button.setMinimumWidth(170)
         self.haul_cycle_crusher_button.clicked.connect(
-            self.load_haul_cycle_crusher_names
+            lambda: self.load_haul_cycle_crusher_names(show_messages=True)
         )
         self.haul_cycle_crusher_input = QListWidget()
         self.haul_cycle_crusher_input.setSelectionMode(
@@ -4232,7 +4304,10 @@ class UserInputs(QMainWindow):
         )
         haul_cycles_ready = (
             not self.haul_cycle_file_path.text().strip()
-            or bool(self.selected_haul_cycle_crusher_names())
+            or (
+                bool(self.selected_haul_cycle_crusher_names())
+                and bool(self.current_haul_cycle_crusher_node())
+            )
         )
         product_guidance_ready = (
             not self.file_path.text().strip()
@@ -4419,8 +4494,7 @@ class UserInputs(QMainWindow):
             self.set_haul_cycle_crusher_items([], [])
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
-            if getattr(self, "stockpile_data", None):
-                self.setup_stockpile_table()
+            self.load_haul_cycle_crusher_names(show_messages=False)
 
     def selected_haul_cycle_crusher_names(self):
         if not hasattr(self, "haul_cycle_crusher_input"):
@@ -4461,7 +4535,7 @@ class UserInputs(QMainWindow):
         finally:
             self.haul_cycle_crusher_input.blockSignals(False)
 
-    def load_haul_cycle_crusher_names(self):
+    def load_haul_cycle_crusher_names(self, show_messages=True):
         file_path = self.haul_cycle_file_path.text().strip()
         if not file_path:
             QMessageBox.information(
@@ -4481,10 +4555,10 @@ class UserInputs(QMainWindow):
                 f"Unable to read haul-cycle crusher names: {exc}",
             )
             return
-        previous = self.selected_haul_cycle_crusher_names()
-        retained = [name for name in previous if name in crusher_names]
-        selected = retained or crusher_names
-        self.set_haul_cycle_crusher_items(crusher_names, selected)
+        # Nearest Crusher must be resolved across every available tipping
+        # point. The separate mapping list identifies the planned crusher for
+        # this scenario.
+        self.set_haul_cycle_crusher_items(crusher_names, crusher_names)
         self.set_haul_cycle_crusher_mapping_items(
             crusher_names,
             getattr(self, "haul_cycle_crusher_mapping_choice", ""),
@@ -4492,14 +4566,14 @@ class UserInputs(QMainWindow):
         self.refresh_haul_cycle_routes(show_errors=True)
         if getattr(self, "stockpile_data", None):
             self.setup_stockpile_table()
-        if crusher_names:
+        if crusher_names and show_messages:
             QMessageBox.information(
                 self,
                 "BlendMaster",
                 f"Found {len(crusher_names)} crusher destination(s). "
                 "All are selected by default.",
             )
-        else:
+        elif show_messages:
             QMessageBox.information(
                 self,
                 "BlendMaster",
@@ -5489,6 +5563,13 @@ class UserInputs(QMainWindow):
             return False, (
                 "Load and select at least one Haul Infinity crusher."
             )
+        if (
+            self.haul_cycle_file_path_choice
+            and not self.haul_cycle_crusher_mapping_choice
+        ):
+            return False, (
+                "Select the planned tipping-point crusher for this scenario."
+            )
         if self.reevaluate_aps_direct_tip_choice:
             selected_destinations = self.aps_direct_tip_crusher_choice
             if not selected_destinations:
@@ -5802,6 +5883,7 @@ class UserInputs(QMainWindow):
         self.AMT_chunk_settings = {}
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
+        self.data_stream_source_warnings = {}
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}
         self.hex_sequence_table = []
@@ -5885,6 +5967,12 @@ class UserInputs(QMainWindow):
         self.stockpile_data = stockpile_data
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
+        # Project restore must hydrate Data Streams before capturing the active
+        # scenario. Otherwise the still-default mapping widget overwrites the
+        # mappings that were just read from the project file.
+        if restoring_project:
+            self.populate_aps_grade_mapping_table()
+            self.populate_recon_factor_table()
         if self.haul_cycle_file_path_choice:
             self.refresh_haul_cycle_routes(show_errors=True)
         else:
@@ -5963,6 +6051,14 @@ class UserInputs(QMainWindow):
         else:
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
+
+        default_use = self.default_stockpile_use_for_active_crusher(
+            self.stockpile_data
+        )
+        if default_use is not None:
+            # Guidance is submitted before the user reaches Stockpiles, so
+            # replace any checkbox defaults captured by earlier setup pages.
+            self.stockpile_data_use_column = default_use
 
         self.setup_stockpile_table()
         self.set_page_enabled(self.stockpile_tab_index, True)
@@ -8212,8 +8308,9 @@ class UserInputs(QMainWindow):
         loaded_state["selected_data_stream"] = str(
             loaded_state.get("selected_data_stream") or DEFAULT_STREAM
         )
-        loaded_state["aps_grade_field_mappings"] = copy.deepcopy(
-            loaded_state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+        loaded_state["aps_grade_field_mappings"] = normalise_aps_grade_field_mappings(
+            loaded_state.get("aps_grade_field_mappings"),
+            loaded_state["product_brand_labels_choice"],
         )
         loaded_state["historical_recon_factors"] = copy.deepcopy(
             loaded_state.get("historical_recon_factors") or {}
@@ -8221,9 +8318,8 @@ class UserInputs(QMainWindow):
         loaded_state["historical_recon_warnings"] = list(
             loaded_state.get("historical_recon_warnings") or []
         )
-        loaded_state["data_stream_planning_categories"] = copy.deepcopy(
+        loaded_state["data_stream_planning_categories"] = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
-            or {"rom": "OPF Feed", "product": ""}
         )
         if loaded_state.get("product_build_settings") is None:
             loaded_state["product_build_settings"] = []
@@ -8805,6 +8901,7 @@ class UserInputs(QMainWindow):
             "2WP Brand",
             "Nearest Crusher",
             "Build",
+            "Inventory Grade Timestamp",
             "Balance (WMT)",
             "Grade Fe (%)",
             "Grade Si (%)",
@@ -8812,6 +8909,13 @@ class UserInputs(QMainWindow):
             "Grade P (%)",
             "Grade Mn (%)",
         ]
+        headers.append("Modelled ROM Grades")
+        for brand in configured_brands(self.product_brand_labels_choice):
+            headers.extend([
+                f"Adjusted ROM Grades ({brand})",
+                f"Modelled Product Grades ({brand})",
+                f"Adjusted Product Grades ({brand})",
+            ])
         if self.is_total_feed_operating_crusher():
             headers.append("Max Reclaim Rate (t/h)")
         headers.append("Reclaim Threshold (WMT)")
@@ -8832,7 +8936,7 @@ class UserInputs(QMainWindow):
         return text
 
     def default_stockpile_use_for_active_crusher(self, stockpile_data):
-        """Select only stockpiles whose resolved nearest crusher is active."""
+        """Select stockpiles matching the planned crusher and brand guidance."""
         mapped_nodes = {
             self.normalized_crusher_display_name(value)
             for value in self.current_haul_cycle_crusher_node()
@@ -8863,6 +8967,14 @@ class UserInputs(QMainWindow):
                     )
                 )
                 in mapped_nodes
+                and bool(
+                    attributes.get("aps_brand")
+                    or attributes.get("APS_BRAND")
+                    or attributes.get("aps_brand_proportions")
+                    or attributes.get("APS_BRAND_PROPORTIONS")
+                    or attributes.get("aps_brand_summary")
+                    or attributes.get("APS_BRAND_SUMMARY")
+                )
             )
             for stockpile_name, attributes in (stockpile_data or {}).items()
         }
@@ -8973,24 +9085,22 @@ class UserInputs(QMainWindow):
             )
 
             # Attributes (Balance and Grades, Center-aligned)
-            keys = ["BUILD", "BALANCE", "GRADE_FE", "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN"]
+            keys = [
+                "BUILD", "TRANSACTION_DATETIME", "BALANCE", "GRADE_FE",
+                "GRADE_SI", "GRADE_AL", "GRADE_P", "GRADE_MN",
+            ]
        
             for col_idx, key in enumerate(
                 keys,
                 start=headers.index("Build"),
             ):
 
-                try:
-                    value = attributes[key]
-                except KeyError:
-                    # Transform keys and retry
-                    keys = [k.lower() for k in keys]  # Transform all keys to lowercase
-                    if key.lower() in attributes:
-                        value = attributes[key.lower()]  # Try accessing with the transformed key
-                    else:
-                        # Show error message if the key is still not found
-                        QMessageBox.warning(self, "Error", f"Unable to find value for key: {key}")
-                        value = 0  # Or handle the absence of value appropriately
+                value = attributes.get(key, attributes.get(key.lower()))
+                if value is None:
+                    # Older project snapshots do not have every field added by
+                    # later inventory queries.  Keep them loadable and render a
+                    # neutral value instead of opening one modal per stockpile.
+                    value = "" if key in {"BUILD", "TRANSACTION_DATETIME"} else 0
 
                 if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
@@ -9010,6 +9120,12 @@ class UserInputs(QMainWindow):
                     build_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     build_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, build_item)
+
+                elif key == "TRANSACTION_DATETIME" or key == "transaction_datetime":
+                    timestamp_item = QTableWidgetItem(str(value or ""))
+                    timestamp_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    timestamp_item.setTextAlignment(Qt.AlignCenter)
+                    self.stockpile_table.setItem(row_idx, col_idx, timestamp_item)
                 
                 else:
                     # Round grade values to 2 decimal points
@@ -9018,6 +9134,35 @@ class UserInputs(QMainWindow):
                     grade_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     grade_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, grade_item)
+
+            streams = attributes.get("grade_streams") or attributes.get("GRADE_STREAMS")
+            modelled_rom_brand = (
+                configured_brands(self.product_brand_labels_choice) or [None]
+            )[0]
+            stream_cells = {
+                "Modelled ROM Grades": format_grade_stream_vector(
+                    streams, "modelled_rom", modelled_rom_brand
+                )
+            }
+            for brand in configured_brands(self.product_brand_labels_choice):
+                stream_cells.update({
+                    f"Adjusted ROM Grades ({brand})": format_grade_stream_vector(
+                        streams, "adjusted_rom", brand
+                    ),
+                    f"Modelled Product Grades ({brand})": format_grade_stream_vector(
+                        streams, "modelled_product", brand
+                    ),
+                    f"Adjusted Product Grades ({brand})": format_grade_stream_vector(
+                        streams, "adjusted_product", brand
+                    ),
+                })
+            for caption, display_value in stream_cells.items():
+                column = headers.index(caption)
+                item = QTableWidgetItem(display_value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setToolTip(display_value)
+                self.stockpile_table.setItem(row_idx, column, item)
 
             if self.is_total_feed_operating_crusher():
                 max_reclaim_rate = attributes.get(
@@ -9765,10 +9910,7 @@ class UserInputs(QMainWindow):
 
         return True
 
-    def setup_AMT_stockpile_table(self):
-        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
-        
-        # Define Headers (Add "Use" Column)
+    def amt_stockpile_headers(self):
         headers = [
             "AMT Stockpiles",
             "Average Reclaim Rate (t/h)",
@@ -9776,7 +9918,97 @@ class UserInputs(QMainWindow):
             "Chunk Size (WMT)",
             "Internal Blend Recon",
             "Internal Upgrade",
+            "Inventory Match",
+            "Matched Inventory Stockpile",
+            "Matched Inventory Build",
+            "Matched Inventory Time",
+            "Modelled ROM Grades",
         ]
+        for brand in configured_brands(self.product_brand_labels_choice):
+            headers.extend([
+                f"Adjusted ROM Grades ({brand})",
+                f"Modelled Product Grades ({brand})",
+                f"Adjusted Product Grades ({brand})",
+            ])
+        return headers
+
+    def ensure_AMT_map_panel(self, connect_table=True):
+        """Create (or recover) the AMT map panel independently of data loading."""
+        if (
+            connect_table
+            and not getattr(self, "_amt_chunk_cell_change_connected", False)
+        ):
+            self.AMT_stockpile_table.cellChanged.connect(
+                self.handle_AMT_chunk_cell_change
+            )
+            self._amt_chunk_cell_change_connected = True
+
+        required_widgets = (
+            "AMT_map_view",
+            "AMT_map_frame",
+            "AMT_stockpile_tab_vertical_layout",
+            "load_AMT_button",
+            "submit_AMT_button",
+        )
+        if all(getattr(self, name, None) is not None for name in required_widgets):
+            self.AMT_map_frame.show()
+            self.AMT_map_view.show()
+            self.load_AMT_button.show()
+            self.submit_AMT_button.show()
+            self.setup_AMT_stockpile_table_first_call = False
+            return
+
+        # AMT map view inside a QFrame
+        self.AMT_map_view = CustomWebEngineView()
+
+        # Frame to surround the map view
+        self.AMT_map_frame = QFrame()
+        self.AMT_map_frame.setObjectName("amtMapFrame")
+        self.AMT_map_frame.setFrameShape(QFrame.NoFrame)
+        frame_layout = QVBoxLayout()
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(0)
+        frame_layout.addWidget(self.AMT_map_view, stretch=1)
+        self.AMT_map_frame.setLayout(frame_layout)
+
+        # Vertical layout for the map and its actions.
+        self.AMT_stockpile_tab_vertical_layout = QVBoxLayout()
+        self.AMT_stockpile_tab_vertical_layout.setContentsMargins(0, 0, 0, 0)
+        self.AMT_stockpile_tab_vertical_layout.setSpacing(8)
+        self.AMT_stockpile_tab_vertical_layout.addWidget(self.AMT_map_frame)
+
+        self.load_AMT_button = QPushButton("Load or Update AMT Map")
+        self.load_AMT_button.setObjectName("loadAMTMapButton")
+        self.style_green_action_button(self.load_AMT_button, 220)
+        self.load_AMT_button.clicked.connect(self.load_AMT_map)
+
+        self.submit_AMT_button = QPushButton("Submit")
+        self.submit_AMT_button.setObjectName("submitAMTChunksButton")
+        self.submit_AMT_button.setMinimumWidth(110)
+        self.submit_AMT_button.clicked.connect(self.store_hex_sequence_table)
+
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addWidget(self.load_AMT_button)
+        button_layout.addWidget(self.submit_AMT_button)
+        button_layout.addStretch()
+        self.AMT_stockpile_tab_vertical_layout.addLayout(button_layout)
+
+        self.AMT_stockpile_tab_layout.addLayout(
+            self.AMT_stockpile_tab_vertical_layout,
+            stretch=1,
+        )
+        self.setup_AMT_stockpile_table_first_call = False
+
+    def setup_AMT_stockpile_table(self):
+        """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+
+        # The project-load path may complete synchronously from saved AMT
+        # rows.  Build the host panel before either that restore or an async
+        # Snowflake fetch so an interrupted load cannot leave the tab blank.
+        self.ensure_AMT_map_panel(connect_table=False)
+
+        headers = self.amt_stockpile_headers()
         self.AMT_stockpile_table.setColumnCount(len(headers))
         self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
         self.AMT_stockpile_table.verticalHeader().setVisible(False)
@@ -9861,6 +10093,7 @@ class UserInputs(QMainWindow):
         self.show_error_popup(error_message)
 
     def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
+        headers = self.amt_stockpile_headers()
         self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
             data_source, AMT_stockpile_data or {}
         )
@@ -9900,7 +10133,17 @@ class UserInputs(QMainWindow):
                 chunk_size_item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row_idx, 3, chunk_size_item)
 
-                inventory_row = (self.stockpile_data or {}).get(stockpile_name, attributes)
+                footprint_rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
+                provenance = footprint_rows[0] if footprint_rows else {}
+                matched_name = str(
+                    provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
+                    or provenance.get("internal_recon_inventory_stockpile")
+                    or ""
+                )
+                inventory_row = (self.stockpile_data or {}).get(
+                    matched_name,
+                    (self.stockpile_data or {}).get(stockpile_name, attributes),
+                )
                 blend_summary, upgrade_summary = self.inventory_internal_factor_summary(inventory_row)
                 for column, summary in ((4, blend_summary), (5, upgrade_summary)):
                     factor_item = QTableWidgetItem(summary)
@@ -9908,61 +10151,71 @@ class UserInputs(QMainWindow):
                     factor_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     self.AMT_stockpile_table.setItem(row_idx, column, factor_item)
 
+                match_status = bool(
+                    provenance.get("INTERNAL_RECON_MATCHED")
+                    if "INTERNAL_RECON_MATCHED" in provenance
+                    else provenance.get("internal_recon_matched", False)
+                )
+                provenance_cells = {
+                    "Inventory Match": "Matched" if match_status else "Not matched - factors 1.0",
+                    "Matched Inventory Stockpile": matched_name,
+                    "Matched Inventory Build": str(
+                        provenance.get("INTERNAL_RECON_INVENTORY_BUILD")
+                        or provenance.get("internal_recon_inventory_build")
+                        or ""
+                    ),
+                    "Matched Inventory Time": str(
+                        provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME")
+                        or provenance.get("internal_recon_inventory_transaction_datetime")
+                        or ""
+                    ),
+                }
+                streams = (
+                    provenance.get("GRADE_STREAMS")
+                    or provenance.get("grade_streams")
+                    or {}
+                )
+                first_brand = (
+                    configured_brands(self.product_brand_labels_choice) or [None]
+                )[0]
+                provenance_cells["Modelled ROM Grades"] = format_grade_stream_vector(
+                    streams, "modelled_rom", first_brand
+                )
+                for brand in configured_brands(self.product_brand_labels_choice):
+                    provenance_cells.update({
+                        f"Adjusted ROM Grades ({brand})": format_grade_stream_vector(
+                            streams, "adjusted_rom", brand
+                        ),
+                        f"Modelled Product Grades ({brand})": format_grade_stream_vector(
+                            streams, "modelled_product", brand
+                        ),
+                        f"Adjusted Product Grades ({brand})": format_grade_stream_vector(
+                            streams, "adjusted_product", brand
+                        ),
+                    })
+                for caption, display_value in provenance_cells.items():
+                    column = headers.index(caption)
+                    item = QTableWidgetItem(display_value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    item.setToolTip(display_value)
+                    self.AMT_stockpile_table.setItem(row_idx, column, item)
+
         # Resize Columns
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        for column in range(len(headers)):
+            self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeToContents
+            )
         self.store_AMT_chunk_settings()
+        self.ensure_AMT_map_panel()
 
-        if self.setup_AMT_stockpile_table_first_call:
-            self.AMT_stockpile_table.cellChanged.connect(self.handle_AMT_chunk_cell_change)
-
-            # AMT map view inside a QFrame
-            self.AMT_map_view = CustomWebEngineView()
-
-            # Frame to surround the map view
-            self.AMT_map_frame = QFrame()
-            self.AMT_map_frame.setObjectName("amtMapFrame")
-            self.AMT_map_frame.setFrameShape(QFrame.NoFrame)
-            frame_layout = QVBoxLayout()
-            frame_layout.setContentsMargins(8, 8, 8, 8)
-            frame_layout.setSpacing(0)
-            frame_layout.addWidget(self.AMT_map_view, stretch=1)
-            self.AMT_map_frame.setLayout(frame_layout)
-
-            # Horizontal layout for map view and button
-            self.AMT_stockpile_tab_vertical_layout = QVBoxLayout()
-            self.AMT_stockpile_tab_vertical_layout.setContentsMargins(0, 0, 0, 0)
-            self.AMT_stockpile_tab_vertical_layout.setSpacing(8)
-            self.AMT_stockpile_tab_vertical_layout.addWidget(self.AMT_map_frame)
-
-            # Add a button to load the chart
-            self.load_AMT_button = QPushButton("Load or Update AMT Map")
-            self.load_AMT_button.setObjectName("loadAMTMapButton")
-            self.style_green_action_button(self.load_AMT_button, 220)
-            self.load_AMT_button.clicked.connect(self.load_AMT_map)  # Connect button to function
-
-            # Add Submit Button at the Bottom
-            submit_button = QPushButton("Submit")
-            submit_button.setObjectName("submitAMTChunksButton")
-            submit_button.setMinimumWidth(110)
-            submit_button.clicked.connect(self.store_hex_sequence_table)
-
-            # Align button to the bottom-left using layout
-            button_layout = QHBoxLayout()
-            button_layout.setContentsMargins(0, 0, 0, 0)
-            button_layout.addWidget(self.load_AMT_button)
-            button_layout.addWidget(submit_button)
-            button_layout.addStretch()  # Push the button to the left
-            self.AMT_stockpile_tab_vertical_layout.addLayout(button_layout)
-
-            # Add the vertical layout to the main layout
-            self.AMT_stockpile_tab_layout.addLayout(self.AMT_stockpile_tab_vertical_layout, stretch=1)
-            
-            self.setup_AMT_stockpile_table_first_call = False  
+        # A freshly created web view has no URL.  Restored projects already
+        # contain their AMT rows and selected chunks, so reconnect the view
+        # automatically instead of requiring an otherwise unexplained button
+        # click.  The second reload covers slower Dash start-up on some PCs.
+        if getattr(self, "project_load_restore_in_progress", False):
+            QTimer.singleShot(250, self.reload_AMT_map_view)
+            QTimer.singleShot(1500, self.reload_AMT_map_view)
 
     def inventory_internal_factor_summary(self, row):
         row = row or {}
@@ -10006,20 +10259,63 @@ class UserInputs(QMainWindow):
         for footprint, rows in enriched.items():
             footprint_key = compact(footprint)
             inventory_row = None
+            inventory_name = ""
+            match_rule = ""
+            exact = inventory_by_name.get(str(footprint).strip().upper())
+            if exact:
+                inventory_row = exact
+                inventory_name = str(footprint).strip()
+                match_rule = "exact stockpile name"
             for name, candidate in inventory_by_name.items():
+                if inventory_row is not None:
+                    break
                 build = compact((candidate or {}).get("BUILD") or (candidate or {}).get("build"))
                 name_key = compact(name)
-                if name_key == footprint_key or name_key in footprint_key or footprint_key in name_key or (build and build in footprint_key):
+                if build and build in footprint_key:
                     inventory_row = candidate
+                    inventory_name = name
+                    match_rule = "inventory build in AMT footprint"
+                    break
+                if name_key == footprint_key or name_key in footprint_key or footprint_key in name_key:
+                    inventory_row = candidate
+                    inventory_name = name
+                    match_rule = "normalised stockpile name"
                     break
             inventory_row = inventory_row or {}
+            source_warnings = self.inventory_stream_warnings(footprint, inventory_row) if inventory_row else []
             if not inventory_row:
-                self.historical_recon_warnings.append(
+                source_warnings = [
                     f"{footprint}: no matching inventory build was found; internal factors defaulted to 1.0."
+                ]
+                self.historical_recon_warnings.extend(source_warnings)
+            inventory_build = str(
+                inventory_row.get("BUILD") or inventory_row.get("build") or ""
+            )
+            inventory_transaction_datetime = str(
+                inventory_row.get("TRANSACTION_DATETIME")
+                or inventory_row.get("transaction_datetime")
+                or ""
+            )
+            factor_values = {}
+            slot = internal_product_slot(self.opf_input_choice)
+            for analyte in ANALYTES:
+                insitu = numeric(
+                    inventory_row.get(f"GRADE_{analyte.upper()}", inventory_row.get(f"grade_{analyte}"))
                 )
-            else:
-                self.historical_recon_warnings.extend(
-                    self.inventory_stream_warnings(footprint, inventory_row)
+                rom = numeric(
+                    inventory_row.get(f"{analyte.upper()}_ROM", inventory_row.get(f"{analyte}_rom"))
+                )
+                product = numeric(
+                    inventory_row.get(
+                        f"{analyte.upper()}_{str(slot or '').upper()}",
+                        inventory_row.get(f"{analyte}_{slot}") if slot else None,
+                    )
+                )
+                factor_values[f"INTERNAL_BLEND_RECON_{analyte.upper()}"] = (
+                    rom / insitu if rom is not None and insitu not in (None, 0) else 1.0
+                )
+                factor_values[f"INTERNAL_UPGRADE_{analyte.upper()}"] = (
+                    product / rom if product is not None and rom not in (None, 0) else 1.0
                 )
             for row in rows or []:
                 insitu = {
@@ -10037,6 +10333,15 @@ class UserInputs(QMainWindow):
                     self.opf_input_choice,
                 )
                 row["GRADE_STREAMS"] = streams
+                row["INTERNAL_RECON_MATCHED"] = bool(inventory_row)
+                row["INTERNAL_RECON_INVENTORY_STOCKPILE"] = inventory_name
+                row["INTERNAL_RECON_INVENTORY_BUILD"] = inventory_build
+                row["INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME"] = (
+                    inventory_transaction_datetime
+                )
+                row["INTERNAL_RECON_MATCH_RULE"] = match_rule
+                row["INTERNAL_RECON_WARNING"] = "; ".join(source_warnings)
+                row.update(factor_values)
         self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
         return enriched
 
@@ -11510,6 +11815,9 @@ class UserInputs(QMainWindow):
         preview.resizeColumnsToContents()
 
     def load_AMT_map(self):
+        self.ensure_AMT_map_panel()
+        if getattr(self, "draw_AMT_map", None) is None:
+            self.start_dash_AMT_map_thread()
         if not self.store_AMT_chunk_settings():
             return
 
@@ -11522,6 +11830,16 @@ class UserInputs(QMainWindow):
         self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
 
         self.load_AMT_map_first_call = False
+
+    def reload_AMT_map_view(self):
+        """Reconnect a restored AMT view after the Dash worker has started."""
+        view = getattr(self, "AMT_map_view", None)
+        if view is None:
+            return
+        if view.url().isEmpty():
+            view.setUrl(QUrl("http://localhost:8054"))
+        else:
+            view.reload()
 
     def load_gantt_chart(self):
         plan_id = self.selected_optimisation_plan_id()
@@ -11988,7 +12306,15 @@ class UserInputs(QMainWindow):
         
         db_path = get_database_path()
 
-        if self.start_dash_AMT_map_thread_first_call:
+        draw_AMT_map = getattr(self, "draw_AMT_map", None)
+        dash_thread = getattr(self, "dash_thread_AMT_map", None)
+        worker_is_alive = bool(
+            dash_thread is not None
+            and hasattr(dash_thread, "is_alive")
+            and dash_thread.is_alive()
+        )
+
+        if draw_AMT_map is None or not worker_is_alive:
 
             self.draw_AMT_map = DrawAMTStockpile(
                 db_path,
@@ -12000,6 +12326,12 @@ class UserInputs(QMainWindow):
             # Use a thread to run the Dash app server
             self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
             self.dash_thread_AMT_map.start()
+
+        else:
+            self.draw_AMT_map.db_path = db_path
+            self.draw_AMT_map.update_chunk_settings(
+                copy.deepcopy(self.AMT_chunk_settings)
+            )
 
         self.start_dash_AMT_map_thread_first_call = False
     
@@ -15228,8 +15560,9 @@ class UserInputs(QMainWindow):
         self.selected_data_stream = str(
             loaded_state.get("selected_data_stream") or DEFAULT_STREAM
         )
-        self.aps_grade_field_mappings = copy.deepcopy(
-            loaded_state.get("aps_grade_field_mappings") or {"rom": {}, "product": {}}
+        self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
+            loaded_state.get("aps_grade_field_mappings"),
+            self.product_brand_labels_choice,
         )
         self.historical_recon_factors = copy.deepcopy(
             loaded_state.get("historical_recon_factors") or {}
@@ -15237,9 +15570,8 @@ class UserInputs(QMainWindow):
         self.historical_recon_warnings = list(
             loaded_state.get("historical_recon_warnings") or []
         )
-        self.data_stream_planning_categories = copy.deepcopy(
+        self.data_stream_planning_categories = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
-            or {"rom": "OPF Feed", "product": ""}
         )
         self.product_build_settings = self.normalized_agent_product_build_settings(
             loaded_state.get("product_build_settings", []) or []
@@ -15435,12 +15767,7 @@ class UserInputs(QMainWindow):
         self.aps_grade_field_mappings = {"rom": {}, "product": {}}
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
-        self.data_stream_planning_categories = {
-            "rom": "OPF Feed",
-            # Temporary compatibility default until the authoritative product
-            # planning category is confirmed for each APS model.
-            "product": "",
-        }
+        self.data_stream_planning_categories = normalise_planning_categories()
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}
         self.product_build_settings = []

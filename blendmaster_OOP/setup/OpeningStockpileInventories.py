@@ -7,6 +7,7 @@ import snowflake.connector
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from database.DatabaseContext import get_database_path
+from classes.GradeStreams import ANALYTES, flatten_grade_streams
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
@@ -22,6 +23,7 @@ class OpeningStockpileInventories:
         
         STOCKPILENAME AS name,
         STOCKPILEBUILDNAME AS build,
+        TRANSACTIONDATETIME AS transaction_datetime,
         BALANCEWMT AS balance, 
         FE_INSITU_WTAVG AS grade_fe, 
         SIO2_INSITU_WTAVG AS grade_si, 
@@ -267,7 +269,8 @@ class OpeningStockpileInventories:
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS opening_stockpile_inventories (
             name TEXT PRIMARY KEY,
-            build TEXT,    
+            build TEXT,
+            transaction_datetime TEXT,
             balance REAL,
             grade_fe REAL,
             grade_si REAL,
@@ -278,7 +281,8 @@ class OpeningStockpileInventories:
             fe_prod1 REAL, si_prod1 REAL, al_prod1 REAL, p_prod1 REAL, mn_prod1 REAL,
             fe_prod2 REAL, si_prod2 REAL, al_prod2 REAL, p_prod2 REAL, mn_prod2 REAL,
             fe_prod3 REAL, si_prod3 REAL, al_prod3 REAL, p_prod3 REAL, mn_prod3 REAL,
-            grade_streams_json TEXT
+            grade_streams_json TEXT,
+            grade_stream_warnings_json TEXT
         )
         ''')
 
@@ -288,10 +292,28 @@ class OpeningStockpileInventories:
             f"{analyte}_{stream}"
             for stream in ("rom", "prod1", "prod2", "prod3")
             for analyte in ("fe", "si", "al", "p", "mn")
-        ] + ["grade_streams_json"]
+        ] + ["grade_streams_json", "grade_stream_warnings_json"]
+        if "transaction_datetime" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE opening_stockpile_inventories "
+                "ADD COLUMN transaction_datetime TEXT"
+            )
+            existing_columns.add("transaction_datetime")
+        flattened_streams = {
+            key: flatten_grade_streams(
+                (row or {}).get("GRADE_STREAMS")
+                or (row or {}).get("grade_streams")
+            )
+            for key, row in (data_dict or {}).items()
+        }
+        extra_columns += sorted({
+            column
+            for values in flattened_streams.values()
+            for column in values
+        })
         for column in extra_columns:
             if column not in existing_columns:
-                column_type = "TEXT" if column == "grade_streams_json" else "REAL"
+                column_type = "TEXT" if column.endswith("_json") else "REAL"
                 cursor.execute(f"ALTER TABLE opening_stockpile_inventories ADD COLUMN {column} {column_type}")
 
         # Clear the table
@@ -303,6 +325,7 @@ class OpeningStockpileInventories:
             mapped_row = {
                 "name": row.get("NAME", None),  # Adjusted for uppercase column names
                 "build": row.get("BUILD", None),
+                "transaction_datetime": row.get("TRANSACTION_DATETIME", None),
                 "balance": row.get("BALANCE", 0.0),
                 "grade_fe": row.get("GRADE_FE", None),
                 "grade_si": row.get("GRADE_SI", None),
@@ -315,6 +338,11 @@ class OpeningStockpileInventories:
                     for analyte in ("fe", "si", "al", "p", "mn")
                 },
                 "grade_streams_json": json.dumps(row.get("GRADE_STREAMS")) if row.get("GRADE_STREAMS") else None,
+                "grade_stream_warnings_json": json.dumps(
+                    row.get("GRADE_STREAM_WARNINGS")
+                    or row.get("grade_stream_warnings")
+                    or []
+                ),
             }
 
             # Skip insertion if mandatory fields (e.g., name) are missing
@@ -324,19 +352,33 @@ class OpeningStockpileInventories:
 
             cursor.execute('''
             INSERT INTO opening_stockpile_inventories (
-                name, build, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn,
+                name, build, transaction_datetime, balance,
+                grade_fe, grade_si, grade_al, grade_p, grade_mn,
                 fe_rom, si_rom, al_rom, p_rom, mn_rom,
                 fe_prod1, si_prod1, al_prod1, p_prod1, mn_prod1,
                 fe_prod2, si_prod2, al_prod2, p_prod2, mn_prod2,
-                fe_prod3, si_prod3, al_prod3, p_prod3, mn_prod3, grade_streams_json
+                fe_prod3, si_prod3, al_prod3, p_prod3, mn_prod3,
+                grade_streams_json, grade_stream_warnings_json
             ) VALUES (
-                :name, :build, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn,
+                :name, :build, :transaction_datetime, :balance,
+                :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn,
                 :fe_rom, :si_rom, :al_rom, :p_rom, :mn_rom,
                 :fe_prod1, :si_prod1, :al_prod1, :p_prod1, :mn_prod1,
                 :fe_prod2, :si_prod2, :al_prod2, :p_prod2, :mn_prod2,
-                :fe_prod3, :si_prod3, :al_prod3, :p_prod3, :mn_prod3, :grade_streams_json
+                :fe_prod3, :si_prod3, :al_prod3, :p_prod3, :mn_prod3,
+                :grade_streams_json, :grade_stream_warnings_json
             )
             ''', mapped_row)
+            audit_values = flattened_streams.get(key, {})
+            if audit_values:
+                assignments = ", ".join(
+                    f'"{column}" = ?' for column in audit_values
+                )
+                cursor.execute(
+                    f'UPDATE opening_stockpile_inventories SET {assignments} '
+                    'WHERE name = ?',
+                    [*audit_values.values(), mapped_row["name"]],
+                )
 
         # Commit and close the connection
         conn.commit()
@@ -366,7 +408,13 @@ class OpeningStockpileInventories:
             easting REAL,
             last_update TEXT,
             hex_updated TEXT,
-            grade_streams_json TEXT
+            grade_streams_json TEXT,
+            internal_recon_matched INTEGER,
+            internal_recon_inventory_stockpile TEXT,
+            internal_recon_inventory_build TEXT,
+            internal_recon_inventory_transaction_datetime TEXT,
+            internal_recon_match_rule TEXT,
+            internal_recon_warning TEXT
         )
         ''')
 
@@ -376,6 +424,60 @@ class OpeningStockpileInventories:
             cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
         if "grade_streams_json" not in existing_columns:
             cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN grade_streams_json TEXT")
+        amt_audit_by_hex = {}
+        for footprint, rows in (data_dict or {}).items():
+            for row in rows or []:
+                audit = {
+                    "internal_recon_matched": int(bool(row.get("INTERNAL_RECON_MATCHED"))),
+                    "internal_recon_inventory_stockpile": row.get("INTERNAL_RECON_INVENTORY_STOCKPILE"),
+                    "internal_recon_inventory_build": row.get("INTERNAL_RECON_INVENTORY_BUILD"),
+                    "internal_recon_inventory_transaction_datetime": row.get(
+                        "INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME"
+                    ),
+                    "internal_recon_match_rule": row.get("INTERNAL_RECON_MATCH_RULE"),
+                    "internal_recon_warning": row.get("INTERNAL_RECON_WARNING"),
+                    **{
+                        f"internal_blend_recon_{analyte}": row.get(
+                            f"INTERNAL_BLEND_RECON_{analyte.upper()}"
+                        )
+                        for analyte in ANALYTES
+                    },
+                    **{
+                        f"internal_upgrade_{analyte}": row.get(
+                            f"INTERNAL_UPGRADE_{analyte.upper()}"
+                        )
+                        for analyte in ANALYTES
+                    },
+                    **flatten_grade_streams(
+                        row.get("GRADE_STREAMS") or row.get("grade_streams")
+                    ),
+                }
+                amt_audit_by_hex[(str(footprint), str(row.get("HEX") or row.get("hex")))] = audit
+        text_audit_columns = {
+            "internal_recon_inventory_stockpile",
+            "internal_recon_inventory_build",
+            "internal_recon_inventory_transaction_datetime",
+            "internal_recon_match_rule",
+            "internal_recon_warning",
+        }
+        audit_columns = sorted({
+            column for values in amt_audit_by_hex.values() for column in values
+        })
+        existing_columns = {column[1] for column in cursor.execute(
+            "PRAGMA table_info(opening_AMT_stockpile_inventories)"
+        ).fetchall()}
+        for column in audit_columns:
+            if column in existing_columns:
+                continue
+            column_type = (
+                "TEXT" if column in text_audit_columns
+                else "INTEGER" if column == "internal_recon_matched"
+                else "REAL"
+            )
+            cursor.execute(
+                f'ALTER TABLE opening_AMT_stockpile_inventories '
+                f'ADD COLUMN "{column}" {column_type}'
+            )
 
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
@@ -411,6 +513,22 @@ class OpeningStockpileInventories:
                 INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, last_update, hex_updated, grade_streams_json)
                 VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :last_update, :hex_updated, :grade_streams_json)
                 ''', mapped_row)
+                audit_values = amt_audit_by_hex.get(
+                    (str(key), str(row.get("HEX") or row.get("hex"))), {}
+                )
+                if audit_values:
+                    assignments = ", ".join(
+                        f'"{column}" = ?' for column in audit_values
+                    )
+                    cursor.execute(
+                        f'UPDATE opening_AMT_stockpile_inventories '
+                        f'SET {assignments} WHERE footprint = ? AND hex = ?',
+                        [
+                            *audit_values.values(),
+                            mapped_row["footprint"],
+                            mapped_row["hex"],
+                        ],
+                    )
 
         # Commit and close the connection
         conn.commit()
@@ -531,14 +649,53 @@ class OpeningStockpileInventories:
             northing REAL,
             easting REAL,
             last_update TEXT,
-            hex_updated TEXT
+            hex_updated TEXT,
+            grade_streams_json TEXT,
+            internal_recon_matched INTEGER,
+            internal_recon_inventory_stockpile TEXT,
+            internal_recon_inventory_build TEXT,
+            internal_recon_inventory_transaction_datetime TEXT,
+            internal_recon_match_rule TEXT,
+            internal_recon_warning TEXT,
+            internal_blend_recon_fe REAL,
+            internal_blend_recon_si REAL,
+            internal_blend_recon_al REAL,
+            internal_blend_recon_p REAL,
+            internal_blend_recon_mn REAL,
+            internal_upgrade_fe REAL,
+            internal_upgrade_si REAL,
+            internal_upgrade_al REAL,
+            internal_upgrade_p REAL,
+            internal_upgrade_mn REAL
         )
         ''')
 
         cursor.execute("PRAGMA table_info(opening_AMT_stockpile_inventories)")
         existing_columns = {column[1] for column in cursor.fetchall()}
-        if "last_update" not in existing_columns:
-            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
+        required_columns = {
+            "last_update": "TEXT",
+            "grade_streams_json": "TEXT",
+            "internal_recon_matched": "INTEGER",
+            "internal_recon_inventory_stockpile": "TEXT",
+            "internal_recon_inventory_build": "TEXT",
+            "internal_recon_inventory_transaction_datetime": "TEXT",
+            "internal_recon_match_rule": "TEXT",
+            "internal_recon_warning": "TEXT",
+            **{
+                f"internal_blend_recon_{analyte}": "REAL"
+                for analyte in ANALYTES
+            },
+            **{
+                f"internal_upgrade_{analyte}": "REAL"
+                for analyte in ANALYTES
+            },
+        }
+        for column, column_type in required_columns.items():
+            if column not in existing_columns:
+                cursor.execute(
+                    f"ALTER TABLE opening_AMT_stockpile_inventories "
+                    f"ADD COLUMN {column} {column_type}"
+                )
 
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')

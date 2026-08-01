@@ -2,11 +2,25 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
+import json
 from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.GradeStreams import (
+    DEFAULT_STREAM,
+    STREAMS,
+    grade_stream_audit_fields,
+    legacy_grade_streams,
+    normalise_brand,
+    normalise_grade_streams,
+    resolve_grade_vector,
+    weighted_merge_grade_streams,
+)
+
+
+GRADE_NAMES = ("fe", "si", "al", "p", "mn")
 
 
 class ManualBlendPlanningError(ValueError):
@@ -21,7 +35,7 @@ class ManualBlendPlanner:
     visible inside a steady state. They never create a steady-state boundary.
     """
 
-    GRADES = ("fe", "si", "al", "p", "mn")
+    GRADES = GRADE_NAMES
     REPORT_COLUMNS = [
         "start_datetime", "end_datetime", "steady_state_number",
         "blend_option", "blend_ID", "steady_state_duration", "period",
@@ -29,7 +43,15 @@ class ManualBlendPlanner:
         "source_blend_ratio", "source_opening_balance",
         "source_actual_tonnes", "source_closing_balance",
         "source_grade_fe", "source_grade_si", "source_grade_al",
-        "source_grade_p", "source_grade_mn", "equipment",
+        "source_grade_p", "source_grade_mn",
+        "selected_grade_stream", "selected_grade_brand",
+        "grade_stream_warnings",
+        *[
+            f"source_grade_{stream}_{grade}"
+            for stream in STREAMS
+            for grade in GRADE_NAMES
+        ],
+        "equipment",
         "equipment_rate_input", "equipment_rate_output",
         "crusher_actual_tonnes", "crusher_rate_input",
         "crusher_rate_output", "crusher_actual_grade_fe",
@@ -71,6 +93,13 @@ class ManualBlendPlanner:
             dict(row) for row in (product_build_settings or [])
         ]
         self.calendar_inputs = dict(calendar_inputs or {})
+        site_context = self.calendar_inputs.get("site_context") or {}
+        solver_config = self.calendar_inputs.get("solver_config") or {}
+        self.selected_data_stream = str(
+            site_context.get("selected_data_stream")
+            or solver_config.get("selected_data_stream")
+            or DEFAULT_STREAM
+        ).strip().lower()
         self.crusher_rate = self._positive_number(
             crusher_rate, "Crusher rate"
         )
@@ -208,6 +237,9 @@ class ManualBlendPlanner:
                 chunk[f"grade_{grade}"] = self._number(
                     row.get(f"grade_{grade}")
                 )
+            chunk["grade_streams"] = normalise_grade_streams(
+                row.get("grade_streams") or row.get("GRADE_STREAMS"), row
+            )
             chunks.setdefault(footprint, []).append(chunk)
 
         for footprint in chunks:
@@ -227,6 +259,10 @@ class ManualBlendPlanner:
                 chunk[f"grade_{grade}"] = self._number(
                     values.get(f"grade_{grade}")
                 )
+            chunk["grade_streams"] = normalise_grade_streams(
+                values.get("grade_streams") or values.get("GRADE_STREAMS"),
+                values,
+            )
             chunks[name] = [chunk]
         self._amt_sources = amt_footprints
         return chunks
@@ -457,6 +493,33 @@ class ManualBlendPlanner:
                         ).dropna().tolist()
                     ],
                 }
+                weighted_streams = None
+                accumulated_tonnes = 0.0
+                for _, payload_row in group.iterrows():
+                    row_tonnes = max(self._number(payload_row.get("payload")), 0)
+                    streams = payload_row.get("grade_streams")
+                    if not isinstance(streams, Mapping):
+                        raw_json = payload_row.get("grade_streams_json")
+                        if isinstance(raw_json, str) and raw_json.strip():
+                            try:
+                                streams = json.loads(raw_json)
+                            except (TypeError, ValueError):
+                                streams = None
+                    if not isinstance(streams, Mapping):
+                        streams = legacy_grade_streams({
+                            f"grade_{grade}": payload_row.get(
+                                f"source_grade_{grade}"
+                            )
+                            for grade in self.GRADES
+                        })
+                    weighted_streams = weighted_merge_grade_streams(
+                        weighted_streams,
+                        accumulated_tonnes,
+                        streams,
+                        row_tonnes,
+                    )
+                    accumulated_tonnes += row_tonnes
+                candidate["grade_streams"] = weighted_streams
                 for grade in self.GRADES:
                     values = pd.to_numeric(
                         group.get(
@@ -543,6 +606,46 @@ class ManualBlendPlanner:
                 return setting
         return {}
 
+    def _active_brand(self, produced_tonnes, state):
+        build_brand = str(
+            self._active_build(produced_tonnes).get("brand") or ""
+        ).strip().upper()
+        if build_brand:
+            return build_brand
+        period = int(state.get("period", 0) or 0)
+        period_name = (
+            self.period_labels[period]
+            if 0 <= period < len(self.period_labels)
+            else "Preplan"
+        )
+        calendar_brands = self.calendar_inputs.get("crusher_brand", {})
+        if isinstance(calendar_brands, Mapping):
+            return str(calendar_brands.get(period_name) or "").strip().upper()
+        return ""
+
+    def _selected_source_fields(self, streams, brand, fallback=None):
+        streams = normalise_grade_streams(streams, fallback or {})
+        selected, warnings = resolve_grade_vector(
+            streams,
+            self.selected_data_stream,
+            brand,
+            fallback or {},
+        )
+        return {
+            **{
+                f"source_grade_{grade}": selected[grade]
+                for grade in self.GRADES
+            },
+            "selected_grade_stream": self.selected_data_stream,
+            "selected_grade_brand": normalise_brand(brand),
+            "grade_stream_warnings": json.dumps(
+                warnings, separators=(",", ":")
+            ) if warnings else "",
+            **grade_stream_audit_fields(
+                streams, brand, prefix="source_grade_"
+            ),
+        }
+
     def _target_values(self, period):
         result = {}
         period_name = (
@@ -578,6 +681,7 @@ class ManualBlendPlanner:
             total_tonnes = state["feed_capacity_tonnes"]
             stockpile_tonnes = total_tonnes - direct_tip_tonnes
             source_rows = []
+            active_brand = self._active_brand(produced_tonnes, state)
 
             for source, ratio in zip(
                 blend["_sources"], blend["_ratios"]
@@ -605,14 +709,31 @@ class ManualBlendPlanner:
                     "source_closing_balance": source_closing,
                     "equipment": "RC",
                 }
-                for grade in self.GRADES:
-                    source_row[f"source_grade_{grade}"] = (
+                source_streams = None
+                accumulated_tonnes = 0.0
+                for chunk, _opening, consumed_tonnes in consumed:
+                    source_streams = weighted_merge_grade_streams(
+                        source_streams,
+                        accumulated_tonnes,
+                        chunk.get("grade_streams"),
+                        consumed_tonnes,
+                    )
+                    accumulated_tonnes += consumed_tonnes
+                legacy = {
+                    f"grade_{grade}": (
                         sum(
                             item[0][f"grade_{grade}"] * item[2]
                             for item in consumed
                         ) / amount
                         if amount > 0 else 0
                     )
+                    for grade in self.GRADES
+                }
+                source_row.update(
+                    self._selected_source_fields(
+                        source_streams, active_brand, legacy
+                    )
+                )
                 source_rows.append(source_row)
 
             candidates = {
@@ -638,10 +759,14 @@ class ManualBlendPlanner:
                     ),
                     "equipment": "EX",
                 }
-                for grade in self.GRADES:
-                    source_row[f"source_grade_{grade}"] = candidate[
-                        f"grade_{grade}"
-                    ]
+                source_row.update(self._selected_source_fields(
+                    candidate.get("grade_streams"),
+                    active_brand,
+                    {
+                        f"grade_{grade}": candidate[f"grade_{grade}"]
+                        for grade in self.GRADES
+                    },
+                ))
                 source_rows.append(source_row)
 
             crusher_grades = {}

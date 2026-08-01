@@ -7,6 +7,7 @@ from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.CrusherTarget import CrusherTarget
+from classes.GradeStreams import grade_stream_audit_fields
 from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
@@ -1784,19 +1785,23 @@ class CaseModeller:
                 else:
                     record["estimated_delivery_datetime"] = ""
 
+            # The grouped source row remains an audit record, so raw stream
+            # fields must be weighted exactly like the selected legacy grades.
             for grade_column in [
-                "source_grade_fe",
-                "source_grade_si",
-                "source_grade_al",
-                "source_grade_p",
-                "source_grade_mn",
+                column for column in group.columns
+                if column.startswith("source_grade_")
             ]:
-                if grade_column in group:
-                    grades = pd.to_numeric(group[grade_column], errors="coerce")
-                    if actual_tonnes > Optimizer.SOLUTION_TOLERANCE:
-                        record[grade_column] = (
-                            grades * group["source_actual_tonnes"]
-                        ).sum() / actual_tonnes
+                grades = pd.to_numeric(group[grade_column], errors="coerce")
+                weights = pd.to_numeric(
+                    group["source_actual_tonnes"], errors="coerce"
+                ).fillna(0)
+                valid = grades.notna() & (weights > Optimizer.SOLUTION_TOLERANCE)
+                valid_tonnes = weights[valid].sum()
+                record[grade_column] = (
+                    (grades[valid] * weights[valid]).sum() / valid_tonnes
+                    if valid_tonnes > Optimizer.SOLUTION_TOLERANCE
+                    else None
+                )
 
             grouped_records.append(record)
 
@@ -2012,6 +2017,11 @@ class CaseModeller:
                     "selected_grade_stream": transaction.get("selected_grade_stream", ""),
                     "selected_grade_brand": transaction.get("selected_grade_brand", ""),
                     "grade_stream_warnings": str(transaction.get("grade_stream_warnings") or ""),
+                    **grade_stream_audit_fields(
+                        transaction.get("grade_streams"),
+                        transaction.get("selected_grade_brand"),
+                        prefix="source_grade_",
+                    ),
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],
                     "equipment_rate_output": transaction["equipment_rate_output"],
