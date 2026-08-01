@@ -53,6 +53,34 @@ effective factors are stored separately.
 The product-stream Planning Plan category defaults to `OPF Production`; ROM
 streams default to `OPF Feed`. Both remain configurable for APS model variants.
 
+## APS grade-field browser
+
+The Data Streams screen reads the header row from the selected 24HR
+`Mining.csv` and presents the distinct fields beside the mapping grid. Select
+a grade mapping cell and either double-click a field or drag it onto that cell.
+This avoids transcription errors in long APS process-stream field names.
+
+## Database View
+
+After selected AMT chunks (or inventory-only stockpiles) are submitted, Setup
+opens **Database View**. This source-level audit snapshot is reused by the next
+optimisation run. It includes:
+
+- selected inventory stockpiles, excluding the duplicate inventory instance
+  of a stockpile selected as AMT;
+- every selected AMT chunk in reclaim sequence;
+- APS payloads whose delivery timestamp falls inside the configured planning
+  horizon;
+- opening, incoming and projected tonnes, calendar state, reclaim threshold,
+  modelled Auto-turnover time and scenario-start availability;
+- every flattened grade stream plus the effective optimiser vector and
+  per-analyte fallback provenance for each configured brand.
+
+APS incoming tonnes outside the horizon are shown separately because the
+current stockpile Auto-turnover calculation observes the complete prepared
+payload population. This makes a stockpile withheld by later APS deliveries
+visible rather than presenting it as an unexplained missing option.
+
 ## Audit and reporting
 
 Inventory and AMT setup views show the calculated streams for every configured

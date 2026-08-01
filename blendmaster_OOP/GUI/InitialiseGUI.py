@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea, QDialog, QSpinBox
@@ -38,9 +38,11 @@ from classes.GradeStreams import (
     inventory_grade_streams,
     is_dry_plant,
     format_grade_stream_vector,
+    flatten_grade_streams,
     normalise_aps_grade_field_mappings,
     normalise_planning_categories,
     numeric,
+    resolve_grade_vector,
 )
 import pandas as pd, sqlite3
 from numbers import Real, Integral
@@ -418,6 +420,10 @@ class UserInputs(QMainWindow):
         self.AMT_settings_layout.addWidget(self.AMT_stockpile_table)
 
         self.AMT_stockpile_tab_layout.addWidget(self.AMT_settings_frame, stretch=0)
+
+        # Source-level audit view used to verify the exact records and grade
+        # streams that will be supplied to the optimiser.
+        self.setup_database_view()
 
         # Add Solver Configuration Tab
         self.setup_solver_configuration_tab()
@@ -1308,6 +1314,7 @@ class UserInputs(QMainWindow):
         for tab_index in [
             self.data_streams_tab_index, self.guidance_schedules_tab_index,
             self.stockpile_tab_index, self.AMT_stockpile_tab_index,
+            self.database_view_tab_index,
             self.solver_config_tab_index, self.product_build_tab_index,
             self.decision_levers_tab_index,
             self.calendar_tab_index, self.decision_point_tab_index,
@@ -1361,6 +1368,12 @@ class UserInputs(QMainWindow):
         """Defer heavyweight report/chart work until the user opens that tab."""
         if self.scenario_switch_in_progress:
             return
+
+        if (
+            tab_index == self.database_view_tab_index
+            and getattr(self, "database_view_refresh_pending", False)
+        ):
+            QTimer.singleShot(0, self.refresh_database_view)
 
         if (
             tab_index == self.sqlite_reports_tab_index
@@ -1650,6 +1663,7 @@ class UserInputs(QMainWindow):
                 )
             )
             self.populate_aps_grade_mapping_table()
+            self.refresh_aps_grade_field_headers()
             self.populate_recon_factor_table()
             warning_text = "\n".join(self.historical_recon_warnings)
             self.data_stream_warning_label.setText(warning_text)
@@ -3060,6 +3074,792 @@ class UserInputs(QMainWindow):
             }
         """)
 
+    def setup_database_view(self):
+        """Set up an auditable view of every source supplied to the run."""
+        self.database_view_tab = QWidget()
+        self.database_view_tab.setObjectName("databaseViewTab")
+        self.database_view_tab_index = self.register_page(
+            "database_view",
+            self.setup_tabs,
+            self.database_view_tab,
+            "Database View",
+        )
+        self.set_page_enabled(self.database_view_tab_index, False)
+
+        layout = QVBoxLayout(self.database_view_tab)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        title = QLabel("Database View")
+        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
+        description = QLabel(
+            "Audit the selected inventory stockpiles, selected AMT chunks, and "
+            "APS 24HR payloads inside the configured planning horizon. The wide "
+            "table exposes raw grades, every calculated grade stream, the grades "
+            "resolved for each configured brand, and per-analyte fallback provenance."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("color: #607080;")
+        layout.addWidget(title)
+        layout.addWidget(description)
+
+        filters = QHBoxLayout()
+        self.database_view_source_filter = QComboBox()
+        self.database_view_source_filter.addItem("All source types", "")
+        for source_type in (
+            "Inventory Stockpile",
+            "AMT Chunk",
+            "AMT Stockpile - No Chunks",
+            "APS Grade Block Payload",
+        ):
+            self.database_view_source_filter.addItem(source_type, source_type)
+        self.database_view_search = QLineEdit()
+        self.database_view_search.setPlaceholderText(
+            "Filter source, stockpile, destination, period, warning..."
+        )
+        self.database_view_source_filter.currentIndexChanged.connect(
+            self.apply_database_view_filters
+        )
+        self.database_view_search.textChanged.connect(
+            self.apply_database_view_filters
+        )
+        filters.addWidget(QLabel("Source Type:"))
+        filters.addWidget(self.database_view_source_filter)
+        filters.addWidget(self.database_view_search, stretch=1)
+        layout.addLayout(filters)
+
+        self.database_view_summary_label = QLabel("Submit AMT Stockpiles to prepare this view.")
+        self.database_view_summary_label.setWordWrap(True)
+        self.database_view_summary_label.setStyleSheet("font-weight: 600; color: #334155;")
+        layout.addWidget(self.database_view_summary_label)
+
+        self.database_view_warning_label = QLabel("")
+        self.database_view_warning_label.setWordWrap(True)
+        self.database_view_warning_label.setStyleSheet(
+            "color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 8px;"
+        )
+        self.database_view_warning_label.hide()
+        layout.addWidget(self.database_view_warning_label)
+
+        self.database_view_table = CustomTableWidget()
+        self.database_view_table.setAlternatingRowColors(True)
+        self.database_view_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.database_view_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.database_view_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.database_view_table, stretch=1)
+
+        buttons = QHBoxLayout()
+        self.database_view_refresh_button = QPushButton("Refresh Database View")
+        self.database_view_refresh_button.clicked.connect(
+            self.refresh_database_view
+        )
+        continue_button = QPushButton("Continue to Solver Configuration")
+        continue_button.clicked.connect(self.continue_from_database_view)
+        buttons.addWidget(self.database_view_refresh_button)
+        buttons.addWidget(continue_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        self.database_view_rows = []
+        self.database_view_expit_payload_transactions = None
+        self.database_view_snapshot_signature = None
+        self.database_view_refresh_pending = True
+        self.database_view_refresh_in_progress = False
+
+    def database_view_input_signature(self):
+        """Return the inputs that determine the APS payload snapshot."""
+        context = self.active_site_context()
+        signature = {
+            "start_time": str(getattr(self, "start_time_choice", "") or ""),
+            "period_count": self.planning_period_count(),
+            "expit_mode": getattr(self, "expit_mode_choice", None),
+            "24hr_file": str(getattr(self, "file_path_24hr_choice", "") or ""),
+            "2wp_file": str(getattr(self, "file_path_choice", "") or ""),
+            "agents": list(getattr(self, "selected_24hr_expit_agents", []) or []),
+            "reevaluate_direct_tip": bool(
+                getattr(self, "reevaluate_aps_direct_tip_choice", False)
+            ),
+            "selected_crusher": getattr(
+                self, "aps_direct_tip_crusher_choice", []
+            ),
+            "site": {
+                key: context.get(key)
+                for key in ("mine", "opf", "crusher", "product_brands")
+            },
+            "movement_rules": context.get("direct_tip_movement_rules", []),
+            "grade_mappings": context.get("aps_grade_field_mappings", {}),
+        }
+        return json.dumps(signature, sort_keys=True, default=str)
+
+    def database_view_periods(self):
+        period_count = getattr(
+            self, "database_view_period_count_snapshot", None
+        )
+        if period_count is None:
+            period_count = self.planning_period_count()
+        periods = PeriodManager(period_count)
+        periods.calculate_periods(
+            getattr(self, "database_view_start_time_snapshot", None)
+            or self.start_time_choice
+            or datetime.now()
+        )
+        return periods
+
+    def database_view_record_with_streams(
+        self, record, streams, fallback=None, source_warnings=None
+    ):
+        """Flatten stored and optimiser-resolved grades into one audit row."""
+        record = dict(record or {})
+        fallback = fallback or {}
+        record["selected_stream"] = self.selected_data_stream
+        for analyte in ANALYTES:
+            record[f"grade_{analyte}"] = numeric(
+                fallback.get(f"grade_{analyte}")
+                if f"grade_{analyte}" in fallback
+                else fallback.get(f"source_grade_{analyte}")
+            )
+        record.update(flatten_grade_streams(streams))
+
+        fallback_messages = []
+        for brand in configured_brands(self.product_brand_labels_choice):
+            brand_key = "".join(
+                character.lower() if character.isalnum() else "_"
+                for character in brand
+            ).strip("_") or "unbranded"
+            grades, fallbacks = resolve_grade_vector(
+                streams,
+                self.selected_data_stream,
+                brand,
+                fallback,
+            )
+            fallback_by_analyte = {
+                warning["analyte"]: warning for warning in fallbacks
+            }
+            for analyte in ANALYTES:
+                record[f"optimiser_{brand_key}_{analyte}"] = grades[analyte]
+                warning = fallback_by_analyte.get(analyte)
+                if warning:
+                    provenance = (
+                        f"{warning['requested_stream']}[{warning['requested_brand']}]"
+                        f" -> {warning['used_stream']}[{warning['used_brand']}]"
+                    )
+                    record[f"fallback_{brand_key}_{analyte}"] = provenance
+                    fallback_messages.append(f"{brand}/{analyte}: {provenance}")
+                else:
+                    record[f"fallback_{brand_key}_{analyte}"] = ""
+
+        if isinstance(source_warnings, str):
+            source_warnings = [source_warnings]
+        warnings = [str(value) for value in (source_warnings or []) if str(value)]
+        warnings.extend(fallback_messages)
+        record["warnings"] = "; ".join(dict.fromkeys(warnings))
+        return record
+
+    def database_view_stockpile_rows(self):
+        records = []
+        selected_stockpiles = copy.deepcopy(
+            getattr(self, "updated_stockpile_data", {}) or {}
+        )
+        selected_chunks = copy.deepcopy(
+            getattr(self, "hex_sequence_table", []) or []
+        )
+
+        for stockpile_name, attributes in selected_stockpiles.items():
+            attributes = attributes or {}
+            if attributes.get("amt", False):
+                footprint_rows = (
+                    getattr(self, "AMT_stockpile_data", {}) or {}
+                ).get(stockpile_name, []) or []
+                provenance = footprint_rows[0] if footprint_rows else {}
+                chunks = [
+                    chunk for chunk in selected_chunks
+                    if str(chunk.get("footprint", "")).strip().upper()
+                    == str(stockpile_name).strip().upper()
+                ]
+                if not chunks:
+                    records.append(self.database_view_record_with_streams(
+                        {
+                            "source_type": "AMT Stockpile - No Chunks",
+                            "source_id": stockpile_name,
+                            "source": stockpile_name,
+                            "parent_stockpile": stockpile_name,
+                            "tonnes": 0.0,
+                            "optimiser_source": False,
+                        },
+                        attributes.get("grade_streams")
+                        or attributes.get("GRADE_STREAMS"),
+                        attributes,
+                        ["Selected as AMT but no selected chunks were found."],
+                    ))
+                    continue
+
+                for chunk in sorted(
+                    chunks,
+                    key=lambda item: (
+                        numeric(item.get("sequence")) or float("inf"),
+                        str(item.get("hex", "")),
+                    ),
+                ):
+                    records.append(self.database_view_record_with_streams(
+                        {
+                            "source_type": "AMT Chunk",
+                            "source_id": chunk.get("hex", ""),
+                            "source": chunk.get("hex", ""),
+                            "parent_stockpile": stockpile_name,
+                            "build_or_chunk": chunk.get("hex", ""),
+                            "sequence": chunk.get("sequence"),
+                            "tonnes": numeric(chunk.get("balance")) or 0.0,
+                            "optimiser_source": True,
+                            "internal_recon_matched": provenance.get(
+                                "internal_recon_matched",
+                                provenance.get("INTERNAL_RECON_MATCHED", ""),
+                            ),
+                            "matched_inventory_stockpile": provenance.get(
+                                "internal_recon_inventory_stockpile",
+                                provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE", ""),
+                            ),
+                            "matched_inventory_build": provenance.get(
+                                "internal_recon_inventory_build",
+                                provenance.get("INTERNAL_RECON_INVENTORY_BUILD", ""),
+                            ),
+                            "matched_inventory_time": provenance.get(
+                                "internal_recon_inventory_transaction_datetime",
+                                provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME", ""),
+                            ),
+                        },
+                        chunk.get("grade_streams")
+                        or chunk.get("GRADE_STREAMS"),
+                        chunk,
+                        chunk.get("grade_stream_warnings")
+                        or chunk.get("GRADE_STREAM_WARNINGS")
+                        or [],
+                    ))
+                continue
+
+            records.append(self.database_view_record_with_streams(
+                {
+                    "source_type": "Inventory Stockpile",
+                    "source_id": stockpile_name,
+                    "source": stockpile_name,
+                    "parent_stockpile": stockpile_name,
+                    "build_or_chunk": attributes.get("build", ""),
+                    "tonnes": numeric(attributes.get("balance")) or 0.0,
+                    "optimiser_source": True,
+                },
+                attributes.get("grade_streams")
+                or attributes.get("GRADE_STREAMS"),
+                attributes,
+                attributes.get("grade_stream_warnings")
+                or attributes.get("GRADE_STREAM_WARNINGS")
+                or [],
+            ))
+        return records
+
+    def prepare_database_view_data(self):
+        """Build local sources and the exact APS snapshot on a worker thread."""
+        records = self.database_view_stockpile_rows()
+        warnings = []
+        transactions = pd.DataFrame()
+        schedule_path = str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ).strip()
+        if schedule_path:
+            try:
+                site_context = copy.deepcopy(
+                    getattr(
+                        self,
+                        "database_view_site_context_snapshot",
+                        None,
+                    )
+                    or self.active_site_context()
+                )
+                transactions = self.run_program.prepare_expit_payload_transactions(
+                    getattr(self, "database_view_start_time_snapshot", None)
+                    or self.start_time_choice,
+                    self.expit_mode_choice,
+                    schedule_path,
+                    getattr(self, "reevaluate_aps_direct_tip_choice", False),
+                    getattr(self, "aps_direct_tip_crusher_choice", []),
+                    site_context,
+                    getattr(self, "file_path_choice", ""),
+                    getattr(self, "selected_24hr_expit_agents", []),
+                )
+            except Exception as exc:
+                warnings.append(f"APS 24HR payload preparation failed: {exc}")
+                transactions = pd.DataFrame()
+
+        self.apply_database_view_stockpile_calculations(
+            records, transactions
+        )
+
+        periods = self.database_view_periods()
+        window_start = pd.Timestamp(
+            getattr(self, "database_view_start_time_snapshot", None)
+            or self.start_time_choice
+            or datetime.now()
+        )
+        window_end = pd.Timestamp(periods.horizon_end())
+        horizon_transactions = transactions.copy()
+        if not horizon_transactions.empty:
+            delivered = pd.to_datetime(
+                horizon_transactions.get("delivered_datetime"),
+                errors="coerce",
+            )
+            horizon_transactions = horizon_transactions[
+                delivered.notna()
+                & (delivered >= window_start)
+                & (delivered < window_end)
+            ].copy()
+            if horizon_transactions.empty:
+                valid_deliveries = delivered.dropna()
+                observed_range = (
+                    f" Observed APS delivery range: "
+                    f"{valid_deliveries.min()} to {valid_deliveries.max()}."
+                    if not valid_deliveries.empty
+                    else " APS delivery timestamps are missing or invalid."
+                )
+                warnings.append(
+                    "No APS 24HR payloads have delivery times inside the "
+                    f"configured planning horizon ({window_start} to "
+                    f"{window_end}).{observed_range}"
+                )
+
+        for transaction in horizon_transactions.to_dict(orient="records"):
+            delivered = pd.to_datetime(
+                transaction.get("delivered_datetime"), errors="coerce"
+            )
+            period_key = (
+                periods.period_for_datetime(delivered.to_pydatetime())
+                if pd.notna(delivered)
+                else None
+            )
+            direct_tip_eligible = str(
+                transaction.get("direct_tip_eligible", False)
+            ).strip().lower() in {"true", "1", "yes"}
+            fallback = {
+                f"grade_{analyte}": transaction.get(f"source_grade_{analyte}")
+                for analyte in ANALYTES
+            }
+            records.append(self.database_view_record_with_streams(
+                {
+                    "source_type": "APS Grade Block Payload",
+                    "source_id": transaction.get("direct_tip_id", ""),
+                    "source": transaction.get("source", ""),
+                    "parent_stockpile": "",
+                    "build_or_chunk": transaction.get("direct_tip_id", ""),
+                    "sequence": "",
+                    "period": period_key or "Outside horizon",
+                    "tonnes": numeric(transaction.get("payload")) or 0.0,
+                    "optimiser_source": bool(
+                        direct_tip_eligible and self.is_direct_tip_enabled()
+                    ),
+                    "direct_tip_eligible": direct_tip_eligible,
+                    "destination": transaction.get("destination", ""),
+                    "planned_destination": transaction.get(
+                        "planned_destination", ""
+                    ),
+                    "fallback_destination": transaction.get(
+                        "fallback_destination", ""
+                    ),
+                    "agent": transaction.get("agent", ""),
+                    "start_datetime": transaction.get("start_datetime", ""),
+                    "delivered_datetime": transaction.get(
+                        "delivered_datetime", ""
+                    ),
+                    "two_wp_destination_resolution": transaction.get(
+                        "two_wp_destination_resolution", ""
+                    ),
+                    "two_wp_destination_ratio": transaction.get(
+                        "two_wp_destination_ratio", ""
+                    ),
+                },
+                transaction.get("grade_streams"),
+                fallback,
+            ))
+
+        return {
+            "records": records,
+            "transactions": transactions,
+            "warnings": warnings,
+            "window_start": window_start,
+            "window_end": window_end,
+            "signature": (
+                getattr(self, "database_view_signature_snapshot", None)
+                or self.database_view_input_signature()
+            ),
+        }
+
+    def apply_database_view_stockpile_calculations(
+        self, records, transactions
+    ):
+        """Expose the stockpile readiness calculations used by DataLoader."""
+        calendar = copy.deepcopy(
+            getattr(self, "database_view_calendar_inputs", None)
+            or getattr(self, "calendar_inputs", None)
+            or {}
+        )
+        stockpiles = getattr(self, "updated_stockpile_data", {}) or {}
+        start_time = (
+            getattr(self, "database_view_start_time_snapshot", None)
+            or self.start_time_choice
+            or datetime.now()
+        )
+        periods = self.database_view_periods()
+        horizon_start = pd.Timestamp(start_time)
+        horizon_end = pd.Timestamp(periods.horizon_end())
+        period_pairs = list(zip(periods.period_keys(), periods.period_labels()))
+        transaction_rows = (
+            transactions.to_dict(orient="records")
+            if transactions is not None and not transactions.empty
+            else []
+        )
+
+        for stockpile_name, attributes in stockpiles.items():
+            attributes = attributes or {}
+            calendar_name = str(
+                attributes.get("name") or stockpile_name
+            )
+            states = calendar.get(
+                f"stockpiles_{calendar_name}_state", {}
+            ) or {}
+            maximums = calendar.get(
+                f"stockpiles_{calendar_name}_maximum_quantity", {}
+            ) or {}
+            related = [
+                transaction for transaction in transaction_rows
+                if str(transaction.get("destination") or "").replace(
+                    "Stockpiles/", ""
+                ) == stockpile_name
+            ]
+            incoming_tonnes = sum(
+                numeric(transaction.get("payload")) or 0.0
+                for transaction in related
+            )
+            related_in_horizon = []
+            for transaction in related:
+                delivered = pd.to_datetime(
+                    transaction.get("delivered_datetime"), errors="coerce"
+                )
+                if (
+                    pd.notna(delivered)
+                    and horizon_start <= delivered < horizon_end
+                ):
+                    related_in_horizon.append(transaction)
+            horizon_incoming_tonnes = sum(
+                numeric(transaction.get("payload")) or 0.0
+                for transaction in related_in_horizon
+            )
+            outside_horizon_tonnes = (
+                incoming_tonnes - horizon_incoming_tonnes
+            )
+            delivered_times = [
+                pd.to_datetime(
+                    transaction.get("delivered_datetime"), errors="coerce"
+                )
+                for transaction in related
+            ]
+            delivered_times = [
+                value for value in delivered_times if pd.notna(value)
+            ]
+            latest_delivery = max(delivered_times) if delivered_times else None
+
+            source_rows = [
+                record for record in records
+                if record.get("source_type") in {
+                    "Inventory Stockpile",
+                    "AMT Chunk",
+                    "AMT Stockpile - No Chunks",
+                }
+                and str(record.get("parent_stockpile") or "").upper()
+                == str(stockpile_name).upper()
+            ]
+            ordered_chunks = sorted(
+                [
+                    record for record in source_rows
+                    if record.get("source_type") == "AMT Chunk"
+                ],
+                key=lambda record: (
+                    numeric(record.get("sequence")) or float("inf"),
+                    str(record.get("source_id") or ""),
+                ),
+            )
+            if ordered_chunks:
+                initial_balance = (
+                    numeric(ordered_chunks[0].get("tonnes")) or 0.0
+                )
+                total_selected_tonnes = sum(
+                    numeric(record.get("tonnes")) or 0.0
+                    for record in ordered_chunks
+                )
+            else:
+                initial_balance = numeric(attributes.get("balance")) or 0.0
+                total_selected_tonnes = initial_balance
+
+            reclaim_threshold = (
+                numeric(attributes.get("reclaim_threshold")) or 0.0
+            )
+            projected_balance = initial_balance + incoming_tonnes
+            is_ready = projected_balance >= reclaim_threshold
+            auto_turnover = latest_delivery if related and is_ready else None
+            preplan_state = str(states.get("Preplan") or "")
+            auto_ready_at_start = (
+                auto_turnover is None
+                or auto_turnover.to_pydatetime() <= start_time
+            )
+
+            for record in source_rows:
+                record["opening_model_balance"] = initial_balance
+                record["total_selected_stockpile_tonnes"] = total_selected_tonnes
+                record["aps_incoming_tonnes"] = incoming_tonnes
+                record["aps_incoming_tonnes_in_horizon"] = (
+                    horizon_incoming_tonnes
+                )
+                record["aps_incoming_tonnes_outside_horizon"] = (
+                    outside_horizon_tonnes
+                )
+                record["projected_balance_after_aps"] = projected_balance
+                record["reclaim_threshold"] = reclaim_threshold
+                record["auto_turnover_datetime"] = auto_turnover or ""
+                record["is_ready_after_aps"] = is_ready
+                for period_key, period_label in period_pairs:
+                    record[f"calendar_state_{period_key}"] = states.get(
+                        period_label, ""
+                    )
+                    record[f"calendar_max_tonnes_{period_key}"] = maximums.get(
+                        period_label, ""
+                    )
+
+                is_first_chunk = (
+                    record.get("source_type") != "AMT Chunk"
+                    or record is ordered_chunks[0]
+                )
+                first_available = (
+                    is_first_chunk
+                    and initial_balance >= 0
+                    and (
+                        preplan_state == "Reclaim"
+                        or (
+                            preplan_state == "Auto"
+                            and auto_ready_at_start
+                            and initial_balance >= reclaim_threshold
+                        )
+                    )
+                )
+                record["available_at_scenario_start"] = first_available
+                if (
+                    is_first_chunk
+                    and preplan_state == "Auto"
+                    and not auto_ready_at_start
+                ):
+                    readiness_warning = (
+                        "Auto stockpile withheld until APS deliveries "
+                        f"complete at {auto_turnover}."
+                    )
+                    if pd.Timestamp(auto_turnover) >= horizon_end:
+                        readiness_warning += (
+                            " That turnover is outside the configured "
+                            "planning horizon."
+                        )
+                    existing = str(record.get("warnings") or "")
+                    record["warnings"] = "; ".join(
+                        value
+                        for value in (existing, readiness_warning)
+                        if value
+                    )
+
+    def open_database_view(self, navigate=True):
+        self.set_page_enabled(self.database_view_tab_index, True)
+        self.database_view_refresh_pending = True
+        if navigate:
+            self.show_page(self.database_view_tab_index, force=True)
+        self.refresh_database_view()
+
+    def refresh_database_view(self):
+        if getattr(self, "database_view_refresh_in_progress", False):
+            return
+        self.database_view_refresh_in_progress = True
+        self.database_view_refresh_pending = False
+        self.database_view_period_count_snapshot = self.planning_period_count()
+        self.database_view_start_time_snapshot = (
+            self.start_time_choice or datetime.now()
+        )
+        self.database_view_site_context_snapshot = self.active_site_context()
+        self.database_view_signature_snapshot = (
+            self.database_view_input_signature()
+        )
+        self.database_view_calendar_inputs = (
+            self.capture_calendar_table_inputs()
+        )
+        self.database_view_refresh_button.setEnabled(False)
+        self.database_view_summary_label.setText(
+            "Preparing selected stockpiles, AMT chunks, and APS payloads..."
+        )
+        self.run_background_task(
+            "Preparing Database View model inputs...",
+            self.prepare_database_view_data,
+            self.finish_database_view_data,
+            self.handle_database_view_error,
+        )
+
+    def finish_database_view_data(self, result):
+        self.database_view_refresh_in_progress = False
+        self.database_view_refresh_button.setEnabled(True)
+        self.database_view_rows = result.get("records", []) or []
+        self.database_view_expit_payload_transactions = result.get(
+            "transactions", pd.DataFrame()
+        )
+        self.database_view_snapshot_signature = result.get("signature")
+        warnings = result.get("warnings", []) or []
+        opening_stockpiles = [
+            record for record in self.database_view_rows
+            if record.get("source_type")
+            in {"Inventory Stockpile", "AMT Chunk"}
+            and record.get("available_at_scenario_start") is True
+        ]
+        preplan_grade_blocks = [
+            record for record in self.database_view_rows
+            if record.get("source_type") == "APS Grade Block Payload"
+            and record.get("period") == "preplan"
+            and record.get("optimiser_source") is True
+        ]
+        if not opening_stockpiles and not preplan_grade_blocks:
+            warnings.append(
+                "No stockpile is available at the scenario start and no "
+                "direct-tip APS payload is available in Preplan. The first "
+                "steady state will have no source options."
+            )
+        self.database_view_warning_label.setText("\n".join(warnings))
+        self.database_view_warning_label.setVisible(bool(warnings))
+        self.populate_database_view_table()
+
+        counts = {}
+        tonnes = 0.0
+        for record in self.database_view_rows:
+            source_type = str(record.get("source_type") or "Unknown")
+            counts[source_type] = counts.get(source_type, 0) + 1
+            tonnes += numeric(record.get("tonnes")) or 0.0
+        count_text = ", ".join(
+            f"{source_type}: {count}"
+            for source_type, count in counts.items()
+        ) or "No source rows"
+        min_stockpiles = getattr(self, "min_stockpiles", None)
+        max_stockpiles = getattr(self, "max_stockpiles", None)
+        min_contribution = numeric(
+            getattr(self, "min_stockpile_contribution_ratio", None)
+        )
+        source_rule = (
+            f"Stockpile rule: min {min_stockpiles or 'not set'}, "
+            f"max {max_stockpiles or 'not set'}, min contribution "
+            + (
+                f"{min_contribution:.1%}"
+                if min_contribution is not None
+                else "not set"
+            )
+        )
+        self.database_view_summary_label.setText(
+            f"Planning window: {result.get('window_start')} to "
+            f"{result.get('window_end')} | {count_text} | "
+            f"Available at start: {len(opening_stockpiles)} stockpile(s); "
+            f"Preplan direct-tip payloads: {len(preplan_grade_blocks)} | "
+            f"Displayed source tonnes: {tonnes:,.1f} | {source_rule}"
+        )
+
+    def handle_database_view_error(self, error_message):
+        self.database_view_refresh_in_progress = False
+        self.database_view_refresh_button.setEnabled(True)
+        self.database_view_warning_label.setText(str(error_message))
+        self.database_view_warning_label.show()
+        self.database_view_summary_label.setText(
+            "Database View could not be prepared."
+        )
+
+    def database_view_headers(self):
+        fixed = [
+            "source_type", "source_id", "source", "parent_stockpile",
+            "build_or_chunk", "sequence", "period", "tonnes",
+            "optimiser_source", "available_at_scenario_start",
+            "direct_tip_eligible", "destination",
+            "planned_destination", "fallback_destination", "agent",
+            "start_datetime", "delivered_datetime", "selected_stream",
+            "opening_model_balance", "total_selected_stockpile_tonnes",
+            "aps_incoming_tonnes", "aps_incoming_tonnes_in_horizon",
+            "aps_incoming_tonnes_outside_horizon",
+            "projected_balance_after_aps",
+            "reclaim_threshold", "auto_turnover_datetime",
+            "is_ready_after_aps", "calendar_state_preplan",
+            "calendar_max_tonnes_preplan",
+            "internal_recon_matched", "matched_inventory_stockpile",
+            "matched_inventory_build", "matched_inventory_time",
+            "two_wp_destination_resolution", "two_wp_destination_ratio",
+            *[f"grade_{analyte}" for analyte in ANALYTES],
+        ]
+        dynamic = sorted({
+            key
+            for record in self.database_view_rows
+            for key in record
+            if key not in fixed and key != "warnings"
+        })
+        return [*fixed, *dynamic, "warnings"]
+
+    def populate_database_view_table(self):
+        table = self.database_view_table
+        headers = self.database_view_headers()
+        table.setSortingEnabled(False)
+        table.clearContents()
+        table.setRowCount(len(self.database_view_rows))
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        for row_index, record in enumerate(self.database_view_rows):
+            for column_index, header in enumerate(headers):
+                value = record.get(header, "")
+                if value is None or (isinstance(value, float) and math.isnan(value)):
+                    display = ""
+                elif header == "tonnes":
+                    display = f"{float(value):,.2f}"
+                elif header.startswith("grade_") or header.startswith("optimiser_"):
+                    display = f"{float(value):.6f}" if numeric(value) is not None else ""
+                else:
+                    display = str(value)
+                item = QTableWidgetItem(display)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setToolTip(display)
+                if header.startswith("fallback_") and display:
+                    item.setBackground(QColor("#fff3cd"))
+                elif (
+                    (header.startswith("grade_") or header.startswith("optimiser_"))
+                    and not display
+                ):
+                    item.setBackground(QColor("#fee2e2"))
+                table.setItem(row_index, column_index, item)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.setSortingEnabled(True)
+        self.apply_database_view_filters()
+
+    def apply_database_view_filters(self, *_args):
+        if not hasattr(self, "database_view_table"):
+            return
+        source_type = str(
+            self.database_view_source_filter.currentData() or ""
+        )
+        search = self.database_view_search.text().strip().lower()
+        for row_index, record in enumerate(self.database_view_rows):
+            type_matches = (
+                not source_type
+                or str(record.get("source_type") or "") == source_type
+            )
+            search_matches = (
+                not search
+                or search in " ".join(
+                    str(value) for value in record.values()
+                ).lower()
+            )
+            self.database_view_table.setRowHidden(
+                row_index, not (type_matches and search_matches)
+            )
+
+    def continue_from_database_view(self):
+        self.activate_manual_setup_tab()
+        self.navigate_to_solver_configuration()
+
     def setup_data_streams(self):
         """Set up grade stream selection, APS mappings and OPF factors."""
         self.data_streams_tab = QWidget()
@@ -3131,7 +3931,16 @@ class UserInputs(QMainWindow):
         mapping_label = QLabel("APS 24HR ROM and Product Grade Field Mappings")
         mapping_label.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(mapping_label)
-        self.aps_grade_mapping_table = QTableWidget()
+        mapping_help = QLabel(
+            "Select a mapping cell, then double-click a 24HR APS field below, "
+            "or drag the field onto the cell."
+        )
+        mapping_help.setWordWrap(True)
+        mapping_help.setStyleSheet("color: #607080;")
+        layout.addWidget(mapping_help)
+
+        mapping_area = QHBoxLayout()
+        self.aps_grade_mapping_table = APSGradeMappingTable()
         self.aps_grade_mapping_table.setColumnCount(7)
         self.aps_grade_mapping_table.setHorizontalHeaderLabels(
             ["Stream", "Brand", "Fe", "SiO₂", "Al₂O₃", "P", "Mn"]
@@ -3139,7 +3948,33 @@ class UserInputs(QMainWindow):
         self.aps_grade_mapping_table.verticalHeader().setVisible(False)
         self.aps_grade_mapping_table.setMinimumHeight(180)
         self.aps_grade_mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.aps_grade_mapping_table)
+        mapping_area.addWidget(self.aps_grade_mapping_table, stretch=3)
+
+        header_panel = QFrame()
+        header_panel.setFrameShape(QFrame.StyledPanel)
+        header_layout = QVBoxLayout(header_panel)
+        header_title = QLabel("24HR APS Fields")
+        header_title.setStyleSheet("font-weight: 700;")
+        self.aps_header_filter = QLineEdit()
+        self.aps_header_filter.setPlaceholderText("Filter fields...")
+        self.aps_header_list = QListWidget()
+        self.aps_header_list.setDragEnabled(True)
+        self.aps_header_list.setDragDropMode(QAbstractItemView.DragOnly)
+        self.aps_header_list.itemDoubleClicked.connect(
+            self.apply_aps_header_to_mapping_cell
+        )
+        self.aps_header_filter.textChanged.connect(
+            self.filter_aps_grade_field_headers
+        )
+        self.aps_header_status_label = QLabel("No 24HR APS file selected.")
+        self.aps_header_status_label.setWordWrap(True)
+        self.aps_header_status_label.setStyleSheet("color: #607080;")
+        header_layout.addWidget(header_title)
+        header_layout.addWidget(self.aps_header_filter)
+        header_layout.addWidget(self.aps_header_list, stretch=1)
+        header_layout.addWidget(self.aps_header_status_label)
+        mapping_area.addWidget(header_panel, stretch=1)
+        layout.addLayout(mapping_area)
 
         factor_label = QLabel("Historical OPF Reconciliation Factors")
         factor_label.setStyleSheet("font-size: 15px; font-weight: 700;")
@@ -3184,6 +4019,98 @@ class UserInputs(QMainWindow):
         scroll.setWidget(content)
         root.addWidget(scroll)
         self.populate_aps_grade_mapping_table()
+        self.refresh_aps_grade_field_headers()
+
+    def current_24hr_aps_path(self):
+        widget_path = (
+            self.file_path_24hr.text().strip()
+            if hasattr(self, "file_path_24hr")
+            else ""
+        )
+        return widget_path or str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ).strip()
+
+    @staticmethod
+    def distinct_aps_csv_headers(path):
+        with open(
+            path,
+            "r",
+            encoding="utf-8-sig",
+            errors="replace",
+            newline="",
+        ) as csv_file:
+            raw_headers = next(csv.reader(csv_file), [])
+        return list(dict.fromkeys(
+            str(header).strip()
+            for header in raw_headers
+            if str(header).strip()
+        ))
+
+    def refresh_aps_grade_field_headers(self, show_errors=False):
+        """Load distinct CSV header values without reading the schedule body."""
+        header_list = getattr(self, "aps_header_list", None)
+        status_label = getattr(self, "aps_header_status_label", None)
+        if header_list is None or status_label is None:
+            return []
+
+        path = self.current_24hr_aps_path()
+        header_list.clear()
+        if not path:
+            status_label.setText("No 24HR APS file selected.")
+            return []
+        if not os.path.isfile(path):
+            status_label.setText(f"24HR APS file not found: {path}")
+            return []
+
+        try:
+            headers = self.distinct_aps_csv_headers(path)
+        except (OSError, csv.Error) as exc:
+            status_label.setText(f"Unable to read 24HR APS fields: {exc}")
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "24HR APS Fields",
+                    f"Unable to read the selected 24HR APS file:\n{exc}",
+                )
+            return []
+
+        header_list.addItems(headers)
+        status_label.setText(
+            f"{len(headers)} distinct fields from {os.path.basename(path)}"
+        )
+        filter_text = (
+            self.aps_header_filter.text()
+            if hasattr(self, "aps_header_filter")
+            else ""
+        )
+        self.filter_aps_grade_field_headers(filter_text)
+        return headers
+
+    def filter_aps_grade_field_headers(self, text):
+        header_list = getattr(self, "aps_header_list", None)
+        if header_list is None:
+            return
+        search = str(text or "").strip().lower()
+        for row in range(header_list.count()):
+            item = header_list.item(row)
+            item.setHidden(bool(search and search not in item.text().lower()))
+
+    def apply_aps_header_to_mapping_cell(self, header_item):
+        table = getattr(self, "aps_grade_mapping_table", None)
+        if table is None or header_item is None:
+            return
+        row = table.currentRow()
+        column = table.currentColumn()
+        if row < 0 or column < 2:
+            QMessageBox.information(
+                self,
+                "APS Grade Field Mapping",
+                "Select an Fe, SiO2, Al2O3, P, or Mn mapping cell first.",
+            )
+            return
+        table.setItem(row, column, QTableWidgetItem(header_item.text()))
+        table.setCurrentCell(row, column)
 
     def populate_aps_grade_mapping_table(self):
         table = getattr(self, "aps_grade_mapping_table", None)
@@ -4481,6 +5408,8 @@ class UserInputs(QMainWindow):
         if file_path:
             self.file_path_24hr.setText(file_path)
             self.set_24hr_expit_agent_items([], [])
+            self.file_path_24hr_choice = file_path
+            self.refresh_aps_grade_field_headers(show_errors=True)
 
     def browse_haul_cycle_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -6002,6 +6931,7 @@ class UserInputs(QMainWindow):
 
         self.setup_stockpile_table()
         self.populate_aps_grade_mapping_table()
+        self.refresh_aps_grade_field_headers()
         self.populate_recon_factor_table()
         self.set_page_enabled(self.data_streams_tab_index, True)
         self.set_page_enabled(
@@ -9422,8 +10352,11 @@ class UserInputs(QMainWindow):
             else:
                 self.hex_sequence_table = []
                 self.hex_sequence_table_argument = []
-                self.activate_manual_setup_tab()
-                self.navigate_to_solver_configuration()
+                if getattr(self, "project_load_restore_in_progress", False):
+                    self.set_page_enabled(self.database_view_tab_index, True)
+                    self.database_view_refresh_pending = True
+                else:
+                    self.open_database_view()
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -10368,7 +11301,7 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
 
-    def store_hex_sequence_table(self):
+    def store_hex_sequence_table(self, navigate=True):
         if not self.store_AMT_chunk_settings():
             return
 
@@ -10379,8 +11312,10 @@ class UserInputs(QMainWindow):
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
             self.save_active_scenario_state()
-            self.activate_manual_setup_tab()
-            self.navigate_to_solver_configuration()
+            self.set_page_enabled(self.database_view_tab_index, True)
+            self.database_view_refresh_pending = True
+            if navigate:
+                self.open_database_view()
         else:
             QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
     
@@ -11496,6 +12431,18 @@ class UserInputs(QMainWindow):
         if self.calendar_inputs is not None:
             self.calendar_inputs["solver_config"] = copy.deepcopy(active_solver_config)
 
+        prepared_transactions = None
+        if (
+            getattr(self, "database_view_snapshot_signature", None)
+            == self.database_view_input_signature()
+            and getattr(
+                self, "database_view_expit_payload_transactions", None
+            ) is not None
+        ):
+            prepared_transactions = copy.deepcopy(
+                self.database_view_expit_payload_transactions
+            )
+
         return self.run_program.execute(
             self.start_time_choice,
             self.expit_mode_choice,
@@ -11514,6 +12461,7 @@ class UserInputs(QMainWindow):
             self.file_path_choice,
             getattr(self, "selected_24hr_expit_agents", []),
             self.planning_period_count(),
+            prepared_transactions,
         )
 
     def finish_project_load_ui(self, success):
@@ -15706,7 +16654,7 @@ class UserInputs(QMainWindow):
     def continue_project_load_after_stockpile_setup(self):
         self.project_load_restore_in_progress = False
         if any((self.stockpile_data_AMT_column or {}).values()):
-            self.store_hex_sequence_table()
+            self.store_hex_sequence_table(navigate=False)
         if self.database_has_saved_optimisation_results(get_database_path()):
             periods = PeriodManager(self.planning_period_count())
             periods.calculate_periods(
@@ -15976,6 +16924,55 @@ class CustomTableWidget(QTableWidget):
             item.setTextAlignment(Qt.AlignCenter)
             self.setItem(row, column, item)
         item.setText(str(value))
+
+class APSGradeMappingTable(QTableWidget):
+    """Mapping table that accepts a field dragged from the APS header list."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.setDropIndicatorShown(True)
+
+    def dragEnterEvent(self, event):
+        source = event.source()
+        if isinstance(source, QListWidget) and source.currentItem() is not None:
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        source = event.source()
+        index = self.indexAt(event.pos())
+        if (
+            isinstance(source, QListWidget)
+            and source.currentItem() is not None
+            and index.isValid()
+            and index.column() >= 2
+        ):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        source = event.source()
+        index = self.indexAt(event.pos())
+        if (
+            not isinstance(source, QListWidget)
+            or source.currentItem() is None
+            or not index.isValid()
+            or index.column() < 2
+        ):
+            event.ignore()
+            return
+        self.setItem(
+            index.row(),
+            index.column(),
+            QTableWidgetItem(source.currentItem().text()),
+        )
+        self.setCurrentCell(index.row(), index.column())
+        event.acceptProposedAction()
+
 
 class CustomWebEngineView(QWebEngineView):
     def __init__(self):

@@ -66,6 +66,66 @@ class Run:
     def is_abort_requested(self):
         return bool(self.abort_requested)
 
+    def prepare_expit_payload_transactions(
+        self,
+        start_time,
+        expit_mode,
+        file_path,
+        reevaluate_aps_direct_tip=False,
+        selected_aps_crusher=None,
+        site_context=None,
+        two_wp_file_path=None,
+        selected_24hr_agents=None,
+    ):
+        """Build the exact APS payload population supplied to DataLoader."""
+        if not file_path:
+            return DataFrame()
+
+        site_context = site_context or {}
+        reference_path = two_wp_file_path or file_path
+        destination_guidance = site_context.get("aps_destination_guidance")
+        if (
+            not destination_guidance
+            or destination_guidance.get("matching_version")
+            != ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+        ):
+            destination_guidance = (
+                ExpitDataHandler.build_2wp_destination_guidance(reference_path)
+            )
+
+        handler = ExpitDataHandler(
+            file_path,
+            include_crusher_destinations=reevaluate_aps_direct_tip,
+            selected_crusher_name=selected_aps_crusher,
+            operational_mine=site_context.get("mine"),
+            operational_crusher=site_context.get("crusher"),
+            operational_opf=site_context.get("opf"),
+            direct_tip_movement_rules=site_context.get(
+                "direct_tip_movement_rules", []
+            ),
+            destination_guidance=destination_guidance,
+            selected_agent_names=selected_24hr_agents,
+            grade_field_mappings=site_context.get(
+                "aps_grade_field_mappings", {}
+            ),
+            configured_product_brands=site_context.get(
+                "product_brands", []
+            ),
+        )
+        transactions = handler.process_transactions()
+        transactions = self._ensure_direct_tip_ids(transactions)
+
+        try:
+            interaction_mode = int(expit_mode)
+        except (TypeError, ValueError):
+            interaction_mode = 1
+        if interaction_mode == 2:
+            transactions = handler.update_transactions(
+                transactions, start_time
+            )
+            transactions = self._ensure_direct_tip_ids(transactions)
+        return transactions if transactions is not None else DataFrame()
+
     def _run_case_modeller(self, case_modeller):
         self.case_modeller = case_modeller
         original_print = builtins.print
@@ -150,6 +210,7 @@ class Run:
         two_wp_file_path=None,
         selected_24hr_agents=None,
         planning_period_count=3,
+        prepared_expit_payload_transactions=None,
     ):
         self.abort_requested = False
         self.case_bridge.print(
@@ -166,39 +227,23 @@ class Run:
         calendar_inputs = calendar_inputs or {}
         calendar_inputs["planning_period_count"] = periods.period_count
 
-        # 24HR supplies movement timing/tonnes/grades. The 2WP supplies the
-        # stockpile destination selected by normalized source, nearest date,
-        # then greatest tonnes.
-        if file_path:
-            reference_path = two_wp_file_path or file_path
-            destination_guidance = (site_context or {}).get(
-                "aps_destination_guidance"
+        # Database View prepares this same payload population for audit. Reuse
+        # it so the inspected records and the subsequent run cannot diverge.
+        if prepared_expit_payload_transactions is not None:
+            expit_payload_transactions = copy.deepcopy(
+                prepared_expit_payload_transactions
             )
-            if (
-                not destination_guidance
-                or destination_guidance.get("matching_version")
-                != ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
-            ):
-                destination_guidance = (
-                    ExpitDataHandler.build_2wp_destination_guidance(reference_path)
-                )
-            expit_data_handler = ExpitDataHandler(
+        elif file_path:
+            expit_payload_transactions = self.prepare_expit_payload_transactions(
+                start_time,
+                expit_mode,
                 file_path,
-                include_crusher_destinations=reevaluate_aps_direct_tip,
-                selected_crusher_name=selected_aps_crusher,
-                operational_mine=(site_context or {}).get("mine"),
-                operational_crusher=(site_context or {}).get("crusher"),
-                operational_opf=(site_context or {}).get("opf"),
-                direct_tip_movement_rules=(site_context or {}).get(
-                    "direct_tip_movement_rules", []
-                ),
-                destination_guidance=destination_guidance,
-                selected_agent_names=selected_24hr_agents,
-                grade_field_mappings=(site_context or {}).get("aps_grade_field_mappings", {}),
-                configured_product_brands=(site_context or {}).get("product_brands", []),
+                reevaluate_aps_direct_tip,
+                selected_aps_crusher,
+                site_context,
+                two_wp_file_path,
+                selected_24hr_agents,
             )
-            expit_payload_transactions = expit_data_handler.process_transactions()
-            expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
         else:
             expit_payload_transactions = DataFrame()
 
@@ -262,9 +307,6 @@ class Run:
         )
 
         if user_interaction_mode == 2 and file_path:
-
-            expit_payload_transactions = expit_data_handler.update_transactions(expit_payload_transactions, start_time)
-            expit_payload_transactions = self._ensure_direct_tip_ids(expit_payload_transactions)
             expit_payload_transactions_to_save = expit_payload_transactions.copy()
 
         elif user_interaction_mode == 1 and file_path:
