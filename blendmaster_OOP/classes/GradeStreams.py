@@ -257,7 +257,7 @@ def format_grade_stream_vector(
     parts = []
     for analyte in ANALYTES:
         value = values.get(analyte)
-        rendered = "—" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
+        rendered = "—" if value is None else f"{value:.2f}"
         parts.append(f"{labels[analyte]} {rendered}")
     return " | ".join(parts)
 

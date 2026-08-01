@@ -132,7 +132,25 @@ class DatabaseManager:
                 frame[column] = pd.to_datetime(
                     frame[column], errors="coerce"
                 ).dt.strftime("%Y-%m-%d %H:%M:%S")
+            elif frame[column].dtype == "object":
+                # Plan reports can include structured audit values such as
+                # grade_streams. SQLite cannot bind a Python dict/list, so
+                # retain the value as deterministic JSON rather than failing
+                # after an otherwise successful optimisation run.
+                frame[column] = frame[column].map(
+                    DatabaseManager._sqlite_plan_result_value
+                )
         return frame
+
+    @staticmethod
+    def _sqlite_plan_result_value(value):
+        if isinstance(value, dict):
+            return json.dumps(value, sort_keys=True, default=str)
+        if isinstance(value, (list, tuple)):
+            return json.dumps(value, default=str)
+        if isinstance(value, set):
+            return json.dumps(sorted(value, key=str), default=str)
+        return value
 
     def write_optimisation_plan_result(
         self,

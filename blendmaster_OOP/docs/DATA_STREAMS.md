@@ -80,6 +80,98 @@ The table intentionally excludes payload-level movement, destination, calendar
 and solver-configuration fields. It is a focused audit of the source tonnes and
 grades entering scheduling.
 
+### Database View field dictionary
+
+The table is deliberately wide because it shows both the values supplied to
+the optimiser and the intermediate values used to derive them. Columns fall
+into four groups.
+
+#### Source identity and quantity
+
+| Field | Meaning | When a blank is expected |
+| --- | --- | --- |
+| `source_type` | `Inventory Stockpile`, `AMT Chunk`, `AMT Stockpile - No Chunks`, or `APS Grade Block`. | Never for a valid row. |
+| `source_id` | Inventory stockpile name, AMT chunk/hex identifier, or APS grade-block source name. | Never for a valid row. |
+| `parent_stockpile` | The stockpile footprint that owns an inventory row or AMT chunk. | APS grade blocks do not have a parent stockpile. |
+| `build_or_chunk` | Inventory build name for an inventory row; chunk/hex identifier for an AMT row. | APS grade blocks and the AMT no-chunks warning row. |
+| `sequence` | AMT reclaim sequence number. | Inventory stockpiles and APS grade blocks. |
+| `tonnes` | Selected inventory balance, selected AMT chunk balance, or the sum of APS payload tonnes for that grade block inside the planning horizon. | A valid scheduling source should not be blank. The AMT no-chunks warning row intentionally shows zero. |
+
+APS payloads are consolidated into one grade-block row. Its grades are
+independently tonne-weighted per analyte, so a missing analyte does not prevent
+the available analytes from being shown.
+
+#### Internal AMT reconciliation
+
+| Field | Meaning | When a blank is expected |
+| --- | --- | --- |
+| `internal_recon_matched` | Whether the AMT footprint was successfully matched to the corresponding inventory stockpile instance used to derive its internal blend and upgrade factors. | All inventory and APS rows. |
+| `matched_inventory_stockpile` | Name of the matched inventory stockpile. | All non-AMT rows, or an unmatched AMT row. |
+| `matched_inventory_build` | Inventory build selected by the time-based match. | All non-AMT rows, or an unmatched AMT row. |
+| `matched_inventory_time` | Transaction timestamp of the matched inventory state. | All non-AMT rows, or an unmatched AMT row. |
+
+These columns are diagnostics, not additional optimiser inputs. For an AMT
+row, an unsuccessful or missing match is actionable because its internal
+factors may have fallen back to 1.0; the `warnings` column records the applied
+fallback.
+
+#### Grade columns
+
+The analyte suffixes are `fe`, `si`, `al`, `p` and `mn`. In field names, `si`
+means SiO2 and `al` means Al2O3.
+
+| Field pattern | Meaning | Required by the optimiser? |
+| --- | --- | --- |
+| `grade_<analyte>` | Raw/legacy source grade retained as the final per-analyte fallback and as an audit reference. It normally corresponds to the original insitu/source grade. | Only used when the requested stream and all upstream stream fallbacks are unavailable for that analyte. |
+| `grade_<stream>_<analyte>` | Stored unbranded grade for one of `insitu`, `modelled_rom`, `adjusted_rom`, `modelled_product`, or `adjusted_product`. | It is an intermediate/audit value unless it resolves the selected stream for the active brand. |
+| `grade_<stream>_<brand>_<analyte>` | Stored brand-specific grade stream. Brand names are lower-cased and non-alphanumeric characters become underscores; for example, brand `CCFB` produces `grade_adjusted_product_ccfb_fe`. | It is an intermediate/audit value unless that brand and stream are selected. |
+| `selected_stream` | The single stream selected on Data Streams for this run. | Yes; it controls which stored vector is requested. |
+| `selected_<brand>_<analyte>` | The effective grade resolved for that brand and analyte after applying the fallback chain. These are the clearest Database View representation of the grades that scheduling will use when that brand is active. | Yes, for the brand being produced. |
+| `fallback_<brand>_<analyte>` | Provenance of a fallback, for example `adjusted_product[CCFB] -> adjusted_rom[CCFB]`. A blank means the requested stream/brand value was available and no fallback was needed. | No. This is audit information explaining how the corresponding `selected_...` value was obtained. |
+
+Not every raw stream column is used at the same time. BlendMaster retains all
+five so the selected result can be traced and the user can switch streams
+without losing the underlying calculations. The `selected_...` columns are
+therefore derived from the wider `grade_...` set, but are intentionally kept
+because they show the exact effective vector after fallback.
+
+#### Warnings and cell colours
+
+| Appearance/field | Meaning | Action |
+| --- | --- | --- |
+| Pale yellow `fallback_...` cell | A fallback **was used** for that brand/analyte. The cell contains the requested and substituted stream/brand; hover to see the full text. | Review whether the substitution is acceptable. It is not itself a missing required cell. |
+| Blank `fallback_...` cell with the normal background | No fallback was required. | None; this is the preferred state. |
+| Blank pale red/pink `grade_...` or `selected_...` cell | No value is stored/resolved for that exact field. | Check it when it belongs to the selected stream and active brand. It can be expected for streams or brands that do not apply to the source. |
+| `warnings` | Consolidated source-calculation, reconciliation and per-analyte fallback messages for the row. | Review any message that affects the active brand or selected stream. |
+
+The UI does not colour an empty fallback cell yellow. A yellow cell always has
+fallback provenance, although its text can be easier to read from the tooltip.
+
+### Which blanks matter?
+
+Only a small subset of the wide row is essential to one scheduling decision:
+the source identity, available tonnes, and the five `selected_<active
+brand>_<analyte>` values. A blank selected grade is not necessarily fatal
+because individual constraints may not use every analyte, but it must not be
+silently interpreted as a grade of zero.
+
+The remaining blanks fall into these expected categories:
+
+- source-specific structure: APS rows have no stockpile/build/reconciliation
+  fields, and inventory rows have no AMT sequence or match fields;
+- unused streams: dry plants, APS mappings, or a particular source may not
+  carry every possible intermediate stream/brand combination;
+- audit-only provenance: blank `fallback_...` fields mean no fallback occurred;
+  and
+- unavailable data: pale red/pink grade cells and warnings identify cases that
+  need review when they intersect the selected stream and active brand.
+
+Some columns are redundant for solving but not for diagnosis. Raw grades,
+intermediate streams, match metadata, fallback provenance and warnings can be
+ignored by the optimiser, yet they explain exactly how the effective selected
+grades were produced. They should be retained in Database View while the new
+data-stream calculations are being validated.
+
 ## Audit and reporting
 
 Inventory and AMT setup views show the calculated streams for every configured

@@ -1971,13 +1971,14 @@ class UserInputs(QMainWindow):
         haulage_cost_layout.addWidget(QLabel("Haulage Cost:"))
         self.haulage_cost_per_hour_input = (
             self.create_solver_threshold_input(
-                "0.0",
+                "5.0",
                 hourly_cost_validator,
             )
         )
         self.haulage_cost_per_hour_input.setToolTip(
             "Applied as $/t = $/hr × cycle minutes ÷ 6000, using a "
-            "nominal 100 t payload."
+            "nominal 100 t payload. The value is used only when the "
+            "Rehandle Cycle Time Penalty is enabled."
         )
         haulage_cost_layout.addWidget(self.haulage_cost_per_hour_input)
         haulage_cost_layout.addWidget(QLabel("$/hr"))
@@ -2623,9 +2624,14 @@ class UserInputs(QMainWindow):
             value = setting.get(key, defaults[key])
             if key == "target_tonnes":
                 try:
-                    value = math.floor(float(value))
+                    value = f"{math.floor(float(value)):.2f}"
                 except (TypeError, ValueError, OverflowError):
-                    value = 0
+                    value = "0.00"
+            elif value is not None:
+                try:
+                    value = f"{float(value):.2f}"
+                except (TypeError, ValueError):
+                    pass
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
             self.product_build_table.setItem(row_idx, col_idx, item)
@@ -2877,11 +2883,9 @@ class UserInputs(QMainWindow):
     def update_rehandle_cycle_time_input_state(self, checked=None):
         if not hasattr(self, "haulage_cost_per_hour_input"):
             return
-        enabled = bool(
-            hasattr(self, "rehandle_cycle_time_penalty_checkbox")
-            and self.rehandle_cycle_time_penalty_checkbox.isChecked()
-        )
-        self.haulage_cost_per_hour_input.setEnabled(enabled)
+        # The switch is configured later on Decision Levers; keep its cost
+        # editable here even when the penalty itself is currently disabled.
+        self.haulage_cost_per_hour_input.setEnabled(True)
 
     def is_direct_tip_enabled(self):
         solver_config = self.normalized_solver_config()
@@ -2936,7 +2940,7 @@ class UserInputs(QMainWindow):
             "active_blend_guidance_enabled": False,
             "active_blend_guidance_incentive": 0.0,
             "rehandle_cycle_time_penalty_enabled": False,
-            "haulage_cost_per_hour": 0.0,
+            "haulage_cost_per_hour": 5.0,
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -2956,6 +2960,11 @@ class UserInputs(QMainWindow):
             merged["brand_guidance_enabled"] = (
                 merged.get("brand_guidance_mode", "ignore") != "ignore"
             )
+        try:
+            if float(merged.get("haulage_cost_per_hour") or 0) <= 0:
+                merged["haulage_cost_per_hour"] = 5.0
+        except (TypeError, ValueError):
+            merged["haulage_cost_per_hour"] = 5.0
         return merged
 
     def apply_app_theme(self):
@@ -3758,7 +3767,7 @@ class UserInputs(QMainWindow):
         self.database_view_summary_label.setText(
             f"Planning window: {result.get('window_start')} to "
             f"{result.get('window_end')} | {count_text} | "
-            f"Displayed source tonnes: {tonnes:,.1f}"
+            f"Displayed source tonnes: {tonnes:,.2f}"
         )
 
     def handle_database_view_error(self, error_message):
@@ -3805,7 +3814,7 @@ class UserInputs(QMainWindow):
                     header.startswith("selected_")
                     and header != "selected_stream"
                 ):
-                    display = f"{float(value):.6f}" if numeric(value) is not None else ""
+                    display = f"{float(value):.2f}" if numeric(value) is not None else ""
                 else:
                     display = str(value)
                 item = QTableWidgetItem(display)
@@ -10127,8 +10136,8 @@ class UserInputs(QMainWindow):
 
                 if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
-                    value = round(float(value)) if value else 0
-                    balance_item = QTableWidgetItem(str(value))
+                    value = float(value) if value else 0.0
+                    balance_item = QTableWidgetItem(f"{value:.2f}")
                     balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     balance_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     if value < 0:
@@ -10206,8 +10215,8 @@ class UserInputs(QMainWindow):
 
             # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
-            reclaim_value = round(float(reclaim_value))  # Ensure reclaim threshold is rounded
-            reclaim_item = QTableWidgetItem(str(reclaim_value))
+            reclaim_value = float(reclaim_value)
+            reclaim_item = QTableWidgetItem(f"{reclaim_value:.2f}")
             reclaim_item.setTextAlignment(Qt.AlignCenter)
             self.stockpile_table.setItem(
                 row_idx,
@@ -10825,7 +10834,7 @@ class UserInputs(QMainWindow):
                 f"state(s) using {transfer['blend_count']} manual blend "
                 f"definition(s).\n\n"
                 f"Transferred selected direct tip: "
-                f"{transfer['direct_tip_tonnes']:,.1f} t.",
+                f"{transfer['direct_tip_tonnes']:,.2f} t.",
             )
             self.show_page(self.blend_sequence_tab_index)
         return True
@@ -10873,7 +10882,7 @@ class UserInputs(QMainWindow):
         chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
 
         self.AMT_stockpile_table.blockSignals(True)
-        chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+        chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
         chunk_size_item.setFlags(Qt.ItemIsEnabled)
         chunk_size_item.setTextAlignment(Qt.AlignCenter)
         self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
@@ -10916,7 +10925,7 @@ class UserInputs(QMainWindow):
             }
 
             self.AMT_stockpile_table.blockSignals(True)
-            chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+            chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
             chunk_size_item.setFlags(Qt.ItemIsEnabled)
             chunk_size_item.setTextAlignment(Qt.AlignCenter)
             self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
@@ -11004,7 +11013,9 @@ class UserInputs(QMainWindow):
         self.submit_AMT_button = QPushButton("Submit")
         self.submit_AMT_button.setObjectName("submitAMTChunksButton")
         self.submit_AMT_button.setMinimumWidth(110)
-        self.submit_AMT_button.clicked.connect(self.store_hex_sequence_table)
+        self.submit_AMT_button.clicked.connect(
+            self.handle_AMT_submit_clicked
+        )
 
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
@@ -11138,7 +11149,7 @@ class UserInputs(QMainWindow):
                 chunk_reclaim_hours = chunk_setting.get("chunk_reclaim_hours", 1.0)
                 chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
 
-                average_rate_item = QTableWidgetItem(f"{average_reclaim_rate:.0f}")
+                average_rate_item = QTableWidgetItem(f"{average_reclaim_rate:.2f}")
                 average_rate_item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row_idx, 1, average_rate_item)
 
@@ -11146,7 +11157,7 @@ class UserInputs(QMainWindow):
                 chunk_hours_item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row_idx, 2, chunk_hours_item)
 
-                chunk_size_item = QTableWidgetItem(f"{chunk_size:.0f}")
+                chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
                 chunk_size_item.setFlags(Qt.ItemIsEnabled)
                 chunk_size_item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row_idx, 3, chunk_size_item)
@@ -11385,6 +11396,10 @@ class UserInputs(QMainWindow):
         else:    
             QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
+
+    def handle_AMT_submit_clicked(self, _checked=False):
+        """Ignore QPushButton.checked and always advance to Database View."""
+        return self.store_hex_sequence_table(navigate=True)
 
     def store_hex_sequence_table(self, navigate=True):
         if not self.store_AMT_chunk_settings():
@@ -11664,7 +11679,16 @@ class UserInputs(QMainWindow):
                     self.main_table.setCellWidget(row_idx, col_idx, state_combo)
                     continue
 
-                item = QTableWidgetItem(str(default_value))
+                display_value = default_value
+                if row_key and (
+                    "_target_" in row_key
+                    or row_key.endswith("_maximum_quantity")
+                ):
+                    try:
+                        display_value = f"{float(default_value):.2f}"
+                    except (TypeError, ValueError):
+                        pass
+                item = QTableWidgetItem(str(display_value))
                 item.setTextAlignment(Qt.AlignCenter)  # Center align all values
                 if not is_editable:
                     item.setFlags(Qt.ItemIsEnabled)  # Non-editable
@@ -11961,7 +11985,7 @@ class UserInputs(QMainWindow):
             ))
         )
         self.haulage_cost_per_hour_input.setText(str(
-            solver_config.get("haulage_cost_per_hour", 0.0)
+            solver_config.get("haulage_cost_per_hour", 5.0)
         ))
         self.update_rehandle_cycle_time_input_state()
         min_feed_duration = solver_config.get("min_feed_duration_hours")
@@ -12275,7 +12299,7 @@ class UserInputs(QMainWindow):
         haulage_cost_per_hour = parse_non_negative_input(
             self.haulage_cost_per_hour_input,
             "Haulage Cost",
-            0.0,
+            5.0,
         )
         min_feed_duration_hours = parse_optional_non_negative(
             min_feed_duration_text,
@@ -13158,7 +13182,15 @@ class UserInputs(QMainWindow):
         )
         self.populate_dataframe_table(self.sqlite_report_table, df)
 
-    def format_table_display_value(self, value):
+    @staticmethod
+    def is_two_decimal_quantity_column(header):
+        normalized = str(header or "").strip().lower()
+        return any(
+            marker in normalized
+            for marker in ("grade", "tonne", "balance", "wmt")
+        )
+
+    def format_table_display_value(self, value, header=None):
         try:
             if pd.isna(value):
                 return ""
@@ -13171,7 +13203,10 @@ class UserInputs(QMainWindow):
         if hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d %H:%M:%S")
 
-        if isinstance(value, Real) and not isinstance(value, Integral):
+        force_two_decimals = self.is_two_decimal_quantity_column(header)
+        if isinstance(value, Real) and (
+            force_two_decimals or not isinstance(value, Integral)
+        ):
             return f"{float(value):.2f}"
 
         if isinstance(value, str):
@@ -13181,6 +13216,11 @@ class UserInputs(QMainWindow):
                 if not pd.isna(parsed_datetime):
                     return parsed_datetime.strftime("%Y-%m-%d %H:%M:%S")
             if stripped_value and ("." in stripped_value or "e" in stripped_value.lower()):
+                try:
+                    return f"{float(stripped_value):.2f}"
+                except ValueError:
+                    pass
+            if force_two_decimals:
                 try:
                     return f"{float(stripped_value):.2f}"
                 except ValueError:
@@ -13201,7 +13241,10 @@ class UserInputs(QMainWindow):
 
         for row_idx, row in enumerate(df.itertuples(index=False)):
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem(self.format_table_display_value(value))
+                item = QTableWidgetItem(self.format_table_display_value(
+                    value,
+                    df.columns[col_idx],
+                ))
                 item.setTextAlignment(Qt.AlignCenter)
                 table_widget.setItem(row_idx, col_idx, item)
 
@@ -13560,7 +13603,10 @@ class UserInputs(QMainWindow):
             except (TypeError, ValueError):
                 pass
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem(self.format_table_display_value(value))
+                item = QTableWidgetItem(self.format_table_display_value(
+                    value,
+                    display_df.columns[col_idx],
+                ))
                 item.setTextAlignment(Qt.AlignCenter)  # Center-align cell content
                 item.setBackground(row_color)
                 self.decision_table.setItem(row_idx, col_idx, item)
@@ -13831,7 +13877,7 @@ class UserInputs(QMainWindow):
 
                     if key == "balance":
                         col_idx = 1  # Balance column
-                        item = QTableWidgetItem(f"{float(value):.0f}")  # Format as integer (no decimals)
+                        item = QTableWidgetItem(f"{float(value):.2f}")
                     else:
                         col_idx = keys.index(key) + 4  # Offset for additional columns
                         item = QTableWidgetItem(f"{float(value):.2f}")  # Format as float (2 decimals)
@@ -13842,7 +13888,7 @@ class UserInputs(QMainWindow):
 
                     if key == "balance":
                         col_idx = 1  # Balance column
-                        item = QTableWidgetItem(f"{float(balance):.0f}")  # Format as integer (no decimals)
+                        item = QTableWidgetItem(f"{float(balance):.2f}")
                     else:
                         col_idx = keys.index(key) + 4  # Offset for additional columns
                         item = QTableWidgetItem("AMT")
@@ -13862,7 +13908,10 @@ class UserInputs(QMainWindow):
 
             latest_record = self.latest_build_record_for_stockpile(build_report_df, stockpile_name)
             if latest_record is not None:
-                projected_balance_item.setText(str(latest_record["closing_balance"]))
+                projected_balance_item.setText(self.format_table_display_value(
+                    latest_record["closing_balance"],
+                    "Projected Balance (WMT)",
+                ))
                 last_payload_item.setText(str(latest_record["delivered_datetime"]))
 
             self.blend_config_table.setItem(row_idx, 2, projected_balance_item)  # Projected Balance
@@ -13979,7 +14028,7 @@ class UserInputs(QMainWindow):
                 delivered_text = ""
                 if latest_record is not None:
                     try:
-                        projected_text = f"{float(latest_record['closing_balance']):.0f}"
+                        projected_text = f"{float(latest_record['closing_balance']):.2f}"
                     except (TypeError, ValueError):
                         projected_text = str(latest_record["closing_balance"])
                     delivered_text = str(latest_record["delivered_datetime"])
@@ -14581,7 +14630,7 @@ class UserInputs(QMainWindow):
                         self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item("AMT"))
                     else:
                         self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
-                self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.1f}"))
+                self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.2f}"))
                 self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
                 self.blend_results_table.setItem(row_idx, 9, self.create_centered_item(sources_combined))
                 self.blend_results_table.setItem(row_idx, 10, self.create_centered_item(source_ratios_combined))
@@ -14737,12 +14786,12 @@ class UserInputs(QMainWindow):
         """
         Apply column formatting for the blend configuration table.
         """
-        # Format Balance and Projected Balance columns (no decimal places)
+        # Format Balance and Projected Balance columns (two decimal places)
         for row_idx in range(self.blend_config_table.rowCount()):
             for col_idx in [1, 2]:  # Balance and Projected Balance columns
                 item = self.blend_config_table.item(row_idx, col_idx)
                 if item and item.text():
-                    item.setText(f"{float(item.text()):.0f}")  # No decimal places
+                    item.setText(f"{float(item.text()):.2f}")
                     item.setTextAlignment(Qt.AlignCenter)
 
         # Format Grade columns (two decimal places)
@@ -14810,7 +14859,9 @@ class UserInputs(QMainWindow):
 
                 # Handle other columns as standard table items
                 else:
-                    item = QTableWidgetItem(str(value))
+                    item = QTableWidgetItem(
+                        self.format_table_display_value(value, key)
+                    )
                     item.setTextAlignment(Qt.AlignCenter)
                     self.blend_results_table_view.setItem(row_idx, col_idx, item)
 
@@ -15772,7 +15823,7 @@ class UserInputs(QMainWindow):
                     for source in sources
                 ),
                 "Direct Tip Tonnes": ", ".join(
-                    f"{source_totals[source]:.1f}"
+                    f"{source_totals[source]:.2f}"
                     for source in sources
                 ),
             }

@@ -205,7 +205,7 @@ class DataLoader:
         )
         haulage_cost_per_hour = self.solver_config.get(
             "haulage_cost_per_hour",
-            0.0,
+            5.0,
         )
         for record, nested_record in stockpile_data.items():
             calendar_name = nested_record["name"]

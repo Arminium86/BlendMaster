@@ -103,7 +103,7 @@ The 2WP guidance value fields accept positive and negative numbers:
 | Component | Where it is controlled | Current default | How it works |
 |---|---|---:|---|
 | Throughput Incentive | Solver Configuration | 1,000,100 $/t | Reward for every feasible tonne processed. The large default makes throughput the dominant objective. Lowering it allows operating costs and other preferences to trade against throughput. Zero permits the solver to choose zero tonnes when all available tonnes have a positive net cost. |
-| Rehandle Cycle Time Penalty | Decision Levers and Solver Configuration | Disabled; 0 $/hr | When enabled, a stockpile receives a haulage cost based on its shortest route to a selected crusher. |
+| Rehandle Cycle Time Penalty | Decision Levers and Solver Configuration | Disabled; 5 $/hr | When enabled, a stockpile receives a haulage cost based on its shortest route to a selected crusher. The cost remains editable while the penalty is disabled. |
 | 2WP Product Guidance | Decision Levers and Solver Configuration | Disabled; 0 $/t | Uses the proportion of the stockpile associated with the active product brand. Positive values reward a match; negative values penalise the unmatched proportion. |
 | 2WP Source Stockpile Timing Compliance | Decision Levers and Solver Configuration | Disabled; 0 $/t; 0 h tolerance | Rewards use inside the 2WP source window, including tolerance. Outside the window, compliance declines progressively as time distance increases. |
 | 2WP Active Blend | Decision Levers and Solver Configuration | Disabled; 0 $/t | Compares the selected stockpile set with the 2WP stockpile set for the active product brand and time. Ratios are not compared. |
@@ -420,4 +420,3 @@ When diagnosing a run, review in this order:
 Rewards and penalties should normally be adjusted only after the feasibility
 rules are understood. Changing a reward cannot resolve a contradiction between
 hard constraints.
-

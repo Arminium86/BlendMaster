@@ -354,6 +354,33 @@ class Optimizer:
         else: return updated_duration_auto_turnover, "Null", "Null"
 
     @staticmethod
+    def calculate_grouped_payload_depletion_duration(
+        delivered_datetimes,
+        start_of_steady_state_datetime,
+    ):
+        """Return the selected payload group's delivery window in hours.
+
+        This utility is used only to validate a configured minimum grade-block
+        pairing duration. Grade-block payload arrivals remain excluded from
+        steady-state boundary generation in ``update_steady_state_duration``.
+        """
+        valid_datetimes = []
+        for delivered_datetime in delivered_datetimes or []:
+            parsed = pd.to_datetime(delivered_datetime, errors="coerce")
+            if not pd.isna(parsed):
+                valid_datetimes.append(parsed.to_pydatetime())
+        if not valid_datetimes or start_of_steady_state_datetime is None:
+            return None
+
+        latest_delivery_datetime = max(valid_datetimes) + timedelta(seconds=1)
+        return max(
+            (
+                latest_delivery_datetime - start_of_steady_state_datetime
+            ).total_seconds() / 3600,
+            0.0,
+        )
+
+    @staticmethod
     def run_blending_optimization(
         event_pool: List[EventData],
         period_crusher_target,

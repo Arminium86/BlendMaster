@@ -261,7 +261,7 @@ class DrawStockProfiles:
             return charts or [html.Div("No data available.")]
 
         data = data.copy()
-        data['Balance'] = pd.to_numeric(data['balance'], errors='coerce').round(1)
+        data['Balance'] = pd.to_numeric(data['balance'], errors='coerce').round(2)
         for column in [
             "arrival_tonnes", "tonnes_to_crusher", "tonnes_to_stockpile",
             "movement_tonnes"
@@ -333,7 +333,7 @@ class DrawStockProfiles:
             fig.update_traces(
                 line=dict(color=stockpile_color, width=2.4),
                 fillcolor=self.hex_to_rgba(stockpile_color, 0.42),
-                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Balance: %{y:,.1f} WMT<extra></extra>",
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Balance: %{y:,.2f} WMT<extra></extra>",
             )
             fig.update_xaxes(
                 showgrid=True,
@@ -548,12 +548,12 @@ class DrawStockProfiles:
                 customdata=customdata,
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                    "%{customdata[0]} tonnes: %{y:,.1f} WMT<br>"
-                    "Target tonnes: %{customdata[5]:,.1f} WMT<br>"
+                    "%{customdata[0]} tonnes: %{y:,.2f} WMT<br>"
+                    "Target tonnes: %{customdata[5]:,.2f} WMT<br>"
                     "Steady State: %{customdata[1]}<br>"
                     "Blend ID: %{customdata[2]}<br>"
                     "Duration: %{customdata[3]:.2f} hrs<br>"
-                    "Added in state: %{customdata[4]:,.1f} WMT<br>"
+                    "Added in state: %{customdata[4]:,.2f} WMT<br>"
                     "Fe: %{customdata[6]:.2f}% (target %{customdata[7]:.2f}-%{customdata[8]:.2f}%)<br>"
                     "Si: %{customdata[9]:.2f}% (target %{customdata[10]:.2f}-%{customdata[11]:.2f}%)<br>"
                     "Al: %{customdata[12]:.2f}% (target %{customdata[13]:.2f}-%{customdata[14]:.2f}%)<br>"
@@ -569,7 +569,7 @@ class DrawStockProfiles:
                 name="Target Tonnes",
                 mode="lines",
                 line=dict(color="#dc2626", width=2.5),
-                hovertemplate="Target tonnes: %{y:,.1f} WMT<extra></extra>",
+                hovertemplate="Target tonnes: %{y:,.2f} WMT<extra></extra>",
             ))
             fig.update_layout(
                 height=260,
@@ -738,8 +738,8 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Stockpile Feed Rate: %{y:,.1f} t/h<br>"
-                "Stockpile Feed Tonnes: %{customdata[2]:,.1f} WMT<br>"
-                "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
+                "Stockpile Feed Tonnes: %{customdata[2]:,.2f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.2f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
                 "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
                 "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
@@ -763,8 +763,8 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Direct Tip Rate: %{y:,.1f} t/h<br>"
-                "Direct Tip Tonnes: %{customdata[2]:,.1f} WMT<br>"
-                "Total Crusher Tonnes: %{customdata[3]:,.1f} WMT<br>"
+                "Direct Tip Tonnes: %{customdata[2]:,.2f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.2f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
                 "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
                 "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
@@ -786,7 +786,7 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Crusher Rate Input: %{y:,.1f} t/h<br>"
-                "Total Crusher Tonnes: %{customdata[2]:,.1f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[2]:,.2f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[3]:,.1f} t/h<br>"
                 "Fe: %{customdata[4]:.2f}% (target %{customdata[5]:.2f}-%{customdata[6]:.2f}%)<br>"
                 "Si: %{customdata[7]:.2f}% (target %{customdata[8]:.2f}-%{customdata[9]:.2f}%)<br>"
@@ -896,9 +896,9 @@ class DrawStockProfiles:
             customdata=customdata,
             hovertemplate=(
                 "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                "Sent to Stockpile at this time: %{customdata[0]:,.1f} WMT<br>"
-                "Cumulative Sent to Stockpile: %{customdata[2]:,.1f} WMT<br>"
-                "Total Sent: %{customdata[4]:,.1f} WMT<extra></extra>"
+                "Sent to Stockpile at this time: %{customdata[0]:,.2f} WMT<br>"
+                "Cumulative Sent to Stockpile: %{customdata[2]:,.2f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.2f} WMT<extra></extra>"
             ),
         ))
         fig.add_trace(go.Scatter(
@@ -912,9 +912,9 @@ class DrawStockProfiles:
             customdata=customdata,
             hovertemplate=(
                 "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                "Sent to Crusher at this time: %{customdata[1]:,.1f} WMT<br>"
-                "Cumulative Sent to Crusher: %{customdata[3]:,.1f} WMT<br>"
-                "Total Sent: %{customdata[4]:,.1f} WMT<extra></extra>"
+                "Sent to Crusher at this time: %{customdata[1]:,.2f} WMT<br>"
+                "Cumulative Sent to Crusher: %{customdata[3]:,.2f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.2f} WMT<extra></extra>"
             ),
         ))
         fig.update_layout(
@@ -1160,7 +1160,7 @@ class DrawStockProfiles:
     @staticmethod
     def summary_chip(label, value, background_color, text_color):
         return html.Span(
-            f"{label}: {value:,.1f} WMT",
+            f"{label}: {value:,.2f} WMT",
             style={
                 "backgroundColor": background_color,
                 "color": text_color,
@@ -1503,7 +1503,7 @@ class DrawGanttChart:
                         ) +
                         f"Actual Direct Tip Ratio: {float(row['actual_direct_tip_ratio']):.2f}<br>"
                         f"Crusher Rate Output: {float(row['crusher_rate_output']):.1f}<br>"  # Format to 1 decimal point
-                        f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):.1f}<br>"  # Format to 1 decimal point
+                        f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):.2f}<br>"
                         f"Crusher Actual Grade Fe: {float(row['crusher_actual_grade_fe']):.2f}%<br>"  # Format as percent
                         f"Crusher Actual Grade Si: {float(row['crusher_actual_grade_si']):.2f}%<br>"
                         f"Crusher Actual Grade Al: {float(row['crusher_actual_grade_al']):.2f}%<br>"
@@ -1903,7 +1903,7 @@ class DrawGanttChart:
             for column, decimals in {
                 "steady_state_duration": 2,
                 "actual_direct_tip_ratio": 2,
-                "crusher_actual_tonnes": 1,
+                "crusher_actual_tonnes": 2,
                 "crusher_rate_output": 1,
             }.items():
                 if column in data:
@@ -1917,7 +1917,7 @@ class DrawGanttChart:
             ]:
                 data[column] = pd.to_numeric(
                     data[column], errors="coerce"
-                ).round(4)
+                ).round(2)
             
             data = data.drop_duplicates()
 
@@ -2101,7 +2101,7 @@ class DrawAMTStockpile:
                 entry["member_hexes"] = ",".join(str(hex_id) for hex_id in entry["member_hexes"])
 
     @staticmethod
-    def dash_table_scalar(value):
+    def dash_table_scalar(value, column=None):
         """Return a scalar accepted by Dash DataTable without altering source metadata."""
         if value is None:
             return ""
@@ -2109,6 +2109,13 @@ class DrawAMTStockpile:
             value = value.item()
         if isinstance(value, float) and not np.isfinite(value):
             return ""
+        normalized_column = str(column or "").strip().lower()
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if (
+                normalized_column in {"balance", "chunk_size"}
+                or normalized_column.startswith("grade_")
+            ):
+                return f"{float(value):.2f}"
         if isinstance(value, (str, int, float, bool)):
             return value
         if isinstance(value, (datetime, pd.Timestamp)):
@@ -2162,7 +2169,8 @@ class DrawAMTStockpile:
             }
             display_rows.append({
                 column: self.dash_table_scalar(
-                    derived.get(column, entry.get(column))
+                    derived.get(column, entry.get(column)),
+                    column,
                 )
                 for column in self.SELECTED_TABLE_COLUMNS
             })
@@ -2546,7 +2554,7 @@ class DrawAMTStockpile:
         ]
         message = (
             f"Generated {len(chunk_rows)} chunks for {footprint}. "
-            f"Target chunk size: {chunk_size:,.0f} tonnes."
+            f"Target chunk size: {chunk_size:,.2f} tonnes."
         )
         return chunk_rows, message
 

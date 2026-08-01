@@ -513,8 +513,8 @@ function buildLegendDetails(row) {
                 : "";
             const displayedTonnes = Number.isFinite(numericTonnes)
                 ? " (" + numericTonnes.toLocaleString(undefined, {
-                    minimumFractionDigits: 1,
-                    maximumFractionDigits: 1
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
                 }) + " t)"
                 : "";
             html += "<div>- " + escapeHtml(source.trim()) +
@@ -589,7 +589,7 @@ function positionBar(bar, row) {
     if (row["Direct Tip Tonnes"] !== undefined && row["Direct Tip Tonnes"] !== null) {
         const directTipTonnes = Number(row["Direct Tip Tonnes"] || 0);
         const directTipRatio = Number(row["Direct Tip Ratio"] || 0);
-        bar.title += "\\nSelected Direct Tip: " + directTipTonnes.toFixed(1) +
+        bar.title += "\\nSelected Direct Tip: " + directTipTonnes.toFixed(2) +
             " t (" + (directTipRatio * 100).toFixed(1) + "%)";
     }
 }
@@ -1393,7 +1393,7 @@ class DrawOptimisedGradeProfiles:
                         f"{truncated_title}: " + "%{y:.2f}%<br>"
                         "Target: %{customdata[1]:.2f}-%{customdata[2]:.2f}%<br>"
                         "Steady State: %{customdata[0]}<br>"
-                        "Crusher Tonnes: %{customdata[3]:,.1f} WMT<extra></extra>"
+                        "Crusher Tonnes: %{customdata[3]:,.2f} WMT<extra></extra>"
                     ),
                 ))
 
@@ -1416,7 +1416,7 @@ class DrawOptimisedGradeProfiles:
                         f"{truncated_title}: " + "%{y:.2f}%<br>"
                         "Target: %{customdata[1]:.2f}-%{customdata[2]:.2f}%<br>"
                         "Steady State: %{customdata[0]}<br>"
-                        "Build Tonnes: %{customdata[3]:,.1f} / %{customdata[4]:,.1f} WMT<extra></extra>"
+                        "Build Tonnes: %{customdata[3]:,.2f} / %{customdata[4]:,.2f} WMT<extra></extra>"
                     ),
                 ))
 
