@@ -45,6 +45,11 @@ from classes.GradeStreams import (
     numeric,
     resolve_grade_vector,
 )
+from classes.AMTChunking import (
+    DEFAULT_AMT_RECLAIM_RATE_TPH,
+    DEFAULT_AMT_TARGET_CHUNK_HOURS,
+    calculate_amt_chunk_plan,
+)
 import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -8704,10 +8709,13 @@ class UserInputs(QMainWindow):
         if len(parts) < 3 or not hasattr(self, "AMT_stockpile_table"):
             return None
         stockpile, field = parts[1], parts[2]
-        field_column = {
-            "average_reclaim_rate_tph": 1,
-            "chunk_reclaim_hours": 2,
+        caption = {
+            "average_reclaim_rate_tph": "Average Reclaim Rate (t/h)",
+            "chunk_reclaim_hours": "Target Hours per Chunk",
         }.get(field)
+        field_column = (
+            self.AMT_column_index(caption) if caption is not None else None
+        )
         if field_column is None:
             return None
         for row in range(self.AMT_stockpile_table.rowCount()):
@@ -9878,10 +9886,13 @@ class UserInputs(QMainWindow):
         if len(parts) < 3 or not hasattr(self, "AMT_stockpile_table"):
             return False
         stockpile, field = parts[1], parts[2]
-        field_column = {
-            "average_reclaim_rate_tph": 1,
-            "chunk_reclaim_hours": 2,
+        caption = {
+            "average_reclaim_rate_tph": "Average Reclaim Rate (t/h)",
+            "chunk_reclaim_hours": "Target Hours per Chunk",
         }.get(field)
+        field_column = (
+            self.AMT_column_index(caption) if caption is not None else None
+        )
         if field_column is None:
             return False
         for row in range(self.AMT_stockpile_table.rowCount()):
@@ -9894,18 +9905,9 @@ class UserInputs(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 self.AMT_stockpile_table.setItem(row, field_column, item)
             item.setText("" if value is None else str(value))
-            if self.AMT_stockpile_table.columnCount() > 3:
-                try:
-                    rate = float(self.AMT_stockpile_table.item(row, 1).text())
-                    hours = float(self.AMT_stockpile_table.item(row, 2).text())
-                    chunk_item = self.AMT_stockpile_table.item(row, 3)
-                    if chunk_item is None:
-                        chunk_item = QTableWidgetItem()
-                        chunk_item.setTextAlignment(Qt.AlignCenter)
-                        self.AMT_stockpile_table.setItem(row, 3, chunk_item)
-                    chunk_item.setText(f"{rate * hours:.0f}")
-                except Exception:
-                    pass
+            self.AMT_chunk_settings[stockpile_item.text()] = (
+                self.update_AMT_chunk_plan_cells(row)
+            )
             return True
         return False
     
@@ -10860,76 +10862,183 @@ class UserInputs(QMainWindow):
             return default
 
     def get_AMT_chunk_setting(self, stockpile_name):
-        return self.AMT_chunk_settings.get(stockpile_name, {
-            "average_reclaim_rate": 1000.0,
-            "chunk_reclaim_hours": 1.0,
-            "chunk_size": 1000.0
-        })
+        setting = copy.deepcopy(
+            (self.AMT_chunk_settings or {}).get(stockpile_name) or {}
+        )
+        rate = numeric(setting.get("average_reclaim_rate"))
+        hours = numeric(setting.get("chunk_reclaim_hours"))
+        # Migrate the exact former 1,000 t/h x 1 h default while retaining
+        # genuinely configured legacy values.
+        legacy_default = (
+            "chunk_count" not in setting
+            and rate == 1000.0
+            and hours == 1.0
+            and numeric(setting.get("chunk_size")) == 1000.0
+        )
+        if rate is None or legacy_default:
+            rate = DEFAULT_AMT_RECLAIM_RATE_TPH
+        if hours is None or legacy_default:
+            hours = DEFAULT_AMT_TARGET_CHUNK_HOURS
+        setting["average_reclaim_rate"] = rate
+        setting["chunk_reclaim_hours"] = hours
+        return setting
 
-    def calculate_AMT_chunk_size(self, average_reclaim_rate, chunk_reclaim_hours):
-        return max(float(average_reclaim_rate), 0.0) * max(float(chunk_reclaim_hours), 0.0)
+    def calculate_AMT_chunk_plan(
+        self, amt_total_wmt, average_reclaim_rate, chunk_reclaim_hours
+    ):
+        return calculate_amt_chunk_plan(
+            amt_total_wmt,
+            average_reclaim_rate,
+            chunk_reclaim_hours,
+        )
+
+    def AMT_column_index(self, caption):
+        return self.amt_stockpile_headers().index(caption)
+
+    @staticmethod
+    def AMT_row_numeric_value(row, *keys):
+        row = row or {}
+        for key in keys:
+            value = numeric(row.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def AMT_footprint_totals(self, stockpile_name, attributes=None):
+        rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
+        amt_total_wmt = sum(
+            max(
+                self.AMT_row_numeric_value(
+                    row, "FINAL_WMT", "final_wmt", "BALANCE", "balance"
+                )
+                or 0.0,
+                0.0,
+            )
+            for row in rows
+        )
+
+        provenance = rows[0] if rows else {}
+        matched_name = str(
+            provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
+            or provenance.get("internal_recon_inventory_stockpile")
+            or stockpile_name
+        ).strip()
+        inventory_row = None
+        normalized_match = matched_name.upper()
+        for source in (
+            getattr(self, "stockpile_data", {}) or {},
+            getattr(self, "updated_stockpile_data", {}) or {},
+        ):
+            for name, candidate in source.items():
+                if str(name).strip().upper() == normalized_match:
+                    inventory_row = candidate or {}
+                    break
+            if inventory_row is not None:
+                break
+        if inventory_row is None:
+            inventory_row = attributes or {}
+        inventory_total_wmt = self.AMT_row_numeric_value(
+            inventory_row, "BALANCE", "balance", "FINAL_WMT", "final_wmt"
+        )
+        return amt_total_wmt, inventory_total_wmt
+
+    def update_AMT_chunk_plan_cells(self, row):
+        headers = self.amt_stockpile_headers()
+        rate_column = headers.index("Average Reclaim Rate (t/h)")
+        hours_column = headers.index("Target Hours per Chunk")
+        amt_total_column = headers.index("AMT Total WMT")
+        inventory_total_column = headers.index("Inventory Stockpile Total WMT")
+        count_column = headers.index("Calculated Number of Chunks")
+        size_column = headers.index("Calculated Chunk Size (WMT)")
+
+        average_reclaim_rate = self.parse_float_from_table_item(
+            self.AMT_stockpile_table.item(row, rate_column),
+            DEFAULT_AMT_RECLAIM_RATE_TPH,
+        )
+        chunk_reclaim_hours = self.parse_float_from_table_item(
+            self.AMT_stockpile_table.item(row, hours_column),
+            DEFAULT_AMT_TARGET_CHUNK_HOURS,
+        )
+        amt_total_wmt = self.parse_float_from_table_item(
+            self.AMT_stockpile_table.item(row, amt_total_column), 0.0
+        )
+        inventory_total_wmt = self.parse_float_from_table_item(
+            self.AMT_stockpile_table.item(row, inventory_total_column), None
+        )
+        plan = self.calculate_AMT_chunk_plan(
+            amt_total_wmt, average_reclaim_rate, chunk_reclaim_hours
+        )
+
+        self.AMT_stockpile_table.blockSignals(True)
+        for column, display in (
+            (count_column, str(plan["chunk_count"])),
+            (size_column, f'{plan["chunk_size"]:.2f}'),
+        ):
+            item = QTableWidgetItem(display)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.AMT_stockpile_table.setItem(row, column, item)
+        self.AMT_stockpile_table.blockSignals(False)
+
+        return {
+            "average_reclaim_rate": average_reclaim_rate,
+            "chunk_reclaim_hours": chunk_reclaim_hours,
+            "chunk_count": plan["chunk_count"],
+            "chunk_size": plan["chunk_size"],
+            "target_chunk_wmt": plan["target_chunk_wmt"],
+            "resulting_chunk_hours": plan["resulting_chunk_hours"],
+            "amt_total_wmt": amt_total_wmt,
+            "inventory_total_wmt": inventory_total_wmt,
+        }
 
     def handle_AMT_chunk_cell_change(self, row, column):
-        if column not in (1, 2):
+        editable_columns = {
+            self.AMT_column_index("Average Reclaim Rate (t/h)"),
+            self.AMT_column_index("Target Hours per Chunk"),
+        }
+        if column not in editable_columns:
             return
 
         stockpile_item = self.AMT_stockpile_table.item(row, 0)
         if not stockpile_item:
             return
 
-        average_reclaim_rate = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 1))
-        chunk_reclaim_hours = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 2))
-        chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
-
-        self.AMT_stockpile_table.blockSignals(True)
-        chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
-        chunk_size_item.setFlags(Qt.ItemIsEnabled)
-        chunk_size_item.setTextAlignment(Qt.AlignCenter)
-        self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
-        self.AMT_stockpile_table.blockSignals(False)
-
         stockpile_name = stockpile_item.text()
-        self.AMT_chunk_settings[stockpile_name] = {
-            "average_reclaim_rate": average_reclaim_rate,
-            "chunk_reclaim_hours": chunk_reclaim_hours,
-            "chunk_size": chunk_size
-        }
+        self.AMT_chunk_settings[stockpile_name] = (
+            self.update_AMT_chunk_plan_cells(row)
+        )
 
         if hasattr(self, "draw_AMT_map"):
             self.draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
 
     def store_AMT_chunk_settings(self):
         settings = {}
+        rate_column = self.AMT_column_index("Average Reclaim Rate (t/h)")
+        hours_column = self.AMT_column_index("Target Hours per Chunk")
         for row in range(self.AMT_stockpile_table.rowCount()):
             stockpile_item = self.AMT_stockpile_table.item(row, 0)
             if not stockpile_item:
                 continue
 
             stockpile_name = stockpile_item.text()
-            average_reclaim_rate = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 1), 1000.0)
-            chunk_reclaim_hours = self.parse_float_from_table_item(self.AMT_stockpile_table.item(row, 2), 1.0)
-            chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
+            average_reclaim_rate = self.parse_float_from_table_item(
+                self.AMT_stockpile_table.item(row, rate_column),
+                DEFAULT_AMT_RECLAIM_RATE_TPH,
+            )
+            chunk_reclaim_hours = self.parse_float_from_table_item(
+                self.AMT_stockpile_table.item(row, hours_column),
+                DEFAULT_AMT_TARGET_CHUNK_HOURS,
+            )
 
             if average_reclaim_rate <= 0 or chunk_reclaim_hours <= 0:
                 QMessageBox.warning(
                     self,
                     "BlendMaster",
-                    f"Average Reclaim Rate and Chunk Reclaim Hours must be positive for {stockpile_name}."
+                    f"Average Reclaim Rate and Target Hours per Chunk must be positive for {stockpile_name}."
                 )
                 return False
 
-            settings[stockpile_name] = {
-                "average_reclaim_rate": average_reclaim_rate,
-                "chunk_reclaim_hours": chunk_reclaim_hours,
-                "chunk_size": chunk_size
-            }
-
-            self.AMT_stockpile_table.blockSignals(True)
-            chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
-            chunk_size_item.setFlags(Qt.ItemIsEnabled)
-            chunk_size_item.setTextAlignment(Qt.AlignCenter)
-            self.AMT_stockpile_table.setItem(row, 3, chunk_size_item)
-            self.AMT_stockpile_table.blockSignals(False)
+            settings[stockpile_name] = self.update_AMT_chunk_plan_cells(row)
 
         self.AMT_chunk_settings = settings
 
@@ -10941,9 +11050,12 @@ class UserInputs(QMainWindow):
     def amt_stockpile_headers(self):
         headers = [
             "AMT Stockpiles",
+            "AMT Total WMT",
+            "Inventory Stockpile Total WMT",
             "Average Reclaim Rate (t/h)",
-            "Chunk Reclaim Hours",
-            "Chunk Size (WMT)",
+            "Target Hours per Chunk",
+            "Calculated Number of Chunks",
+            "Calculated Chunk Size (WMT)",
             "Internal Blend Recon",
             "Internal Upgrade",
             "Inventory Match",
@@ -11144,23 +11256,66 @@ class UserInputs(QMainWindow):
                 stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
                 self.AMT_stockpile_table.setItem(row_idx, 0, stockpile_item)
 
+                amt_total_wmt, inventory_total_wmt = (
+                    self.AMT_footprint_totals(stockpile_name, attributes)
+                )
                 chunk_setting = self.get_AMT_chunk_setting(stockpile_name)
-                average_reclaim_rate = chunk_setting.get("average_reclaim_rate", 1000.0)
-                chunk_reclaim_hours = chunk_setting.get("chunk_reclaim_hours", 1.0)
-                chunk_size = self.calculate_AMT_chunk_size(average_reclaim_rate, chunk_reclaim_hours)
+                average_reclaim_rate = chunk_setting.get(
+                    "average_reclaim_rate", DEFAULT_AMT_RECLAIM_RATE_TPH
+                )
+                chunk_reclaim_hours = chunk_setting.get(
+                    "chunk_reclaim_hours", DEFAULT_AMT_TARGET_CHUNK_HOURS
+                )
+                chunk_plan = self.calculate_AMT_chunk_plan(
+                    amt_total_wmt,
+                    average_reclaim_rate,
+                    chunk_reclaim_hours,
+                )
+
+                for caption, value in (
+                    ("AMT Total WMT", amt_total_wmt),
+                    ("Inventory Stockpile Total WMT", inventory_total_wmt),
+                ):
+                    display = "" if value is None else f"{value:.2f}"
+                    item = QTableWidgetItem(display)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self.AMT_stockpile_table.setItem(
+                        row_idx, headers.index(caption), item
+                    )
 
                 average_rate_item = QTableWidgetItem(f"{average_reclaim_rate:.2f}")
                 average_rate_item.setTextAlignment(Qt.AlignCenter)
-                self.AMT_stockpile_table.setItem(row_idx, 1, average_rate_item)
+                self.AMT_stockpile_table.setItem(
+                    row_idx,
+                    headers.index("Average Reclaim Rate (t/h)"),
+                    average_rate_item,
+                )
 
                 chunk_hours_item = QTableWidgetItem(f"{chunk_reclaim_hours:g}")
                 chunk_hours_item.setTextAlignment(Qt.AlignCenter)
-                self.AMT_stockpile_table.setItem(row_idx, 2, chunk_hours_item)
+                self.AMT_stockpile_table.setItem(
+                    row_idx,
+                    headers.index("Target Hours per Chunk"),
+                    chunk_hours_item,
+                )
 
-                chunk_size_item = QTableWidgetItem(f"{chunk_size:.2f}")
-                chunk_size_item.setFlags(Qt.ItemIsEnabled)
-                chunk_size_item.setTextAlignment(Qt.AlignCenter)
-                self.AMT_stockpile_table.setItem(row_idx, 3, chunk_size_item)
+                for caption, display in (
+                    (
+                        "Calculated Number of Chunks",
+                        str(chunk_plan["chunk_count"]),
+                    ),
+                    (
+                        "Calculated Chunk Size (WMT)",
+                        f'{chunk_plan["chunk_size"]:.2f}',
+                    ),
+                ):
+                    item = QTableWidgetItem(display)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self.AMT_stockpile_table.setItem(
+                        row_idx, headers.index(caption), item
+                    )
 
                 footprint_rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
                 provenance = footprint_rows[0] if footprint_rows else {}
@@ -11174,11 +11329,16 @@ class UserInputs(QMainWindow):
                     (self.stockpile_data or {}).get(stockpile_name, attributes),
                 )
                 blend_summary, upgrade_summary = self.inventory_internal_factor_summary(inventory_row)
-                for column, summary in ((4, blend_summary), (5, upgrade_summary)):
+                for caption, summary in (
+                    ("Internal Blend Recon", blend_summary),
+                    ("Internal Upgrade", upgrade_summary),
+                ):
                     factor_item = QTableWidgetItem(summary)
                     factor_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     factor_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    self.AMT_stockpile_table.setItem(row_idx, column, factor_item)
+                    self.AMT_stockpile_table.setItem(
+                        row_idx, headers.index(caption), factor_item
+                    )
 
                 match_status = bool(
                     provenance.get("INTERNAL_RECON_MATCHED")

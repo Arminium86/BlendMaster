@@ -26,6 +26,11 @@ from classes.GradeStreams import (
     normalise_grade_streams,
     weighted_merge_grade_streams,
 )
+from classes.AMTChunking import (
+    DEFAULT_AMT_RECLAIM_RATE_TPH,
+    DEFAULT_AMT_TARGET_CHUNK_HOURS,
+    calculate_amt_chunk_plan,
+)
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -2052,6 +2057,7 @@ class DrawAMTStockpile:
     SELECTED_TABLE_COLUMNS = [
         "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
         "grade_p", "grade_mn", "hex_count", "chunk_size",
+        "amt_total_wmt", "inventory_total_wmt", "calculated_chunk_count",
         "inventory_match", "matched_inventory_stockpile", "matched_inventory_build",
         "matched_inventory_time", "inventory_match_rule",
         "internal_blend_recon", "internal_upgrade",
@@ -2112,7 +2118,10 @@ class DrawAMTStockpile:
         normalized_column = str(column or "").strip().lower()
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if (
-                normalized_column in {"balance", "chunk_size"}
+                normalized_column in {
+                    "balance", "chunk_size", "amt_total_wmt",
+                    "inventory_total_wmt",
+                }
                 or normalized_column.startswith("grade_")
             ):
                 return f"{float(value):.2f}"
@@ -2149,6 +2158,15 @@ class DrawAMTStockpile:
                 )
 
             derived = {
+                "amt_total_wmt": self.get_chunk_setting(
+                    entry.get("footprint"), "amt_total_wmt", 0.0
+                ),
+                "inventory_total_wmt": self.get_chunk_setting(
+                    entry.get("footprint"), "inventory_total_wmt", None
+                ),
+                "calculated_chunk_count": int(self.get_chunk_setting(
+                    entry.get("footprint"), "chunk_count", 1
+                )),
                 "inventory_match": (
                     "Matched" if bool(entry.get("internal_recon_matched"))
                     else "Not matched - factors 1.0"
@@ -2218,13 +2236,67 @@ class DrawAMTStockpile:
         return max(self.to_float(value), 0.0)
 
     def get_chunk_setting(self, footprint, key, default=0.0):
-        settings = self.chunk_settings.get(footprint, {})
+        settings = (getattr(self, "chunk_settings", {}) or {}).get(
+            footprint, {}
+        )
         return self.to_float(settings.get(key), default)
 
+    def get_chunk_plan(self, footprint):
+        total_wmt = self.get_chunk_setting(footprint, "amt_total_wmt", None)
+        if total_wmt is None:
+            data = getattr(self, "data", pd.DataFrame())
+            filtered = (
+                data[data["footprint"] == footprint]
+                if not data.empty and "footprint" in data
+                else pd.DataFrame()
+            )
+            total_wmt = pd.to_numeric(
+                filtered.get("balance", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0).clip(lower=0).sum()
+        reclaim_rate = self.get_chunk_setting(
+            footprint,
+            "average_reclaim_rate",
+            DEFAULT_AMT_RECLAIM_RATE_TPH,
+        )
+        reclaim_hours = self.get_chunk_setting(
+            footprint,
+            "chunk_reclaim_hours",
+            DEFAULT_AMT_TARGET_CHUNK_HOURS,
+        )
+        return calculate_amt_chunk_plan(
+            total_wmt, reclaim_rate, reclaim_hours
+        )
+
     def get_chunk_size(self, footprint):
-        reclaim_rate = self.get_chunk_setting(footprint, "average_reclaim_rate")
-        reclaim_hours = self.get_chunk_setting(footprint, "chunk_reclaim_hours")
-        return reclaim_rate * reclaim_hours
+        stored = self.get_chunk_setting(footprint, "chunk_size", None)
+        if stored is not None and stored > 0:
+            return stored
+        return self.get_chunk_plan(footprint)["chunk_size"]
+
+    def footprint_tonnage_summary(self, footprint):
+        if not footprint:
+            return "Select a footprint to view AMT and inventory tonnages."
+        plan = self.get_chunk_plan(footprint)
+        amt_total = self.get_chunk_setting(
+            footprint, "amt_total_wmt", None
+        )
+        if amt_total is None:
+            amt_total = plan["chunk_size"] * plan["chunk_count"]
+        inventory_total = self.get_chunk_setting(
+            footprint, "inventory_total_wmt", None
+        )
+        inventory_display = (
+            f"{inventory_total:,.2f} t"
+            if inventory_total is not None else "Unavailable"
+        )
+        return (
+            f"AMT Total WMT: {amt_total:,.2f} t | "
+            f"Inventory Stockpile Total WMT: {inventory_display} | "
+            f"Calculated Chunks: {plan['chunk_count']} | "
+            f"Calculated Chunk Size: {plan['chunk_size']:,.2f} t | "
+            f"Resulting Hours/Chunk: {plan['resulting_chunk_hours']:.2f}"
+        )
 
     def remove_footprint_chunks(self, footprint, table_data=None):
         self.selected_points = [
@@ -2388,6 +2460,15 @@ class DrawAMTStockpile:
             "chunk_size": round(chunk_size, 3),
             "average_reclaim_rate": self.get_chunk_setting(footprint, "average_reclaim_rate"),
             "chunk_reclaim_hours": self.get_chunk_setting(footprint, "chunk_reclaim_hours"),
+            "calculated_chunk_count": int(
+                self.get_chunk_plan(footprint)["chunk_count"]
+            ),
+            "amt_total_wmt": self.get_chunk_setting(
+                footprint, "amt_total_wmt", total_tonnes
+            ),
+            "inventory_total_wmt": self.get_chunk_setting(
+                footprint, "inventory_total_wmt", None
+            ),
             "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
             "grade_streams": weighted_streams,
             **provenance,
@@ -2448,7 +2529,10 @@ class DrawAMTStockpile:
     def build_chunks_for_footprint(self, footprint, reclaim_start_point, reclaim_end_point, cut_start_point, cut_end_point):
         chunk_size = self.get_chunk_size(footprint)
         if chunk_size <= 0:
-            return [], "Enter positive Average Reclaim Rate and Chunk Reclaim Hours for this stockpile."
+            return [], (
+                "Enter positive Average Reclaim Rate and Target Hours per "
+                "Chunk for this stockpile."
+            )
 
         reclaim_vector = self.direction_vector(reclaim_start_point, reclaim_end_point)
         cut_vector = self.direction_vector(cut_start_point, cut_end_point)
@@ -2498,55 +2582,34 @@ class DrawAMTStockpile:
         if filtered_data["_positive_balance"].sum() <= 0:
             return [], "All hexagons in this footprint have zero or negative balance."
 
+        requested_chunk_count = max(
+            int(self.get_chunk_plan(footprint)["chunk_count"]), 1
+        )
+        # A hexagon is BlendMaster's smallest spatial unit. If the requested
+        # duration implies more chunks than positioned positive-WMT hexagons,
+        # generate the maximum spatially possible count and report it.
+        generated_chunk_count = min(requested_chunk_count, len(path_rows))
         chunks = []
-        current_rows = []
-        current_tonnes = 0.0
-        pending_zero_rows = []
-
-        def finalise_current():
-            nonlocal current_rows, current_tonnes
-            if current_tonnes > 0:
-                chunks.append(list(current_rows))
-            elif current_rows and chunks:
-                chunks[-1].extend(current_rows)
-            current_rows = []
-            current_tonnes = 0.0
-
-        for row_dict in path_rows:
-            tonnes = row_dict["_positive_balance"]
-
-            if tonnes <= 0:
-                if current_rows:
-                    current_rows.append(row_dict)
-                else:
-                    pending_zero_rows.append(row_dict)
-                continue
-
-            if not current_rows:
-                current_rows = pending_zero_rows + [row_dict]
-                pending_zero_rows = []
-                current_tonnes = tonnes
-                continue
-
-            before_gap = abs(chunk_size - current_tonnes)
-            after_gap = abs(chunk_size - (current_tonnes + tonnes))
-
-            if current_tonnes >= chunk_size or before_gap <= after_gap:
-                finalise_current()
-                current_rows = pending_zero_rows + [row_dict]
-                pending_zero_rows = []
-                current_tonnes = tonnes
-            else:
-                current_rows.append(row_dict)
-                current_tonnes += tonnes
-
-        if pending_zero_rows:
-            if current_rows:
-                current_rows.extend(pending_zero_rows)
-            elif chunks:
-                chunks[-1].extend(pending_zero_rows)
-
-        finalise_current()
+        start_index = 0
+        for _chunk_index in range(generated_chunk_count - 1):
+            remaining_chunks = generated_chunk_count - len(chunks)
+            maximum_end = len(path_rows) - (remaining_chunks - 1)
+            running_tonnes = 0.0
+            best_end = start_index + 1
+            best_gap = float("inf")
+            for end_index in range(start_index + 1, maximum_end + 1):
+                running_tonnes += path_rows[end_index - 1][
+                    "_positive_balance"
+                ]
+                gap = abs(chunk_size - running_tonnes)
+                if gap <= best_gap:
+                    best_gap = gap
+                    best_end = end_index
+                elif running_tonnes >= chunk_size:
+                    break
+            chunks.append(path_rows[start_index:best_end])
+            start_index = best_end
+        chunks.append(path_rows[start_index:])
 
         chunk_rows = [
             self.build_chunk_row(footprint, sequence, rows, chunk_size)
@@ -2554,8 +2617,14 @@ class DrawAMTStockpile:
         ]
         message = (
             f"Generated {len(chunk_rows)} chunks for {footprint}. "
-            f"Target chunk size: {chunk_size:,.2f} tonnes."
+            f"Calculated target: {requested_chunk_count} chunks at "
+            f"{chunk_size:,.2f} tonnes each."
         )
+        if generated_chunk_count < requested_chunk_count:
+            message += (
+                f" Only {generated_chunk_count} chunks were spatially possible "
+                "because AMT hexagons cannot be split."
+            )
         return chunk_rows, message
 
     def generate_chunks_from_directions(self, footprint, table_data):
@@ -2715,6 +2784,21 @@ class DrawAMTStockpile:
                             placeholder="Select a footprint",
                             style={"fontSize": "13px"}
                         ),
+                        html.Div(
+                            id="footprint-tonnage-summary",
+                            children=self.footprint_tonnage_summary(None),
+                            style={
+                                "fontSize": "11.5px",
+                                "fontWeight": "650",
+                                "lineHeight": "1.55",
+                                "color": "#334155",
+                                "backgroundColor": "#f8fafc",
+                                "border": "1px solid #dbe4ee",
+                                "borderRadius": "6px",
+                                "padding": "7px 8px",
+                                "marginTop": "8px",
+                            },
+                        ),
                         html.Div(style={"height": "8px"}),
                         dcc.Upload(
                             id="upload-dxf",
@@ -2861,7 +2945,8 @@ class DrawAMTStockpile:
         @self.app.callback(
             [Output("selected-table", "data"),
             Output("scatter-plot", "figure"),
-            Output("chunk-status", "children")],
+            Output("chunk-status", "children"),
+            Output("footprint-tonnage-summary", "children")],
             [Input("scatter-plot", "clickData"),
             Input("footprint-dropdown", "value"),
             Input("hex-size-slider", "value"),  # Hex size slider input
@@ -2885,7 +2970,14 @@ class DrawAMTStockpile:
             if not selected_footprint:
                 status_message = "Select a footprint to digitize reclaim and cut directions."
                 self.status_message = status_message
-                return self.selected_table_data(), self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
+                return (
+                    self.selected_table_data(),
+                    self.generate_scatter_plot(
+                        selected_footprint, relayout_data, current_fig, hex_size
+                    ),
+                    status_message,
+                    self.footprint_tonnage_summary(selected_footprint),
+                )
 
             table_data = table_data or []
 
@@ -3036,7 +3128,14 @@ class DrawAMTStockpile:
                     status_message = f"Error processing overlay: {e}"
 
             self.status_message = status_message
-            return self.selected_table_data(), self.generate_scatter_plot(selected_footprint, relayout_data, current_fig, hex_size), status_message
+            return (
+                self.selected_table_data(),
+                self.generate_scatter_plot(
+                    selected_footprint, relayout_data, current_fig, hex_size
+                ),
+                status_message,
+                self.footprint_tonnage_summary(selected_footprint),
+            )
 
     def generate_scatter_plot(self, selected_footprint, relayout_data, existing_fig, hex_size=15):
 
