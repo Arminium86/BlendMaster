@@ -133,6 +133,21 @@ RAW_WMT
 deficit values, the inventory/ledger adjustment, inferred direction, method and
 status remain available for audit.
 
+### Coordinate outlier quarantine
+
+Map and reclaim geometry use a single shared coordinate filter. BlendMaster
+estimates normal hex-grid spacing from nearest neighbours, builds connected
+coordinate components, and quarantines only small components separated from the
+main footprint by many normal grid spacings. Larger disjoint components are
+retained so a legitimate second footprint lobe is not discarded automatically.
+
+A quarantined or missing coordinate is excluded from the map, automatic axes
+and dig path. Its `FINAL_WMT`, grades and properties are not deleted: the hex is
+assigned non-spatially to the chunk whose resulting tonnes are closest to the
+target chunk size. The UI reports the excluded hex IDs, WMT and allocation
+warning. This preserves the authoritative opening balance without inventing a
+replacement coordinate.
+
 ## Grade-block linkage
 
 Each deduplicated inbound AMT trip is enriched through two paths.

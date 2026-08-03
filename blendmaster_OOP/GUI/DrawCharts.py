@@ -2077,6 +2077,8 @@ class DrawAMTStockpile:
         "matched_inventory_time", "inventory_match_rule",
         "grade_block_count", "lineage_coverage_pct", "lineage_unmatched_wmt",
         "modelled_product_coverage", "modelled_properties",
+        "geometry_quarantine_count", "geometry_quarantine_wmt",
+        "geometry_quarantine_hexes",
         "modelled_rom_grades", "adjusted_rom_grades",
         "modelled_product_grades", "adjusted_product_grades",
     ]
@@ -2091,6 +2093,7 @@ class DrawAMTStockpile:
         self.reclaim_directions = {}
         self.cut_directions = {}
         self.dig_paths = {}
+        self.geometry_outliers = {}
         self.status_message = "Select a footprint, digitize reclaim and cut directions, then generate chunks."
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
@@ -2137,7 +2140,7 @@ class DrawAMTStockpile:
                 normalized_column in {
                     "balance", "chunk_size", "amt_total_wmt",
                     "inventory_total_wmt", "lineage_coverage_pct",
-                    "lineage_unmatched_wmt",
+                    "lineage_unmatched_wmt", "geometry_quarantine_wmt",
                 }
                 or normalized_column.startswith("grade_")
             ):
@@ -2262,6 +2265,115 @@ class DrawAMTStockpile:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def geometry_outlier_mask(positioned_data):
+        """Return a mask for small, remote coordinate components.
+
+        AMT footprint hexes form a regular connected grid.  The typical grid
+        spacing is estimated from nearest neighbours, then small components
+        separated well beyond that spacing are quarantined.  Larger disjoint
+        components are retained rather than assuming they are bad data.
+        """
+        if positioned_data is None or len(positioned_data) < 4:
+            return pd.Series(False, index=getattr(positioned_data, "index", []))
+
+        coordinates = positioned_data[["long", "lat"]].drop_duplicates().copy()
+        if len(coordinates) < 4:
+            return pd.Series(False, index=positioned_data.index)
+
+        median_latitude = float(coordinates["lat"].median())
+        metric_points = np.column_stack((
+            (coordinates["long"].to_numpy(float) - coordinates["long"].median())
+            * 111320.0 * max(abs(np.cos(np.deg2rad(median_latitude))), 1e-6),
+            (coordinates["lat"].to_numpy(float) - coordinates["lat"].median())
+            * 110540.0,
+        ))
+        distances = np.sqrt(
+            np.sum((metric_points[:, None, :] - metric_points[None, :, :]) ** 2, axis=2)
+        )
+        distances[distances <= 1e-9] = np.inf
+        nearest = distances.min(axis=1)
+        finite_nearest = nearest[np.isfinite(nearest) & (nearest > 0)]
+        if len(finite_nearest) < 3:
+            return pd.Series(False, index=positioned_data.index)
+
+        typical_spacing = float(np.median(finite_nearest))
+        core_nearest = finite_nearest[finite_nearest <= typical_spacing * 4.0]
+        if len(core_nearest) == 0 or typical_spacing <= 0:
+            return pd.Series(False, index=positioned_data.index)
+        connection_radius = max(
+            typical_spacing * 4.0,
+            float(np.percentile(core_nearest, 95)) * 2.0,
+        )
+
+        adjacency = distances <= connection_radius
+        unvisited = set(range(len(coordinates)))
+        components = []
+        while unvisited:
+            seed = unvisited.pop()
+            component = {seed}
+            frontier = [seed]
+            while frontier:
+                current = frontier.pop()
+                neighbours = set(np.flatnonzero(adjacency[current])) & unvisited
+                if neighbours:
+                    component.update(neighbours)
+                    frontier.extend(neighbours)
+                    unvisited.difference_update(neighbours)
+            components.append(component)
+
+        if len(components) <= 1:
+            return pd.Series(False, index=positioned_data.index)
+        largest = max(components, key=len)
+        maximum_small_component = max(3, int(np.ceil(len(coordinates) * 0.10)))
+        excluded_coordinate_indices = set()
+        for component in components:
+            if component is largest or len(component) > maximum_small_component:
+                continue
+            separation = float(distances[np.ix_(list(component), list(largest))].min())
+            if separation > connection_radius * 4.0:
+                excluded_coordinate_indices.update(component)
+
+        excluded_coordinates = {
+            tuple(coordinates.iloc[index][["long", "lat"]])
+            for index in excluded_coordinate_indices
+        }
+        return positioned_data.apply(
+            lambda row: (row["long"], row["lat"]) in excluded_coordinates,
+            axis=1,
+        )
+
+    def footprint_geometry_rows(self, footprint, positive_only=False):
+        """Return accepted, quarantined and missing-position footprint rows."""
+        if not hasattr(self, "geometry_outliers"):
+            self.geometry_outliers = {}
+        data = self.data[self.data["footprint"] == footprint].copy()
+        if data.empty:
+            return data, data.copy(), data.copy()
+        if "balance" not in data:
+            data["balance"] = 0.0
+        for column in ("lat", "long", "balance"):
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+        missing = data[data[["lat", "long"]].isna().any(axis=1)].copy()
+        positioned = data.dropna(subset=["lat", "long"]).copy()
+        outlier_mask = self.geometry_outlier_mask(positioned)
+        outliers = positioned[outlier_mask].copy()
+        accepted = positioned[~outlier_mask].copy()
+        if positive_only:
+            accepted = accepted[accepted["balance"].apply(self.positive_tonnes) > 0].copy()
+            outliers = outliers[outliers["balance"].apply(self.positive_tonnes) > 0].copy()
+            missing = missing[missing["balance"].apply(self.positive_tonnes) > 0].copy()
+
+        self.geometry_outliers[footprint] = {
+            "outlier_hexes": outliers.get("hex", pd.Series(dtype=object)).tolist(),
+            "outlier_count": len(outliers),
+            "outlier_wmt": sum(self.positive_tonnes(value) for value in outliers.get("balance", [])),
+            "missing_position_hexes": missing.get("hex", pd.Series(dtype=object)).tolist(),
+            "missing_position_count": len(missing),
+            "missing_position_wmt": sum(self.positive_tonnes(value) for value in missing.get("balance", [])),
+        }
+        return accepted, outliers, missing
+
     def positive_tonnes(self, value):
         return max(self.to_float(value), 0.0)
 
@@ -2323,6 +2435,17 @@ class DrawAMTStockpile:
             f"{inventory_total:,.2f} t"
             if inventory_total is not None else "Unavailable"
         )
+        self.footprint_geometry_rows(footprint, positive_only=True)
+        geometry = self.geometry_outliers.get(footprint, {})
+        geometry_display = (
+            f" | Quarantined Coordinates: {geometry.get('outlier_count', 0)} "
+            f"hex(es), {geometry.get('outlier_wmt', 0.0):,.2f} t"
+        )
+        if geometry.get("missing_position_count", 0):
+            geometry_display += (
+                f" | Missing Coordinates: {geometry['missing_position_count']} "
+                f"hex(es), {geometry.get('missing_position_wmt', 0.0):,.2f} t"
+            )
         return (
             f"Raw Signed AMT WMT: {raw_signed_total:,.2f} t | "
             if raw_signed_total is not None else "Raw Signed AMT WMT: Unavailable | "
@@ -2332,6 +2455,7 @@ class DrawAMTStockpile:
             f"Calculated Chunks: {plan['chunk_count']} | "
             f"Calculated Chunk Size: {plan['chunk_size']:,.2f} t | "
             f"Resulting Hours/Chunk: {plan['resulting_chunk_hours']:.2f}"
+            f"{geometry_display}"
         )
 
     def remove_footprint_chunks(self, footprint, table_data=None):
@@ -2360,15 +2484,11 @@ class DrawAMTStockpile:
 
     def automatic_directions_for_footprint(self, footprint):
         """Return short-axis reclaim and long-axis cut directions from hex geometry."""
-        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        filtered_data, _outliers, _missing = self.footprint_geometry_rows(
+            footprint, positive_only=False
+        )
         if filtered_data.empty:
             return None, None, "No AMT hexagons were found for this footprint."
-
-        for column in ("long", "lat"):
-            filtered_data[column] = pd.to_numeric(
-                filtered_data[column], errors="coerce"
-            )
-        filtered_data = filtered_data.dropna(subset=["long", "lat"])
         coordinates = filtered_data[["long", "lat"]].drop_duplicates().to_numpy()
         if len(coordinates) < 3:
             return (
@@ -2454,6 +2574,9 @@ class DrawAMTStockpile:
         lineage_keys = set()
         lineage_matched_final_wmt = 0.0
         grade_stream_warnings = []
+        geometry_quarantine_rows = [
+            row for row in chunk_rows if row.get("_geometry_quarantine_reason")
+        ]
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             if total_tonnes > 0:
@@ -2555,6 +2678,14 @@ class DrawAMTStockpile:
             grade_stream_warnings.append(
                 f"Grade-block lineage covers {lineage_coverage_pct:.2f}% of chunk WMT."
             )
+        if geometry_quarantine_rows:
+            quarantined_hexes = [
+                str(row.get("hex") or "") for row in geometry_quarantine_rows
+            ]
+            grade_stream_warnings.append(
+                "Invalid coordinate hexes were excluded from the spatial path "
+                f"and allocated non-spatially: {', '.join(quarantined_hexes)}."
+            )
 
         provenance = {}
         if chunk_rows:
@@ -2621,6 +2752,13 @@ class DrawAMTStockpile:
             "modelled_product_coverage": "; ".join(product_coverage_parts),
             "modelled_properties": modelled_properties,
             "grade_stream_warnings": list(dict.fromkeys(grade_stream_warnings)),
+            "geometry_quarantine_count": len(geometry_quarantine_rows),
+            "geometry_quarantine_wmt": sum(
+                row["_positive_balance"] for row in geometry_quarantine_rows
+            ),
+            "geometry_quarantine_hexes": ",".join(
+                str(row.get("hex") or "") for row in geometry_quarantine_rows
+            ),
             **provenance,
         }
 
@@ -2698,25 +2836,44 @@ class DrawAMTStockpile:
         if abs(np.linalg.det(matrix)) < 1e-6:
             return [], "Reclaim direction and cut direction are too close to parallel."
 
-        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        filtered_data, coordinate_outliers, missing_positions = (
+            self.footprint_geometry_rows(footprint, positive_only=True)
+        )
+        coordinate_outliers = coordinate_outliers.copy()
+        missing_positions = missing_positions.copy()
+        coordinate_outliers["_geometry_quarantine_reason"] = (
+            "remote coordinate outlier"
+        )
+        missing_positions["_geometry_quarantine_reason"] = "missing coordinates"
+        quarantined_data = pd.concat(
+            [coordinate_outliers, missing_positions], ignore_index=False
+        ).copy()
         if filtered_data.empty:
-            return [], "No AMT hexagons were found for this footprint."
+            return [], "No positioned AMT hexagons remain after geometry validation."
 
         numeric_columns = [
             "lat", "long", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"
         ]
         for column in numeric_columns:
             filtered_data[column] = pd.to_numeric(filtered_data[column], errors="coerce")
-
-        filtered_data = filtered_data.dropna(subset=["lat", "long"])
-        if filtered_data.empty:
-            return [], "No AMT hexagons have valid coordinates for this footprint."
+            if column in quarantined_data:
+                quarantined_data[column] = pd.to_numeric(
+                    quarantined_data[column], errors="coerce"
+                )
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             filtered_data[grade] = filtered_data[grade].fillna(0)
+            if grade in quarantined_data:
+                quarantined_data[grade] = quarantined_data[grade].fillna(0)
 
         filtered_data["_positive_balance"] = filtered_data["balance"].apply(self.positive_tonnes)
         filtered_data = filtered_data[filtered_data["_positive_balance"] > 0].copy()
+        quarantined_data["_positive_balance"] = quarantined_data["balance"].apply(
+            self.positive_tonnes
+        )
+        quarantined_data = quarantined_data[
+            quarantined_data["_positive_balance"] > 0
+        ].copy()
         if filtered_data.empty:
             return [], "All hexagons in this footprint have zero or negative balance."
 
@@ -2761,6 +2918,22 @@ class DrawAMTStockpile:
             start_index = best_end
         chunks.append(path_rows[start_index:])
 
+        # Invalid coordinates are excluded from axes and dig-path geometry but
+        # their material remains part of the opening balance.  Put each such
+        # hex into the chunk whose resulting tonnes are closest to the target;
+        # this is an explicit non-spatial allocation, not a fabricated point.
+        quarantined_rows = quarantined_data.to_dict("records")
+        for quarantined_row in quarantined_rows:
+            target_chunk = min(
+                range(len(chunks)),
+                key=lambda index: abs(
+                    sum(row["_positive_balance"] for row in chunks[index])
+                    + quarantined_row["_positive_balance"]
+                    - chunk_size
+                ),
+            )
+            chunks[target_chunk].append(quarantined_row)
+
         chunk_rows = [
             self.build_chunk_row(footprint, sequence, rows, chunk_size)
             for sequence, rows in enumerate(chunks, start=1)
@@ -2774,6 +2947,18 @@ class DrawAMTStockpile:
             message += (
                 f" Only {generated_chunk_count} chunks were spatially possible "
                 "because AMT hexagons cannot be split."
+            )
+        if quarantined_rows:
+            quarantined_wmt = sum(
+                row["_positive_balance"] for row in quarantined_rows
+            )
+            message += (
+                f" Quarantined {len(quarantined_rows)} invalid coordinate "
+                f"hex(es), {quarantined_wmt:,.2f} t, from the spatial path; "
+                "their tonnes were retained through non-spatial chunk allocation. "
+                "Hexes: "
+                + ", ".join(str(row.get("hex") or "") for row in quarantined_rows)
+                + "."
             )
         return chunk_rows, message
 
@@ -3321,36 +3506,22 @@ class DrawAMTStockpile:
         if not selected_footprint:
             return go.Figure()
 
-        filtered_data = self.data[self.data["footprint"] == selected_footprint]
+        filtered_data, _outliers, _missing = self.footprint_geometry_rows(
+            selected_footprint, positive_only=True
+        )
 
         if filtered_data.empty:
             return go.Figure()
 
-        # Ensure we're working on a copy to avoid SettingWithCopyWarning
+        # Ensure we're working on a copy to avoid SettingWithCopyWarning.
+        # The same geometry filter now drives display, automatic axes and the
+        # generated dig path.
         filtered_data = filtered_data.copy()
         filtered_data.loc[:, "lat"] = pd.to_numeric(filtered_data["lat"], errors="coerce").round(9)
         filtered_data.loc[:, "long"] = pd.to_numeric(filtered_data["long"], errors="coerce").round(9)
         filtered_data.loc[:, "balance"] = pd.to_numeric(filtered_data["balance"], errors="coerce")
-        filtered_data = filtered_data.dropna(subset=["lat", "long"])
-        filtered_data = filtered_data[filtered_data["balance"] > 0]
         if filtered_data.empty:
             return fig
-
-        # Remove outliers using IQR method
-        q1_lat, q3_lat = np.percentile(filtered_data["lat"], [25, 75])
-        iqr_lat = q3_lat - q1_lat
-        lower_bound_lat = q1_lat - 1.5 * iqr_lat
-        upper_bound_lat = q3_lat + 1.5 * iqr_lat
-
-        q1_long, q3_long = np.percentile(filtered_data["long"], [25, 75])
-        iqr_long = q3_long - q1_long
-        lower_bound_long = q1_long - 1.5 * iqr_long
-        upper_bound_long = q3_long + 1.5 * iqr_long
-
-        filtered_data = filtered_data[
-            (filtered_data["lat"] >= lower_bound_lat) & (filtered_data["lat"] <= upper_bound_lat) &
-            (filtered_data["long"] >= lower_bound_long) & (filtered_data["long"] <= upper_bound_long)
-        ]
 
         # Round latitude, longitude, and grades to 2 decimal places for tooltips
         filtered_data["lat_tooltip"] = filtered_data["lat"].round(2)

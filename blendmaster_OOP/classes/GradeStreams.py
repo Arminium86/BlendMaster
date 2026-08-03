@@ -426,13 +426,13 @@ def inventory_grade_streams(
 ):
     """Build all streams for an inventory stockpile.
 
-    Inventory ROM and product are already modelled.  Historical blend adjusts
-    ROM; historical regression adjusts product.  Blend is deliberately not
-    applied to inventory product.
+    Inventory insitu is the modelled ROM baseline, matching the AMT stream
+    convention. Historical blend adjusts ROM; historical regression adjusts
+    the imported inventory product. Blend is deliberately not applied to
+    inventory product.
     """
     brands = configured_brands(brands) or [UNBRANDED]
     insitu = {a: _row_value(row, f"grade_{a}", f"{a}_insitu", f"insitu_{a}") for a in ANALYTES}
-    rom = {a: _row_value(row, f"rom_{a}", f"{a}_rom", f"grade_rom_{a}") for a in ANALYTES}
     slot = internal_product_slot(opf)
     product = {
         a: _row_value(row, f"{slot}_{a}", f"{a}_{slot}", f"grade_{slot}_{a}") if slot else None
@@ -442,16 +442,17 @@ def inventory_grade_streams(
     for a in ANALYTES:
         if insitu[a] is None:
             insitu[a] = legacy_vector(row)[a]
-        if rom[a] is None:
-            rom[a] = insitu[a]
 
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
-    result["modelled_rom"][UNBRANDED] = rom
+    result["modelled_rom"][UNBRANDED] = copy.deepcopy(insitu)
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
-        adjusted_rom = {a: (rom[a] * blend[a] if rom[a] is not None else None) for a in ANALYTES}
+        adjusted_rom = {
+            a: (insitu[a] * blend[a] if insitu[a] is not None else None)
+            for a in ANALYTES
+        }
         result["adjusted_rom"][brand] = adjusted_rom
         if is_dry_plant(opf) or slot is None:
             result["modelled_product"][brand] = copy.deepcopy(adjusted_rom)

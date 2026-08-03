@@ -22,10 +22,13 @@ factor is applied.
 
 Inventory stockpiles use:
 
-- Modelled ROM = imported inventory ROM
-- Adjusted ROM = inventory ROM x historical blend recon
+- Modelled ROM = imported inventory insitu grade
+- Adjusted ROM = Modelled ROM (inventory insitu) x historical blend recon
 - Modelled Product = imported inventory product for the OPF product channel
 - Adjusted Product = inventory product x historical regression recon
+
+The imported inventory ROM fields remain available for auditing, but they do
+not drive the inventory Modelled ROM or Adjusted ROM streams.
 
 AMT hexagons use:
 
@@ -122,6 +125,11 @@ The table is deliberately wide because it shows both the values supplied to
 the optimiser and the intermediate values used to derive them. Columns fall
 into four groups.
 
+Displayed sum quantities (tonnes, WMT and counts) are rounded to whole units.
+Displayed weighted-average grades, modelled properties and coverage values are
+rounded to two decimal places. The underlying calculation values retain their
+full precision.
+
 #### Source identity and quantity
 
 | Field | Meaning | When a blank is expected |
@@ -149,6 +157,9 @@ the available analytes from being shown.
 | `spatially_corrected_wmt` | Nonnegative balance after directional deficit allocation. | Non-AMT rows. |
 | `spatial_adjustment_wmt` | Change caused by transferring AMT overdraw to nearby positive donor hexes. | Non-AMT rows. |
 | `ledger_adjustment_wmt` | Final proportional change required to match inventory `BALANCEWMT`. | Non-AMT rows. |
+| `geometry_quarantine_count` | Number of AMT hexes in the chunk whose remote or missing coordinate was excluded from spatial path generation. | Non-AMT rows, or zero when all chunk hexes are positioned normally. |
+| `geometry_quarantine_wmt` | WMT retained through non-spatial chunk allocation after coordinate quarantine. | Non-AMT rows, or zero when no coordinate was quarantined. |
+| `geometry_quarantine_hexes` | Comma-separated IDs of the quarantined hexes assigned to the chunk. | Non-AMT rows, or a normal AMT chunk. |
 | `lineage_entry_count` | Number of lineage records, including an unmatched record when present. | Non-AMT rows. |
 | `lineage_inbound_wmt` | Inbound WMT represented by grade-block lineage for the hex. | Non-AMT rows, or an AMT hex with no inbound lineage. |
 | `lineage_matched_wmt` | Lineage WMT attributed through EXPIT or the AMT truck list. | Non-AMT rows. |

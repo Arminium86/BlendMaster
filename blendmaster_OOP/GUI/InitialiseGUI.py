@@ -3359,6 +3359,15 @@ class UserInputs(QMainWindow):
                             "ledger_adjustment_wmt": chunk.get(
                                 "ledger_adjustment_wmt"
                             ),
+                            "geometry_quarantine_count": chunk.get(
+                                "geometry_quarantine_count"
+                            ),
+                            "geometry_quarantine_wmt": chunk.get(
+                                "geometry_quarantine_wmt"
+                            ),
+                            "geometry_quarantine_hexes": chunk.get(
+                                "geometry_quarantine_hexes"
+                            ),
                             "internal_recon_matched": provenance.get(
                                 "AMT_INVENTORY_MATCHED",
                                 provenance.get(
@@ -3862,17 +3871,7 @@ class UserInputs(QMainWindow):
         for row_index, record in enumerate(self.database_view_rows):
             for column_index, header in enumerate(headers):
                 value = record.get(header, "")
-                if value is None or (isinstance(value, float) and math.isnan(value)):
-                    display = ""
-                elif header == "tonnes":
-                    display = f"{float(value):,.2f}"
-                elif header.startswith("grade_") or (
-                    header.startswith("selected_")
-                    and header != "selected_stream"
-                ):
-                    display = f"{float(value):.2f}" if numeric(value) is not None else ""
-                else:
-                    display = str(value)
+                display = self.database_view_display_value(header, value)
                 item = QTableWidgetItem(display)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 item.setToolTip(display)
@@ -3893,6 +3892,33 @@ class UserInputs(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.setSortingEnabled(True)
         self.apply_database_view_filters()
+
+    @staticmethod
+    def database_view_display_value(header, value):
+        """Format audit quantities as sums and weighted values as averages."""
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return ""
+        number = numeric(value)
+        sum_property = (
+            header == "tonnes"
+            or header.endswith("_wmt")
+            or header.endswith("_tonnes")
+            or header.endswith("_count")
+        )
+        weighted_average_property = (
+            header.startswith("grade_")
+            or (
+                header.startswith("selected_")
+                and header != "selected_stream"
+            )
+            or header.startswith("modelled_")
+            or header.endswith("_coverage_pct")
+        )
+        if number is not None and sum_property:
+            return f"{number:,.0f}"
+        if number is not None and weighted_average_property:
+            return f"{number:,.2f}"
+        return str(value)
 
     def apply_database_view_filters(self, *_args):
         if not hasattr(self, "database_view_table"):
@@ -4558,14 +4584,15 @@ class UserInputs(QMainWindow):
                 for candidate in (name_value, name_value.upper())
             )
 
-        missing_rom = [
+        missing_insitu = [
             analyte for analyte in ANALYTES
-            if not present(f"{analyte}_rom", f"rom_{analyte}")
+            if not present(f"grade_{analyte}", f"{analyte}_insitu", f"insitu_{analyte}")
         ]
         messages = []
-        if missing_rom:
+        if missing_insitu:
             messages.append(
-                f"{name}: missing inventory ROM for {', '.join(missing_rom)}; falling back to insitu with factor 1.0."
+                f"{name}: missing inventory insitu grade for {', '.join(missing_insitu)}; "
+                "Modelled and Adjusted ROM fall back independently per analyte."
             )
         slot = internal_product_slot(self.opf_input_choice)
         if slot is None and not is_dry_plant(self.opf_input_choice):
@@ -4579,7 +4606,8 @@ class UserInputs(QMainWindow):
             ]
             if missing_product:
                 messages.append(
-                    f"{name}: missing inventory {slot.upper()} for {', '.join(missing_product)}; product falls back independently to ROM."
+                    f"{name}: missing inventory {slot.upper()} for {', '.join(missing_product)}; "
+                    "product falls back independently to Adjusted ROM."
                 )
         return messages
 
@@ -11457,10 +11485,8 @@ class UserInputs(QMainWindow):
                         or ""
                     ),
                 }
-                streams = (
-                    provenance.get("GRADE_STREAMS")
-                    or provenance.get("grade_streams")
-                    or {}
+                streams = self.aggregate_AMT_footprint_grade_streams(
+                    footprint_rows
                 )
                 first_brand = (
                     configured_brands(self.product_brand_labels_choice) or [None]
@@ -11503,6 +11529,41 @@ class UserInputs(QMainWindow):
         if getattr(self, "project_load_restore_in_progress", False):
             QTimer.singleShot(250, self.reload_AMT_map_view)
             QTimer.singleShot(1500, self.reload_AMT_map_view)
+
+    @staticmethod
+    def aggregate_AMT_footprint_grade_streams(rows):
+        """Tonne-weight grade streams across every positive hex in a footprint."""
+        weighted_sums = {}
+        denominators = {}
+        for row in rows or []:
+            row = row or {}
+            tonnes = None
+            for key in ("FINAL_WMT", "final_wmt", "BALANCE", "balance", "WMT", "wmt"):
+                tonnes = numeric(row.get(key))
+                if tonnes is not None:
+                    break
+            tonnes = max(tonnes or 0.0, 0.0)
+            if tonnes <= 0:
+                continue
+            streams = normalise_grade_streams(
+                row.get("GRADE_STREAMS") or row.get("grade_streams") or {}
+            )
+            for stream, brand_map in streams.items():
+                for brand, grades in (brand_map or {}).items():
+                    for analyte in ANALYTES:
+                        value = numeric((grades or {}).get(analyte))
+                        if value is None:
+                            continue
+                        key = (stream, brand, analyte)
+                        weighted_sums[key] = weighted_sums.get(key, 0.0) + value * tonnes
+                        denominators[key] = denominators.get(key, 0.0) + tonnes
+
+        result = {stream: {} for stream in STREAMS}
+        for (stream, brand, analyte), weighted_sum in weighted_sums.items():
+            result[stream].setdefault(brand, {})[analyte] = (
+                weighted_sum / denominators[(stream, brand, analyte)]
+            )
+        return result
 
     def amt_lineage_summary(self, rows):
         """Summarise footprint lineage and EXPIT product-property coverage."""
