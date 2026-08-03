@@ -41,6 +41,32 @@ plants, so product streams alias Adjusted ROM and regression is locked to 1.0.
 IB product mapping remains unconfirmed and therefore falls back to Adjusted ROM
 with a warning.
 
+### AMT spatial tonnage reconciliation
+
+AMT opening tonnes are reconstructed at the exact inventory build active at
+scenario start. Inbound and outbound AMT rows are deduplicated by `INTERNALID`;
+inbound tonnes are positive and outbound tonnes are negative at their recorded
+target/source hex.
+
+Known source-hex precision can overdraw reclaimed hexes. BlendMaster corrects
+this before chunking as follows:
+
+1. Negative hexes form one or more reclaim fronts. Their principal row axis is
+   calculated from centroid geometry and reclaim progression is taken
+   perpendicular to that axis, toward the centroid of remaining positive ore.
+2. Each deficit is transferred to positive hex capacity in deterministic
+   nearest-first order. Connected adjacent hexes and the inferred progression
+   direction are preferred; progressively more distant rows are used as needed.
+3. Negative corrected hexes are set to zero. The residual stockpile-level
+   difference, including unattributed movements and inventory adjustments, is
+   applied proportionally to the remaining positive hexes so their sum exactly
+   equals the authoritative inventory `BALANCEWMT`.
+
+The UI retains raw signed tonnes, spatial and inventory adjustments, final
+tonnes, unresolved deficits, direction and method/status fields. `FINAL_WMT`,
+not raw tonnes, is used for AMT chunking. Grade redistribution is intentionally
+outside this tonnage-only stage.
+
 ## Historical OPF factors
 
 Only completed shift dates strictly before scenario start are used. Each brand

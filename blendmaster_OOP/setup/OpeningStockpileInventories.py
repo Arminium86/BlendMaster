@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from database.DatabaseContext import get_database_path
 from classes.GradeStreams import ANALYTES, flatten_grade_streams
+from setup.AMTSpatialReconciliation import reconcile_amt_hex_rows
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
@@ -98,157 +99,239 @@ class OpeningStockpileInventories:
             conn.close()
 
     def call_opening_AMT_stockpile_inventories(self, build, start_time=None):
-        # Call the function to connect
         conn = self.connect_snowflake_with_service_account()
+        requested_builds = build if isinstance(build, list) else [build]
+        requested_builds = list(dict.fromkeys(
+            str(value).strip() for value in requested_builds if str(value).strip()
+        ))
+        if not requested_builds:
+            if conn is not None:
+                conn.close()
+            self.save_AMT_to_database({})
+            return {}
 
-        # Personal account Snowflake connection (has AMT access)
-        # conn = snowflake.connector.connect(
-        #     user='armin.sabet@fortescue.com',
-        #     account='wn74261.ap-southeast-2',
-        #     warehouse='WH_EDW_SELFSERVICE',
-        #     database='AA_OPERATIONS_MANAGEMENT',
-        #     authenticator='externalbrowser',
-        #     role='EDW_ARMIN.SABET',
-        #     login_timeout=60,  # Increase login timeout
-        #     network_timeout=300  # Increase network timeout
-        # )
+        if hasattr(start_time, "toPyDateTime"):
+            start_time = start_time.toPyDateTime()
+        if start_time is None:
+            start_time = datetime.now()
+        if isinstance(start_time, datetime):
+            start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            start_time = str(start_time)
 
-        # Dynamically generate the filters for each query
-        if isinstance(build, list):  # If build is a list
-            location_filter = " OR ".join([f"CONTAINS(LOCATION_NAME, '{b}')" for b in build])
-            source_location_filter = " OR ".join([f"CONTAINS(SOURCELOCATIONNAME, '{b}')" for b in build])
-        else:  # If build is a single string
-            location_filter = f"CONTAINS(LOCATION_NAME, '{build}')"
-            source_location_filter = f"CONTAINS(SOURCELOCATIONNAME, '{build}')"
-
-        restore_movement_filter = "1 = 0"
-        if start_time is not None:
-            if hasattr(start_time, "toPyDateTime"):
-                start_time = start_time.toPyDateTime()
-            if isinstance(start_time, datetime):
-                start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
-            restore_movement_filter = (
-                f"TO_TIMESTAMP_NTZ(fq.LAST_UPDATE) > TO_TIMESTAMP_NTZ('{start_time}')\n"
-                f"                    AND TO_TIMESTAMP_NTZ(mr.LOADEDDATETIME) >= TO_TIMESTAMP_NTZ('{start_time}')\n"
-                f"                    AND TO_TIMESTAMP_NTZ(mr.LOADEDDATETIME) < TO_TIMESTAMP_NTZ(fq.LAST_UPDATE)"
-            )
-        
-        # SQL Query with dynamic CONTAINS filter
+        requested_values = ", ".join(["(%s)"] * len(requested_builds))
         query = f"""
-           WITH first_query AS (
-                SELECT 
-                    FOOTPRINT,
-                    HEX, 
-                    SUM(TOTAL_WMT) AS WMT, 
-                    LONGITUDE, 
-                    LATITUDE, 
-                    FE, 
-                    SIO2, 
-                    AL2O3, 
-                    MN, 
-                    P,
-                    MAX(LAST_UPDATE) AS LAST_UPDATE
-                FROM
-                    AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_HEX_GRADES
-                WHERE 
-                    {location_filter}
-                GROUP BY 
-                    FOOTPRINT,
-                    HEX,
-                    LONGITUDE,
-                    LATITUDE,
-                    FE, 
-                    SIO2, 
-                    AL2O3, 
-                    MN, 
-                    P
-                ORDER BY 
-                    HEX
+            WITH REQUESTED_BUILDS AS (
+                SELECT COLUMN1::VARCHAR AS REQUESTED_BUILD
+                FROM VALUES {requested_values}
             ),
-            movement_rows AS (
-                SELECT 
-                    SOURCELOCATIONNAME, 
-                    LOADEDDATETIME, 
-                    SOURCEHEX, 
-                    AVG(TONNES) AS WMT
-                FROM
-                    AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT
-                WHERE 
-                    {source_location_filter}
-                GROUP BY
-                    SOURCELOCATIONNAME,
-                    LOADEDDATETIME,
-                    DUMPEDDATETIME,
-                    SOURCEHEX
+            PARAMS AS (
+                SELECT TO_TIMESTAMP_TZ(
+                    %s || ' +08:00',
+                    'YYYY-MM-DD HH24:MI:SS TZH:TZM'
+                ) AS AS_OF_TS
             ),
-            second_query AS (
+            INVENTORY_INSTANCE_CANDIDATES AS (
                 SELECT
-                    fq.HEX AS SOURCEHEX,
-                    SUM(mr.WMT) AS WMT
-                FROM
-                    first_query fq
-                    JOIN movement_rows mr ON fq.HEX = mr.SOURCEHEX
-                WHERE
-                    {restore_movement_filter}
-                GROUP BY
-                    fq.HEX
+                    requested.REQUESTED_BUILD,
+                    inventory.STOCKPILENAME AS FOOTPRINT,
+                    inventory.STOCKPILEBUILDNAME AS LOCATION_NAME,
+                    inventory.TRANSACTIONDATETIME AS INVENTORY_TRANSACTION_DATETIME,
+                    inventory.BALANCEWMT AS INVENTORY_BALANCE_WMT
+                FROM REQUESTED_BUILDS requested
+                CROSS JOIN PARAMS params
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS inventory
+                    ON  inventory.STOCKPILEBUILDNAME = requested.REQUESTED_BUILD
+                    OR  inventory.STOCKPILENAME = requested.REQUESTED_BUILD
+                WHERE inventory.TRANSACTIONDATETIME <= params.AS_OF_TS
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY requested.REQUESTED_BUILD
+                    ORDER BY inventory.TRANSACTIONDATETIME DESC
+                ) = 1
             ),
-            hex_coordinates AS (
-                SELECT DISTINCT 
-                    SOURCEHEX, 
-                    SOURCEHEXEASTING, 
-                    SOURCEHEXNORTHING
-                FROM 
-                    AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT
+            SELECTED_INSTANCES AS (
+                SELECT * FROM INVENTORY_INSTANCE_CANDIDATES
+            ),
+            INBOUND_RAW AS (
+                SELECT
+                    selected.FOOTPRINT,
+                    selected.LOCATION_NAME,
+                    movement.INTERNALID,
+                    COALESCE(movement.TARGETHEX, '__UNATTRIBUTED__') AS HEX,
+                    movement.DUMPEDDATETIME AS MOVEMENT_DATETIME,
+                    AVG(movement.TONNES) OVER (
+                        PARTITION BY selected.LOCATION_NAME, movement.INTERNALID
+                    ) AS WMT,
+                    movement.TARGETHEXLAT AS LATITUDE,
+                    movement.TARGETHEXLNG AS LONGITUDE,
+                    movement.TARGETHEXEASTING AS EASTING,
+                    movement.TARGETHEXNORTHING AS NORTHING
+                FROM SELECTED_INSTANCES selected
+                CROSS JOIN PARAMS params
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT movement
+                    ON movement.TARGETLOCATIONNAME = selected.LOCATION_NAME
+                WHERE movement.DUMPEDDATETIME <= params.AS_OF_TS
+                  AND movement.TONNES > 0
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY selected.LOCATION_NAME, movement.INTERNALID
+                    ORDER BY movement.DUMPEDDATETIME DESC
+                ) = 1
+            ),
+            OUTBOUND_RAW AS (
+                SELECT
+                    selected.FOOTPRINT,
+                    selected.LOCATION_NAME,
+                    movement.INTERNALID,
+                    COALESCE(movement.SOURCEHEX, '__UNATTRIBUTED__') AS HEX,
+                    movement.DUMPEDDATETIME AS MOVEMENT_DATETIME,
+                    AVG(movement.TONNES) OVER (
+                        PARTITION BY selected.LOCATION_NAME, movement.INTERNALID
+                    ) AS WMT,
+                    movement.SOURCEHEXLAT AS LATITUDE,
+                    movement.SOURCEHEXLNG AS LONGITUDE,
+                    movement.SOURCEHEXEASTING AS EASTING,
+                    movement.SOURCEHEXNORTHING AS NORTHING
+                FROM SELECTED_INSTANCES selected
+                CROSS JOIN PARAMS params
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT movement
+                    ON movement.SOURCELOCATIONNAME = selected.LOCATION_NAME
+                WHERE movement.DUMPEDDATETIME <= params.AS_OF_TS
+                  AND movement.TONNES > 0
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY selected.LOCATION_NAME, movement.INTERNALID
+                    ORDER BY movement.DUMPEDDATETIME DESC
+                ) = 1
+            ),
+            HEX_MOVEMENTS AS (
+                SELECT FOOTPRINT, LOCATION_NAME, HEX, WMT AS SIGNED_WMT
+                FROM INBOUND_RAW
+                UNION ALL
+                SELECT FOOTPRINT, LOCATION_NAME, HEX, -WMT AS SIGNED_WMT
+                FROM OUTBOUND_RAW
+            ),
+            HEX_BALANCES AS (
+                SELECT
+                    FOOTPRINT,
+                    LOCATION_NAME,
+                    HEX,
+                    SUM(SIGNED_WMT) AS RAW_WMT
+                FROM HEX_MOVEMENTS
+                GROUP BY FOOTPRINT, LOCATION_NAME, HEX
+            ),
+            UNATTRIBUTED_MOVEMENTS AS (
+                SELECT
+                    FOOTPRINT,
+                    LOCATION_NAME,
+                    COALESCE(SUM(RAW_WMT), 0) AS UNATTRIBUTED_MOVEMENT_WMT
+                FROM HEX_BALANCES
+                WHERE HEX = '__UNATTRIBUTED__'
+                GROUP BY FOOTPRINT, LOCATION_NAME
+            ),
+            HEX_GRADES AS (
+                SELECT
+                    grades.FOOTPRINT,
+                    grades.LOCATION_NAME,
+                    grades.HEX,
+                    grades.FE,
+                    grades.SIO2,
+                    grades.AL2O3,
+                    grades.MN,
+                    grades.P,
+                    grades.LONGITUDE,
+                    grades.LATITUDE,
+                    grades.LAST_UPDATE
+                FROM AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_HEX_GRADES grades
+                INNER JOIN SELECTED_INSTANCES selected
+                    ON grades.LOCATION_NAME = selected.LOCATION_NAME
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY grades.LOCATION_NAME, grades.HEX
+                    ORDER BY grades.LAST_UPDATE DESC
+                ) = 1
+            ),
+            HEX_COORDINATE_CANDIDATES AS (
+                SELECT FOOTPRINT, LOCATION_NAME, HEX, MOVEMENT_DATETIME,
+                       LATITUDE, LONGITUDE, EASTING, NORTHING
+                FROM INBOUND_RAW
+                WHERE HEX <> '__UNATTRIBUTED__'
+                UNION ALL
+                SELECT FOOTPRINT, LOCATION_NAME, HEX, MOVEMENT_DATETIME,
+                       LATITUDE, LONGITUDE, EASTING, NORTHING
+                FROM OUTBOUND_RAW
+                WHERE HEX <> '__UNATTRIBUTED__'
+            ),
+            HEX_COORDINATES AS (
+                SELECT * FROM HEX_COORDINATE_CANDIDATES
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY LOCATION_NAME, HEX
+                    ORDER BY
+                        CASE WHEN EASTING IS NULL OR NORTHING IS NULL THEN 1 ELSE 0 END,
+                        MOVEMENT_DATETIME DESC
+                ) = 1
+            ),
+            HEX_UNIVERSE AS (
+                SELECT FOOTPRINT, LOCATION_NAME, HEX
+                FROM HEX_BALANCES
+                WHERE HEX <> '__UNATTRIBUTED__'
+                UNION
+                SELECT FOOTPRINT, LOCATION_NAME, HEX
+                FROM HEX_GRADES
             )
-            SELECT 
-                fq.FOOTPRINT,
-                fq.HEX,
-                fq.FE,    
-                fq.SIO2,
-                fq.AL2O3,
-                fq.MN,
-                fq.P,
-                CASE 
-                    WHEN sq.SOURCEHEX IS NOT NULL THEN fq.WMT + sq.WMT
-                    ELSE fq.WMT
-                END AS FINAL_WMT,
-                fq.LONGITUDE,
-                fq.LATITUDE,
-                fq.LAST_UPDATE,
-                hc.SOURCEHEXEASTING,
-                hc.SOURCEHEXNORTHING,
-                CASE 
-                    WHEN sq.SOURCEHEX IS NOT NULL THEN 'True'
-                    ELSE 'False'
-                END AS HEX_UPDATED
-            FROM 
-                first_query fq
-                LEFT JOIN second_query sq ON fq.HEX = sq.SOURCEHEX
-                LEFT JOIN hex_coordinates hc ON fq.HEX = hc.SOURCEHEX
-            ORDER BY 
-                fq.HEX;
+            SELECT
+                universe.FOOTPRINT,
+                universe.LOCATION_NAME,
+                universe.HEX,
+                grades.FE,
+                grades.SIO2,
+                grades.AL2O3,
+                grades.MN,
+                grades.P,
+                COALESCE(balance.RAW_WMT, 0) AS RAW_WMT,
+                COALESCE(balance.RAW_WMT, 0) AS FINAL_WMT,
+                COALESCE(grades.LONGITUDE, coordinates.LONGITUDE) AS LONGITUDE,
+                COALESCE(grades.LATITUDE, coordinates.LATITUDE) AS LATITUDE,
+                grades.LAST_UPDATE,
+                coordinates.EASTING AS SOURCEHEXEASTING,
+                coordinates.NORTHING AS SOURCEHEXNORTHING,
+                CASE WHEN balance.HEX IS NULL THEN 'False' ELSE 'True' END AS HEX_UPDATED,
+                selected.INVENTORY_BALANCE_WMT,
+                selected.INVENTORY_TRANSACTION_DATETIME,
+                COALESCE(unattributed.UNATTRIBUTED_MOVEMENT_WMT, 0)
+                    AS UNATTRIBUTED_MOVEMENT_WMT
+            FROM HEX_UNIVERSE universe
+            INNER JOIN SELECTED_INSTANCES selected
+                ON universe.LOCATION_NAME = selected.LOCATION_NAME
+            LEFT JOIN HEX_BALANCES balance
+                ON  balance.LOCATION_NAME = universe.LOCATION_NAME
+                AND balance.HEX = universe.HEX
+            LEFT JOIN HEX_GRADES grades
+                ON  grades.LOCATION_NAME = universe.LOCATION_NAME
+                AND grades.HEX = universe.HEX
+            LEFT JOIN HEX_COORDINATES coordinates
+                ON  coordinates.LOCATION_NAME = universe.LOCATION_NAME
+                AND coordinates.HEX = universe.HEX
+            LEFT JOIN UNATTRIBUTED_MOVEMENTS unattributed
+                ON unattributed.LOCATION_NAME = universe.LOCATION_NAME
+            ORDER BY universe.FOOTPRINT, universe.HEX
         """
 
         try:
             # Execute query
             cursor = conn.cursor()
-            cursor.execute(query)
+            cursor.execute(query, (*requested_builds, start_time))
             result = cursor.fetchall()
 
             # Fetch column names
             columns = [col[0] for col in cursor.description]
 
-            # Convert to a dictionary with FOOTPRINT as the key, storing multiple rows in a list
             data_dict = {}
             for row in result:
-                key = row[0]  # FOOTPRINT as the key
-                record = dict(zip(columns, row))  # Convert row to dictionary
+                key = row[0]
+                data_dict.setdefault(key, []).append(dict(zip(columns, row)))
 
-                if key in data_dict:
-                    data_dict[key].append(record)  # Append to the list if the key exists
-                else:
-                    data_dict[key] = [record]  # Create a new list if the key does not exist
+            data_dict = {
+                footprint: reconcile_amt_hex_rows(rows)
+                for footprint, rows in data_dict.items()
+            }
 
             # Store results in SQLite database
             self.save_AMT_to_database(data_dict)
@@ -436,6 +519,27 @@ class OpeningStockpileInventories:
                     ),
                     "internal_recon_match_rule": row.get("INTERNAL_RECON_MATCH_RULE"),
                     "internal_recon_warning": row.get("INTERNAL_RECON_WARNING"),
+                    "location_name": row.get("LOCATION_NAME"),
+                    "inventory_balance_wmt": row.get("INVENTORY_BALANCE_WMT"),
+                    "raw_wmt": row.get("RAW_WMT"),
+                    "spatially_corrected_wmt": row.get("SPATIALLY_CORRECTED_WMT"),
+                    "spatial_adjustment_wmt": row.get("SPATIAL_ADJUSTMENT_WMT"),
+                    "ledger_adjustment_wmt": row.get("LEDGER_ADJUSTMENT_WMT"),
+                    "spatial_deficit_wmt": row.get("SPATIAL_DEFICIT_WMT"),
+                    "spatial_deficit_filled_wmt": row.get("SPATIAL_DEFICIT_FILLED_WMT"),
+                    "spatial_donor_wmt": row.get("SPATIAL_DONOR_WMT"),
+                    "spatial_unresolved_wmt": row.get("SPATIAL_UNRESOLVED_WMT"),
+                    "raw_stockpile_wmt": row.get("RAW_STOCKPILE_WMT"),
+                    "raw_positive_stockpile_wmt": row.get("RAW_POSITIVE_STOCKPILE_WMT"),
+                    "spatially_corrected_stockpile_wmt": row.get(
+                        "SPATIALLY_CORRECTED_STOCKPILE_WMT"
+                    ),
+                    "final_stockpile_wmt": row.get("FINAL_STOCKPILE_WMT"),
+                    "unattributed_movement_wmt": row.get("UNATTRIBUTED_MOVEMENT_WMT"),
+                    "spatial_recon_status": row.get("SPATIAL_RECON_STATUS"),
+                    "spatial_recon_method": row.get("SPATIAL_RECON_METHOD"),
+                    "reclaim_direction_easting": row.get("RECLAIM_DIRECTION_EASTING"),
+                    "reclaim_direction_northing": row.get("RECLAIM_DIRECTION_NORTHING"),
                     **{
                         f"internal_blend_recon_{analyte}": row.get(
                             f"INTERNAL_BLEND_RECON_{analyte.upper()}"
@@ -459,6 +563,9 @@ class OpeningStockpileInventories:
             "internal_recon_inventory_transaction_datetime",
             "internal_recon_match_rule",
             "internal_recon_warning",
+            "location_name",
+            "spatial_recon_status",
+            "spatial_recon_method",
         }
         audit_columns = sorted({
             column for values in amt_audit_by_hex.values() for column in values

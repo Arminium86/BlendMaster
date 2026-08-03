@@ -2050,6 +2050,11 @@ class DrawAMTStockpile:
     AMT_COLUMNS = [
         "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
         "lat", "long", "northing", "easting", "last_update", "hex_updated", "grade_streams_json",
+        "raw_wmt", "spatially_corrected_wmt", "spatial_adjustment_wmt",
+        "ledger_adjustment_wmt", "spatial_deficit_wmt", "spatial_donor_wmt",
+        "spatial_unresolved_wmt", "raw_stockpile_wmt", "raw_positive_stockpile_wmt",
+        "spatially_corrected_stockpile_wmt", "final_stockpile_wmt",
+        "spatial_recon_status", "spatial_recon_method",
         "internal_recon_matched", "internal_recon_inventory_stockpile",
         "internal_recon_inventory_build", "internal_recon_match_rule",
         "internal_recon_warning", "internal_recon_inventory_transaction_datetime",
@@ -2057,7 +2062,7 @@ class DrawAMTStockpile:
     SELECTED_TABLE_COLUMNS = [
         "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
         "grade_p", "grade_mn", "hex_count", "chunk_size",
-        "amt_total_wmt", "inventory_total_wmt", "calculated_chunk_count",
+        "raw_signed_amt_wmt", "amt_total_wmt", "inventory_total_wmt", "calculated_chunk_count",
         "inventory_match", "matched_inventory_stockpile", "matched_inventory_build",
         "matched_inventory_time", "inventory_match_rule",
         "internal_blend_recon", "internal_upgrade",
@@ -2158,6 +2163,9 @@ class DrawAMTStockpile:
                 )
 
             derived = {
+                "raw_signed_amt_wmt": self.get_chunk_setting(
+                    entry.get("footprint"), "raw_signed_amt_wmt", 0.0
+                ),
                 "amt_total_wmt": self.get_chunk_setting(
                     entry.get("footprint"), "amt_total_wmt", 0.0
                 ),
@@ -2286,12 +2294,18 @@ class DrawAMTStockpile:
         inventory_total = self.get_chunk_setting(
             footprint, "inventory_total_wmt", None
         )
+        raw_signed_total = self.get_chunk_setting(
+            footprint, "raw_signed_amt_wmt", None
+        )
         inventory_display = (
             f"{inventory_total:,.2f} t"
             if inventory_total is not None else "Unavailable"
         )
         return (
-            f"AMT Total WMT: {amt_total:,.2f} t | "
+            f"Raw Signed AMT WMT: {raw_signed_total:,.2f} t | "
+            if raw_signed_total is not None else "Raw Signed AMT WMT: Unavailable | "
+        ) + (
+            f"AMT Total WMT: {amt_total:,.2f} t (Spatially Reconciled) | "
             f"Inventory Stockpile Total WMT: {inventory_display} | "
             f"Calculated Chunks: {plan['chunk_count']} | "
             f"Calculated Chunk Size: {plan['chunk_size']:,.2f} t | "
@@ -2465,6 +2479,9 @@ class DrawAMTStockpile:
             ),
             "amt_total_wmt": self.get_chunk_setting(
                 footprint, "amt_total_wmt", total_tonnes
+            ),
+            "raw_signed_amt_wmt": self.get_chunk_setting(
+                footprint, "raw_signed_amt_wmt", None
             ),
             "inventory_total_wmt": self.get_chunk_setting(
                 footprint, "inventory_total_wmt", None
@@ -3194,6 +3211,14 @@ class DrawAMTStockpile:
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             filtered_data[grade] = pd.to_numeric(filtered_data[grade], errors="coerce").fillna(0)
             filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
+        for column in (
+            "balance", "raw_wmt", "spatial_adjustment_wmt", "ledger_adjustment_wmt"
+        ):
+            if column not in filtered_data:
+                filtered_data[column] = 0.0
+            filtered_data[column] = pd.to_numeric(
+                filtered_data[column], errors="coerce"
+            ).fillna(0).round(2)
 
         chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
         filtered_data["chunk_sequence"] = filtered_data["hex"].map(chunk_lookup)
@@ -3221,14 +3246,18 @@ class DrawAMTStockpile:
                 customdata=group[[
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
                     "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
-                    "lat_tooltip", "long_tooltip", "chunk_sequence"
+                    "lat_tooltip", "long_tooltip", "chunk_sequence", "raw_wmt",
+                    "spatial_adjustment_wmt", "ledger_adjustment_wmt"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
                     "Chunk: %{customdata[9]}<br>" +
                     "Latitude: %{customdata[7]:.2f}<br>" +
                     "Longitude: %{customdata[8]:.2f}<br>" +
-                    "Balance: %{customdata[1]}t<br>" +
+                    "Final Balance: %{customdata[1]:,.2f} t<br>" +
+                    "Raw Signed Balance: %{customdata[10]:,.2f} t<br>" +
+                    "Spatial Adjustment: %{customdata[11]:+,.2f} t<br>" +
+                    "Inventory Adjustment: %{customdata[12]:+,.2f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +
@@ -3254,13 +3283,17 @@ class DrawAMTStockpile:
                 customdata=remaining_data[[
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
                     "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
-                    "lat_tooltip", "long_tooltip"
+                    "lat_tooltip", "long_tooltip", "raw_wmt",
+                    "spatial_adjustment_wmt", "ledger_adjustment_wmt"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
                     "Latitude: %{customdata[7]:.2f}<br>" +
                     "Longitude: %{customdata[8]:.2f}<br>" +
-                    "Balance: %{customdata[1]}t<br>" +
+                    "Final Balance: %{customdata[1]:,.2f} t<br>" +
+                    "Raw Signed Balance: %{customdata[9]:,.2f} t<br>" +
+                    "Spatial Adjustment: %{customdata[10]:+,.2f} t<br>" +
+                    "Inventory Adjustment: %{customdata[11]:+,.2f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +

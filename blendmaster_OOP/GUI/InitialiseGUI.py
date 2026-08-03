@@ -10942,10 +10942,31 @@ class UserInputs(QMainWindow):
         )
         return amt_total_wmt, inventory_total_wmt
 
+    def AMT_raw_signed_footprint_total(self, stockpile_name):
+        rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
+        if not rows:
+            return 0.0
+        reported_total = self.AMT_row_numeric_value(
+            rows[0], "RAW_STOCKPILE_WMT", "raw_stockpile_wmt"
+        )
+        if reported_total is not None:
+            return reported_total
+        raw_hex_total = sum(
+            self.AMT_row_numeric_value(
+                row, "RAW_WMT", "raw_wmt", "FINAL_WMT", "final_wmt"
+            ) or 0.0
+            for row in rows
+        )
+        unattributed = self.AMT_row_numeric_value(
+            rows[0], "UNATTRIBUTED_MOVEMENT_WMT", "unattributed_movement_wmt"
+        ) or 0.0
+        return raw_hex_total + unattributed
+
     def update_AMT_chunk_plan_cells(self, row):
         headers = self.amt_stockpile_headers()
         rate_column = headers.index("Average Reclaim Rate (t/h)")
         hours_column = headers.index("Target Hours per Chunk")
+        raw_total_column = headers.index("Raw Signed AMT WMT")
         amt_total_column = headers.index("AMT Total WMT")
         inventory_total_column = headers.index("Inventory Stockpile Total WMT")
         count_column = headers.index("Calculated Number of Chunks")
@@ -10958,6 +10979,9 @@ class UserInputs(QMainWindow):
         chunk_reclaim_hours = self.parse_float_from_table_item(
             self.AMT_stockpile_table.item(row, hours_column),
             DEFAULT_AMT_TARGET_CHUNK_HOURS,
+        )
+        raw_signed_amt_wmt = self.parse_float_from_table_item(
+            self.AMT_stockpile_table.item(row, raw_total_column), 0.0
         )
         amt_total_wmt = self.parse_float_from_table_item(
             self.AMT_stockpile_table.item(row, amt_total_column), 0.0
@@ -10987,6 +11011,7 @@ class UserInputs(QMainWindow):
             "chunk_size": plan["chunk_size"],
             "target_chunk_wmt": plan["target_chunk_wmt"],
             "resulting_chunk_hours": plan["resulting_chunk_hours"],
+            "raw_signed_amt_wmt": raw_signed_amt_wmt,
             "amt_total_wmt": amt_total_wmt,
             "inventory_total_wmt": inventory_total_wmt,
         }
@@ -11050,6 +11075,7 @@ class UserInputs(QMainWindow):
     def amt_stockpile_headers(self):
         headers = [
             "AMT Stockpiles",
+            "Raw Signed AMT WMT",
             "AMT Total WMT",
             "Inventory Stockpile Total WMT",
             "Average Reclaim Rate (t/h)",
@@ -11259,6 +11285,9 @@ class UserInputs(QMainWindow):
                 amt_total_wmt, inventory_total_wmt = (
                     self.AMT_footprint_totals(stockpile_name, attributes)
                 )
+                raw_signed_amt_wmt = self.AMT_raw_signed_footprint_total(
+                    stockpile_name
+                )
                 chunk_setting = self.get_AMT_chunk_setting(stockpile_name)
                 average_reclaim_rate = chunk_setting.get(
                     "average_reclaim_rate", DEFAULT_AMT_RECLAIM_RATE_TPH
@@ -11273,6 +11302,7 @@ class UserInputs(QMainWindow):
                 )
 
                 for caption, value in (
+                    ("Raw Signed AMT WMT", raw_signed_amt_wmt),
                     ("AMT Total WMT", amt_total_wmt),
                     ("Inventory Stockpile Total WMT", inventory_total_wmt),
                 ):
