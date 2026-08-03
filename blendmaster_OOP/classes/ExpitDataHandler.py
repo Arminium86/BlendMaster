@@ -11,6 +11,11 @@ from classes.GradeStreams import (
     normalise_aps_grade_field_mappings,
     weighted_merge_grade_streams,
 )
+from classes.CustomConstraints import (
+    canonical_property_key,
+    merge_source_properties,
+    source_property_kind,
+)
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 2
@@ -98,10 +103,10 @@ class ExpitDataHandler:
                 if isinstance(brand_mappings, dict):
                     mapped_grade_columns.update(value for value in brand_mappings.values() if value)
         self.mapped_grade_columns = mapped_grade_columns
-        self.data = pd.read_csv(
-            input_data,
-            usecols=lambda column: column in self.TRANSACTION_COLUMNS or column in self.mapped_grade_columns,
-        )
+        # Retain numeric APS properties beyond the core schedule fields so
+        # ultrafines, recovery, physical properties, and other model inputs can
+        # participate in Database View and custom constraints.
+        self.data = pd.read_csv(input_data)
         missing_mapped_columns = sorted(
             self.mapped_grade_columns - set(self.data.columns)
         )
@@ -109,6 +114,46 @@ class ExpitDataHandler:
             raise ValueError(
                 "APS 24HR grade field mapping column(s) were not found: "
                 + ", ".join(missing_mapped_columns)
+            )
+        self.property_columns = []
+        self.property_column_keys = {}
+        canonical_sources = {}
+        ignored_property_columns = set(self.TRANSACTION_COLUMNS) | set(
+            self.mapped_grade_columns
+        )
+        for column in self.data.columns:
+            if column in ignored_property_columns:
+                continue
+            numeric_values = pd.to_numeric(self.data[column], errors="coerce")
+            if not numeric_values.notna().any():
+                continue
+            key = canonical_property_key(column)
+            if not key:
+                continue
+            prior = canonical_sources.get(key)
+            if prior is not None and prior != column:
+                raise ValueError(
+                    "APS numeric property headers collide after field-name "
+                    f"normalisation: '{prior}' and '{column}' both become '{key}'."
+                )
+            canonical_sources[key] = column
+            self.property_columns.append(column)
+            self.property_column_keys[column] = key
+        unknown_property_columns = [
+            column for column in self.property_columns
+            if source_property_kind(self.property_column_keys[column]) == "unknown"
+        ]
+        self.property_warnings = []
+        if unknown_property_columns:
+            preview = ", ".join(unknown_property_columns[:10])
+            suffix = (
+                f" (+{len(unknown_property_columns) - 10} more)"
+                if len(unknown_property_columns) > 10 else ""
+            )
+            self.property_warnings.append(
+                "APS numeric properties without a recognised total/control "
+                "name were treated as WMT-weighted source properties: "
+                f"{preview}{suffix}."
             )
         if not self.data.empty:
             self._preprocess_data()
@@ -1181,6 +1226,18 @@ class ExpitDataHandler:
                     ).fillna(0.0).iloc[0]
                     * ratio
                 )
+                for property_column in getattr(
+                    self, "property_columns", []
+                ):
+                    key = self.property_column_keys.get(property_column, "")
+                    if source_property_kind(key) != "additive":
+                        continue
+                    value = pd.to_numeric(
+                        pd.Series([row.get(property_column)]),
+                        errors="coerce",
+                    ).iloc[0]
+                    if pd.notna(value):
+                        split_row[property_column] = float(value) * ratio
                 reported_trips = pd.to_numeric(
                     pd.Series([row.get("HaulageResult.NumberOfTrips")]),
                     errors="coerce",
@@ -1450,6 +1507,44 @@ class ExpitDataHandler:
         if weighted_grade_frames:
             self.data = pd.concat([self.data, *weighted_grade_frames], axis=1)
 
+        intensive_property_columns = [
+            column
+            for column in getattr(self, "property_columns", [])
+            if source_property_kind(
+                self.property_column_keys.get(column)
+            ) in {"intensive", "unknown"}
+        ]
+        additive_property_columns = [
+            column
+            for column in getattr(self, "property_columns", [])
+            if source_property_kind(
+                self.property_column_keys.get(column)
+            ) == "additive"
+        ]
+        for column in additive_property_columns:
+            self.data[column] = pd.to_numeric(
+                self.data[column], errors="coerce"
+            )
+        weighted_property_columns = {}
+        weighted_property_frames = []
+        numeric_tonnes = pd.to_numeric(
+            self.data["Mining.wetTonnes"], errors="coerce"
+        ).fillna(0)
+        for index, column in enumerate(intensive_property_columns):
+            numerator = f"__property_mass_{index}"
+            denominator = f"__property_tonnes_{index}"
+            numeric_values = pd.to_numeric(self.data[column], errors="coerce")
+            valid_tonnes = numeric_tonnes.where(numeric_values.notna(), 0.0)
+            weighted_property_frames.extend([
+                (numeric_values.fillna(0.0) * valid_tonnes).rename(numerator),
+                valid_tonnes.rename(denominator),
+            ])
+            weighted_property_columns[column] = (numerator, denominator)
+        if weighted_property_frames:
+            self.data = pd.concat(
+                [self.data, *weighted_property_frames], axis=1
+            )
+
         # Perform basic aggregation
         aggregation = {
             "Time.StartTime": "first",  # First row's start time
@@ -1467,6 +1562,15 @@ class ExpitDataHandler:
             weighted_column: "sum"
             for pair in weighted_grade_columns.values()
             for weighted_column in pair
+        })
+        aggregation.update({
+            weighted_column: "sum"
+            for pair in weighted_property_columns.values()
+            for weighted_column in pair
+        })
+        aggregation.update({
+            column: (lambda values: values.sum(min_count=1))
+            for column in additive_property_columns
         })
         aggregated_data = self.data.groupby(
             [
@@ -1487,6 +1591,11 @@ class ExpitDataHandler:
                 aggregated_data[numerator]
                 / aggregated_data[denominator].replace(0, pd.NA)
             )
+        for column, (numerator, denominator) in weighted_property_columns.items():
+            aggregated_data[column] = (
+                aggregated_data[numerator]
+                / aggregated_data[denominator].replace(0, pd.NA)
+            )
 
         # Drop intermediate mass/tonnage columns.
         aggregated_data = aggregated_data.drop(columns=[
@@ -1494,6 +1603,11 @@ class ExpitDataHandler:
             *[
                 weighted_column
                 for pair in weighted_grade_columns.values()
+                for weighted_column in pair
+            ],
+            *[
+                weighted_column
+                for pair in weighted_property_columns.values()
                 for weighted_column in pair
             ],
         ])
@@ -1529,6 +1643,33 @@ class ExpitDataHandler:
         load_time = payload / loader_rate if loader_rate else 0.0
         return payload, load_time
 
+    def _payload_source_properties(self, row, payload_tonnes, group_tonnes):
+        properties = {}
+        try:
+            group_tonnes = float(group_tonnes or 0)
+            payload_tonnes = float(payload_tonnes or 0)
+        except (TypeError, ValueError):
+            return properties
+        if group_tonnes <= 0 or payload_tonnes <= 0:
+            return properties
+        for column in getattr(self, "property_columns", []):
+            key = self.property_column_keys.get(column, "")
+            kind = source_property_kind(key)
+            if kind not in {"intensive", "unknown", "additive"}:
+                continue
+            try:
+                value = float(row.get(column))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            properties[key] = (
+                value * payload_tonnes / group_tonnes
+                if kind == "additive"
+                else value
+            )
+        return properties
+
     def process_transactions(self):
         if not self.data.empty:
             self.results = []
@@ -1549,6 +1690,9 @@ class ExpitDataHandler:
                     destination_metadata = self._payload_destination_metadata(row)
                     row_grade_streams = aps_grade_streams(
                         row.to_dict(), self.grade_field_mappings, self.configured_product_brands
+                    )
+                    row_source_properties = self._payload_source_properties(
+                        row, payload, tonnes
                     )
                     num_trips = tonnes / payload
                     int_trips = int(num_trips)
@@ -1586,6 +1730,7 @@ class ExpitDataHandler:
                             "source_grade_mn": row["Mining.grades_mn"],
                             "source_grade_p": row["Mining.grades_p"],
                             "grade_streams": row_grade_streams,
+                            "source_properties": dict(row_source_properties),
                             "delivered_datetime": delivery_time,
                             **destination_metadata,
                         })
@@ -1600,6 +1745,9 @@ class ExpitDataHandler:
                         "Grade_p": row["Mining.grades_p"]
                     }  # Default to current row's grades in case no top-up happens
                     weighted_grade_streams = row_grade_streams
+                    weighted_source_properties = self._payload_source_properties(
+                        row, fractional_tonnes, tonnes
+                    )
 
                     if fractional_tonnes > 0:
                         current_fractional_tonnes = fractional_tonnes
@@ -1636,9 +1784,45 @@ class ExpitDataHandler:
                                     next_grade_streams,
                                     top_up_tonnes,
                                 )
+                                next_source_properties = self._payload_source_properties(
+                                    next_row,
+                                    top_up_tonnes,
+                                    group.at[i + 1, "Mining.wetTonnes"],
+                                )
+                                weighted_source_properties = merge_source_properties(
+                                    weighted_source_properties,
+                                    current_fractional_tonnes,
+                                    next_source_properties,
+                                    top_up_tonnes,
+                                )
 
-                                # Update the next row's tonnes
+                                # Update the next grouped row without duplicating
+                                # additive masses/volumes already consumed by the
+                                # top-up payload.
+                                next_opening_tonnes = float(
+                                    group.at[i + 1, "Mining.wetTonnes"] or 0
+                                )
                                 group.at[i + 1, "Mining.wetTonnes"] -= top_up_tonnes
+                                remaining_ratio = (
+                                    max(group.at[i + 1, "Mining.wetTonnes"], 0)
+                                    / next_opening_tonnes
+                                    if next_opening_tonnes > 0 else 0
+                                )
+                                for property_column in getattr(
+                                    self, "property_columns", []
+                                ):
+                                    key = self.property_column_keys.get(
+                                        property_column, ""
+                                    )
+                                    if source_property_kind(key) != "additive":
+                                        continue
+                                    try:
+                                        group.at[i + 1, property_column] = (
+                                            float(group.at[i + 1, property_column])
+                                            * remaining_ratio
+                                        )
+                                    except (TypeError, ValueError):
+                                        pass
                                 if group.at[i + 1, "Mining.wetTonnes"] <= 0:
                                     group.at[i + 1, "Mining.wetTonnes"] = 0  # Mark as used
 
@@ -1695,6 +1879,7 @@ class ExpitDataHandler:
                             "source_grade_mn": weighted_grades["Grade_mn"],
                             "source_grade_p": weighted_grades["Grade_p"],
                             "grade_streams": weighted_grade_streams,
+                            "source_properties": weighted_source_properties,
                             "delivered_datetime": delivery_time,
                             **destination_metadata,
                         })

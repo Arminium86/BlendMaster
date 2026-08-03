@@ -124,6 +124,10 @@ class Run:
                 transactions, start_time
             )
             transactions = self._ensure_direct_tip_ids(transactions)
+        if transactions is not None:
+            transactions.attrs["source_property_warnings"] = list(
+                getattr(handler, "property_warnings", []) or []
+            )
         return transactions if transactions is not None else DataFrame()
 
     def _run_case_modeller(self, case_modeller):

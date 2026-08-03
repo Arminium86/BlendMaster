@@ -1,6 +1,7 @@
 # This tracks source balances and the program runs and provides input to the EventPool for the update functionality
 import pandas as pd
 import copy
+import re
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from typing import List
@@ -9,6 +10,12 @@ from classes.GradeStreams import (
     legacy_grade_streams,
     normalise_grade_streams,
     weighted_merge_grade_streams,
+)
+from classes.CustomConstraints import (
+    filter_source_properties,
+    merge_source_properties,
+    scale_additive_source_properties,
+    source_properties_from_mapping,
 )
 class BalanceTracker:
     @staticmethod
@@ -20,8 +27,24 @@ class BalanceTracker:
             return float(fallback)
         return float(fallback) if pd.isna(numeric) else numeric
 
-    def __init__(self, stockpiles: List[StockpileData], grade_blocks: List[GradeBlockData], period_tracker, hex_sequence_table):
+    def __init__(
+        self,
+        stockpiles: List[StockpileData],
+        grade_blocks: List[GradeBlockData],
+        period_tracker,
+        hex_sequence_table,
+        required_source_property_keys=None,
+    ):
+        self.required_source_property_keys = (
+            None
+            if required_source_property_keys is None
+            else set(required_source_property_keys)
+        )
         self.state = {item.name: item.to_dict().get(f"state_{period_tracker}", 0) for item in stockpiles}
+        self._normalized_stockpile_names = {
+            self.normalized_stockpile_name(name): name
+            for name in self.state
+        }
         self.grade_block_names = {item.name for item in grade_blocks}
         self.balance = {item.name: item.balance for item in stockpiles + grade_blocks}
         self.grade_fe = {item.name: self._numeric_grade(item.grade_fe) for item in stockpiles + grade_blocks}
@@ -32,6 +55,13 @@ class BalanceTracker:
         self.grade_streams = {
             item.name: normalise_grade_streams(
                 getattr(item, "grade_streams", None), item
+            )
+            for item in stockpiles + grade_blocks
+        }
+        self.source_properties = {
+            item.name: filter_source_properties(
+                getattr(item, "source_properties", None),
+                self.required_source_property_keys,
             )
             for item in stockpiles + grade_blocks
         }
@@ -63,8 +93,16 @@ class BalanceTracker:
                 self.process_hex_sequence(name, reclaimed_tonnes)
             
             if not self.is_amt.get(name, False) and self.balance_copy[name] != 0:
-
-                self.balance_copy[name] = max(self.balance_copy[name] - reclaimed_tonnes, 0)
+                opening_balance = max(float(self.balance_copy[name] or 0), 0)
+                closing_balance = max(opening_balance - reclaimed_tonnes, 0)
+                self.balance_copy[name] = closing_balance
+                self.source_properties[name] = (
+                    scale_additive_source_properties(
+                        self.source_properties.get(name),
+                        closing_balance / opening_balance
+                        if opening_balance > 0 else 0,
+                    )
+                )
        
         if not expit_payload_transactions.empty:
 
@@ -78,6 +116,7 @@ class BalanceTracker:
                     continue
                 delivered_datetime = transaction["delivered_datetime"]
                 payload = float(transaction["payload"] or 0)
+                original_payload = payload
                 agent = transaction["agent"]
                 source = transaction["source"]
                 mining_start_datetime = transaction["start_datetime"]
@@ -132,6 +171,24 @@ class BalanceTracker:
                             incoming_streams,
                             payload,
                         )
+                        incoming_properties = source_properties_from_mapping(
+                            transaction
+                        )
+                        incoming_properties = filter_source_properties(
+                            incoming_properties,
+                            self.required_source_property_keys,
+                        )
+                        if original_payload > 0 and payload < original_payload:
+                            incoming_properties = scale_additive_source_properties(
+                                incoming_properties,
+                                payload / original_payload,
+                            )
+                        self.source_properties[name] = merge_source_properties(
+                            self.source_properties.get(name, {}),
+                            current_balance,
+                            incoming_properties,
+                            payload,
+                        )
                         
                         # Update the balance
                         self.balance_copy[name] = updated_balance
@@ -154,6 +211,9 @@ class BalanceTracker:
                             "grade_p": self.grade_p[name],
                             "grade_mn": self.grade_mn[name],
                             "grade_streams": copy.deepcopy(self.grade_streams.get(name)),
+                            "source_properties": copy.deepcopy(
+                                self.source_properties.get(name)
+                            ),
                             
                         })
                     
@@ -169,10 +229,14 @@ class BalanceTracker:
 
     def resolve_payload_build_stockpile(self, transaction):
         destination = self.clean_stockpile_name(transaction.get("destination", ""))
+        destination = self._normalized_stockpile_names.get(destination, "")
         if destination:
             return destination
 
         fallback_destination = self.clean_stockpile_name(transaction.get("fallback_destination", ""))
+        fallback_destination = self._normalized_stockpile_names.get(
+            fallback_destination, ""
+        )
         if fallback_destination:
             return fallback_destination
 
@@ -186,13 +250,18 @@ class BalanceTracker:
         return ""
 
     @staticmethod
-    def clean_stockpile_name(value):
+    def normalized_stockpile_name(value):
         if value is None or pd.isna(value):
             return ""
-        value = str(value).strip()
+        value = str(value).strip().replace("\\", "/")
         if not value:
             return ""
-        return value.replace("Stockpiles/", "")
+        value = re.sub(r"^stockpiles/", "", value, flags=re.IGNORECASE)
+        return value.strip(" /").upper()
+
+    @staticmethod
+    def clean_stockpile_name(value):
+        return BalanceTracker.normalized_stockpile_name(value)
 
     def first_receiving_stockpile(self):
         for name, state in self.state.items():
@@ -236,6 +305,9 @@ class BalanceTracker:
 
     def get_grade_streams(self, name):
         return copy.deepcopy(self.grade_streams.get(name))
+
+    def get_source_properties(self, name):
+        return copy.deepcopy(self.source_properties.get(name, {}))
     
     def process_hex_sequence(self, name, reclaimed_tonnes):
         # Filter the hex sequence table for entries matching the stockpile name
@@ -251,6 +323,8 @@ class BalanceTracker:
         if reclaimed_tonnes <= 0:
             return
 
+        partially_depleted_properties = None
+        partially_depleted_hex = None
         for current_hex in sorted_hexes:
             current_balance = max(float(current_hex.get('balance', 0) or 0), 0)
             current_hex['balance'] = current_balance
@@ -260,6 +334,14 @@ class BalanceTracker:
 
             depleted_tonnes = min(current_balance, reclaimed_tonnes)
             current_hex['balance'] = current_balance - depleted_tonnes
+            if current_hex['balance'] > 0:
+                partially_depleted_hex = current_hex
+                partially_depleted_properties = (
+                    scale_additive_source_properties(
+                        self.source_properties.get(name),
+                        current_hex['balance'] / current_balance,
+                    )
+                )
             self.total_AMT_stockpile_balances[name] = max(
                 self.total_AMT_stockpile_balances.get(name, 0) - depleted_tonnes,
                 0
@@ -282,6 +364,19 @@ class BalanceTracker:
             self.grade_streams[name] = normalise_grade_streams(
                 next_hex.get("grade_streams"), next_hex
             )
+            if (
+                next_hex is partially_depleted_hex
+                and partially_depleted_properties is not None
+            ):
+                self.source_properties[name] = partially_depleted_properties
+            else:
+                self.source_properties[name] = source_properties_from_mapping(
+                    next_hex
+                )
+                self.source_properties[name] = filter_source_properties(
+                    self.source_properties[name],
+                    self.required_source_property_keys,
+                )
         else:
             self.balance_copy[name] = 0
 

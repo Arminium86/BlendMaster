@@ -8,6 +8,10 @@ from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import grade_stream_audit_fields
+from classes.CustomConstraints import (
+    custom_constraint_property_keys,
+    filter_source_properties,
+)
 from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
@@ -114,8 +118,45 @@ class CaseModeller:
         self.current_time = periods.get_periods()["preplan_start"]
         self.start_time = periods.get_periods()["preplan_start"]
         self.period_tracker = "preplan"
-        self.balance_tracker = BalanceTracker(stockpiles, grade_blocks, self.period_tracker, hex_sequence_table)
+        self.solver_config = solver_config or {}
+        constraint_definitions = list(
+            self.solver_config.get("custom_constraints") or []
+        )
+        for target in (crusher_targets or {}).values():
+            if isinstance(target, dict):
+                constraint_definitions.extend(
+                    target.get("custom_constraints") or []
+                )
+        required_source_property_keys = custom_constraint_property_keys(
+            constraint_definitions
+        )
+        for source in [*stockpiles, *grade_blocks]:
+            source.source_properties = filter_source_properties(
+                getattr(source, "source_properties", None),
+                required_source_property_keys,
+            )
+        self.balance_tracker = BalanceTracker(
+            stockpiles,
+            grade_blocks,
+            self.period_tracker,
+            hex_sequence_table,
+            required_source_property_keys=required_source_property_keys,
+        )
         self.expit_payload_transactions = expit_payload_transactions
+        if (
+            isinstance(expit_payload_transactions, pd.DataFrame)
+            and "source_properties" in expit_payload_transactions.columns
+        ):
+            self.expit_payload_transactions = (
+                expit_payload_transactions.copy(deep=False)
+            )
+            self.expit_payload_transactions["source_properties"] = (
+                expit_payload_transactions["source_properties"].map(
+                    lambda properties: filter_source_properties(
+                        properties, required_source_property_keys
+                    )
+                )
+            )
         self.event_pool = EventPoolGenerator(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
         self.results = pd.DataFrame()
@@ -133,7 +174,6 @@ class CaseModeller:
         self.min_stockpiles = min_stockpiles
         self.max_stockpiles = max_stockpiles
         self.min_stockpile_contribution_ratio = min_stockpile_contribution_ratio
-        self.solver_config = solver_config or {}
         self.plan_id = str(plan_id or "Primary")
         self.reserved_blend_signatures = {
             frozenset(signature)
@@ -1803,6 +1843,30 @@ class CaseModeller:
                     else None
                 )
 
+            for coefficient_column in [
+                column for column in group.columns
+                if str(column).startswith("custom_constraint_")
+                and str(column).endswith((
+                    "_source_numerator", "_source_denominator"
+                ))
+            ]:
+                coefficients = pd.to_numeric(
+                    group[coefficient_column], errors="coerce"
+                )
+                weights = pd.to_numeric(
+                    group["source_actual_tonnes"], errors="coerce"
+                ).fillna(0)
+                valid = coefficients.notna() & (
+                    weights > Optimizer.SOLUTION_TOLERANCE
+                )
+                valid_tonnes = weights[valid].sum()
+                record[coefficient_column] = (
+                    (coefficients[valid] * weights[valid]).sum()
+                    / valid_tonnes
+                    if valid_tonnes > Optimizer.SOLUTION_TOLERANCE
+                    else None
+                )
+
             grouped_records.append(record)
 
         grouped_rows = pd.DataFrame(grouped_records)
@@ -1989,6 +2053,11 @@ class CaseModeller:
                 if crusher_actual_tonnes > Optimizer.SOLUTION_TOLERANCE
                 else 0
             )
+            custom_constraint_result_fields = {
+                key: value
+                for key, value in result.items()
+                if str(key).startswith("custom_constraint_")
+            }
             report_data = [
                 {
                     "start_datetime": self.current_time,
@@ -2022,6 +2091,12 @@ class CaseModeller:
                         transaction.get("selected_grade_brand"),
                         prefix="source_grade_",
                     ),
+                    **custom_constraint_result_fields,
+                    **{
+                        key: value
+                        for key, value in transaction.items()
+                        if str(key).startswith("custom_constraint_")
+                    },
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],
                     "equipment_rate_output": transaction["equipment_rate_output"],

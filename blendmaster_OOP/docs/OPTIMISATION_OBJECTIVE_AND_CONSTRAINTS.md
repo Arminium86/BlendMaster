@@ -57,6 +57,10 @@ Quantity, and the resulting blend must satisfy every applicable grade rule.
 : A soft preference in the objective. It changes ranking but does not make an
   infeasible blend feasible.
 
+**Custom ratio constraint**
+: A named, user-configured hard constraint calculated from numeric properties
+  of the selected sources. Its minimum and maximum can vary by Calendar period.
+
 ## The objective function
 
 For each candidate source `s`, BlendMaster selects tonnes `x(s)`.
@@ -195,6 +199,82 @@ Payload arrival does **not** create a new steady state. Payloads whose delivery
 time falls inside the existing steady-state window become candidates for that
 window.
 
+## Configuring custom ratio constraints
+
+Solver Configuration contains a **Custom Ratio Constraints** table with
+**Add Constraint...**, **Edit...** and **Delete** actions. A definition has a
+stable name, a numerator expression and a denominator expression. The two
+expression fields are editable, type-to-search lists: select a field directly
+or enter an expression such as:
+
+```text
+modelled_property_a * selected_fe
+```
+
+with a denominator such as:
+
+```text
+modelled_property_c
+```
+
+Expressions are parsed without `eval`. They may contain numeric field names,
+numeric constants, parentheses and the operators `+`, `-`, `*` and `/`,
+including unary `+` or `-`. Function calls, attributes, subscripts, powers and
+other Python syntax are rejected. Division by zero and non-finite results are
+also rejected.
+
+Imported field names are canonicalised for use in expressions: they are made
+lower-case, non-alphanumeric characters become underscores, repeated
+underscores are collapsed, and a name beginning with a digit receives a
+`field_` prefix. Python keywords receive the same prefix. The field selector advertises imported properties common to
+all current source records, helping prevent a constraint that only some sources
+can evaluate. The following built-in fields are always offered:
+
+| Field | Per-source value |
+|---|---|
+| `one` | `1.0`; use this as the denominator for a tonne-weighted average or as the numerator/denominator basis for a source-share ratio. |
+| `is_direct_tip`, `is_grade_block` | `1.0` for a direct-tip grade block, otherwise `0.0`. |
+| `is_stockpile` | `1.0` for an inventory or AMT stockpile source, otherwise `0.0`. |
+| `is_amt` | `1.0` for an AMT chunk, otherwise `0.0`. |
+| `is_inventory` | `1.0` for a non-AMT inventory stockpile, otherwise `0.0`. |
+| `source_balance` | Source balance available when the event was created. |
+| `selected_fe`, `selected_si`, `selected_al`, `selected_p`, `selected_mn` | The active brand's effective selected grade after data-stream fallback. |
+| `grade_fe`, `grade_si`, `grade_al`, `grade_p`, `grade_mn` | Aliases of the same effective optimiser grades. |
+
+Numeric intensive properties—grades, percentages, ratios, moisture, yields,
+recovery, ultrafines and density—are exposed directly under their canonical
+names. Additive source totals ending in `_wmt`, `_dmt`, `_tonnes`, `_mass` or
+`_volume` are instead exposed as per-source-tonne coefficients named
+`<field>_per_source_wmt`. For example, an imported `product_dmt` total is used
+as `product_dmt_per_source_wmt`. This preserves dimensions when inventory
+stockpiles, AMT chunks and grade blocks have different balances, and prevents a
+source-level total from being multiplied by selected tonnes as though it were
+an intensive grade. Other numeric APS fields are retained and WMT-weighted as
+intensive properties by default; Database View emits a warning naming fields
+where that assumption was required. Runtime/control columns are not advertised
+as constraint fields.
+
+After Solver Configuration is submitted, Calendar adds **Min** and **Max** rows
+under each custom constraint for every planning period. Either side may be left
+blank to leave that bound unenforced. If both are entered, Min must not exceed
+Max. Definitions and Calendar bounds are stored in projects using a stable key,
+so constraints with the same display labels in different table sections do not
+collide.
+
+Every expression is checked again against every source available to a solve.
+Preparation stops with the constraint and source named when a referenced field
+is missing, non-numeric or non-finite, or when an expression divides by zero.
+The denominator must be non-negative for every source and positive for at least
+one available source. Missing data is never silently replaced with zero.
+
+At run preparation BlendMaster compiles the field dependencies from every
+enabled numerator and denominator. Only those source properties are carried
+through dynamic stockpile builds, depletion, EventPool and optimisation; the
+full source-property catalogue remains in Database View and the saved APS
+source snapshot. Reports store the definition, bounds, aggregate result and
+per-source numerator/denominator coefficients, rather than duplicating every
+unused source property.
+
 ## Hard constraints inside each optimisation
 
 ### 1. Non-negative tonnes
@@ -285,7 +365,25 @@ between the Calendar minimum and maximum.
 - When Direct Tip is disabled, the effective direct-tip ratio is zero and
   grade-block sources are removed.
 
-### 9. Minimum and maximum stockpile count
+### 9. Custom ratio constraints
+
+For selected tonnes `x(s)`, per-source numerator expression `N(s)` and
+per-source denominator expression `D(s)`, BlendMaster constrains:
+
+```text
+custom ratio = sum over sources [x(s) * N(s)]
+               / sum over sources [x(s) * D(s)]
+```
+
+This is a ratio of tonne-weighted totals, not an arithmetic average of each
+source's `N(s) / D(s)`. Operations inside an expression—such as
+`field_a * field_b`—are evaluated once for each source, producing a constant
+coefficient before the linear optimisation is built. Min and Max are enforced
+by cross-multiplying the non-negative denominator, so the resulting rules
+remain linear hard constraints. A definition with both Calendar bounds blank
+is calculated and reported but does not restrict the blend.
+
+### 10. Minimum and maximum stockpile count
 
 When configured in Decision Levers:
 
@@ -294,7 +392,7 @@ When configured in Decision Levers:
 
 Only stockpiles count. Direct-tip grade blocks do not count toward these limits.
 
-### 10. Minimum Stockpile Contribution Ratio
+### 11. Minimum Stockpile Contribution Ratio
 
 For stockpile-count purposes, every selected stockpile must contribute at least:
 
@@ -305,7 +403,7 @@ minimum contribution ratio × total crusher-feed tonnes
 The default ratio is 0.01, or 1%. This prevents negligible “token” tonnes from
 being used merely to satisfy Min Stockpiles.
 
-### 11. Depletion-controller equality
+### 12. Depletion-controller equality
 
 When a provisional solution shows that a selected stockpile or grouped
 direct-tip source depletes before the end of the current window, BlendMaster
@@ -315,14 +413,14 @@ requires the controlling source to use the calculated depletion tonnes.
 If that equality makes the shortened problem infeasible, BlendMaster retries
 the shortened window without the equality as a safeguard.
 
-### 12. Active-blend selection linkage
+### 13. Active-blend selection linkage
 
 When active-blend guidance is enabled, binary source-selection variables are
 linked to actual source tonnes. A source marked as selected must contribute a
 positive amount. The exact-set reward or penalty is then applied only when the
 selected set can be determined consistently.
 
-### 13. Distinct alternative blend options
+### 14. Distinct alternative blend options
 
 After finding one feasible option, BlendMaster excludes that exact active
 source set and resolves to find another option. Each additional option must
@@ -389,6 +487,31 @@ configuration, not a forecast profit or accounting margin. Scores from projects
 with different incentive values should not be compared as if they were monetary
 outcomes.
 
+## Custom-constraint report columns
+
+Optimised and manual blend reports retain both the steady-state ratio and the
+per-source coefficients used to calculate it. A constraint whose stable key is
+`<key>` creates these columns:
+
+| Column | Meaning |
+|---|---|
+| `custom_constraint_<key>_name` | User-facing constraint name. |
+| `custom_constraint_<key>_numerator_expression` | Saved numerator expression. |
+| `custom_constraint_<key>_denominator_expression` | Saved denominator expression. |
+| `custom_constraint_<key>_numerator` | `sum[x(s) * N(s)]` for the steady state. |
+| `custom_constraint_<key>_denominator` | `sum[x(s) * D(s)]` for the steady state. |
+| `custom_constraint_<key>_actual_ratio` | Numerator total divided by denominator total. |
+| `custom_constraint_<key>_target_min` | Calendar minimum used for the steady state, or blank. |
+| `custom_constraint_<key>_target_max` | Calendar maximum used for the steady state, or blank. |
+| `custom_constraint_<key>_source_numerator` | `N(s)` coefficient for this report source row. |
+| `custom_constraint_<key>_source_denominator` | `D(s)` coefficient for this report source row. |
+
+The optimised report database adds these columns dynamically, so new named
+constraints do not require a schema migration. When payloads are consolidated
+to a grouped source row, their source coefficients are weighted by the reported
+source tonnes. These fields make the reported ratio independently
+reconstructable from the source rows.
+
 ## Why a run may be infeasible
 
 Common causes include:
@@ -400,6 +523,8 @@ Common causes include:
 - grade ranges cannot meet crusher or product-build targets;
 - the stockpile-only grade rule is stricter than the available stockpiles allow;
 - direct-tip minimum and maximum ratios conflict with available sources;
+- a custom ratio has contradictory bounds, no positive denominator, missing
+  source properties, or cannot be satisfied by the available blend;
 - Min Stockpiles, Max Stockpiles and Minimum Contribution Ratio are
   incompatible;
 - Total_Feed stockpiles have no positive Max Reclaim Rate;
@@ -412,11 +537,17 @@ When diagnosing a run, review in this order:
 1. source states, time availability, balances and reclaim rates;
 2. crusher and product-build grade limits;
 3. direct-tip ratio settings;
-4. Min/Max Stockpiles and Minimum Contribution Ratio;
-5. Maximum Quantity and minimum-duration settings;
-6. Total_Feed reclaim rates and haul-cycle routes; and
-7. the solver timeout.
+4. custom-ratio expressions, source-field coverage and Calendar bounds;
+5. Min/Max Stockpiles and Minimum Contribution Ratio;
+6. Maximum Quantity and minimum-duration settings;
+7. Total_Feed reclaim rates and haul-cycle routes; and
+8. the solver timeout.
 
 Rewards and penalties should normally be adjusted only after the feasibility
 rules are understood. Changing a reward cannot resolve a contradiction between
 hard constraints.
+
+For each custom constraint, infeasibility diagnostics retain its expressions,
+Calendar bounds and the available per-source coefficient range when that
+range can be determined. An obviously out-of-range Min or Max is named in the
+likely-cause trace.

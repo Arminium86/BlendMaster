@@ -18,6 +18,19 @@ from classes.GradeStreams import (
     resolve_grade_vector,
     weighted_merge_grade_streams,
 )
+from classes.CustomConstraints import (
+    CustomConstraintError,
+    SafeNumericExpression,
+    constraint_key,
+    constraint_report_fields,
+    custom_constraint_property_keys,
+    filter_source_properties,
+    mapping_constraint_fields,
+    merge_source_properties,
+    normalize_custom_constraints,
+    scale_additive_source_properties,
+    source_properties_from_mapping,
+)
 
 
 GRADE_NAMES = ("fe", "si", "al", "p", "mn")
@@ -95,6 +108,12 @@ class ManualBlendPlanner:
         self.calendar_inputs = dict(calendar_inputs or {})
         site_context = self.calendar_inputs.get("site_context") or {}
         solver_config = self.calendar_inputs.get("solver_config") or {}
+        self.custom_constraints = normalize_custom_constraints(
+            solver_config.get("custom_constraints")
+        )
+        self.required_source_property_keys = (
+            custom_constraint_property_keys(self.custom_constraints)
+        )
         self.selected_data_stream = str(
             site_context.get("selected_data_stream")
             or solver_config.get("selected_data_stream")
@@ -240,6 +259,11 @@ class ManualBlendPlanner:
             chunk["grade_streams"] = normalise_grade_streams(
                 row.get("grade_streams") or row.get("GRADE_STREAMS"), row
             )
+            chunk["source_properties"] = filter_source_properties(
+                source_properties_from_mapping(row),
+                self.required_source_property_keys,
+            )
+            chunk["is_amt"] = True
             chunks.setdefault(footprint, []).append(chunk)
 
         for footprint in chunks:
@@ -263,6 +287,11 @@ class ManualBlendPlanner:
                 values.get("grade_streams") or values.get("GRADE_STREAMS"),
                 values,
             )
+            chunk["source_properties"] = filter_source_properties(
+                source_properties_from_mapping(values),
+                self.required_source_property_keys,
+            )
+            chunk["is_amt"] = False
             chunks[name] = [chunk]
         self._amt_sources = amt_footprints
         return chunks
@@ -494,6 +523,7 @@ class ManualBlendPlanner:
                     ],
                 }
                 weighted_streams = None
+                weighted_properties = {}
                 accumulated_tonnes = 0.0
                 for _, payload_row in group.iterrows():
                     row_tonnes = max(self._number(payload_row.get("payload")), 0)
@@ -518,8 +548,18 @@ class ManualBlendPlanner:
                         streams,
                         row_tonnes,
                     )
+                    weighted_properties = merge_source_properties(
+                        weighted_properties,
+                        accumulated_tonnes,
+                        filter_source_properties(
+                            source_properties_from_mapping(payload_row),
+                            self.required_source_property_keys,
+                        ),
+                        row_tonnes,
+                    )
                     accumulated_tonnes += row_tonnes
                 candidate["grade_streams"] = weighted_streams
+                candidate["source_properties"] = weighted_properties
                 for grade in self.GRADES:
                     values = pd.to_numeric(
                         group.get(
@@ -668,6 +708,103 @@ class ManualBlendPlanner:
                 )
         return result
 
+    def _custom_constraint_bounds(self, definition, period):
+        period_name = (
+            self.period_labels[period]
+            if 0 <= period < len(self.period_labels)
+            else "Preplan"
+        )
+        key = constraint_key(definition.get("key") or definition.get("name"))
+
+        def bound(suffix):
+            values = self.calendar_inputs.get(
+                f"crusher_custom_constraint_{key}_{suffix}", {}
+            )
+            value = values.get(period_name) if isinstance(values, Mapping) else None
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError) as error:
+                raise ManualBlendPlanningError(
+                    f"{definition['name']} {suffix.title()} must be numeric or blank."
+                ) from error
+
+        return bound("min"), bound("max")
+
+    def _custom_constraint_fields(self, source_rows, period):
+        report_fields = {}
+        for definition in self.custom_constraints:
+            if not definition.get("enabled", True):
+                continue
+            numerator_expression = SafeNumericExpression(
+                definition.get("numerator")
+            )
+            denominator_expression = SafeNumericExpression(
+                definition.get("denominator") or "one"
+            )
+            numerator_total = 0.0
+            denominator_total = 0.0
+            key = constraint_key(
+                definition.get("key") or definition.get("name")
+            )
+            for source_row in source_rows:
+                try:
+                    fields = mapping_constraint_fields(source_row)
+                    numerator = numerator_expression.evaluate(fields)
+                    denominator = denominator_expression.evaluate(fields)
+                except CustomConstraintError as error:
+                    raise ManualBlendPlanningError(
+                        f"{definition['name']}: {source_row.get('source')}: {error}"
+                    ) from error
+                if denominator < 0:
+                    raise ManualBlendPlanningError(
+                        f"{definition['name']}: {source_row.get('source')}: "
+                        "denominator expression must be non-negative."
+                    )
+                tonnes = self._number(source_row.get("source_actual_tonnes"))
+                numerator_total += numerator * tonnes
+                denominator_total += denominator * tonnes
+                source_row[
+                    f"custom_constraint_{key}_source_numerator"
+                ] = numerator
+                source_row[
+                    f"custom_constraint_{key}_source_denominator"
+                ] = denominator
+            minimum, maximum = self._custom_constraint_bounds(
+                definition, period
+            )
+            report_fields.update(constraint_report_fields(
+                definition,
+                numerator_total,
+                denominator_total,
+                minimum,
+                maximum,
+            ))
+        return report_fields
+
+    def custom_constraint_report_columns(self):
+        columns = []
+        for definition in self.custom_constraints:
+            if not definition.get("enabled", True):
+                continue
+            prefix = "custom_constraint_" + constraint_key(
+                definition.get("key") or definition.get("name")
+            )
+            columns.extend([
+                f"{prefix}_name",
+                f"{prefix}_numerator_expression",
+                f"{prefix}_denominator_expression",
+                f"{prefix}_numerator",
+                f"{prefix}_denominator",
+                f"{prefix}_actual_ratio",
+                f"{prefix}_target_min",
+                f"{prefix}_target_max",
+                f"{prefix}_source_numerator",
+                f"{prefix}_source_denominator",
+            ])
+        return columns
+
     def build_report(self, states, allocations=None):
         self.validate_allocations(states, allocations or {})
         inventory = deepcopy(self._inventory_template)
@@ -706,19 +843,33 @@ class ManualBlendPlanner:
                     "source_type": "stockpile",
                     "source_opening_balance": source_opening,
                     "source_actual_tonnes": amount,
+                    "constraint_source_balance": amount,
                     "source_closing_balance": source_closing,
                     "equipment": "RC",
+                    "is_amt": source in self._amt_sources,
                 }
                 source_streams = None
+                source_properties = {}
                 accumulated_tonnes = 0.0
-                for chunk, _opening, consumed_tonnes in consumed:
+                for chunk, opening, consumed_tonnes in consumed:
                     source_streams = weighted_merge_grade_streams(
                         source_streams,
                         accumulated_tonnes,
                         chunk.get("grade_streams"),
                         consumed_tonnes,
                     )
+                    consumed_properties = scale_additive_source_properties(
+                        chunk.get("source_properties"),
+                        consumed_tonnes / opening if opening > 0 else 0,
+                    )
+                    source_properties = merge_source_properties(
+                        source_properties,
+                        accumulated_tonnes,
+                        consumed_properties,
+                        consumed_tonnes,
+                    )
                     accumulated_tonnes += consumed_tonnes
+                source_row["source_properties"] = source_properties
                 legacy = {
                     f"grade_{grade}": (
                         sum(
@@ -754,10 +905,17 @@ class ManualBlendPlanner:
                         "available_tonnes"
                     ],
                     "source_actual_tonnes": amount,
+                    "constraint_source_balance": amount,
                     "source_closing_balance": (
                         candidate["available_tonnes"] - amount
                     ),
                     "equipment": "EX",
+                    "is_amt": False,
+                    "source_properties": scale_additive_source_properties(
+                        candidate.get("source_properties") or {},
+                        amount / candidate["available_tonnes"]
+                        if candidate["available_tonnes"] > 0 else 0,
+                    ),
                 }
                 source_row.update(self._selected_source_fields(
                     candidate.get("grade_streams"),
@@ -785,6 +943,9 @@ class ManualBlendPlanner:
                 if total_tonnes > 0 else 0
             )
             targets = self._target_values(state["period"])
+            custom_constraint_fields = self._custom_constraint_fields(
+                source_rows, state["period"]
+            )
             duration = state["steady_state_duration"]
 
             for source_row in source_rows:
@@ -822,21 +983,28 @@ class ManualBlendPlanner:
                         for grade, value in crusher_grades.items()
                     },
                     **targets,
+                    **custom_constraint_fields,
                 })
             produced_tonnes += total_tonnes
 
+        custom_columns = self.custom_constraint_report_columns()
+        base_columns = [
+            column
+            for column in self.REPORT_COLUMNS
+            if column not in ProductBuildProgress.COLUMNS
+        ]
         report = pd.DataFrame(
             report_rows,
-            columns=[
-                column
-                for column in self.REPORT_COLUMNS
-                if column not in ProductBuildProgress.COLUMNS
-            ],
+            columns=[*base_columns, *custom_columns],
         )
         report = ProductBuildProgress.annotate(
             report, self.product_build_settings
         )
-        return report.reindex(columns=self.REPORT_COLUMNS)
+        return report.reindex(columns=[
+            *base_columns,
+            *custom_columns,
+            *ProductBuildProgress.COLUMNS,
+        ])
 
     def state_summaries(self, states, allocations=None):
         report = self.build_report(states, allocations or {})

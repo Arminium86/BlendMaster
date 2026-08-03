@@ -55,6 +55,7 @@ class EventPoolGenerator:
                             "aps_brand": stockpile.aps_brand,
                             "aps_brand_proportions": stockpile.aps_brand_proportions,
                             "grade_streams": stockpile.grade_streams,
+                            "source_properties": stockpile.source_properties,
                         })
 
         for grade_block in self.grade_blocks:
@@ -93,6 +94,7 @@ class EventPoolGenerator:
                         "source_name": grade_block.source or grade_block.name,
                         "delivered_datetime": delivered_datetime,
                         "grade_streams": grade_block.grade_streams,
+                        "source_properties": grade_block.source_properties,
                     })
 
         return events
@@ -156,13 +158,28 @@ class EventPoolGenerator:
             if event.is_stockpile:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p  = balance_tracker.get_balance(event.stockpile)
                 event.grade_streams = balance_tracker.get_grade_streams(event.stockpile)
+                get_properties = getattr(
+                    balance_tracker, "get_source_properties", None
+                )
+                if callable(get_properties):
+                    event.source_properties = get_properties(event.stockpile)
             elif event.is_grade_block:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p = balance_tracker.get_balance(event.grade_block)
                 event.grade_streams = balance_tracker.get_grade_streams(event.grade_block)
+                get_properties = getattr(
+                    balance_tracker, "get_source_properties", None
+                )
+                if callable(get_properties):
+                    event.source_properties = get_properties(event.grade_block)
     
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
         stockpile.balance, stockpile.grade_fe, stockpile.grade_si, stockpile.grade_al, stockpile.grade_mn, stockpile.grade_p = balance_tracker.get_balance(stockpile.name)
+        get_properties = getattr(
+            balance_tracker, "get_source_properties", None
+        )
+        if callable(get_properties):
+            stockpile.source_properties = get_properties(stockpile.name)
         if (
             ((stockpile_state == "Auto" and self.expit_transactions_complete(stockpile, current_time)) 
             
@@ -214,6 +231,7 @@ class EventPoolGenerator:
                 aps_brand=record.get("aps_brand"),
                 aps_brand_proportions=record.get("aps_brand_proportions"),
                 grade_streams=record.get("grade_streams"),
+                source_properties=record.get("source_properties"),
 
             )
             for record in event_data_dicts

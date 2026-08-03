@@ -1,11 +1,19 @@
 # This loads the data from external sources (currently an Excel file with multiple tabs which represents the combined user input and opening inventories)
 import json
+import math
 import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.HaulCycleDataHandler import HaulCycleDataHandler
 from classes.PeriodManager import PeriodManager
+from classes.CustomConstraints import (
+    constraint_key,
+    custom_constraint_property_keys,
+    filter_source_properties,
+    normalize_custom_constraints,
+    source_properties_from_mapping,
+)
 from pandas import DataFrame
 
 class DataLoader:
@@ -17,6 +25,15 @@ class DataLoader:
         self.periods = periods
         self.solver_config = (calendar_inputs or {}).get("solver_config", {})
         self.direct_tip_enabled = bool(self.solver_config.get("direct_tip_enabled", True))
+        self.required_source_property_keys = custom_constraint_property_keys(
+            self.solver_config.get("custom_constraints")
+        )
+
+    def solver_source_properties(self, record):
+        return filter_source_properties(
+            source_properties_from_mapping(record),
+            self.required_source_property_keys,
+        )
 
     def period_keys(self):
         if self.periods is not None:
@@ -43,6 +60,13 @@ class DataLoader:
             except (TypeError, ValueError):
                 return None
         return None
+
+    @staticmethod
+    def normalized_stockpile_name(value):
+        text = str(value or "").strip().replace("\\", "/")
+        if text.lower().startswith("stockpiles/"):
+            text = text[len("stockpiles/"):]
+        return text.strip(" /").upper()
 
     def load_data(self):
         """Loads data from GUI and returns it in structured format."""
@@ -85,6 +109,49 @@ class DataLoader:
                 target[f"target_{grade}_max"] = self.calendar_inputs[
                     f"crusher_target_{grade}_max"
                 ][period_label]
+            target["custom_constraints"] = []
+            for definition in normalize_custom_constraints(
+                self.solver_config.get("custom_constraints")
+            ):
+                if not definition.get("enabled", True):
+                    continue
+                key = constraint_key(
+                    definition.get("key") or definition.get("name")
+                )
+                minimum = (self.calendar_inputs.get(
+                    f"crusher_custom_constraint_{key}_min", {}
+                ) or {}).get(period_label)
+                maximum = (self.calendar_inputs.get(
+                    f"crusher_custom_constraint_{key}_max", {}
+                ) or {}).get(period_label)
+
+                def optional_number(value, bound_name):
+                    if value in (None, ""):
+                        return None
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(
+                            f"{definition['name']} {bound_name} must be numeric or blank."
+                        ) from error
+                    if not math.isfinite(number):
+                        raise ValueError(
+                            f"{definition['name']} {bound_name} must be finite."
+                        )
+                    return number
+
+                item = dict(definition)
+                item["minimum"] = optional_number(minimum, "Min")
+                item["maximum"] = optional_number(maximum, "Max")
+                if (
+                    item["minimum"] is not None
+                    and item["maximum"] is not None
+                    and item["minimum"] > item["maximum"]
+                ):
+                    raise ValueError(
+                        f"{definition['name']} Min cannot be greater than Max."
+                    )
+                target["custom_constraints"].append(item)
             crusher_target_data[period_key] = target
 
         for target in crusher_target_data.values():
@@ -127,8 +194,13 @@ class DataLoader:
             
             if not self.expit_payload_transactions.empty:
                 
+                normalized_stockpile_id = self.normalized_stockpile_name(
+                    stockpile_id
+                )
                 stockpile_transactions = self.expit_payload_transactions[
-                    self.expit_payload_transactions["destination"].str.replace("Stockpiles/", "", regex=False) == stockpile_id
+                    self.expit_payload_transactions["destination"].map(
+                        self.normalized_stockpile_name
+                    ) == normalized_stockpile_id
                 ].to_dict(orient='records')
             
             else:
@@ -297,6 +369,7 @@ class DataLoader:
                 aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {}),
                 max_reclaim_rate=max_reclaim_rate,
                 grade_streams=self.coerce_grade_streams(nested_record.get("grade_streams")),
+                source_properties=self.solver_source_properties(nested_record),
                 period_values={
                     **{
                         f"state_{key}": states_by_period[label]
@@ -372,6 +445,7 @@ class DataLoader:
                 start_datetime=record.get("start_datetime"),
                 source=record.get("source"),
                 grade_streams=self.coerce_grade_streams(record.get("grade_streams")),
+                source_properties=self.solver_source_properties(record),
                 period_values={
                     **{
                         f"max_quantity_{period_key}":
@@ -437,5 +511,8 @@ class DataLoader:
                             stockpile_data[key] = corresponding_hex[key]
                     if corresponding_hex.get("grade_streams") is not None:
                         stockpile_data["grade_streams"] = corresponding_hex.get("grade_streams")
+                    stockpile_data["source_properties"] = (
+                        self.solver_source_properties(corresponding_hex)
+                    )
 
 

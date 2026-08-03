@@ -378,6 +378,26 @@ class DatabaseManager:
                 f'ADD COLUMN "{column}" {column_type}'
             )
 
+        for column in results.columns:
+            if (
+                not str(column).startswith("custom_constraint_")
+                or column in existing_columns
+            ):
+                continue
+            column_type = (
+                "TEXT"
+                if str(column).endswith((
+                    "_name",
+                    "_numerator_expression",
+                    "_denominator_expression",
+                ))
+                else "REAL"
+            )
+            cursor.execute(
+                f'ALTER TABLE optimised_blend_report '
+                f'ADD COLUMN "{column}" {column_type}'
+            )
+
         cursor.execute('DELETE FROM optimised_blend_report')
 
         if results.empty:
@@ -801,7 +821,8 @@ class DatabaseManager:
             aps_direct_tip_candidate INTEGER,
             two_wp_destination_resolution TEXT,
             two_wp_destination_ratio REAL,
-            grade_streams_json TEXT
+            grade_streams_json TEXT,
+            source_properties_json TEXT
         )
         ''')
 
@@ -816,6 +837,7 @@ class DatabaseManager:
             "two_wp_destination_resolution": "TEXT",
             "two_wp_destination_ratio": "REAL",
             "grade_streams_json": "TEXT",
+            "source_properties_json": "TEXT",
         }
         for column_name, column_type in optional_columns.items():
             if column_name not in existing_columns:
@@ -846,6 +868,18 @@ class DatabaseManager:
             results["grade_streams_json"] = results["grade_streams_json"].map(
                 lambda value: value if isinstance(value, str) else json.dumps(value or {})
             )
+        if "source_properties" in results.columns:
+            results["source_properties_json"] = results[
+                "source_properties"
+            ].map(lambda value: json.dumps(value or {}, sort_keys=True))
+        elif "source_properties_json" in results.columns:
+            results["source_properties_json"] = results[
+                "source_properties_json"
+            ].map(
+                lambda value: value
+                if isinstance(value, str)
+                else json.dumps(value or {}, sort_keys=True)
+            )
         results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
@@ -875,7 +909,8 @@ class DatabaseManager:
                 aps_direct_tip_candidate,
                 two_wp_destination_resolution,
                 two_wp_destination_ratio,
-                grade_streams_json
+                grade_streams_json,
+                source_properties_json
             ) VALUES (
                 :agent, 
                 :source, 
@@ -895,7 +930,8 @@ class DatabaseManager:
                 :aps_direct_tip_candidate,
                 :two_wp_destination_resolution,
                 :two_wp_destination_ratio,
-                :grade_streams_json
+                :grade_streams_json,
+                :source_properties_json
             )
             ''', row.to_dict())
 

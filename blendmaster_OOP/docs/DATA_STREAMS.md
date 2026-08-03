@@ -30,6 +30,18 @@ Inventory stockpiles use:
 The imported inventory ROM fields remain available for auditing, but they do
 not drive the inventory Modelled ROM or Adjusted ROM streams.
 
+Inventory-only scenarios use the same downstream data-stream path as AMT
+scenarios. Each selected inventory stockpile carries its complete
+`grade_streams` and numeric source properties into its solver event; the active
+Calendar brand then resolves the configured stream independently for Fe, SiO2,
+Al2O3, P and Mn using the same fallback rules. The resulting selected grades,
+available balance and source properties are the values shown in Database View,
+passed to the optimiser and retained in reports. AMT selection only replaces a
+selected footprint with its spatial chunks; it does not enable a separate
+product-grade calculation path. Consequently an inventory-only run keeps its
+inventory rows, product streams and adjusted product grades without requiring
+an AMT map or hex sequence.
+
 The opening inventory snapshot also retains the extended APS stockpile
 properties available at the scenario start time. These include extended
 insitu/ROM/product/OPF/train chemistry, moisture and wet/dry yields, WHIMS
@@ -129,6 +141,34 @@ the next optimisation run. It includes:
 The table intentionally excludes payload-level movement, destination, calendar
 and solver-configuration fields. It is a focused audit of the source tonnes and
 grades entering scheduling.
+
+Database View retains the full imported/calculated property catalogue for
+audit and constraint setup. Once Solver Configuration is submitted, the run
+projects that catalogue down to only the source properties referenced by
+enabled custom expressions; the five grade streams remain available separately
+for period/brand selection. This reduces steady-state build and depletion work
+without removing fields from Database View.
+
+### Choosing visible columns
+
+**Choose Columns...** opens a searchable checklist of every field currently
+available in the table. The default selection keeps the scheduling inputs
+compact:
+
+- source identity (`source_type`, `source_id`, `parent_stockpile`,
+  `build_or_chunk` and AMT `sequence`);
+- available `tonnes` and `selected_stream`;
+- all stored insitu grade fields; and
+- every `selected_<brand>_<analyte>` field, which is the effective grade vector
+  after stream and per-analyte fallback resolution.
+
+Use **Select All** to expose reconciliation, lineage, coverage, intermediate
+streams and extended source properties, or **Defaults** to return to the compact
+view. Searching only filters the checklist; it does not remove fields from the
+underlying source record. The chosen column set is retained with scenario and
+project state. If saved columns are unavailable in a newly loaded dataset they
+are simply omitted, while newly available fields remain accessible through the
+selector.
 
 ### Database View field dictionary
 
@@ -246,8 +286,9 @@ The remaining blanks fall into these expected categories:
 Some columns are redundant for solving but not for diagnosis. Raw grades,
 intermediate streams, match metadata, fallback provenance and warnings can be
 ignored by the optimiser, yet they explain exactly how the effective selected
-grades were produced. They should be retained in Database View while the new
-data-stream calculations are being validated.
+grades were produced. They remain in the Database View record even when hidden
+by the column selector, and can be exposed when the data-stream calculations
+need diagnosis.
 
 ## Audit and reporting
 

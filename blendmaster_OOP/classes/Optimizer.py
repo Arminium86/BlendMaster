@@ -35,6 +35,12 @@ from pulp import (
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
+from classes.CustomConstraints import (
+    CustomConstraintError,
+    constraint_key,
+    constraint_report_fields,
+    custom_constraint_coefficients,
+)
 
 
 class RetryingCBCSolver(PULP_CBC_CMD):
@@ -1074,7 +1080,12 @@ class Optimizer:
         direct_feed_ratio_min = period_crusher_target["direct_feed_ratio_min"]
         if not grade_block_indices:
             A_ub_min_feed_ratio = [[0 for _ in range(len(event_pool))]]
-            b_ub_min_feed_ratio = [0]
+            # A positive minimum cannot be met when no direct-tip source is
+            # available. Make the model explicitly infeasible instead of
+            # silently accepting an all-zero constraint row.
+            b_ub_min_feed_ratio = [
+                -1 if direct_feed_ratio_min > 0 else 0
+            ]
 
         elif direct_feed_ratio_min <= 0 or direct_feed_ratio_min > 1:
             
@@ -1091,6 +1102,62 @@ class Optimizer:
             grade_block_coef = -10 * (1 - direct_feed_ratio_min)
             A_ub_min_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]]
             b_ub_min_feed_ratio = [0]
+
+        # User-defined ratios use the same linear form as Direct Tip Ratio:
+        #   sum(x * numerator) / sum(x * denominator) between min and max.
+        # Arithmetic inside each expression is evaluated once per source, so
+        # cross-multiplication remains a linear constraint in selected tonnes.
+        A_ub_custom_constraints = []
+        b_ub_custom_constraints = []
+        compiled_custom_constraints = []
+        for definition in period_crusher_target.get("custom_constraints", []) or []:
+            numerator_values, denominator_values = (
+                custom_constraint_coefficients(event_pool, definition)
+            )
+            minimum = definition.get("minimum")
+            maximum = definition.get("maximum")
+            minimum = (
+                safe_float(minimum) if minimum not in (None, "") else None
+            )
+            maximum = (
+                safe_float(maximum) if maximum not in (None, "") else None
+            )
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(
+                    f"{definition.get('name')}: minimum cannot exceed maximum."
+                )
+            if minimum is not None or maximum is not None:
+                # A bounded ratio is undefined at a zero selected denominator;
+                # prevent the solver from satisfying it vacuously.
+                A_ub_custom_constraints.append([
+                    -denominator for denominator in denominator_values
+                ])
+                b_ub_custom_constraints.append(
+                    -Optimizer.SOLUTION_TOLERANCE
+                )
+            if minimum is not None:
+                A_ub_custom_constraints.append([
+                    minimum * denominator - numerator
+                    for numerator, denominator in zip(
+                        numerator_values, denominator_values
+                    )
+                ])
+                b_ub_custom_constraints.append(0.0)
+            if maximum is not None:
+                A_ub_custom_constraints.append([
+                    numerator - maximum * denominator
+                    for numerator, denominator in zip(
+                        numerator_values, denominator_values
+                    )
+                ])
+                b_ub_custom_constraints.append(0.0)
+            compiled_custom_constraints.append({
+                "definition": definition,
+                "numerator_values": numerator_values,
+                "denominator_values": denominator_values,
+                "minimum": minimum,
+                "maximum": maximum,
+            })
 
         # Step 5: Maximum quantities for each source
         # Generate a list of indicies for each unique source
@@ -1144,6 +1211,7 @@ class Optimizer:
             + A_ub_max_crusher_grade_mn
             + A_ub_stockpile_grade_feasibility
             + A_ub_product_build_grade
+            + A_ub_custom_constraints
             + A_ub_max_quantity
         )
 
@@ -1163,6 +1231,7 @@ class Optimizer:
             + b_ub_max_crusher_grade_mn
             + b_ub_stockpile_grade_feasibility
             + b_ub_product_build_grade
+            + b_ub_custom_constraints
             + b_ub_max_quantity
         )
 
@@ -1441,13 +1510,44 @@ class Optimizer:
 
         if result.success:
 
+            custom_constraint_fields = {}
+            custom_constraint_source_fields = []
+            for compiled in compiled_custom_constraints:
+                numerator_total = sum(
+                    value * result.x[index]
+                    for index, value in enumerate(
+                        compiled["numerator_values"]
+                    )
+                )
+                denominator_total = sum(
+                    value * result.x[index]
+                    for index, value in enumerate(
+                        compiled["denominator_values"]
+                    )
+                )
+                custom_constraint_fields.update(constraint_report_fields(
+                    compiled["definition"],
+                    numerator_total,
+                    denominator_total,
+                    compiled["minimum"],
+                    compiled["maximum"],
+                ))
+                key = constraint_key(
+                    compiled["definition"].get("key")
+                    or compiled["definition"].get("name")
+                )
+                custom_constraint_source_fields.append((
+                    key,
+                    compiled["numerator_values"],
+                    compiled["denominator_values"],
+                ))
+
             transactions = []
             for i, event in enumerate(event_pool):
                 if result.x[i] >= 0:
                     source_id = event.stockpile if event.is_stockpile else event.grade_block
                     source_name = event.source_name or source_id
-                    transactions.append(
-                        {
+                    transaction = {
                             "source": source_name,
                             "source_id": source_id,
                             "source_type": event.type,
@@ -1465,6 +1565,9 @@ class Optimizer:
                             "selected_grade_brand": event.selected_grade_brand,
                             "grade_stream_warnings": event.grade_stream_warnings,
                             "grade_streams": deepcopy(event.grade_streams),
+                            "source_properties": deepcopy(
+                                event.source_properties
+                            ),
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,
                             "equipment_rate_output": result.x[i]
@@ -1472,7 +1575,14 @@ class Optimizer:
                             if steady_state_duration != 0
                             else 0,
                         }
-                    )
+                    for key, numerator_values, denominator_values in custom_constraint_source_fields:
+                        transaction[
+                            f"custom_constraint_{key}_source_numerator"
+                        ] = numerator_values[i]
+                        transaction[
+                            f"custom_constraint_{key}_source_denominator"
+                        ] = denominator_values[i]
+                    transactions.append(transaction)
 
             return {
                 "Linprog_result_object": result,
@@ -1524,6 +1634,7 @@ class Optimizer:
                 if steady_state_duration != 0
                 else 0,
                 "crusher_actual_tonnes": sum(result.x),
+                **custom_constraint_fields,
                 "solver_score": solver_score,
                 "solver_objective_value": objective_value,
                 "diagnostics": diagnostics,
@@ -1697,6 +1808,95 @@ class Optimizer:
                 f"The minimum stockpile count and contribution ratio require more than 100% "
                 f"of crusher feed ({min_stockpiles} x {min_stockpile_contribution_ratio:g})."
             )
+
+        custom_constraint_ranges = []
+        for definition in period_crusher_target.get(
+            "custom_constraints", []
+        ) or []:
+            name = str(
+                definition.get("name")
+                or definition.get("key")
+                or "Custom constraint"
+            )
+            minimum = definition.get("minimum")
+            maximum = definition.get("maximum")
+            minimum = (
+                safe_float(minimum) if minimum not in (None, "") else None
+            )
+            maximum = (
+                safe_float(maximum) if maximum not in (None, "") else None
+            )
+            diagnostic = {
+                "name": name,
+                "numerator_expression": definition.get("numerator"),
+                "denominator_expression": definition.get("denominator"),
+                "target_min": minimum,
+                "target_max": maximum,
+                "available_min": None,
+                "available_max": None,
+            }
+            try:
+                numerator_values, denominator_values = (
+                    custom_constraint_coefficients(event_pool, definition)
+                )
+            except CustomConstraintError as error:
+                diagnostic["error"] = str(error)
+                likely_causes.append(str(error))
+                custom_constraint_ranges.append(diagnostic)
+                continue
+
+            active_coefficients = [
+                (numerator_values[index], denominator_values[index])
+                for index, bound in enumerate(bounds)
+                if safe_float(bound[1]) > Optimizer.SOLUTION_TOLERANCE
+            ]
+            source_ratios = [
+                numerator / denominator
+                for numerator, denominator in active_coefficients
+                if denominator > Optimizer.SOLUTION_TOLERANCE
+            ]
+            nonzero_zero_denominator = any(
+                denominator <= Optimizer.SOLUTION_TOLERANCE
+                and abs(numerator) > Optimizer.SOLUTION_TOLERANCE
+                for numerator, denominator in active_coefficients
+            )
+            if source_ratios and not nonzero_zero_denominator:
+                available_min = min(source_ratios)
+                available_max = max(source_ratios)
+                diagnostic["available_min"] = available_min
+                diagnostic["available_max"] = available_max
+                if (
+                    minimum is not None
+                    and minimum
+                    > available_max + Optimizer.SOLUTION_TOLERANCE
+                ):
+                    likely_causes.append(
+                        f"Custom ratio '{name}' minimum {minimum:g} is above "
+                        f"the available source-coefficient range "
+                        f"({available_min:g} to {available_max:g})."
+                    )
+                if (
+                    maximum is not None
+                    and maximum
+                    < available_min - Optimizer.SOLUTION_TOLERANCE
+                ):
+                    likely_causes.append(
+                        f"Custom ratio '{name}' maximum {maximum:g} is below "
+                        f"the available source-coefficient range "
+                        f"({available_min:g} to {available_max:g})."
+                    )
+            elif not source_ratios:
+                likely_causes.append(
+                    f"Custom ratio '{name}' has no positive denominator "
+                    "among sources with available tonnes."
+                )
+            else:
+                diagnostic["range_note"] = (
+                    "A source has a zero denominator and non-zero numerator; "
+                    "a simple coefficient range is not defined."
+                )
+            custom_constraint_ranges.append(diagnostic)
+
         if not likely_causes and selected_tonnes <= Optimizer.SOLUTION_TOLERANCE:
             likely_causes.append(
                 "The solver returned zero crusher feed. Check stockpile State, Max Quantity, "
@@ -1716,6 +1916,7 @@ class Optimizer:
             "source_summaries": source_summaries,
             "grade_ranges": grade_ranges,
             "stockpile_grade_ranges": stockpile_grade_ranges,
+            "custom_constraint_ranges": custom_constraint_ranges,
             "likely_causes": likely_causes,
             "min_stockpiles": min_stockpiles,
             "max_stockpiles": max_stockpiles,

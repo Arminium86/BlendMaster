@@ -6,7 +6,8 @@ class StockpileData:
         cash_preplan, cash_period_1, cash_period_2,
         equipment, reclaim_threshold, grade_fe, grade_si, grade_al, grade_p, grade_mn, auto_turnover_datetime, is_ready, is_AMT,
         aps_brand=None, aps_brand_proportions=None, aps_brand_tonnes=None,
-        max_reclaim_rate=None, period_values=None, grade_streams=None
+        max_reclaim_rate=None, period_values=None, grade_streams=None,
+        source_properties=None,
     ):
         self._name = name
         self._balance = balance
@@ -38,6 +39,7 @@ class StockpileData:
         self._max_reclaim_rate = max_reclaim_rate
         self._period_values = dict(period_values or {})
         self._grade_streams = grade_streams
+        self._source_properties = dict(source_properties or {})
 
     # Getters
     @property
@@ -155,6 +157,10 @@ class StockpileData:
     @property
     def grade_streams(self):
         return self._grade_streams
+
+    @property
+    def source_properties(self):
+        return self._source_properties
     
     # Setters
     @name.setter
@@ -273,6 +279,10 @@ class StockpileData:
     def grade_streams(self, value):
         self._grade_streams = value
 
+    @source_properties.setter
+    def source_properties(self, value):
+        self._source_properties = dict(value or {})
+
     # Method to retrieve the original dictionary
     def to_dict(self):
         result = {
@@ -305,6 +315,7 @@ class StockpileData:
             "aps_brand_tonnes": self._aps_brand_tonnes,
             "max_reclaim_rate": self._max_reclaim_rate,
             "grade_streams": self._grade_streams,
+            "source_properties": self._source_properties,
         }
         result.update(self._period_values)
         return result

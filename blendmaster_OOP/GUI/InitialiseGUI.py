@@ -1,7 +1,7 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QSplashScreen, QScrollArea, QDialog, QSpinBox
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QCompleter
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -51,6 +51,17 @@ from classes.GradeStreams import (
     normalise_planning_categories,
     numeric,
     resolve_grade_vector,
+)
+from classes.CustomConstraints import (
+    BUILTIN_CONSTRAINT_FIELDS,
+    CustomConstraintError,
+    SafeNumericExpression,
+    constraint_property_fields,
+    constraint_key,
+    normalize_custom_constraints,
+    merge_source_properties,
+    source_properties_from_mapping,
+    source_property_kind,
 )
 from classes.AMTChunking import (
     DEFAULT_AMT_RECLAIM_RATE_TPH,
@@ -1110,7 +1121,8 @@ class UserInputs(QMainWindow):
             while len(hierarchy) > indent_level:
                 hierarchy.pop()
             hierarchy.append(caption.strip().replace(" ", "_").lower())
-            full_key = "_".join(hierarchy)
+            explicit_key = caption_item.data(Qt.UserRole)
+            full_key = str(explicit_key) if explicit_key else "_".join(hierarchy)
             values = {}
             for column, header in enumerate(headers, start=1):
                 value = self.get_main_table_cell_text(row_idx, column)
@@ -1289,6 +1301,7 @@ class UserInputs(QMainWindow):
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
+            "database_view_selected_columns", "database_view_known_columns",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
@@ -1567,6 +1580,25 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(
                 state.get("hex_sequence_table_argument") or self.hex_sequence_table
             )
+            self.database_view_selected_columns = copy.deepcopy(
+                state.get("database_view_selected_columns")
+            )
+            self.database_view_known_columns = copy.deepcopy(
+                state.get("database_view_known_columns")
+            )
+            self.database_view_rows = []
+            self.database_view_expit_payload_transactions = None
+            self.database_view_snapshot_signature = None
+            self.database_view_refresh_pending = True
+            self.database_view_refresh_in_progress = False
+            self.database_view_refresh_generation = (
+                getattr(self, "database_view_refresh_generation", 0) + 1
+            )
+            if hasattr(self, "database_view_table"):
+                self.database_view_table.clearContents()
+                self.database_view_table.setRowCount(0)
+            if hasattr(self, "database_view_continue_button"):
+                self.database_view_continue_button.setEnabled(False)
             self.calendar_inputs = copy.deepcopy(state.get("calendar_inputs") or {})
             self.solver_config = self.normalized_solver_config(state.get("solver_config") or {})
             self.min_stockpiles = state.get("min_stockpiles")
@@ -2166,6 +2198,69 @@ class UserInputs(QMainWindow):
         low_fe_layout.addWidget(self.low_fe_threshold_input)
         low_fe_layout.addStretch()
         self.solver_config_layout.addLayout(low_fe_layout)
+
+        custom_constraints_label = QLabel("Custom Ratio Constraints")
+        custom_constraints_label.setStyleSheet(
+            "font-weight: bold; margin-top: 12px;"
+        )
+        custom_constraints_label.setToolTip(
+            "Each constraint is calculated as the tonne-weighted sum of its "
+            "numerator expression divided by the tonne-weighted sum of its "
+            "denominator expression. Period-specific bounds are entered in "
+            "Calendar."
+        )
+        self.solver_config_layout.addWidget(custom_constraints_label)
+
+        custom_help = QLabel(
+            "Create named ratios from source fields. Expressions support field "
+            "names, numbers, parentheses, and +, -, *, /."
+        )
+        custom_help.setWordWrap(True)
+        self.solver_config_layout.addWidget(custom_help)
+
+        self.custom_constraint_table = QTableWidget()
+        self.custom_constraint_table.setColumnCount(3)
+        self.custom_constraint_table.setHorizontalHeaderLabels(
+            ["Name", "Numerator Expression", "Denominator Expression"]
+        )
+        self.custom_constraint_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.custom_constraint_table.setSelectionMode(
+            QAbstractItemView.SingleSelection
+        )
+        self.custom_constraint_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.custom_constraint_table.verticalHeader().setVisible(False)
+        self.custom_constraint_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.custom_constraint_table.setMinimumHeight(130)
+        self.custom_constraint_table.doubleClicked.connect(
+            self.edit_selected_custom_constraint
+        )
+        self.solver_config_layout.addWidget(self.custom_constraint_table)
+
+        custom_buttons = QHBoxLayout()
+        add_custom_constraint_button = QPushButton("Add Constraint...")
+        edit_custom_constraint_button = QPushButton("Edit...")
+        delete_custom_constraint_button = QPushButton("Delete")
+        add_custom_constraint_button.clicked.connect(
+            self.add_custom_constraint
+        )
+        edit_custom_constraint_button.clicked.connect(
+            self.edit_selected_custom_constraint
+        )
+        delete_custom_constraint_button.clicked.connect(
+            self.delete_selected_custom_constraint
+        )
+        custom_buttons.addWidget(add_custom_constraint_button)
+        custom_buttons.addWidget(edit_custom_constraint_button)
+        custom_buttons.addWidget(delete_custom_constraint_button)
+        custom_buttons.addStretch()
+        self.solver_config_layout.addLayout(custom_buttons)
+        self.custom_constraint_definitions = []
 
         submit_layout = QHBoxLayout()
         self.solver_config_submit_button = QPushButton("Submit")
@@ -2878,6 +2973,211 @@ class UserInputs(QMainWindow):
         input_field.setFixedWidth(70)
         return input_field
 
+    def custom_constraint_available_fields(self):
+        fields = set(BUILTIN_CONSTRAINT_FIELDS)
+        if not self.database_view_is_current():
+            return sorted(fields)
+        records = list(getattr(self, "database_view_rows", []) or [])
+        property_sets = []
+        for record in records:
+            available = set(constraint_property_fields(
+                source_properties_from_mapping(record),
+                record.get("tonnes", record.get("balance")),
+            ))
+            # Database View's selected_<brand>_* columns are presentation
+            # aliases. Runtime events expose the active brand as selected_*.
+            available = {
+                key for key in available
+                if not key.startswith("selected_")
+            }
+            property_sets.append(available)
+        property_sets = [values for values in property_sets if values]
+        if property_sets:
+            # Only advertise imported fields available for every current
+            # source. The optimiser still performs a per-source preflight and
+            # names any source whose data later becomes unavailable.
+            fields.update(set.intersection(*property_sets))
+        return sorted(fields)
+
+    def populate_custom_constraint_table(self):
+        if not hasattr(self, "custom_constraint_table"):
+            return
+        definitions = normalize_custom_constraints(
+            getattr(self, "custom_constraint_definitions", [])
+        )
+        self.custom_constraint_definitions = definitions
+        self.custom_constraint_table.setRowCount(len(definitions))
+        for row, definition in enumerate(definitions):
+            for column, key in enumerate(("name", "numerator", "denominator")):
+                item = QTableWidgetItem(str(definition.get(key) or ""))
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.custom_constraint_table.setItem(row, column, item)
+        self.custom_constraint_table.resizeRowsToContents()
+
+    def custom_constraint_expression_combo(self, fields, value=""):
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItems(fields)
+        combo.setCurrentText(str(value or ""))
+        completer = QCompleter(fields, combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        combo.setCompleter(completer)
+        combo.lineEdit().setPlaceholderText(
+            "Select a field or type an expression"
+        )
+        return combo
+
+    def add_custom_constraint(self):
+        self.open_custom_constraint_dialog()
+
+    def edit_selected_custom_constraint(self, *_args):
+        if not hasattr(self, "custom_constraint_table"):
+            return
+        row = self.custom_constraint_table.currentRow()
+        if row < 0 or row >= len(self.custom_constraint_definitions):
+            QMessageBox.information(
+                self,
+                "Custom Ratio Constraints",
+                "Select a constraint to edit.",
+            )
+            return
+        self.open_custom_constraint_dialog(row)
+
+    def delete_selected_custom_constraint(self):
+        if not hasattr(self, "custom_constraint_table"):
+            return
+        row = self.custom_constraint_table.currentRow()
+        if row < 0 or row >= len(self.custom_constraint_definitions):
+            return
+        removed = self.custom_constraint_definitions.pop(row)
+        key = constraint_key(removed.get("key") or removed.get("name"))
+        deleted_calendar_keys = {
+            f"crusher_custom_constraint_{key}_{suffix}"
+            for suffix in ("min", "max")
+        }
+        for suffix in ("min", "max"):
+            (self.calendar_inputs or {}).pop(
+                f"crusher_custom_constraint_{key}_{suffix}", None
+            )
+        if hasattr(self, "main_table"):
+            for table_row in range(self.main_table.rowCount() - 1, -1, -1):
+                caption_item = self.main_table.item(table_row, 0)
+                if (
+                    caption_item is not None
+                    and str(caption_item.data(Qt.UserRole) or "")
+                    in deleted_calendar_keys
+                ):
+                    self.main_table.removeRow(table_row)
+        self.populate_custom_constraint_table()
+
+    def open_custom_constraint_dialog(self, row=None):
+        if not self.database_view_is_current():
+            QMessageBox.information(
+                self,
+                "Custom Ratio Constraints",
+                "Refresh Database View successfully before adding or editing "
+                "a custom constraint.",
+            )
+            return
+        current = (
+            self.custom_constraint_definitions[row]
+            if row is not None and 0 <= row < len(self.custom_constraint_definitions)
+            else {}
+        )
+        fields = self.custom_constraint_available_fields()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            "Edit Custom Ratio Constraint" if current else "Add Custom Ratio Constraint"
+        )
+        dialog.resize(650, 230)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        name_input = QLineEdit(str(current.get("name") or ""))
+        numerator_input = self.custom_constraint_expression_combo(
+            fields, current.get("numerator")
+        )
+        denominator_input = self.custom_constraint_expression_combo(
+            fields, current.get("denominator") or "one"
+        )
+        form.addRow("Name:", name_input)
+        form.addRow("Numerator:", numerator_input)
+        form.addRow("Denominator:", denominator_input)
+        layout.addLayout(form)
+        hint = QLabel(
+            "Calendar will add Min and Max rows for this constraint. Leave a "
+            "Calendar bound blank when that side should not be enforced."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QHBoxLayout()
+        save_button = QPushButton("Save")
+        cancel_button = QPushButton("Cancel")
+        buttons.addStretch()
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+        cancel_button.clicked.connect(dialog.reject)
+
+        def save_definition():
+            name = name_input.text().strip()
+            numerator = numerator_input.currentText().strip()
+            denominator = denominator_input.currentText().strip() or "one"
+            if not name:
+                QMessageBox.warning(dialog, "Invalid Constraint", "Name cannot be blank.")
+                return
+            try:
+                numerator_expression = SafeNumericExpression(numerator)
+                denominator_expression = SafeNumericExpression(denominator)
+            except CustomConstraintError as error:
+                QMessageBox.warning(dialog, "Invalid Constraint", str(error))
+                return
+            unavailable = sorted(
+                {
+                    name.lower()
+                    for name in (
+                        numerator_expression.names
+                        | denominator_expression.names
+                    )
+                }
+                - set(fields)
+            )
+            if unavailable:
+                QMessageBox.warning(
+                    dialog,
+                    "Invalid Constraint",
+                    "These fields are not available in the current source data: "
+                    + ", ".join(unavailable),
+                )
+                return
+            key = current.get("key") or constraint_key(name)
+            used_keys = {
+                definition.get("key")
+                for index, definition in enumerate(self.custom_constraint_definitions)
+                if index != row
+            }
+            base_key = key
+            suffix = 2
+            while key in used_keys:
+                key = f"{base_key}_{suffix}"
+                suffix += 1
+            definition = {
+                "key": key,
+                "name": name,
+                "numerator": numerator,
+                "denominator": denominator,
+                "enabled": True,
+            }
+            if row is None:
+                self.custom_constraint_definitions.append(definition)
+            else:
+                self.custom_constraint_definitions[row] = definition
+            self.populate_custom_constraint_table()
+            dialog.accept()
+
+        save_button.clicked.connect(save_definition)
+        dialog.exec_()
+
     def update_direct_tip_input_state(self, checked=None):
         direct_tip_enabled = self.direct_tip_enabled_checkbox.isChecked()
         self.direct_tip_cash_incentive_input.setEnabled(direct_tip_enabled)
@@ -2953,6 +3253,7 @@ class UserInputs(QMainWindow):
             "active_blend_guidance_incentive": 0.0,
             "rehandle_cycle_time_penalty_enabled": False,
             "haulage_cost_per_hour": 5.0,
+            "custom_constraints": [],
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -2977,6 +3278,16 @@ class UserInputs(QMainWindow):
                 merged["haulage_cost_per_hour"] = 5.0
         except (TypeError, ValueError):
             merged["haulage_cost_per_hour"] = 5.0
+        try:
+            merged["custom_constraints"] = normalize_custom_constraints(
+                merged.get("custom_constraints")
+            )
+            self.custom_constraint_normalization_warning = ""
+        except CustomConstraintError as error:
+            self.custom_constraint_normalization_warning = str(error)
+            raise ValueError(
+                "Invalid saved custom ratio constraint: " + str(error)
+            ) from error
         return merged
 
     def apply_app_theme(self):
@@ -3145,9 +3456,14 @@ class UserInputs(QMainWindow):
         self.database_view_search.textChanged.connect(
             self.apply_database_view_filters
         )
+        self.database_view_column_button = QPushButton("Choose Columns...")
+        self.database_view_column_button.clicked.connect(
+            self.choose_database_view_columns
+        )
         filters.addWidget(QLabel("Source Type:"))
         filters.addWidget(self.database_view_source_filter)
         filters.addWidget(self.database_view_search, stretch=1)
+        filters.addWidget(self.database_view_column_button)
         layout.addLayout(filters)
 
         self.database_view_summary_label = QLabel("Submit AMT Stockpiles to prepare this view.")
@@ -3175,18 +3491,26 @@ class UserInputs(QMainWindow):
         self.database_view_refresh_button.clicked.connect(
             self.refresh_database_view
         )
-        continue_button = QPushButton("Continue to Solver Configuration")
-        continue_button.clicked.connect(self.continue_from_database_view)
+        self.database_view_continue_button = QPushButton(
+            "Continue to Solver Configuration"
+        )
+        self.database_view_continue_button.setEnabled(False)
+        self.database_view_continue_button.clicked.connect(
+            self.continue_from_database_view
+        )
         buttons.addWidget(self.database_view_refresh_button)
-        buttons.addWidget(continue_button)
+        buttons.addWidget(self.database_view_continue_button)
         buttons.addStretch()
         layout.addLayout(buttons)
 
         self.database_view_rows = []
         self.database_view_expit_payload_transactions = None
         self.database_view_snapshot_signature = None
+        self.database_view_selected_columns = None
+        self.database_view_known_columns = None
         self.database_view_refresh_pending = True
         self.database_view_refresh_in_progress = False
+        self.database_view_refresh_generation = 0
 
     def database_view_input_signature(self):
         """Return the inputs that determine the APS payload snapshot."""
@@ -3212,6 +3536,18 @@ class UserInputs(QMainWindow):
             "grade_mappings": context.get("aps_grade_field_mappings", {}),
         }
         return json.dumps(signature, sort_keys=True, default=str)
+
+    def database_view_is_current(self):
+        if getattr(self, "database_view_refresh_in_progress", False):
+            return False
+        try:
+            current_signature = self.database_view_input_signature()
+        except Exception:
+            return False
+        return (
+            getattr(self, "database_view_snapshot_signature", None)
+            == current_signature
+        )
 
     def database_view_periods(self):
         period_count = getattr(
@@ -3451,8 +3787,16 @@ class UserInputs(QMainWindow):
                 "raw_tonnes": {analyte: 0.0 for analyte in ANALYTES},
                 "stream_mass": {},
                 "stream_tonnes": {},
+                "source_properties": {},
             })
+            previous_tonnes = group["tonnes"]
             group["tonnes"] += tonnes
+            group["source_properties"] = merge_source_properties(
+                group["source_properties"],
+                previous_tonnes,
+                source_properties_from_mapping(transaction),
+                tonnes,
+            )
 
             fallback = {
                 f"grade_{analyte}": transaction.get(
@@ -3512,6 +3856,7 @@ class UserInputs(QMainWindow):
                 )
             rows.append(self.database_view_record_with_streams(
                 {
+                    **group["source_properties"],
                     "source_type": "APS Grade Block",
                     "source_id": source,
                     "parent_stockpile": "",
@@ -3524,8 +3869,11 @@ class UserInputs(QMainWindow):
             ))
         return rows
 
-    def prepare_database_view_data(self):
+    def prepare_database_view_data(self, refresh_generation=None):
         """Build source tonnes/grades and retain the exact APS run snapshot."""
+        request_signature = getattr(
+            self, "database_view_signature_snapshot", None
+        )
         records = self.database_view_stockpile_rows()
         warnings = []
         transactions = pd.DataFrame()
@@ -3552,6 +3900,11 @@ class UserInputs(QMainWindow):
                     site_context,
                     getattr(self, "file_path_choice", ""),
                     getattr(self, "selected_24hr_expit_agents", []),
+                )
+                warnings.extend(
+                    transactions.attrs.get(
+                        "source_property_warnings", []
+                    )
                 )
             except Exception as exc:
                 warnings.append(f"APS 24HR payload preparation failed: {exc}")
@@ -3600,9 +3953,10 @@ class UserInputs(QMainWindow):
             "window_start": window_start,
             "window_end": window_end,
             "signature": (
-                getattr(self, "database_view_signature_snapshot", None)
+                request_signature
                 or self.database_view_input_signature()
             ),
+            "refresh_generation": refresh_generation,
         }
 
     def apply_database_view_stockpile_calculations(
@@ -3795,6 +4149,16 @@ class UserInputs(QMainWindow):
             return
         self.database_view_refresh_in_progress = True
         self.database_view_refresh_pending = False
+        self.database_view_refresh_generation = (
+            getattr(self, "database_view_refresh_generation", 0) + 1
+        )
+        refresh_generation = self.database_view_refresh_generation
+        self.database_view_rows = []
+        self.database_view_expit_payload_transactions = None
+        self.database_view_snapshot_signature = None
+        self.database_view_table.clearContents()
+        self.database_view_table.setRowCount(0)
+        self.database_view_continue_button.setEnabled(False)
         self.database_view_period_count_snapshot = self.planning_period_count()
         self.database_view_start_time_snapshot = (
             self.start_time_choice or datetime.now()
@@ -3809,23 +4173,46 @@ class UserInputs(QMainWindow):
         )
         self.run_background_task(
             "Preparing Database View model inputs...",
-            self.prepare_database_view_data,
+            lambda: self.prepare_database_view_data(refresh_generation),
             self.finish_database_view_data,
-            self.handle_database_view_error,
+            lambda error: self.handle_database_view_error(
+                error, refresh_generation
+            ),
         )
 
     def finish_database_view_data(self, result):
+        if result.get("refresh_generation") != getattr(
+            self, "database_view_refresh_generation", None
+        ):
+            return
         self.database_view_refresh_in_progress = False
         self.database_view_refresh_button.setEnabled(True)
+        if result.get("signature") != self.database_view_input_signature():
+            self.database_view_refresh_pending = True
+            self.database_view_rows = []
+            self.database_view_expit_payload_transactions = None
+            self.database_view_snapshot_signature = None
+            self.database_view_continue_button.setEnabled(False)
+            self.database_view_warning_label.setText(
+                "Database View inputs changed while it was being prepared. "
+                "Refresh the view before continuing."
+            )
+            self.database_view_warning_label.show()
+            self.database_view_summary_label.setText(
+                "Database View refresh required."
+            )
+            return
         self.database_view_rows = result.get("records", []) or []
         self.database_view_expit_payload_transactions = result.get(
             "transactions", pd.DataFrame()
         )
         self.database_view_snapshot_signature = result.get("signature")
+        self.database_view_refresh_pending = False
         warnings = result.get("warnings", []) or []
         self.database_view_warning_label.setText("\n".join(warnings))
         self.database_view_warning_label.setVisible(bool(warnings))
         self.populate_database_view_table()
+        self.database_view_continue_button.setEnabled(True)
 
         counts = {}
         tonnes = 0.0
@@ -3843,16 +4230,32 @@ class UserInputs(QMainWindow):
             f"Displayed source tonnes: {tonnes:,.2f}"
         )
 
-    def handle_database_view_error(self, error_message):
+    def handle_database_view_error(
+        self, error_message, refresh_generation=None
+    ):
+        if (
+            refresh_generation is not None
+            and refresh_generation != getattr(
+                self, "database_view_refresh_generation", None
+            )
+        ):
+            return
         self.database_view_refresh_in_progress = False
+        self.database_view_refresh_pending = True
+        self.database_view_rows = []
+        self.database_view_expit_payload_transactions = None
+        self.database_view_snapshot_signature = None
         self.database_view_refresh_button.setEnabled(True)
+        self.database_view_continue_button.setEnabled(False)
+        self.database_view_table.clearContents()
+        self.database_view_table.setRowCount(0)
         self.database_view_warning_label.setText(str(error_message))
         self.database_view_warning_label.show()
         self.database_view_summary_label.setText(
             "Database View could not be prepared."
         )
 
-    def database_view_headers(self):
+    def database_view_all_headers(self):
         fixed = [
             "source_type", "source_id", "parent_stockpile",
             "build_or_chunk", "sequence", "tonnes", "selected_stream",
@@ -3867,6 +4270,139 @@ class UserInputs(QMainWindow):
             if key not in fixed and key != "warnings"
         })
         return [*fixed, *dynamic, "warnings"]
+
+    @staticmethod
+    def default_database_view_columns(headers):
+        identity = {
+            "source_type", "source_id", "parent_stockpile",
+            "build_or_chunk", "sequence", "tonnes", "selected_stream",
+        }
+        return [
+            header for header in headers
+            if (
+                header in identity
+                or header.startswith("grade_insitu_")
+                or (
+                    header.startswith("selected_")
+                    and header != "selected_stream"
+                )
+            )
+        ]
+
+    def database_view_headers(self):
+        all_headers = self.database_view_all_headers()
+        selected = getattr(self, "database_view_selected_columns", None)
+        if selected is None:
+            selected = self.default_database_view_columns(all_headers)
+            self.database_view_selected_columns = list(selected)
+        else:
+            known = getattr(self, "database_view_known_columns", None)
+            if known is not None:
+                new_defaults = [
+                    header
+                    for header in self.default_database_view_columns(
+                        all_headers
+                    )
+                    if header not in set(known)
+                ]
+                if new_defaults:
+                    selected = [*selected, *new_defaults]
+                    self.database_view_selected_columns = list(
+                        dict.fromkeys(selected)
+                    )
+        self.database_view_known_columns = list(all_headers)
+        selected_set = set(selected)
+        headers = [header for header in all_headers if header in selected_set]
+        if not headers and all_headers:
+            headers = self.default_database_view_columns(all_headers)
+            self.database_view_selected_columns = list(headers)
+        return headers
+
+    def update_database_view_column_button(self):
+        if not hasattr(self, "database_view_column_button"):
+            return
+        all_headers = self.database_view_all_headers()
+        selected = set(
+            getattr(self, "database_view_selected_columns", []) or []
+        )
+        selected_count = sum(header in selected for header in all_headers)
+        total_count = len(all_headers)
+        self.database_view_column_button.setText(
+            f"Choose Columns... ({selected_count}/{total_count})"
+        )
+
+    def choose_database_view_columns(self):
+        all_headers = self.database_view_all_headers()
+        if not all_headers:
+            return
+        selected = set(
+            getattr(self, "database_view_selected_columns", None)
+            or self.default_database_view_columns(all_headers)
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Database View Columns")
+        dialog.resize(520, 650)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Type to find a field...")
+        field_list = QListWidget()
+        for header in all_headers:
+            item = QListWidgetItem(header)
+            item.setFlags(
+                item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled
+            )
+            item.setCheckState(
+                Qt.Checked if header in selected else Qt.Unchecked
+            )
+            field_list.addItem(item)
+
+        def filter_fields(text):
+            needle = str(text or "").strip().lower()
+            for index in range(field_list.count()):
+                item = field_list.item(index)
+                item.setHidden(bool(needle and needle not in item.text().lower()))
+
+        def set_checked(headers_to_check):
+            headers_to_check = set(headers_to_check)
+            for index in range(field_list.count()):
+                item = field_list.item(index)
+                item.setCheckState(
+                    Qt.Checked if item.text() in headers_to_check else Qt.Unchecked
+                )
+
+        search.textChanged.connect(filter_fields)
+        layout.addWidget(search)
+        layout.addWidget(field_list, stretch=1)
+        actions = QHBoxLayout()
+        defaults_button = QPushButton("Defaults")
+        defaults_button.clicked.connect(
+            lambda: set_checked(self.default_database_view_columns(all_headers))
+        )
+        all_button = QPushButton("Select All")
+        all_button.clicked.connect(lambda: set_checked(all_headers))
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        actions.addWidget(defaults_button)
+        actions.addWidget(all_button)
+        actions.addStretch()
+        actions.addWidget(apply_button)
+        actions.addWidget(cancel_button)
+        layout.addLayout(actions)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        chosen = [
+            field_list.item(index).text()
+            for index in range(field_list.count())
+            if field_list.item(index).checkState() == Qt.Checked
+        ]
+        self.database_view_selected_columns = (
+            chosen or self.default_database_view_columns(all_headers)
+        )
+        self.database_view_known_columns = list(all_headers)
+        self.populate_database_view_table()
+        self.save_active_scenario_state()
 
     def populate_database_view_table(self):
         table = self.database_view_table
@@ -3883,6 +4419,7 @@ class UserInputs(QMainWindow):
                 item = QTableWidgetItem(display)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 item.setToolTip(display)
+                item.setData(Qt.UserRole, row_index)
                 if header.startswith("fallback_") and display:
                     item.setBackground(QColor("#fff3cd"))
                 elif (
@@ -3899,6 +4436,7 @@ class UserInputs(QMainWindow):
                 table.setItem(row_index, column_index, item)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.setSortingEnabled(True)
+        self.update_database_view_column_button()
         self.apply_database_view_filters()
 
     @staticmethod
@@ -3908,6 +4446,8 @@ class UserInputs(QMainWindow):
             return ""
         number = numeric(value)
         sum_property = (
+            source_property_kind(header) == "additive"
+            or
             header == "tonnes"
             or header.endswith("_wmt")
             or header.endswith("_dmt")
@@ -3917,6 +4457,8 @@ class UserInputs(QMainWindow):
             or header == "balancedmt"
         )
         weighted_average_property = (
+            source_property_kind(header) in {"intensive", "unknown"}
+            or
             header.startswith("grade_")
             or (
                 header.startswith("selected_")
@@ -3943,7 +4485,15 @@ class UserInputs(QMainWindow):
             self.database_view_source_filter.currentData() or ""
         )
         search = self.database_view_search.text().strip().lower()
-        for row_index, record in enumerate(self.database_view_rows):
+        for row_index in range(self.database_view_table.rowCount()):
+            row_item = self.database_view_table.item(row_index, 0)
+            record_index = (
+                row_item.data(Qt.UserRole) if row_item is not None else None
+            )
+            try:
+                record = self.database_view_rows[int(record_index)]
+            except (TypeError, ValueError, IndexError):
+                record = {}
             type_matches = (
                 not source_type
                 or str(record.get("source_type") or "") == source_type
@@ -3959,6 +4509,14 @@ class UserInputs(QMainWindow):
             )
 
     def continue_from_database_view(self):
+        if getattr(self, "database_view_refresh_in_progress", False):
+            return
+        if (
+            getattr(self, "database_view_snapshot_signature", None)
+            != self.database_view_input_signature()
+        ):
+            self.refresh_database_view()
+            return
         self.activate_manual_setup_tab()
         self.navigate_to_solver_configuration()
 
@@ -11866,8 +12424,54 @@ class UserInputs(QMainWindow):
             {"crusher_target_mn_max": ("      Max", [True] * period_count, "blue", ["100"] * period_count)},
         ])
 
+        custom_constraints = [
+            definition
+            for definition in self.normalized_solver_config().get(
+                "custom_constraints", []
+            )
+            if definition.get("enabled", True)
+        ]
+        if custom_constraints:
+            self.calendar_rows.append((
+                "  Custom Ratio Constraints",
+                [False] * period_count,
+                "blue",
+                [""] * period_count,
+            ))
+            for definition in custom_constraints:
+                key = constraint_key(definition.get("key") or definition.get("name"))
+                min_key = f"crusher_custom_constraint_{key}_min"
+                max_key = f"crusher_custom_constraint_{key}_max"
+                saved_min = (self.calendar_inputs or {}).get(min_key, {})
+                saved_max = (self.calendar_inputs or {}).get(max_key, {})
+                self.calendar_rows.extend([
+                    (
+                        f"    {definition.get('name') or key}",
+                        [False] * period_count,
+                        "blue",
+                        [""] * period_count,
+                    ),
+                    {
+                        min_key: (
+                            "      Min",
+                            [True] * period_count,
+                            "blue",
+                            [saved_min.get(label, "") for label in period_labels],
+                        )
+                    },
+                    {
+                        max_key: (
+                            "      Max",
+                            [True] * period_count,
+                            "blue",
+                            [saved_max.get(label, "") for label in period_labels],
+                        )
+                    },
+                ])
+
         # Dynamically Add Stockpile Rows with default values
         self.calendar_rows.append(("Stockpiles", [False] * period_count, "red", [""] * period_count))
+        self.calendar_stockpile_start_index = len(self.calendar_rows)
 
         selected_stockpiles = list(getattr(self, "updated_stockpile_data_keys", []) or [])
         selected_stockpile_keys = {str(stockpile).strip().upper() for stockpile in selected_stockpiles}
@@ -12002,6 +12606,8 @@ class UserInputs(QMainWindow):
             item_caption.setBackground(QBrush(
                 section_colors[color_group] if is_section_row else parent_colors[color_group]
             ))
+            if row_key:
+                item_caption.setData(Qt.UserRole, row_key)
             if (
                 row_key == "reclaim_equipment_max_reclaim_rate"
                 and self.is_total_feed_operating_crusher()
@@ -12042,6 +12648,7 @@ class UserInputs(QMainWindow):
                 display_value = default_value
                 if row_key and (
                     "_target_" in row_key
+                    or row_key.startswith("crusher_custom_constraint_")
                     or row_key.endswith("_maximum_quantity")
                 ):
                     try:
@@ -12153,7 +12760,9 @@ class UserInputs(QMainWindow):
             self.calendar_rows[23]["crusher_target_mn_max"] = ("      Max", [True] * period_count, "blue", calendar_values("crusher_target_mn_max", hundred_defaults))
 
             
-            start_index = 25
+            start_index = getattr(
+                self, "calendar_stockpile_start_index", 25
+            )
             calendar_index = start_index  # Start populating calendar_rows after the static crusher rows
 
             for stockpile in getattr(self, "calendar_stockpile_names", self.updated_stockpile_data_keys):
@@ -12237,8 +12846,10 @@ class UserInputs(QMainWindow):
             current_name = caption.strip().replace(" ", "_").lower()
             hierarchy.append(current_name)
 
-            # Generate the full key by joining the hierarchy
-            full_key = "_".join(hierarchy)
+            # Dictionary rows carry stable keys so renaming a displayed custom
+            # constraint does not orphan its saved Calendar values.
+            explicit_key = caption_item.data(Qt.UserRole)
+            full_key = str(explicit_key) if explicit_key else "_".join(hierarchy)
 
             # Retrieve the values for Preplan, Period_1, Period_2, etc.
             row_data = {}
@@ -12429,6 +13040,10 @@ class UserInputs(QMainWindow):
             solver_config.get("low_fe_preference_incentive", 1.0)
         ))
         self.low_fe_threshold_input.setText(str(solver_config.get("low_fe_threshold", 58.0)))
+        self.custom_constraint_definitions = copy.deepcopy(
+            solver_config.get("custom_constraints") or []
+        )
+        self.populate_custom_constraint_table()
 
     def store_solver_config_inputs(self, show_errors=True):
         if self.calendar_inputs is None:
@@ -12776,6 +13391,9 @@ class UserInputs(QMainWindow):
             "prefer_low_fe_stockpiles": self.prefer_low_fe_stockpiles_checkbox.isChecked(),
             "low_fe_preference_incentive": low_fe_preference_incentive,
             "low_fe_threshold": low_fe_threshold,
+            "custom_constraints": copy.deepcopy(
+                getattr(self, "custom_constraint_definitions", [])
+            ),
         }
         self.solver_config = self.normalized_solver_config(self.solver_config)
 
@@ -12832,8 +13450,10 @@ class UserInputs(QMainWindow):
             current_name = caption.strip().replace(" ", "_").lower()
             hierarchy.append(current_name)
 
-            # Generate the full key by joining the hierarchy
-            full_key = "_".join(hierarchy)
+            # Dictionary rows carry stable keys so renaming a displayed custom
+            # constraint does not orphan its saved Calendar values.
+            explicit_key = caption_item.data(Qt.UserRole)
+            full_key = str(explicit_key) if explicit_key else "_".join(hierarchy)
 
             # Retrieve the values for Preplan, Period_1, Period_2, etc.
             row_data = {}
@@ -16631,7 +17251,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 11,
+                "project_format_version": 13,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -16715,6 +17335,12 @@ class UserInputs(QMainWindow):
                 'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
                 'AMT_stockpile_data': getattr(self, "AMT_stockpile_data", {}),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
+                "database_view_selected_columns": copy.deepcopy(
+                    getattr(self, "database_view_selected_columns", None)
+                ),
+                "database_view_known_columns": copy.deepcopy(
+                    getattr(self, "database_view_known_columns", None)
+                ),
                 "solver_config": self.solver_config,
             }
             # Generate a timestamp
@@ -17121,6 +17747,21 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
         self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+        self.database_view_selected_columns = copy.deepcopy(
+            loaded_state.get("database_view_selected_columns")
+        )
+        self.database_view_known_columns = copy.deepcopy(
+            loaded_state.get("database_view_known_columns")
+        )
+        self.database_view_rows = []
+        self.database_view_expit_payload_transactions = None
+        self.database_view_snapshot_signature = None
+        self.database_view_refresh_pending = True
+        self.database_view_refresh_generation = (
+            getattr(self, "database_view_refresh_generation", 0) + 1
+        )
+        if hasattr(self, "database_view_continue_button"):
+            self.database_view_continue_button.setEnabled(False)
         self.seed_active_scenario_database()
         self.solver_config = self.normalized_solver_config(
             loaded_state.get("solver_config", {})
