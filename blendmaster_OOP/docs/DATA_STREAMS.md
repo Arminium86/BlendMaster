@@ -29,17 +29,26 @@ Inventory stockpiles use:
 
 AMT hexagons use:
 
-- Modelled ROM = hex insitu x inventory internal blend recon
-- Adjusted ROM = Modelled ROM x historical blend recon
-- Modelled Product = Adjusted ROM x inventory internal upgrade
+- Modelled ROM = hex insitu baseline; no inventory-derived internal blend factor
+  is applied
+- Adjusted ROM = hex insitu x historical blend recon
+- Modelled Product = grade-block-lineage-weighted EXPIT product grades for the
+  applicable OPF product channel
 - Adjusted Product = Modelled Product x historical regression recon
 
-The inventory internal blend recon is `ROM / insitu`; internal upgrade is
-`PRODn / ROM`. CC OPF02 inventory PROD3 is normalised to BlendMaster Product2.
-CB and CC OPF01 use Product1; CC OPF02 and VK/KV use Product2. EW and FT are dry
-plants, so product streams alias Adjusted ROM and regression is locked to 1.0.
-IB product mapping remains unconfirmed and therefore falls back to Adjusted ROM
-with a warning.
+The former AMT workaround based on inventory `ROM / insitu` and `PRODn / ROM`
+factors is superseded by grade-block attribution. CB and CC OPF01 use EXPIT
+Product1; CC OPF02 and VK/KV use EXPIT Product2. EW and FT are dry plants, so
+product streams alias Adjusted ROM and regression is locked to 1.0. IB product
+mapping remains unconfirmed and therefore falls back to Adjusted ROM with a
+warning.
+
+AMT insitu grades continue to come from the AMT hex grade table. Grade-block
+lineage supplies modelled product chemistry and modelled physical properties
+such as ultrafines, recovery and ore type. Physical properties remain modelled
+only; blend and regression factors apply only to the five grade analytes. The
+complete opening-tonnage and lineage method is documented in
+[AMT Opening Hexes and Grade-Block Lineage](AMT_OPENING_HEXES_AND_GRADE_BLOCK_LINEAGE.md).
 
 ### AMT spatial tonnage reconciliation
 
@@ -64,8 +73,9 @@ this before chunking as follows:
 
 The UI retains raw signed tonnes, spatial and inventory adjustments, final
 tonnes, unresolved deficits, direction and method/status fields. `FINAL_WMT`,
-not raw tonnes, is used for AMT chunking. Grade redistribution is intentionally
-outside this tonnage-only stage.
+not raw tonnes, is used for AMT chunking. The spatial algorithm is tonnage-only;
+grade-block composition is subsequently aligned to `FINAL_WMT` under the
+documented proportional-depletion assumption.
 
 ## Historical OPF factors
 
@@ -127,19 +137,38 @@ APS payloads are consolidated into one grade-block row. Its grades are
 independently tonne-weighted per analyte, so a missing analyte does not prevent
 the available analytes from being shown.
 
-#### Internal AMT reconciliation
+#### AMT opening and grade-block lineage
 
 | Field | Meaning | When a blank is expected |
 | --- | --- | --- |
-| `internal_recon_matched` | Whether the AMT footprint was successfully matched to the corresponding inventory stockpile instance used to derive its internal blend and upgrade factors. | All inventory and APS rows. |
-| `matched_inventory_stockpile` | Name of the matched inventory stockpile. | All non-AMT rows, or an unmatched AMT row. |
-| `matched_inventory_build` | Inventory build selected by the time-based match. | All non-AMT rows, or an unmatched AMT row. |
-| `matched_inventory_time` | Transaction timestamp of the matched inventory state. | All non-AMT rows, or an unmatched AMT row. |
+| `internal_recon_matched` | Legacy field name indicating that the AMT footprint was matched to an inventory build/balance. It does not mean internal blend or upgrade factors were used. | All inventory and APS rows. |
+| `matched_inventory_stockpile` | Inventory stockpile used to identify the AMT footprint instance and authoritative total. | All non-AMT rows, or an unmatched AMT row. |
+| `matched_inventory_build` | Exact inventory build used as the AMT `LOCATION_NAME`. | All non-AMT rows, or an unmatched AMT row. |
+| `matched_inventory_time` | Timestamp of the authoritative inventory balance at or before scenario start. | All non-AMT rows, or an unmatched AMT row. |
+| `raw_wmt` | Signed inbound-minus-outbound AMT balance before spatial correction. | Non-AMT rows. |
+| `spatially_corrected_wmt` | Nonnegative balance after directional deficit allocation. | Non-AMT rows. |
+| `spatial_adjustment_wmt` | Change caused by transferring AMT overdraw to nearby positive donor hexes. | Non-AMT rows. |
+| `ledger_adjustment_wmt` | Final proportional change required to match inventory `BALANCEWMT`. | Non-AMT rows. |
+| `lineage_entry_count` | Number of lineage records, including an unmatched record when present. | Non-AMT rows. |
+| `lineage_inbound_wmt` | Inbound WMT represented by grade-block lineage for the hex. | Non-AMT rows, or an AMT hex with no inbound lineage. |
+| `lineage_matched_wmt` | Lineage WMT attributed through EXPIT or the AMT truck list. | Non-AMT rows. |
+| `lineage_unmatched_wmt` | Inbound WMT retained without a defensible grade-block match. | Non-AMT rows; zero is preferred for AMT. |
+| `lineage_final_wmt` | Final spatially and inventory-reconciled WMT to which the lineage composition was aligned. | Non-AMT rows. |
+| `lineage_matched_final_wmt` | Final WMT represented by the matched lineage share. | Non-AMT rows. |
+| `lineage_unmatched_final_wmt` | Final WMT represented by the unmatched lineage share. | Non-AMT rows; zero is preferred for AMT. |
+| `lineage_coverage_pct` | Percentage of lineage inbound WMT attributed through EXPIT or the AMT truck list. | Non-AMT rows or a hex with no inbound lineage. |
+| `grade_block_count` | Number of distinct resolved grade-block identities contributing to the hex, excluding `UNMATCHED`. | Non-AMT rows. |
+| `modelled_<property>` | Grade-block-lineage-weighted modelled chemistry or physical property. | Non-AMT rows, or when no contributing lineage supplies that property. |
+| `modelled_<property>_coverage_pct` | Percentage of final hex tonnes supporting the corresponding modelled property. | Non-AMT rows or a zero-tonne hex. |
 
-These columns are diagnostics, not additional optimiser inputs. For an AMT
-row, an unsuccessful or missing match is actionable because its internal
-factors may have fallen back to 1.0; the `warnings` column records the applied
-fallback.
+The inventory match now selects the correct build and total; it no longer
+provides AMT internal blend or upgrade factors. Modelled product grades can feed
+the product stream, while lineage identities, physical properties, match
+coverage and spatial adjustments remain diagnostic/model-input provenance. A
+positive hex with incomplete lineage is actionable and is recorded in the
+`warnings` column. Partial coverage of the active product channel is also
+warned: the displayed modelled grade is based on covered lineage tonnes, while
+the coverage column quantifies the excluded share.
 
 #### Grade columns
 
@@ -201,9 +230,10 @@ data-stream calculations are being validated.
 ## Audit and reporting
 
 Inventory and AMT setup views show the calculated streams for every configured
-brand. AMT rows also retain whether an inventory instance was matched, the
-matched stockpile/build/timestamp, the match rule, and the internal blend and
-upgrade factors used for the calculation.
+brand. AMT rows also retain the selected inventory build/balance timestamp, raw
+and spatially reconciled tonnes, grade-block lineage, per-property coverage and
+lineage warnings. The obsolete inventory-derived internal blend and upgrade
+factors are not part of the AMT stream calculation.
 
 Optimised and manual blend reports retain the selected stream and brand, the
 five grades actually used by the solver, and all five analytes for every raw

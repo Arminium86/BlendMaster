@@ -387,6 +387,20 @@ def internal_product_slot(opf: Any) -> Optional[str]:
     return None
 
 
+def amt_modelled_product_slot(opf: Any) -> Optional[str]:
+    """Return the EXPIT modelled-product slot applicable to an AMT source.
+
+    EXPIT exposes only PROD1 and PROD2.  This differs from the inventory table,
+    where CC OPF02's canonical Product2 is physically stored in PROD3.
+    """
+    opf_key = normalise_opf(opf)
+    if opf_key in {"CB_OPF", "CC_OPF01"}:
+        return "prod1"
+    if opf_key in {"CC_OPF02", "VK_OPF"}:
+        return "prod2"
+    return None
+
+
 def canonical_product_channel(opf: Any) -> Optional[str]:
     slot = internal_product_slot(opf)
     if slot == "prod1":
@@ -453,63 +467,86 @@ def inventory_grade_streams(
 
 def amt_grade_streams(
     insitu_source: Any,
-    inventory_row: Mapping[str, Any],
+    lineage_source: Mapping[str, Any],
     brands: Iterable[str],
     historical_factors: Any,
     opf: Any,
 ):
-    """Build AMT streams using the matching inventory build's internal factors."""
+    """Build AMT streams from insitu grades and grade-block lineage products.
+
+    ``lineage_source`` is expected to carry ``MODELLED_PROD1_<analyte>`` and/or
+    ``MODELLED_PROD2_<analyte>`` fields calculated from the grade blocks that
+    remain in the hex.  Legacy PROD1/PROD2 field spellings remain accepted so
+    saved projects can still be interpreted, but no inventory-derived blend or
+    upgrade factor is calculated here.
+    """
     brands = configured_brands(brands) or [UNBRANDED]
     insitu = legacy_vector(insitu_source)
-    inventory_insitu = {
-        a: _row_value(inventory_row, f"grade_{a}", f"{a}_insitu", f"insitu_{a}")
-        for a in ANALYTES
-    }
-    inventory_rom = {
-        a: _row_value(inventory_row, f"rom_{a}", f"{a}_rom", f"grade_rom_{a}")
-        for a in ANALYTES
-    }
-    slot = internal_product_slot(opf)
-    inventory_product = {
-        a: _row_value(inventory_row, f"{slot}_{a}", f"{a}_{slot}", f"grade_{slot}_{a}") if slot else None
-        for a in ANALYTES
-    }
-    internal_blend = {
-        a: factor(inventory_rom[a] / inventory_insitu[a])
-        if inventory_rom[a] is not None and inventory_insitu[a] not in {None, 0}
-        else 1.0
-        for a in ANALYTES
-    }
-    internal_upgrade = {
-        a: factor(inventory_product[a] / inventory_rom[a])
-        if inventory_product[a] is not None and inventory_rom[a] not in {None, 0}
-        else 1.0
-        for a in ANALYTES
-    }
-    modelled_rom = {
-        a: (insitu[a] * internal_blend[a] if insitu[a] is not None else None)
-        for a in ANALYTES
+    slot = amt_modelled_product_slot(opf)
+    lineage_source = lineage_source if isinstance(lineage_source, Mapping) else {}
+
+    def nested_product_value(analyte: str) -> Optional[float]:
+        if not slot:
+            return None
+        source_analyte = {"si": "sio2", "al": "al2o3"}.get(
+            analyte, analyte
+        )
+        for key in (
+            f"modelled_{slot}",
+            f"MODELLED_{slot.upper()}",
+            slot,
+            slot.upper(),
+        ):
+            values = lineage_source.get(key)
+            if isinstance(values, Mapping):
+                value = _row_value(
+                    values,
+                    source_analyte,
+                    analyte,
+                    f"grade_{source_analyte}",
+                    f"grade_{analyte}",
+                )
+                if value is not None:
+                    return value
+        return _row_value(
+            lineage_source,
+            f"modelled_{slot}_{source_analyte}",
+            f"modelled_{slot}_{analyte}",
+            f"{slot}_{source_analyte}",
+            f"{slot}_{analyte}",
+            f"{source_analyte}_{slot}",
+            f"{analyte}_{slot}",
+            f"grade_{slot}_{source_analyte}",
+            f"grade_{slot}_{analyte}",
+        )
+
+    modelled_product = {
+        analyte: nested_product_value(analyte) for analyte in ANALYTES
     }
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
-    result["modelled_rom"][UNBRANDED] = modelled_rom
+    # Historical blend reconciliation now forms the only AMT ROM adjustment.
+    # Keeping modelled ROM equal to insitu preserves the five-stream audit
+    # boundary while removing the obsolete inventory ROM/insitu workaround.
+    result["modelled_rom"][UNBRANDED] = copy.deepcopy(insitu)
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
         adjusted_rom = {
-            a: (modelled_rom[a] * blend[a] if modelled_rom[a] is not None else None)
+            a: (insitu[a] * blend[a] if insitu[a] is not None else None)
             for a in ANALYTES
         }
         result["adjusted_rom"][brand] = adjusted_rom
-        if is_dry_plant(opf) or slot is None:
+        if is_dry_plant(opf):
             result["modelled_product"][brand] = copy.deepcopy(adjusted_rom)
             result["adjusted_product"][brand] = copy.deepcopy(adjusted_rom)
+        elif slot is None:
+            # IB and any unconfirmed OPF retain an empty product vector so the
+            # normal per-analyte stream resolver explicitly falls back to ROM.
+            result["modelled_product"][brand] = grade_vector()
+            result["adjusted_product"][brand] = grade_vector()
         else:
-            modelled_product = {
-                a: (adjusted_rom[a] * internal_upgrade[a] if adjusted_rom[a] is not None else None)
-                for a in ANALYTES
-            }
-            result["modelled_product"][brand] = modelled_product
+            result["modelled_product"][brand] = copy.deepcopy(modelled_product)
             result["adjusted_product"][brand] = {
                 a: (modelled_product[a] * regression[a] if modelled_product[a] is not None else None)
                 for a in ANALYTES

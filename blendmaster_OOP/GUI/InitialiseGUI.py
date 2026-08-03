@@ -33,6 +33,7 @@ from classes.GradeStreams import (
     STREAMS,
     STREAM_LABELS,
     amt_grade_streams,
+    amt_modelled_product_slot,
     configured_brands,
     internal_product_slot,
     inventory_grade_streams,
@@ -3313,6 +3314,26 @@ class UserInputs(QMainWindow):
                         str(item.get("hex", "")),
                     ),
                 ):
+                    modelled_payload = chunk.get("modelled_properties") or {}
+                    modelled_values = (
+                        modelled_payload.get("values", {})
+                        if isinstance(modelled_payload, dict) else {}
+                    )
+                    modelled_coverage = (
+                        modelled_payload.get("coverage", {})
+                        if isinstance(modelled_payload, dict) else {}
+                    )
+                    property_audit = {
+                        f"modelled_{name}": value
+                        for name, value in modelled_values.items()
+                    }
+                    property_audit.update({
+                        f"modelled_{name}_coverage_pct": (
+                            numeric(value) * 100.0
+                            if numeric(value) is not None else None
+                        )
+                        for name, value in modelled_coverage.items()
+                    })
                     records.append(self.database_view_record_with_streams(
                         {
                             "source_type": "AMT Chunk",
@@ -3321,22 +3342,52 @@ class UserInputs(QMainWindow):
                             "build_or_chunk": chunk.get("hex", ""),
                             "sequence": chunk.get("sequence"),
                             "tonnes": numeric(chunk.get("balance")) or 0.0,
+                            "grade_block_count": chunk.get("grade_block_count"),
+                            "lineage_coverage_pct": chunk.get(
+                                "lineage_coverage_pct"
+                            ),
+                            "lineage_unmatched_wmt": chunk.get(
+                                "lineage_unmatched_wmt"
+                            ),
+                            "raw_wmt": chunk.get("raw_wmt"),
+                            "spatially_corrected_wmt": chunk.get(
+                                "spatially_corrected_wmt"
+                            ),
+                            "spatial_adjustment_wmt": chunk.get(
+                                "spatial_adjustment_wmt"
+                            ),
+                            "ledger_adjustment_wmt": chunk.get(
+                                "ledger_adjustment_wmt"
+                            ),
                             "internal_recon_matched": provenance.get(
-                                "internal_recon_matched",
-                                provenance.get("INTERNAL_RECON_MATCHED", ""),
+                                "AMT_INVENTORY_MATCHED",
+                                provenance.get(
+                                    "internal_recon_matched",
+                                    provenance.get("INTERNAL_RECON_MATCHED", ""),
+                                ),
                             ),
                             "matched_inventory_stockpile": provenance.get(
-                                "internal_recon_inventory_stockpile",
-                                provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE", ""),
+                                "AMT_INVENTORY_STOCKPILE",
+                                provenance.get(
+                                    "internal_recon_inventory_stockpile",
+                                    provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE", ""),
+                                ),
                             ),
                             "matched_inventory_build": provenance.get(
-                                "internal_recon_inventory_build",
-                                provenance.get("INTERNAL_RECON_INVENTORY_BUILD", ""),
+                                "AMT_INVENTORY_BUILD",
+                                provenance.get(
+                                    "internal_recon_inventory_build",
+                                    provenance.get("INTERNAL_RECON_INVENTORY_BUILD", ""),
+                                ),
                             ),
                             "matched_inventory_time": provenance.get(
-                                "internal_recon_inventory_transaction_datetime",
-                                provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME", ""),
+                                "AMT_INVENTORY_TRANSACTION_DATETIME",
+                                provenance.get(
+                                    "internal_recon_inventory_transaction_datetime",
+                                    provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME", ""),
+                                ),
                             ),
+                            **property_audit,
                         },
                         chunk.get("grade_streams")
                         or chunk.get("GRADE_STREAMS"),
@@ -11082,8 +11133,8 @@ class UserInputs(QMainWindow):
             "Target Hours per Chunk",
             "Calculated Number of Chunks",
             "Calculated Chunk Size (WMT)",
-            "Internal Blend Recon",
-            "Internal Upgrade",
+            "Grade-block Lineage",
+            "Modelled Product Coverage",
             "Inventory Match",
             "Matched Inventory Stockpile",
             "Matched Inventory Build",
@@ -11232,6 +11283,19 @@ class UserInputs(QMainWindow):
         if not selected_footprints.issubset(saved_footprints):
             return False
 
+        # Saved AMT rows created before grade-block lineage still carry the
+        # retired inventory-derived blend/upgrade streams.  Refresh those
+        # projects from Snowflake instead of silently mixing both models.
+        for footprint, rows in AMT_stockpile_data.items():
+            if str(footprint).upper() not in selected_footprints:
+                continue
+            if not any(
+                "GRADE_BLOCK_LINEAGE_JSON" in (row or {})
+                or "LINEAGE_ENTRY_COUNT" in (row or {})
+                for row in rows or []
+            ):
+                return False
+
         self.opening_stockpile_inventories.save_AMT_to_database(AMT_stockpile_data)
         return True
 
@@ -11350,18 +11414,17 @@ class UserInputs(QMainWindow):
                 footprint_rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
                 provenance = footprint_rows[0] if footprint_rows else {}
                 matched_name = str(
-                    provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
+                    provenance.get("AMT_INVENTORY_STOCKPILE")
+                    or provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
                     or provenance.get("internal_recon_inventory_stockpile")
                     or ""
                 )
-                inventory_row = (self.stockpile_data or {}).get(
-                    matched_name,
-                    (self.stockpile_data or {}).get(stockpile_name, attributes),
+                lineage_summary, product_coverage_summary = self.amt_lineage_summary(
+                    footprint_rows
                 )
-                blend_summary, upgrade_summary = self.inventory_internal_factor_summary(inventory_row)
                 for caption, summary in (
-                    ("Internal Blend Recon", blend_summary),
-                    ("Internal Upgrade", upgrade_summary),
+                    ("Grade-block Lineage", lineage_summary),
+                    ("Modelled Product Coverage", product_coverage_summary),
                 ):
                     factor_item = QTableWidgetItem(summary)
                     factor_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -11371,20 +11434,25 @@ class UserInputs(QMainWindow):
                     )
 
                 match_status = bool(
-                    provenance.get("INTERNAL_RECON_MATCHED")
-                    if "INTERNAL_RECON_MATCHED" in provenance
-                    else provenance.get("internal_recon_matched", False)
+                    provenance.get("AMT_INVENTORY_MATCHED")
+                    if "AMT_INVENTORY_MATCHED" in provenance
+                    else provenance.get(
+                        "INTERNAL_RECON_MATCHED",
+                        provenance.get("internal_recon_matched", False),
+                    )
                 )
                 provenance_cells = {
-                    "Inventory Match": "Matched" if match_status else "Not matched - factors 1.0",
+                    "Inventory Match": "Matched" if match_status else "Not matched",
                     "Matched Inventory Stockpile": matched_name,
                     "Matched Inventory Build": str(
-                        provenance.get("INTERNAL_RECON_INVENTORY_BUILD")
+                        provenance.get("AMT_INVENTORY_BUILD")
+                        or provenance.get("INTERNAL_RECON_INVENTORY_BUILD")
                         or provenance.get("internal_recon_inventory_build")
                         or ""
                     ),
                     "Matched Inventory Time": str(
-                        provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME")
+                        provenance.get("AMT_INVENTORY_TRANSACTION_DATETIME")
+                        or provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME")
                         or provenance.get("internal_recon_inventory_transaction_datetime")
                         or ""
                     ),
@@ -11436,107 +11504,71 @@ class UserInputs(QMainWindow):
             QTimer.singleShot(250, self.reload_AMT_map_view)
             QTimer.singleShot(1500, self.reload_AMT_map_view)
 
-    def inventory_internal_factor_summary(self, row):
-        row = row or {}
+    def amt_lineage_summary(self, rows):
+        """Summarise footprint lineage and EXPIT product-property coverage."""
+        rows = rows or []
+        grade_blocks = set()
+        final_wmt = 0.0
+        matched_final_wmt = 0.0
+        for row in rows:
+            row = row or {}
+            final_wmt += numeric(row.get("LINEAGE_FINAL_WMT")) or 0.0
+            matched_final_wmt += (
+                numeric(row.get("LINEAGE_MATCHED_FINAL_WMT")) or 0.0
+            )
+            lineage_json = row.get("GRADE_BLOCK_LINEAGE_JSON")
+            try:
+                lineage = (
+                    json.loads(lineage_json)
+                    if isinstance(lineage_json, str) else lineage_json
+                )
+            except (TypeError, ValueError):
+                lineage = []
+            for entry in lineage if isinstance(lineage, list) else []:
+                key = str((entry or {}).get("lineage_key") or "")
+                if key and key.upper() != "UNMATCHED":
+                    grade_blocks.add(key)
 
-        def value(*names):
-            for name in names:
-                candidate = numeric(row.get(name))
-                if candidate is None:
-                    candidate = numeric(row.get(name.upper()))
-                if candidate is not None:
-                    return candidate
-            return None
+        coverage = matched_final_wmt / final_wmt * 100.0 if final_wmt > 0 else None
+        unmatched = max(final_wmt - matched_final_wmt, 0.0)
+        lineage_summary = (
+            f"{len(grade_blocks)} grade blocks | "
+            f"{coverage:.2f}% attributed | {unmatched:,.2f} t unmatched"
+            if coverage is not None else "No positive AMT balance"
+        )
 
-        slot = internal_product_slot(self.opf_input_choice)
-        blend_values = []
-        upgrade_values = []
+        slot = amt_modelled_product_slot(self.opf_input_choice)
+        if is_dry_plant(self.opf_input_choice):
+            return lineage_summary, "Dry plant: product follows adjusted ROM"
+        if slot is None:
+            return lineage_summary, "No confirmed EXPIT product channel"
         labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+        product_coverage = []
+        source_prefix = f"MODELLED_{slot.upper()}"
         for analyte in ANALYTES:
-            insitu = value(f"grade_{analyte}", f"{analyte}_insitu")
-            rom = value(f"{analyte}_rom", f"rom_{analyte}")
-            product = value(f"{analyte}_{slot}", f"{slot}_{analyte}") if slot else None
-            blend = rom / insitu if rom is not None and insitu not in (None, 0) else 1.0
-            upgrade = product / rom if product is not None and rom not in (None, 0) else 1.0
-            blend_values.append(f"{labels[analyte]} {blend:.4f}")
-            upgrade_values.append(f"{labels[analyte]} {upgrade:.4f}")
-        if is_dry_plant(self.opf_input_choice) or slot is None:
-            return ", ".join(blend_values), "ROM only"
-        return ", ".join(blend_values), ", ".join(upgrade_values)
+            source_name = {"si": "SIO2", "al": "AL2O3"}.get(
+                analyte, analyte.upper()
+            )
+            weighted_coverage = 0.0
+            total_tonnes = 0.0
+            for row in rows:
+                tonnes = numeric((row or {}).get("FINAL_WMT")) or 0.0
+                pct = numeric((row or {}).get(
+                    f"{source_prefix}_{source_name}_COVERAGE_PCT"
+                ))
+                if tonnes > 0:
+                    total_tonnes += tonnes
+                    weighted_coverage += (pct or 0.0) * tonnes
+            pct = weighted_coverage / total_tonnes if total_tonnes > 0 else 0.0
+            product_coverage.append(f"{labels[analyte]} {pct:.2f}%")
+        return lineage_summary, f"{slot.upper()} | " + ", ".join(product_coverage)
 
     def enrich_AMT_grade_streams(self, data_source, amt_data):
-        """Attach the matching inventory build's internal factors to every hex."""
+        """Attach lineage-derived AMT streams and inventory-instance provenance."""
         enriched = copy.deepcopy(amt_data or {})
-        inventory_by_name = {
-            str(name).strip().upper(): (self.stockpile_data or {}).get(name, attributes)
-            for name, attributes in (data_source or {}).items()
-        }
-
-        def compact(value):
-            return "".join(character for character in str(value or "").upper() if character.isalnum())
-
         for footprint, rows in enriched.items():
-            footprint_key = compact(footprint)
-            inventory_row = None
-            inventory_name = ""
-            match_rule = ""
-            exact = inventory_by_name.get(str(footprint).strip().upper())
-            if exact:
-                inventory_row = exact
-                inventory_name = str(footprint).strip()
-                match_rule = "exact stockpile name"
-            for name, candidate in inventory_by_name.items():
-                if inventory_row is not None:
-                    break
-                build = compact((candidate or {}).get("BUILD") or (candidate or {}).get("build"))
-                name_key = compact(name)
-                if build and build in footprint_key:
-                    inventory_row = candidate
-                    inventory_name = name
-                    match_rule = "inventory build in AMT footprint"
-                    break
-                if name_key == footprint_key or name_key in footprint_key or footprint_key in name_key:
-                    inventory_row = candidate
-                    inventory_name = name
-                    match_rule = "normalised stockpile name"
-                    break
-            inventory_row = inventory_row or {}
-            source_warnings = self.inventory_stream_warnings(footprint, inventory_row) if inventory_row else []
-            if not inventory_row:
-                source_warnings = [
-                    f"{footprint}: no matching inventory build was found; internal factors defaulted to 1.0."
-                ]
-                self.historical_recon_warnings.extend(source_warnings)
-            inventory_build = str(
-                inventory_row.get("BUILD") or inventory_row.get("build") or ""
-            )
-            inventory_transaction_datetime = str(
-                inventory_row.get("TRANSACTION_DATETIME")
-                or inventory_row.get("transaction_datetime")
-                or ""
-            )
-            factor_values = {}
-            slot = internal_product_slot(self.opf_input_choice)
-            for analyte in ANALYTES:
-                insitu = numeric(
-                    inventory_row.get(f"GRADE_{analyte.upper()}", inventory_row.get(f"grade_{analyte}"))
-                )
-                rom = numeric(
-                    inventory_row.get(f"{analyte.upper()}_ROM", inventory_row.get(f"{analyte}_rom"))
-                )
-                product = numeric(
-                    inventory_row.get(
-                        f"{analyte.upper()}_{str(slot or '').upper()}",
-                        inventory_row.get(f"{analyte}_{slot}") if slot else None,
-                    )
-                )
-                factor_values[f"INTERNAL_BLEND_RECON_{analyte.upper()}"] = (
-                    rom / insitu if rom is not None and insitu not in (None, 0) else 1.0
-                )
-                factor_values[f"INTERNAL_UPGRADE_{analyte.upper()}"] = (
-                    product / rom if product is not None and rom not in (None, 0) else 1.0
-                )
             for row in rows or []:
+                row = row or {}
                 insitu = {
                     "grade_fe": row.get("FE"),
                     "grade_si": row.get("SIO2"),
@@ -11546,21 +11578,82 @@ class UserInputs(QMainWindow):
                 }
                 streams = amt_grade_streams(
                     insitu,
-                    inventory_row,
+                    row,
                     self.product_brand_labels_choice,
                     self.historical_recon_factors,
                     self.opf_input_choice,
                 )
                 row["GRADE_STREAMS"] = streams
-                row["INTERNAL_RECON_MATCHED"] = bool(inventory_row)
+                inventory_name = str(row.get("FOOTPRINT") or footprint or "")
+                inventory_build = str(row.get("LOCATION_NAME") or "")
+                inventory_transaction_datetime = str(
+                    row.get("INVENTORY_TRANSACTION_DATETIME") or ""
+                )
+                inventory_matched = bool(
+                    inventory_name
+                    and inventory_build
+                    and row.get("INVENTORY_BALANCE_WMT") is not None
+                )
+                match_rule = (
+                    "latest inventory build at or before scenario start"
+                    if inventory_matched else "no inventory instance"
+                )
+                row["AMT_INVENTORY_MATCHED"] = inventory_matched
+                row["AMT_INVENTORY_STOCKPILE"] = inventory_name
+                row["AMT_INVENTORY_BUILD"] = inventory_build
+                row["AMT_INVENTORY_TRANSACTION_DATETIME"] = (
+                    inventory_transaction_datetime
+                )
+                row["AMT_INVENTORY_MATCH_RULE"] = match_rule
+                # Retain legacy column names for saved-project/report schema
+                # compatibility. They now describe only the opening inventory
+                # instance match; no internal grade factors are calculated.
+                row["INTERNAL_RECON_MATCHED"] = inventory_matched
                 row["INTERNAL_RECON_INVENTORY_STOCKPILE"] = inventory_name
                 row["INTERNAL_RECON_INVENTORY_BUILD"] = inventory_build
                 row["INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME"] = (
                     inventory_transaction_datetime
                 )
                 row["INTERNAL_RECON_MATCH_RULE"] = match_rule
-                row["INTERNAL_RECON_WARNING"] = "; ".join(source_warnings)
-                row.update(factor_values)
+                row["INTERNAL_RECON_WARNING"] = (
+                    "" if inventory_matched
+                    else f"{footprint}: no as-of inventory instance was matched."
+                )
+                lineage_warning = str(row.get("LINEAGE_WARNING") or "").strip()
+                source_warnings = [lineage_warning] if lineage_warning else []
+                product_slot = amt_modelled_product_slot(self.opf_input_choice)
+                if product_slot and not is_dry_plant(self.opf_input_choice):
+                    labels = {
+                        "fe": "Fe", "si": "SiO₂", "al": "Al₂O₃",
+                        "p": "P", "mn": "Mn",
+                    }
+                    for analyte in ANALYTES:
+                        source_name = {"si": "SIO2", "al": "AL2O3"}.get(
+                            analyte, analyte.upper()
+                        )
+                        coverage = numeric(row.get(
+                            f"MODELLED_{product_slot.upper()}_{source_name}_COVERAGE_PCT"
+                        ))
+                        if (numeric(row.get("FINAL_WMT")) or 0.0) <= 0:
+                            continue
+                        if coverage is None or coverage <= 0:
+                            source_warnings.append(
+                                f"{product_slot.upper()} {labels[analyte]} is unavailable; "
+                                "the selected product stream will fall back for this analyte."
+                            )
+                        elif coverage < 99.999999:
+                            source_warnings.append(
+                                f"{product_slot.upper()} {labels[analyte]} covers "
+                                f"{coverage:.2f}% of final hex WMT; the modelled grade uses "
+                                "only covered lineage tonnes."
+                            )
+                row["GRADE_STREAM_WARNINGS"] = list(dict.fromkeys(
+                    warning for warning in source_warnings if warning
+                ))
+                for warning in row["GRADE_STREAM_WARNINGS"]:
+                    self.historical_recon_warnings.append(
+                        f"{footprint}/{row.get('HEX', '')}: {warning}"
+                    )
         self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
         return enriched
 

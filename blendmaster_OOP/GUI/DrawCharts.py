@@ -2055,6 +2055,16 @@ class DrawAMTStockpile:
         "spatial_unresolved_wmt", "raw_stockpile_wmt", "raw_positive_stockpile_wmt",
         "spatially_corrected_stockpile_wmt", "final_stockpile_wmt",
         "spatial_recon_status", "spatial_recon_method",
+        "grade_block_lineage_json", "modelled_properties_json",
+        "grade_block_count", "lineage_entry_count", "lineage_inbound_wmt",
+        "lineage_matched_wmt", "lineage_unmatched_wmt", "lineage_final_wmt",
+        "lineage_matched_final_wmt", "lineage_unmatched_final_wmt",
+        "lineage_coverage_pct", "lineage_warning", "modelled_rom_mats",
+        "modelled_dominant_ore_type",
+        "grade_stream_warnings_json",
+        "amt_inventory_matched", "amt_inventory_stockpile",
+        "amt_inventory_build", "amt_inventory_transaction_datetime",
+        "amt_inventory_match_rule",
         "internal_recon_matched", "internal_recon_inventory_stockpile",
         "internal_recon_inventory_build", "internal_recon_match_rule",
         "internal_recon_warning", "internal_recon_inventory_transaction_datetime",
@@ -2065,7 +2075,8 @@ class DrawAMTStockpile:
         "raw_signed_amt_wmt", "amt_total_wmt", "inventory_total_wmt", "calculated_chunk_count",
         "inventory_match", "matched_inventory_stockpile", "matched_inventory_build",
         "matched_inventory_time", "inventory_match_rule",
-        "internal_blend_recon", "internal_upgrade",
+        "grade_block_count", "lineage_coverage_pct", "lineage_unmatched_wmt",
+        "modelled_product_coverage", "modelled_properties",
         "modelled_rom_grades", "adjusted_rom_grades",
         "modelled_product_grades", "adjusted_product_grades",
     ]
@@ -2125,7 +2136,8 @@ class DrawAMTStockpile:
             if (
                 normalized_column in {
                     "balance", "chunk_size", "amt_total_wmt",
-                    "inventory_total_wmt",
+                    "inventory_total_wmt", "lineage_coverage_pct",
+                    "lineage_unmatched_wmt",
                 }
                 or normalized_column.startswith("grade_")
             ):
@@ -2155,13 +2167,6 @@ class DrawAMTStockpile:
                     for brand in brands
                 )
 
-            def factor_summary(prefix):
-                labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
-                return " | ".join(
-                    f"{labels[analyte]} {self.to_float(entry.get(f'{prefix}_{analyte}'), 1.0):.4f}"
-                    for analyte in ANALYTES
-                )
-
             derived = {
                 "raw_signed_amt_wmt": self.get_chunk_setting(
                     entry.get("footprint"), "raw_signed_amt_wmt", 0.0
@@ -2176,17 +2181,34 @@ class DrawAMTStockpile:
                     entry.get("footprint"), "chunk_count", 1
                 )),
                 "inventory_match": (
-                    "Matched" if bool(entry.get("internal_recon_matched"))
-                    else "Not matched - factors 1.0"
+                    "Matched" if bool(entry.get(
+                        "amt_inventory_matched",
+                        entry.get("internal_recon_matched"),
+                    )) else "Not matched"
                 ),
-                "matched_inventory_stockpile": entry.get("internal_recon_inventory_stockpile", ""),
-                "matched_inventory_build": entry.get("internal_recon_inventory_build", ""),
+                "matched_inventory_stockpile": entry.get(
+                    "amt_inventory_stockpile",
+                    entry.get("internal_recon_inventory_stockpile", ""),
+                ),
+                "matched_inventory_build": entry.get(
+                    "amt_inventory_build",
+                    entry.get("internal_recon_inventory_build", ""),
+                ),
                 "matched_inventory_time": entry.get(
-                    "internal_recon_inventory_transaction_datetime", ""
+                    "amt_inventory_transaction_datetime",
+                    entry.get("internal_recon_inventory_transaction_datetime", ""),
                 ),
-                "inventory_match_rule": entry.get("internal_recon_match_rule", ""),
-                "internal_blend_recon": factor_summary("internal_blend_recon"),
-                "internal_upgrade": factor_summary("internal_upgrade"),
+                "inventory_match_rule": entry.get(
+                    "amt_inventory_match_rule",
+                    entry.get("internal_recon_match_rule", ""),
+                ),
+                "grade_block_count": entry.get("grade_block_count", 0),
+                "lineage_coverage_pct": entry.get("lineage_coverage_pct"),
+                "lineage_unmatched_wmt": entry.get("lineage_unmatched_wmt"),
+                "modelled_product_coverage": entry.get(
+                    "modelled_product_coverage", ""
+                ),
+                "modelled_properties": entry.get("modelled_properties") or {},
                 **{
                     f"{stream}_grades": stream_summary(stream)
                     for stream in STREAMS
@@ -2427,6 +2449,11 @@ class DrawAMTStockpile:
         weighted_grades = {}
         weighted_streams = None
         accumulated_tonnes = 0.0
+        property_mass = defaultdict(float)
+        property_tonnes = defaultdict(float)
+        lineage_keys = set()
+        lineage_matched_final_wmt = 0.0
+        grade_stream_warnings = []
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             if total_tonnes > 0:
@@ -2444,12 +2471,100 @@ class DrawAMTStockpile:
                 row.get("grade_streams"),
                 row_tonnes,
             )
+            property_payload = row.get("modelled_properties") or {}
+            values = property_payload.get("values", {}) if isinstance(
+                property_payload, dict
+            ) else {}
+            coverage = property_payload.get("coverage", {}) if isinstance(
+                property_payload, dict
+            ) else {}
+            for property_name, raw_value in values.items():
+                value = self.to_float(raw_value, None)
+                covered_fraction = self.to_float(
+                    coverage.get(property_name), None
+                )
+                if value is None:
+                    continue
+                if covered_fraction is None:
+                    covered_fraction = 1.0
+                covered_fraction = min(max(covered_fraction, 0.0), 1.0)
+                denominator = row_tonnes * covered_fraction
+                if denominator <= 0:
+                    continue
+                property_mass[property_name] += value * denominator
+                property_tonnes[property_name] += denominator
+
+            lineage = row.get("grade_block_lineage") or []
+            for contribution in lineage if isinstance(lineage, list) else []:
+                key = str((contribution or {}).get("lineage_key") or "")
+                if key and key.upper() != "UNMATCHED":
+                    lineage_keys.add(key)
+            matched_wmt = self.to_float(
+                row.get("lineage_matched_final_wmt"), None
+            )
+            if matched_wmt is None:
+                coverage_pct = self.to_float(
+                    row.get("lineage_coverage_pct"), None
+                )
+                matched_wmt = (
+                    row_tonnes * coverage_pct / 100.0
+                    if coverage_pct is not None else 0.0
+                )
+            lineage_matched_final_wmt += min(max(matched_wmt, 0.0), row_tonnes)
+            row_warnings = row.get("grade_stream_warnings") or []
+            if isinstance(row_warnings, str):
+                row_warnings = [row_warnings]
+            grade_stream_warnings.extend(
+                str(warning) for warning in row_warnings if str(warning)
+            )
             accumulated_tonnes += row_tonnes
+
+        modelled_properties = {
+            "values": {
+                name: property_mass[name] / covered_tonnes
+                for name, covered_tonnes in property_tonnes.items()
+                if covered_tonnes > 0
+            },
+            "coverage": {
+                name: covered_tonnes / total_tonnes
+                for name, covered_tonnes in property_tonnes.items()
+                if total_tonnes > 0
+            },
+        }
+        product_coverage_parts = []
+        for product in (1, 2):
+            values = []
+            for suffix, label in (
+                ("fe", "Fe"), ("sio2", "SiO₂"), ("al2o3", "Al₂O₃"),
+                ("p", "P"), ("mn", "Mn"),
+            ):
+                key = f"prod{product}_{suffix}"
+                if key in modelled_properties["coverage"]:
+                    values.append(
+                        f"{label} {modelled_properties['coverage'][key] * 100.0:.2f}%"
+                    )
+            if values:
+                product_coverage_parts.append(
+                    f"PROD{product}: " + ", ".join(values)
+                )
+        lineage_coverage_pct = (
+            lineage_matched_final_wmt / total_tonnes * 100.0
+            if total_tonnes > 0 else None
+        )
+        if lineage_coverage_pct is not None and lineage_coverage_pct < 99.999999:
+            grade_stream_warnings.append(
+                f"Grade-block lineage covers {lineage_coverage_pct:.2f}% of chunk WMT."
+            )
 
         provenance = {}
         if chunk_rows:
             first_row = chunk_rows[0]
             for key in (
+                "amt_inventory_matched",
+                "amt_inventory_stockpile",
+                "amt_inventory_build",
+                "amt_inventory_transaction_datetime",
+                "amt_inventory_match_rule",
                 "internal_recon_matched",
                 "internal_recon_inventory_stockpile",
                 "internal_recon_inventory_build",
@@ -2458,11 +2573,6 @@ class DrawAMTStockpile:
                 "internal_recon_warning",
             ):
                 provenance[key] = first_row.get(key)
-            for prefix in ("internal_blend_recon", "internal_upgrade"):
-                for analyte in ANALYTES:
-                    provenance[f"{prefix}_{analyte}"] = first_row.get(
-                        f"{prefix}_{analyte}"
-                    )
 
         return {
             "footprint": footprint,
@@ -2488,6 +2598,29 @@ class DrawAMTStockpile:
             ),
             "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
             "grade_streams": weighted_streams,
+            "grade_block_count": len(lineage_keys),
+            "lineage_coverage_pct": lineage_coverage_pct,
+            "lineage_unmatched_wmt": max(
+                total_tonnes - lineage_matched_final_wmt, 0.0
+            ),
+            "raw_wmt": sum(
+                self.to_float(row.get("raw_wmt"), 0.0) for row in chunk_rows
+            ),
+            "spatially_corrected_wmt": sum(
+                self.to_float(row.get("spatially_corrected_wmt"), 0.0)
+                for row in chunk_rows
+            ),
+            "spatial_adjustment_wmt": sum(
+                self.to_float(row.get("spatial_adjustment_wmt"), 0.0)
+                for row in chunk_rows
+            ),
+            "ledger_adjustment_wmt": sum(
+                self.to_float(row.get("ledger_adjustment_wmt"), 0.0)
+                for row in chunk_rows
+            ),
+            "modelled_product_coverage": "; ".join(product_coverage_parts),
+            "modelled_properties": modelled_properties,
+            "grade_stream_warnings": list(dict.fromkeys(grade_stream_warnings)),
             **provenance,
         }
 
@@ -2729,16 +2862,30 @@ class DrawAMTStockpile:
             data = pd.read_sql(query, conn)
             if data.empty:
                 return self.empty_amt_dataframe()
+            def decode_json(value, expected_type):
+                if not isinstance(value, str) or not value.strip():
+                    return None
+                try:
+                    decoded = json.loads(value)
+                    return decoded if isinstance(decoded, expected_type) else None
+                except (TypeError, ValueError):
+                    return None
             if "grade_streams_json" in data.columns:
-                def decode_streams(value):
-                    if not isinstance(value, str) or not value.strip():
-                        return None
-                    try:
-                        decoded = json.loads(value)
-                        return decoded if isinstance(decoded, dict) else None
-                    except (TypeError, ValueError):
-                        return None
-                data["grade_streams"] = data["grade_streams_json"].map(decode_streams)
+                data["grade_streams"] = data["grade_streams_json"].map(
+                    lambda value: decode_json(value, dict)
+                )
+            if "modelled_properties_json" in data.columns:
+                data["modelled_properties"] = data[
+                    "modelled_properties_json"
+                ].map(lambda value: decode_json(value, dict))
+            if "grade_block_lineage_json" in data.columns:
+                data["grade_block_lineage"] = data[
+                    "grade_block_lineage_json"
+                ].map(lambda value: decode_json(value, list))
+            if "grade_stream_warnings_json" in data.columns:
+                data["grade_stream_warnings"] = data[
+                    "grade_stream_warnings_json"
+                ].map(lambda value: decode_json(value, list))
             return data
         except Exception as e:
             if "opening_AMT_stockpile_inventories" not in str(e):
@@ -3219,6 +3366,14 @@ class DrawAMTStockpile:
             filtered_data[column] = pd.to_numeric(
                 filtered_data[column], errors="coerce"
             ).fillna(0).round(2)
+        for column in (
+            "grade_block_count", "lineage_coverage_pct", "lineage_unmatched_final_wmt"
+        ):
+            if column not in filtered_data:
+                filtered_data[column] = 0.0
+            filtered_data[column] = pd.to_numeric(
+                filtered_data[column], errors="coerce"
+            ).fillna(0).round(2)
 
         chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
         filtered_data["chunk_sequence"] = filtered_data["hex"].map(chunk_lookup)
@@ -3247,7 +3402,9 @@ class DrawAMTStockpile:
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
                     "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
                     "lat_tooltip", "long_tooltip", "chunk_sequence", "raw_wmt",
-                    "spatial_adjustment_wmt", "ledger_adjustment_wmt"
+                    "spatial_adjustment_wmt", "ledger_adjustment_wmt",
+                    "grade_block_count", "lineage_coverage_pct",
+                    "lineage_unmatched_final_wmt"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
@@ -3258,6 +3415,9 @@ class DrawAMTStockpile:
                     "Raw Signed Balance: %{customdata[10]:,.2f} t<br>" +
                     "Spatial Adjustment: %{customdata[11]:+,.2f} t<br>" +
                     "Inventory Adjustment: %{customdata[12]:+,.2f} t<br>" +
+                    "Grade Blocks: %{customdata[13]:.0f}<br>" +
+                    "Lineage Coverage: %{customdata[14]:.2f}%<br>" +
+                    "Unmatched Lineage: %{customdata[15]:,.2f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +
@@ -3284,7 +3444,9 @@ class DrawAMTStockpile:
                     "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
                     "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
                     "lat_tooltip", "long_tooltip", "raw_wmt",
-                    "spatial_adjustment_wmt", "ledger_adjustment_wmt"
+                    "spatial_adjustment_wmt", "ledger_adjustment_wmt",
+                    "grade_block_count", "lineage_coverage_pct",
+                    "lineage_unmatched_final_wmt"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
@@ -3294,6 +3456,9 @@ class DrawAMTStockpile:
                     "Raw Signed Balance: %{customdata[9]:,.2f} t<br>" +
                     "Spatial Adjustment: %{customdata[10]:+,.2f} t<br>" +
                     "Inventory Adjustment: %{customdata[11]:+,.2f} t<br>" +
+                    "Grade Blocks: %{customdata[12]:.0f}<br>" +
+                    "Lineage Coverage: %{customdata[13]:.2f}%<br>" +
+                    "Unmatched Lineage: %{customdata[14]:,.2f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +

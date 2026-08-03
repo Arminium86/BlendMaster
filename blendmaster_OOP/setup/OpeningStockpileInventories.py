@@ -9,6 +9,12 @@ from cryptography.hazmat.backends import default_backend
 from database.DatabaseContext import get_database_path
 from classes.GradeStreams import ANALYTES, flatten_grade_streams
 from setup.AMTSpatialReconciliation import reconcile_amt_hex_rows
+from setup.AMTGradeBlockLineage import (
+    align_amt_grade_block_lineage,
+    expit_select_sql,
+    property_object_sql,
+    weighted_property_sql,
+)
 
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
@@ -120,6 +126,9 @@ class OpeningStockpileInventories:
             start_time = str(start_time)
 
         requested_values = ", ".join(["(%s)"] * len(requested_builds))
+        lineage_property_select = expit_select_sql()
+        lineage_property_averages = weighted_property_sql()
+        lineage_property_object = property_object_sql()
         query = f"""
             WITH REQUESTED_BUILDS AS (
                 SELECT COLUMN1::VARCHAR AS REQUESTED_BUILD
@@ -176,6 +185,115 @@ class OpeningStockpileInventories:
                     PARTITION BY selected.LOCATION_NAME, movement.INTERNALID
                     ORDER BY movement.DUMPEDDATETIME DESC
                 ) = 1
+            ),
+            EXPIT_DETAILS AS (
+                SELECT expit.*
+                FROM INBOUND_RAW inbound
+                CROSS JOIN PARAMS params
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS expit
+                    ON expit.INTERNAL_ID = inbound.INTERNALID
+                WHERE expit.IS_DELETED = FALSE
+                  AND expit.DISCRIMINATOR = 'PrimaryMovement'
+                  AND expit.TRANSACTION_DATETIME <= params.AS_OF_TS
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY inbound.LOCATION_NAME, inbound.INTERNALID
+                    ORDER BY expit.TRANSACTION_DATETIME DESC
+                ) = 1
+            ),
+            TRUCK_LIST_ATTRIBUTES AS (
+                SELECT truck.*
+                FROM SELECTED_INSTANCES selected
+                CROSS JOIN PARAMS params
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_STOCKPILE_HEX_TRUCK_LIST truck
+                    ON truck.LOCATION_NAME = selected.LOCATION_NAME
+                WHERE truck.DUMPEDDATETIME <= params.AS_OF_TS
+                  AND truck.TRUCK_WMT > 0
+            ),
+            INBOUND_ENRICHED AS (
+                SELECT
+                    inbound.*,
+                    expit.SOURCE_GRADEBLOCK_ID,
+                    COALESCE(truck.GRADE_BLOCK, expit.SOURCE_FMS) AS GRADE_BLOCK_NAME,
+                    truck.ROM_MATS,
+                    CASE
+                        WHEN expit.SOURCE_GRADEBLOCK_ID IS NOT NULL
+                            THEN 'EXPIT_INTERNAL_ID'
+                        WHEN truck.GRADE_BLOCK IS NOT NULL
+                            THEN 'TRUCK_LIST_TIME_HEX'
+                        ELSE 'UNMATCHED'
+                    END AS MATCH_METHOD,
+                    {lineage_property_select}
+                FROM INBOUND_RAW inbound
+                LEFT JOIN EXPIT_DETAILS expit
+                    ON expit.INTERNAL_ID = inbound.INTERNALID
+                LEFT JOIN TRUCK_LIST_ATTRIBUTES truck
+                    ON  truck.LOCATION_NAME = inbound.LOCATION_NAME
+                    AND truck.HEX = inbound.HEX
+                    AND truck.DUMPEDDATETIME = inbound.MOVEMENT_DATETIME
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY inbound.LOCATION_NAME, inbound.INTERNALID
+                    ORDER BY
+                        CASE WHEN truck.GRADE_BLOCK IS NULL THEN 1 ELSE 0 END,
+                        ABS(COALESCE(truck.TRUCK_WMT, inbound.WMT) - inbound.WMT),
+                        truck.LAST_UPDATE DESC NULLS LAST
+                ) = 1
+            ),
+            LINEAGE_BY_GRADE_BLOCK AS (
+                SELECT
+                    FOOTPRINT,
+                    LOCATION_NAME,
+                    HEX,
+                    COALESCE(
+                        'ID:' || TO_VARCHAR(SOURCE_GRADEBLOCK_ID),
+                        'NAME:' || UPPER(GRADE_BLOCK_NAME),
+                        'UNMATCHED'
+                    ) AS LINEAGE_KEY,
+                    SOURCE_GRADEBLOCK_ID AS GRADE_BLOCK_ID,
+                    MAX(GRADE_BLOCK_NAME) AS GRADE_BLOCK_NAME,
+                    MAX(ROM_MATS) AS ROM_MATS,
+                    MAX(MATCH_METHOD) AS MATCH_METHOD,
+                    SUM(WMT) AS GB_INBOUND_WMT,
+                    COUNT(DISTINCT INTERNALID) AS TRIP_COUNT,
+                    MIN(MOVEMENT_DATETIME) AS FIRST_DUMP_DATETIME,
+                    MAX(MOVEMENT_DATETIME) AS LAST_DUMP_DATETIME,
+                    {lineage_property_averages}
+                FROM INBOUND_ENRICHED
+                WHERE HEX <> '__UNATTRIBUTED__'
+                GROUP BY
+                    FOOTPRINT,
+                    LOCATION_NAME,
+                    HEX,
+                    COALESCE(
+                        'ID:' || TO_VARCHAR(SOURCE_GRADEBLOCK_ID),
+                        'NAME:' || UPPER(GRADE_BLOCK_NAME),
+                        'UNMATCHED'
+                    ),
+                    SOURCE_GRADEBLOCK_ID
+            ),
+            LINEAGE_BY_HEX AS (
+                SELECT
+                    FOOTPRINT,
+                    LOCATION_NAME,
+                    HEX,
+                    TO_JSON(ARRAY_AGG(
+                        OBJECT_CONSTRUCT_KEEP_NULL(
+                            'lineage_key', LINEAGE_KEY,
+                            'grade_block_id', GRADE_BLOCK_ID,
+                            'grade_block_name', GRADE_BLOCK_NAME,
+                            'rom_mats', ROM_MATS,
+                            'match_method', MATCH_METHOD,
+                            'inbound_wmt', GB_INBOUND_WMT,
+                            'trip_count', TRIP_COUNT,
+                            'first_dump_datetime', FIRST_DUMP_DATETIME,
+                            'last_dump_datetime', LAST_DUMP_DATETIME,
+                            'properties', OBJECT_CONSTRUCT_KEEP_NULL(
+                                {lineage_property_object}
+                            )
+                        )
+                    ) WITHIN GROUP (ORDER BY GB_INBOUND_WMT DESC))
+                        AS GRADE_BLOCK_LINEAGE_JSON
+                FROM LINEAGE_BY_GRADE_BLOCK
+                GROUP BY FOOTPRINT, LOCATION_NAME, HEX
             ),
             OUTBOUND_RAW AS (
                 SELECT
@@ -241,8 +359,10 @@ class OpeningStockpileInventories:
                     grades.LATITUDE,
                     grades.LAST_UPDATE
                 FROM AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_HEX_GRADES grades
+                CROSS JOIN PARAMS params
                 INNER JOIN SELECTED_INSTANCES selected
                     ON grades.LOCATION_NAME = selected.LOCATION_NAME
+                WHERE grades.LAST_UPDATE <= params.AS_OF_TS
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY grades.LOCATION_NAME, grades.HEX
                     ORDER BY grades.LAST_UPDATE DESC
@@ -296,7 +416,8 @@ class OpeningStockpileInventories:
                 selected.INVENTORY_BALANCE_WMT,
                 selected.INVENTORY_TRANSACTION_DATETIME,
                 COALESCE(unattributed.UNATTRIBUTED_MOVEMENT_WMT, 0)
-                    AS UNATTRIBUTED_MOVEMENT_WMT
+                    AS UNATTRIBUTED_MOVEMENT_WMT,
+                lineage.GRADE_BLOCK_LINEAGE_JSON
             FROM HEX_UNIVERSE universe
             INNER JOIN SELECTED_INSTANCES selected
                 ON universe.LOCATION_NAME = selected.LOCATION_NAME
@@ -311,6 +432,9 @@ class OpeningStockpileInventories:
                 AND coordinates.HEX = universe.HEX
             LEFT JOIN UNATTRIBUTED_MOVEMENTS unattributed
                 ON unattributed.LOCATION_NAME = universe.LOCATION_NAME
+            LEFT JOIN LINEAGE_BY_HEX lineage
+                ON  lineage.LOCATION_NAME = universe.LOCATION_NAME
+                AND lineage.HEX = universe.HEX
             ORDER BY universe.FOOTPRINT, universe.HEX
         """
 
@@ -329,9 +453,31 @@ class OpeningStockpileInventories:
                 data_dict.setdefault(key, []).append(dict(zip(columns, row)))
 
             data_dict = {
-                footprint: reconcile_amt_hex_rows(rows)
+                footprint: align_amt_grade_block_lineage(
+                    reconcile_amt_hex_rows(rows)
+                )
                 for footprint, rows in data_dict.items()
             }
+            for footprint, rows in data_dict.items():
+                for row in rows:
+                    inventory_matched = bool(
+                        row.get("LOCATION_NAME")
+                        and row.get("INVENTORY_BALANCE_WMT") is not None
+                    )
+                    row["AMT_INVENTORY_MATCHED"] = inventory_matched
+                    row["AMT_INVENTORY_STOCKPILE"] = str(
+                        row.get("FOOTPRINT") or footprint or ""
+                    )
+                    row["AMT_INVENTORY_BUILD"] = str(
+                        row.get("LOCATION_NAME") or ""
+                    )
+                    row["AMT_INVENTORY_TRANSACTION_DATETIME"] = str(
+                        row.get("INVENTORY_TRANSACTION_DATETIME") or ""
+                    )
+                    row["AMT_INVENTORY_MATCH_RULE"] = (
+                        "latest inventory build at or before scenario start"
+                        if inventory_matched else "no inventory instance"
+                    )
 
             # Store results in SQLite database
             self.save_AMT_to_database(data_dict)
@@ -510,7 +656,19 @@ class OpeningStockpileInventories:
         amt_audit_by_hex = {}
         for footprint, rows in (data_dict or {}).items():
             for row in rows or []:
+                modelled_audit = {
+                    str(column).lower(): value
+                    for column, value in row.items()
+                    if str(column).upper().startswith("MODELLED_")
+                }
                 audit = {
+                    "amt_inventory_matched": int(bool(row.get("AMT_INVENTORY_MATCHED"))),
+                    "amt_inventory_stockpile": row.get("AMT_INVENTORY_STOCKPILE"),
+                    "amt_inventory_build": row.get("AMT_INVENTORY_BUILD"),
+                    "amt_inventory_transaction_datetime": row.get(
+                        "AMT_INVENTORY_TRANSACTION_DATETIME"
+                    ),
+                    "amt_inventory_match_rule": row.get("AMT_INVENTORY_MATCH_RULE"),
                     "internal_recon_matched": int(bool(row.get("INTERNAL_RECON_MATCHED"))),
                     "internal_recon_inventory_stockpile": row.get("INTERNAL_RECON_INVENTORY_STOCKPILE"),
                     "internal_recon_inventory_build": row.get("INTERNAL_RECON_INVENTORY_BUILD"),
@@ -540,24 +698,35 @@ class OpeningStockpileInventories:
                     "spatial_recon_method": row.get("SPATIAL_RECON_METHOD"),
                     "reclaim_direction_easting": row.get("RECLAIM_DIRECTION_EASTING"),
                     "reclaim_direction_northing": row.get("RECLAIM_DIRECTION_NORTHING"),
-                    **{
-                        f"internal_blend_recon_{analyte}": row.get(
-                            f"INTERNAL_BLEND_RECON_{analyte.upper()}"
-                        )
-                        for analyte in ANALYTES
-                    },
-                    **{
-                        f"internal_upgrade_{analyte}": row.get(
-                            f"INTERNAL_UPGRADE_{analyte.upper()}"
-                        )
-                        for analyte in ANALYTES
-                    },
+                    "grade_block_lineage_json": row.get("GRADE_BLOCK_LINEAGE_JSON"),
+                    "grade_block_count": row.get("GRADE_BLOCK_COUNT"),
+                    "lineage_entry_count": row.get("LINEAGE_ENTRY_COUNT"),
+                    "lineage_inbound_wmt": row.get("LINEAGE_INBOUND_WMT"),
+                    "lineage_matched_wmt": row.get("LINEAGE_MATCHED_WMT"),
+                    "lineage_unmatched_wmt": row.get("LINEAGE_UNMATCHED_WMT"),
+                    "lineage_final_wmt": row.get("LINEAGE_FINAL_WMT"),
+                    "lineage_matched_final_wmt": row.get(
+                        "LINEAGE_MATCHED_FINAL_WMT"
+                    ),
+                    "lineage_unmatched_final_wmt": row.get(
+                        "LINEAGE_UNMATCHED_FINAL_WMT"
+                    ),
+                    "lineage_coverage_pct": row.get("LINEAGE_COVERAGE_PCT"),
+                    "lineage_warning": row.get("LINEAGE_WARNING"),
+                    "grade_stream_warnings_json": row.get(
+                        "GRADE_STREAM_WARNINGS"
+                    ),
+                    **modelled_audit,
                     **flatten_grade_streams(
                         row.get("GRADE_STREAMS") or row.get("grade_streams")
                     ),
                 }
                 amt_audit_by_hex[(str(footprint), str(row.get("HEX") or row.get("hex")))] = audit
         text_audit_columns = {
+            "amt_inventory_stockpile",
+            "amt_inventory_build",
+            "amt_inventory_transaction_datetime",
+            "amt_inventory_match_rule",
             "internal_recon_inventory_stockpile",
             "internal_recon_inventory_build",
             "internal_recon_inventory_transaction_datetime",
@@ -566,6 +735,12 @@ class OpeningStockpileInventories:
             "location_name",
             "spatial_recon_status",
             "spatial_recon_method",
+            "grade_block_lineage_json",
+            "lineage_warning",
+            "grade_stream_warnings_json",
+            "modelled_properties_json",
+            "modelled_rom_mats",
+            "modelled_dominant_ore_type",
         }
         audit_columns = sorted({
             column for values in amt_audit_by_hex.values() for column in values
@@ -577,8 +752,11 @@ class OpeningStockpileInventories:
             if column in existing_columns:
                 continue
             column_type = (
-                "TEXT" if column in text_audit_columns
-                else "INTEGER" if column == "internal_recon_matched"
+                "TEXT" if column in text_audit_columns or column.endswith("_json")
+                else "INTEGER" if column in {
+                    "amt_inventory_matched", "internal_recon_matched", "grade_block_count",
+                    "lineage_entry_count",
+                }
                 else "REAL"
             )
             cursor.execute(
@@ -624,6 +802,13 @@ class OpeningStockpileInventories:
                     (str(key), str(row.get("HEX") or row.get("hex"))), {}
                 )
                 if audit_values:
+                    audit_values = {
+                        column: (
+                            json.dumps(value, default=str, separators=(",", ":"))
+                            if isinstance(value, (dict, list, tuple)) else value
+                        )
+                        for column, value in audit_values.items()
+                    }
                     assignments = ", ".join(
                         f'"{column}" = ?' for column in audit_values
                     )
