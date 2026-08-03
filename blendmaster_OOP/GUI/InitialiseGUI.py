@@ -6,7 +6,13 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer, QSize, QEvent
-from setup.OpeningStockpileInventories import OpeningStockpileInventories
+from setup.OpeningStockpileInventories import (
+    INVENTORY_ADDITIONAL_FIELDS,
+    INVENTORY_INTEGER_FIELDS,
+    INVENTORY_TEXT_FIELDS,
+    OpeningStockpileInventories,
+    inventory_additional_values,
+)
 from execute.Run import Run
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.HaulCycleDataHandler import HaulCycleDataHandler
@@ -3407,6 +3413,7 @@ class UserInputs(QMainWindow):
                     ))
                 continue
 
+            inventory_audit = inventory_additional_values(attributes)
             records.append(self.database_view_record_with_streams(
                 {
                     "source_type": "Inventory Stockpile",
@@ -3414,6 +3421,7 @@ class UserInputs(QMainWindow):
                     "parent_stockpile": stockpile_name,
                     "build_or_chunk": attributes.get("build", ""),
                     "tonnes": numeric(attributes.get("balance")) or 0.0,
+                    **inventory_audit,
                 },
                 attributes.get("grade_streams")
                 or attributes.get("GRADE_STREAMS"),
@@ -3902,8 +3910,11 @@ class UserInputs(QMainWindow):
         sum_property = (
             header == "tonnes"
             or header.endswith("_wmt")
+            or header.endswith("_dmt")
             or header.endswith("_tonnes")
+            or header.endswith("_volume")
             or header.endswith("_count")
+            or header == "balancedmt"
         )
         weighted_average_property = (
             header.startswith("grade_")
@@ -3913,6 +3924,11 @@ class UserInputs(QMainWindow):
             )
             or header.startswith("modelled_")
             or header.endswith("_coverage_pct")
+            or (
+                header in INVENTORY_ADDITIONAL_FIELDS
+                and header not in INVENTORY_TEXT_FIELDS
+                and header not in INVENTORY_INTEGER_FIELDS
+            )
         )
         if number is not None and sum_property:
             return f"{number:,.0f}"

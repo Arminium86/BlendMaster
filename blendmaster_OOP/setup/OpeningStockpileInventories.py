@@ -2,6 +2,7 @@ import snowflake.connector
 import sqlite3
 import json
 from datetime import datetime
+from decimal import Decimal
 import os
 import snowflake.connector
 from cryptography.hazmat.primitives import serialization
@@ -16,6 +17,486 @@ from setup.AMTGradeBlockLineage import (
     weighted_property_sql,
 )
 
+
+_EXTENDED_CHEMISTRY = (
+    "FE", "SIO2", "AL2O3", "P", "MN", "MGO", "K2O", "TIO2", "NA2O",
+    "S", "CAO", "LOI_371", "LOI_650", "LOI_1000", "LOI_TOTAL", "AS",
+    "CL", "CU", "ZN", "PB", "BAO", "TOTALOXIDES", "MOISTURE",
+)
+_CORE_ANALYTES = {"FE", "SIO2", "AL2O3", "P", "MN"}
+_INVENTORY_EXTRA_SELECTS = [
+    ("stockpileid", "LT.STOCKPILEID"),
+    ("areaname", "LT.AREANAME"),
+    ("hub", "LT.HUB"),
+    ("stockpilesubcategory", "LT.STOCKPILESUBCATEGORY"),
+    ("stockpiletype", "LT.STOCKPILETYPE"),
+    ("transactiondirection", "SR.TRANSACTIONDIRECTION"),
+    ("material", "LOWER(LT.MATERIAL)"),
+    ("product", "LT.PRODUCT"),
+    ("isfeedable", "LT.ISFEEDABLE"),
+    ("isinbuildpurity", "LT.ISINBUILDPURITY"),
+]
+for _stream, _properties in (
+    ("INSITU", (*_EXTENDED_CHEMISTRY, "LOI_425", "WETYIELD", "DRYYIELD")),
+    ("ROM", (*_EXTENDED_CHEMISTRY, "WETYIELD", "DRYYIELD", "WHIMS_MINUS1", "WHIMS_PLUS1")),
+    ("PROD1", (*_EXTENDED_CHEMISTRY, "WETYIELD", "DRYYIELD")),
+    ("PROD2", (*_EXTENDED_CHEMISTRY, "WETYIELD", "DRYYIELD")),
+    ("OPF", (*_EXTENDED_CHEMISTRY, "WETYIELD", "DRYYIELD")),
+    ("PROD3", (*_EXTENDED_CHEMISTRY, "WETYIELD", "DRYYIELD")),
+    ("TRAIN", _EXTENDED_CHEMISTRY),
+):
+    for _property in _properties:
+        if _stream in {"INSITU", "ROM", "PROD1", "PROD2", "PROD3"} and _property in _CORE_ANALYTES:
+            continue
+        _source = f"{_property}_{_stream}_WTAVG"
+        _INVENTORY_EXTRA_SELECTS.append((_source.lower(), f"LT.{_source}"))
+
+for _ore_type in ("BID", "CIDL", "CIDM", "CIDU", "DID", "HC", "OTHER"):
+    _INVENTORY_EXTRA_SELECTS.extend([
+        (
+            f"oretype_{_ore_type.lower()}_dmt",
+            f"LT.ORETYPE_{_ore_type}_INSITU_WTAVG * "
+            "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG))",
+        ),
+        (
+            f"oretype_{_ore_type.lower()}_insitu_wtavg_pc",
+            f"LT.ORETYPE_{_ore_type}_INSITU_WTAVG",
+        ),
+    ])
+
+_INVENTORY_EXTRA_SELECTS.extend([
+    ("prod2_wmt", "LT.WETYIELD_PROD2_WTAVG * LT.BALANCEWMT"),
+    (
+        "prod2_dmt",
+        "LT.DRYYIELD_PROD2_WTAVG * "
+        "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG))",
+    ),
+    ("minus_1mm_pct", "M.MINUS_1MM_PCT"),
+    ("lump_yield_pct", "M.LUMP_YIELD_PCT"),
+    ("fines_yield_pct", "M.FINES_YIELD_PCT"),
+    ("lump_wmt", "LT.BALANCEWMT * M.LUMP_YIELD_PCT"),
+    ("fines_wmt", "LT.BALANCEWMT * M.FINES_YIELD_PCT"),
+    (
+        "balancedmt",
+        "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG)",
+    ),
+    (
+        "lump_dmt",
+        "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * M.LUMP_YIELD_PCT",
+    ),
+    (
+        "fines_dmt",
+        "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * M.FINES_YIELD_PCT",
+    ),
+    ("fines_moisture", "M.FINES_MOISTURE"),
+    ("lump_moisture", "M.LUMP_MOISTURE"),
+    ("gb_dry_density", "M.GB_DRY_DENSITY"),
+    (
+        "lump_volume",
+        "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * "
+        "M.LUMP_YIELD_PCT) / NULLIF(M.GB_DRY_DENSITY, 0)",
+    ),
+    (
+        "fines_volume",
+        "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * "
+        "M.FINES_YIELD_PCT) / NULLIF(M.GB_DRY_DENSITY, 0)",
+    ),
+    ("loi_425", "M.LOI_425"),
+])
+for _size in ("FINES", "LUMP"):
+    for _property in (
+        "FE", "SIO2", "AL2O3", "MN", "P", "LOI_425", "LOI_TOTAL", "S", "AS",
+    ):
+        _alias = f"{_size}_{_property}".lower()
+        _INVENTORY_EXTRA_SELECTS.append((_alias, f"M.{_size}_{_property}"))
+
+INVENTORY_ADDITIONAL_FIELDS = tuple(
+    ["cbmaterial", *[alias for alias, _expression in _INVENTORY_EXTRA_SELECTS]]
+)
+INVENTORY_TEXT_FIELDS = {
+    "stockpileid", "areaname", "hub", "stockpilesubcategory",
+    "stockpiletype", "transactiondirection", "material", "cbmaterial",
+    "product",
+}
+INVENTORY_INTEGER_FIELDS = {"isfeedable", "isinbuildpurity"}
+
+
+def _sqlite_scalar(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (dict, list, tuple, set)):
+        serializable = sorted(value, key=str) if isinstance(value, set) else value
+        return json.dumps(serializable, default=str)
+    return value
+
+
+def inventory_additional_values(row):
+    row = row or {}
+    values = {}
+    for field in INVENTORY_ADDITIONAL_FIELDS:
+        value = row.get(field.upper())
+        if value is None:
+            value = row.get(field)
+        if value is not None:
+            values[field] = _sqlite_scalar(value)
+    return values
+
+
+_CB_MATERIAL_CASE = """
+CASE
+    WHEN LT.FE_INSITU_WTAVG <= 0 THEN 'ws'
+    WHEN LT.FE_INSITU_WTAVG >= 58.0 AND LT.FE_INSITU_WTAVG < 100.0
+         AND LT.AL2O3_INSITU_WTAVG >= 4.5 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 20.5 THEN 'so'
+    WHEN LT.FE_INSITU_WTAVG >= 58.0 AND LT.FE_INSITU_WTAVG < 100.0
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 4.5
+         AND LT.SIO2_INSITU_WTAVG >= 8.0 AND LT.SIO2_INSITU_WTAVG < 20.5 THEN 'so'
+    WHEN LT.FE_INSITU_WTAVG >= 58.0 AND LT.FE_INSITU_WTAVG < 100.0
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 4.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 8.0 THEN 'hg'
+    WHEN LT.FE_INSITU_WTAVG >= 55.5 AND LT.FE_INSITU_WTAVG < 58.0
+         AND LT.AL2O3_INSITU_WTAVG >= 4.0 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 6.5 THEN 'bs'
+    WHEN LT.FE_INSITU_WTAVG >= 55.5 AND LT.FE_INSITU_WTAVG < 58.0
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 4.0
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 7.0 THEN 'so'
+    WHEN LT.FE_INSITU_WTAVG >= 55.5 AND LT.FE_INSITU_WTAVG < 58.0
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 4.0
+         AND LT.SIO2_INSITU_WTAVG >= 7.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'ba'
+    WHEN LT.FE_INSITU_WTAVG >= 55.5 AND LT.FE_INSITU_WTAVG < 58.0
+         AND LT.AL2O3_INSITU_WTAVG >= 4.0 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 6.5 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 3.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 12.0 THEN 'ba'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 4.0 AND LT.AL2O3_INSITU_WTAVG < 7.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 7.0 THEN 'bs'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 2.0
+         AND LT.SIO2_INSITU_WTAVG >= 12.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 2.0 AND LT.AL2O3_INSITU_WTAVG < 3.0
+         AND LT.SIO2_INSITU_WTAVG >= 12.0 AND LT.SIO2_INSITU_WTAVG < 16.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 3.0 AND LT.AL2O3_INSITU_WTAVG < 3.5
+         AND LT.SIO2_INSITU_WTAVG >= 12.0 AND LT.SIO2_INSITU_WTAVG < 15.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 3.5 AND LT.AL2O3_INSITU_WTAVG < 4.0
+         AND LT.SIO2_INSITU_WTAVG >= 7.0 AND LT.SIO2_INSITU_WTAVG < 13.5 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 2.0
+         AND LT.SIO2_INSITU_WTAVG >= 17.0 AND LT.SIO2_INSITU_WTAVG < 20.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 2.0 AND LT.AL2O3_INSITU_WTAVG < 3.0
+         AND LT.SIO2_INSITU_WTAVG >= 16.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 3.0 AND LT.AL2O3_INSITU_WTAVG < 3.5
+         AND LT.SIO2_INSITU_WTAVG >= 15.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 3.5 AND LT.AL2O3_INSITU_WTAVG < 4.0
+         AND LT.SIO2_INSITU_WTAVG >= 13.5 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 7.5 AND LT.AL2O3_INSITU_WTAVG < 8.0
+         AND LT.SIO2_INSITU_WTAVG >= 8.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 7.0 AND LT.AL2O3_INSITU_WTAVG < 7.5
+         AND LT.SIO2_INSITU_WTAVG >= 11.5 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 8.0 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 7.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 7.5 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 6.5 THEN 'bs'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 8.0 AND LT.AL2O3_INSITU_WTAVG < 8.5
+         AND LT.SIO2_INSITU_WTAVG >= 6.5 AND LT.SIO2_INSITU_WTAVG < 7.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 7.5 AND LT.AL2O3_INSITU_WTAVG < 8.0
+         AND LT.SIO2_INSITU_WTAVG >= 6.5 AND LT.SIO2_INSITU_WTAVG < 8.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 4.0 AND LT.AL2O3_INSITU_WTAVG < 5.5
+         AND LT.SIO2_INSITU_WTAVG >= 13.0 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 6.0 AND LT.AL2O3_INSITU_WTAVG < 7.0
+         AND LT.SIO2_INSITU_WTAVG >= 11.5 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 4.0 AND LT.AL2O3_INSITU_WTAVG < 5.5
+         AND LT.SIO2_INSITU_WTAVG >= 7.0 AND LT.SIO2_INSITU_WTAVG < 13.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 5.5 AND LT.AL2O3_INSITU_WTAVG < 6.0
+         AND LT.SIO2_INSITU_WTAVG >= 11.5 AND LT.SIO2_INSITU_WTAVG < 17.0 THEN 'sg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 5.5 AND LT.AL2O3_INSITU_WTAVG < 7.5
+         AND LT.SIO2_INSITU_WTAVG >= 7.0 AND LT.SIO2_INSITU_WTAVG < 11.5 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 53.0 AND LT.FE_INSITU_WTAVG < 55.5
+         AND LT.AL2O3_INSITU_WTAVG >= 3.5 AND LT.AL2O3_INSITU_WTAVG < 4.0
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 7.0 THEN 'ba'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 0.0 AND LT.AL2O3_INSITU_WTAVG < 3.5
+         AND LT.SIO2_INSITU_WTAVG >= 0.0 AND LT.SIO2_INSITU_WTAVG < 10.0 THEN 'ba'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 4.5 AND LT.AL2O3_INSITU_WTAVG < 5.0
+         AND LT.SIO2_INSITU_WTAVG >= 10.0 AND LT.SIO2_INSITU_WTAVG < 13.5 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 5.0 AND LT.AL2O3_INSITU_WTAVG < 5.5
+         AND LT.SIO2_INSITU_WTAVG >= 10.0 AND LT.SIO2_INSITU_WTAVG < 13.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 5.5 AND LT.AL2O3_INSITU_WTAVG < 6.0
+         AND LT.SIO2_INSITU_WTAVG >= 10.0 AND LT.SIO2_INSITU_WTAVG < 12.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 6.0 AND LT.AL2O3_INSITU_WTAVG < 7.5
+         AND LT.SIO2_INSITU_WTAVG >= 10.0 AND LT.SIO2_INSITU_WTAVG < 11.0 THEN 'lg'
+    WHEN LT.FE_INSITU_WTAVG >= 51.0 AND LT.FE_INSITU_WTAVG < 53.0
+         AND LT.AL2O3_INSITU_WTAVG >= 5.0 AND LT.AL2O3_INSITU_WTAVG < 5.5
+         AND LT.SIO2_INSITU_WTAVG >= 13.0 AND LT.SIO2_INSITU_WTAVG < 15.0 THEN 'sg'
+    ELSE 'ws'
+END
+"""
+
+
+def opening_inventory_query():
+    """Build the scenario-time opening inventory query with APS properties."""
+    additional_select = ",\n            ".join(
+        f"{expression} AS {alias}"
+        for alias, expression in _INVENTORY_EXTRA_SELECTS
+    )
+    return f"""
+        WITH INVENTORY_FILTERED AS (
+            SELECT *
+            FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS
+            WHERE TRANSACTIONDATETIME <= %s
+              AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT'))
+              AND HUB = %s
+              AND AREANAME = %s
+        ),
+        ADJUSTMENT_TRANSACTIONS_REMOVED AS (
+            SELECT
+                STOCKPILEID,
+                STOCKPILEBUILDNAME,
+                MAX(TRANSACTIONDATETIME) AS TRANSACTIONDATETIME
+            FROM INVENTORY_FILTERED
+            WHERE TRANSACTIONDIRECTION != 'Adjustment'
+            GROUP BY STOCKPILEID, STOCKPILEBUILDNAME
+        ),
+        STACK_OR_RECLAIM AS (
+            SELECT
+                inventory.STOCKPILEID,
+                inventory.STOCKPILEBUILDNAME,
+                inventory.TRANSACTIONDATETIME AS STACK_OR_RECLAIM_DATETIME,
+                inventory.TRANSACTIONDIRECTION
+            FROM ADJUSTMENT_TRANSACTIONS_REMOVED latest
+            INNER JOIN INVENTORY_FILTERED inventory
+                ON inventory.STOCKPILEID = latest.STOCKPILEID
+               AND inventory.STOCKPILEBUILDNAME = latest.STOCKPILEBUILDNAME
+               AND inventory.TRANSACTIONDATETIME = latest.TRANSACTIONDATETIME
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY inventory.STOCKPILEID, inventory.STOCKPILEBUILDNAME
+                ORDER BY inventory.TRANSACTIONDATETIME DESC
+            ) = 1
+        ),
+        LATEST_TRANSACTION_KEY AS (
+            SELECT
+                STOCKPILEID,
+                STOCKPILEBUILDNAME,
+                MAX(TRANSACTIONDATETIME) AS TRANSACTIONDATETIME
+            FROM INVENTORY_FILTERED
+            GROUP BY STOCKPILEID, STOCKPILEBUILDNAME
+        ),
+        LATEST_TRANSACTIONS AS (
+            SELECT inventory.*
+            FROM LATEST_TRANSACTION_KEY latest
+            INNER JOIN INVENTORY_FILTERED inventory
+                ON inventory.STOCKPILEID = latest.STOCKPILEID
+               AND inventory.STOCKPILEBUILDNAME = latest.STOCKPILEBUILDNAME
+               AND inventory.TRANSACTIONDATETIME = latest.TRANSACTIONDATETIME
+        ),
+        PS_BASE AS (
+            SELECT
+                STOCKPILEID,
+                STOCKPILENAME,
+                STOCKPILEBUILDNAME,
+                TRANSACTIONDATETIME
+            FROM INVENTORY_FILTERED
+            WHERE TRANSACTIONDIRECTION != 'Adjustment'
+        ),
+        BUILD_MAX AS (
+            SELECT
+                STOCKPILEID,
+                STOCKPILENAME,
+                STOCKPILEBUILDNAME,
+                MAX(TRANSACTIONDATETIME) AS BUILD_MAX_DT
+            FROM PS_BASE
+            GROUP BY STOCKPILEID, STOCKPILENAME, STOCKPILEBUILDNAME
+        ),
+        LATEST_BUILD AS (
+            SELECT
+                STOCKPILEID,
+                STOCKPILENAME,
+                STOCKPILEBUILDNAME,
+                BUILD_MAX_DT
+            FROM BUILD_MAX
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY STOCKPILEID
+                ORDER BY BUILD_MAX_DT DESC, STOCKPILEBUILDNAME
+            ) = 1
+        ),
+        BUILD_SPAN AS (
+            SELECT
+                base.STOCKPILEID,
+                base.STOCKPILENAME,
+                base.STOCKPILEBUILDNAME,
+                MIN(base.TRANSACTIONDATETIME) AS MIN_DT,
+                MAX(base.TRANSACTIONDATETIME) AS MAX_DT
+            FROM PS_BASE base
+            INNER JOIN LATEST_BUILD latest
+                ON base.STOCKPILEID = latest.STOCKPILEID
+               AND base.STOCKPILEBUILDNAME = latest.STOCKPILEBUILDNAME
+            GROUP BY base.STOCKPILEID, base.STOCKPILENAME, base.STOCKPILEBUILDNAME
+        ),
+        EXPIT AS (
+            SELECT
+                SHIFT_DATE::DATE AS SHIFT_DATE,
+                SOURCE AS SOURCE_GRADEBLOCK_NAME,
+                DESTINATION_FMS AS STOCKPILE,
+                WMT_REPORTING AS WMT,
+                WMT_REPORTING * (1 - MOISTURE) AS DMT
+            FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
+            WHERE DESTINATION_STOCKPILE_SUBCATEGORY NOT IN ('null')
+        ),
+        PS AS (
+            SELECT
+                expit.SOURCE_GRADEBLOCK_NAME,
+                span.STOCKPILEBUILDNAME AS STOCKPILE_BUILD_NAME,
+                SUM(expit.WMT) AS WMT,
+                SUM(expit.DMT) AS DMT
+            FROM EXPIT expit
+            INNER JOIN BUILD_SPAN span
+                ON UPPER(TRIM(expit.STOCKPILE)) = UPPER(TRIM(span.STOCKPILENAME))
+               AND expit.SHIFT_DATE BETWEEN CAST(span.MIN_DT AS DATE) AND CAST(span.MAX_DT AS DATE)
+            GROUP BY expit.SOURCE_GRADEBLOCK_NAME, span.STOCKPILEBUILDNAME
+        ),
+        GB AS (
+            SELECT
+                CONCAT(
+                    MINE_CODE, '_', LOCATION_NO, '_', PHASE, '_', BLAST_RL, '_',
+                    BLAST_NO, '_',
+                    CASE
+                        WHEN TRY_TO_NUMBER(BLAST_NO) BETWEEN 600 AND 699
+                         AND TRY_TO_NUMBER(FLITCH_RL) IS NOT NULL
+                            THEN TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL) + 1)
+                        ELSE FLITCH_RL
+                    END,
+                    '_', GB_NAME
+                ) AS FULL_NAME_WITH_SITE,
+                TRY_TO_DOUBLE(PROD1_MINUS1MM_PCT) AS PROD1_MINUS1MM_PCT,
+                PROD1_FINES_YIELD_PCT,
+                PROD1_LUMP_YIELD_PCT,
+                PROD1_FINES_MOISTURE,
+                PROD1_LUMP_MOISTURE,
+                PROD1_FINES_FE,
+                PROD1_FINES_SIO2,
+                PROD1_FINES_AL2O3,
+                PROD1_FINES_MN,
+                PROD1_FINES_P,
+                PROD1_FINES_LOI_425,
+                PROD1_FINES_LOI_TOTAL,
+                PROD1_FINES_S,
+                PROD1_FINES_AS,
+                PROD1_LUMP_FE,
+                PROD1_LUMP_SIO2,
+                PROD1_LUMP_AL2O3,
+                PROD1_LUMP_MN,
+                PROD1_LUMP_P,
+                PROD1_LUMP_LOI_425,
+                PROD1_LUMP_LOI_TOTAL,
+                PROD1_LUMP_S,
+                PROD1_LUMP_AS,
+                GB_DRY_DENSITY,
+                LOI_425
+            FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS
+        ),
+        MINUS1MM_BY_STOCKPILE AS (
+            SELECT
+                ps.STOCKPILE_BUILD_NAME,
+                SUM(COALESCE(gb.PROD1_MINUS1MM_PCT, 0) * ps.WMT)
+                    / NULLIF(SUM(ps.WMT), 0) AS MINUS_1MM_PCT,
+                SUM(COALESCE(gb.PROD1_FINES_YIELD_PCT, 0) * ps.DMT)
+                    / NULLIF(SUM(ps.DMT), 0) AS FINES_YIELD_PCT,
+                SUM(COALESCE(gb.PROD1_LUMP_YIELD_PCT, 0) * ps.DMT)
+                    / NULLIF(SUM(ps.DMT), 0) AS LUMP_YIELD_PCT,
+                SUM(COALESCE(gb.PROD1_FINES_MOISTURE, 0) * ps.WMT)
+                    / NULLIF(SUM(ps.WMT), 0) AS FINES_MOISTURE,
+                SUM(COALESCE(gb.PROD1_LUMP_MOISTURE, 0) * ps.WMT)
+                    / NULLIF(SUM(ps.WMT), 0) AS LUMP_MOISTURE,
+                SUM(COALESCE(gb.GB_DRY_DENSITY, 0) * ps.DMT)
+                    / NULLIF(SUM(ps.DMT), 0) AS GB_DRY_DENSITY,
+                SUM(COALESCE(gb.LOI_425, 0) * ps.DMT)
+                    / NULLIF(SUM(ps.DMT), 0) AS LOI_425,
+                {', '.join(
+                    f'SUM(COALESCE(gb.PROD1_{size}_{prop}, 0) * ps.DMT) '
+                    f'/ NULLIF(SUM(ps.DMT), 0) AS {size}_{prop}'
+                    for size in ('FINES', 'LUMP')
+                    for prop in (
+                        'FE', 'SIO2', 'AL2O3', 'MN', 'P', 'LOI_425',
+                        'LOI_TOTAL', 'S', 'AS'
+                    )
+                )}
+            FROM PS ps
+            INNER JOIN GB gb
+                ON UPPER(TRIM(ps.SOURCE_GRADEBLOCK_NAME)) = UPPER(TRIM(gb.FULL_NAME_WITH_SITE))
+            GROUP BY ps.STOCKPILE_BUILD_NAME
+        )
+        SELECT
+            LT.STOCKPILENAME AS name,
+            LT.STOCKPILEBUILDNAME AS build,
+            LT.TRANSACTIONDATETIME AS transaction_datetime,
+            LT.BALANCEWMT AS balance,
+            LT.FE_INSITU_WTAVG AS grade_fe,
+            LT.SIO2_INSITU_WTAVG AS grade_si,
+            LT.AL2O3_INSITU_WTAVG AS grade_al,
+            LT.P_INSITU_WTAVG AS grade_p,
+            LT.MN_INSITU_WTAVG AS grade_mn,
+            LT.FE_ROM_WTAVG AS fe_rom,
+            LT.SIO2_ROM_WTAVG AS si_rom,
+            LT.AL2O3_ROM_WTAVG AS al_rom,
+            LT.P_ROM_WTAVG AS p_rom,
+            LT.MN_ROM_WTAVG AS mn_rom,
+            LT.FE_PROD1_WTAVG AS fe_prod1,
+            LT.SIO2_PROD1_WTAVG AS si_prod1,
+            LT.AL2O3_PROD1_WTAVG AS al_prod1,
+            LT.P_PROD1_WTAVG AS p_prod1,
+            LT.MN_PROD1_WTAVG AS mn_prod1,
+            LT.FE_PROD2_WTAVG AS fe_prod2,
+            LT.SIO2_PROD2_WTAVG AS si_prod2,
+            LT.AL2O3_PROD2_WTAVG AS al_prod2,
+            LT.P_PROD2_WTAVG AS p_prod2,
+            LT.MN_PROD2_WTAVG AS mn_prod2,
+            LT.FE_PROD3_WTAVG AS fe_prod3,
+            LT.SIO2_PROD3_WTAVG AS si_prod3,
+            LT.AL2O3_PROD3_WTAVG AS al_prod3,
+            LT.P_PROD3_WTAVG AS p_prod3,
+            LT.MN_PROD3_WTAVG AS mn_prod3,
+            {_CB_MATERIAL_CASE} AS cbmaterial,
+            {additional_select}
+        FROM LATEST_TRANSACTIONS LT
+        LEFT JOIN STACK_OR_RECLAIM SR
+            ON LT.STOCKPILEID = SR.STOCKPILEID
+           AND LT.STOCKPILEBUILDNAME = SR.STOCKPILEBUILDNAME
+        LEFT JOIN MINUS1MM_BY_STOCKPILE M
+            ON M.STOCKPILE_BUILD_NAME = LT.STOCKPILEBUILDNAME
+        WHERE LT.BALANCEWMT > 0
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY LT.STOCKPILENAME
+            ORDER BY LT.TRANSACTIONDATETIME DESC, LT.STOCKPILEBUILDNAME DESC
+        ) = 1
+        ORDER BY LT.STOCKPILENAME
+    """
+
 class OpeningStockpileInventories:
     def call_opening_stockpile_inventories(self, hub, area_name, start_time):
         
@@ -24,62 +505,7 @@ class OpeningStockpileInventories:
         
         start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
         
-        # SQL Query
-        query = """
-        SELECT 
-        
-        STOCKPILENAME AS name,
-        STOCKPILEBUILDNAME AS build,
-        TRANSACTIONDATETIME AS transaction_datetime,
-        BALANCEWMT AS balance, 
-        FE_INSITU_WTAVG AS grade_fe, 
-        SIO2_INSITU_WTAVG AS grade_si, 
-        AL2O3_INSITU_WTAVG AS grade_al, 
-        P_INSITU_WTAVG AS grade_p, 
-        MN_INSITU_WTAVG AS grade_mn
-        ,FE_ROM_WTAVG AS fe_rom
-        ,SIO2_ROM_WTAVG AS si_rom
-        ,AL2O3_ROM_WTAVG AS al_rom
-        ,P_ROM_WTAVG AS p_rom
-        ,MN_ROM_WTAVG AS mn_rom
-        ,FE_PROD1_WTAVG AS fe_prod1
-        ,SIO2_PROD1_WTAVG AS si_prod1
-        ,AL2O3_PROD1_WTAVG AS al_prod1
-        ,P_PROD1_WTAVG AS p_prod1
-        ,MN_PROD1_WTAVG AS mn_prod1
-        ,FE_PROD2_WTAVG AS fe_prod2
-        ,SIO2_PROD2_WTAVG AS si_prod2
-        ,AL2O3_PROD2_WTAVG AS al_prod2
-        ,P_PROD2_WTAVG AS p_prod2
-        ,MN_PROD2_WTAVG AS mn_prod2
-        ,FE_PROD3_WTAVG AS fe_prod3
-        ,SIO2_PROD3_WTAVG AS si_prod3
-        ,AL2O3_PROD3_WTAVG AS al_prod3
-        ,P_PROD3_WTAVG AS p_prod3
-        ,MN_PROD3_WTAVG AS mn_prod3
-        
-        FROM (
-            SELECT *, 
-            ROW_NUMBER() OVER (PARTITION BY STOCKPILENAME ORDER BY TRANSACTIONDATETIME DESC) AS rn
-            
-            FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS
-            
-            WHERE TRANSACTIONDATETIME <= %s
-              AND TRANSACTIONDIRECTION IN ('Stack', 'Reclaim')
-              AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT'))
-              AND HUB = %s
-              AND AREANAME = %s
-        ) ranked
-
-        WHERE rn = 1 
-        AND TRANSACTIONDIRECTION IN ('Stack', 'Reclaim') 
-        AND (STOCKPILETYPE IN ('RomStockpile') OR CONTAINS(STOCKPILENAME, 'LT')) 
-        
-        ORDER BY 
-            HUB,
-            STOCKPILENAME,
-            TRANSACTIONDATETIME
-        """
+        query = opening_inventory_query()
 
         try:
             # Execute query
@@ -521,7 +947,10 @@ class OpeningStockpileInventories:
             f"{analyte}_{stream}"
             for stream in ("rom", "prod1", "prod2", "prod3")
             for analyte in ("fe", "si", "al", "p", "mn")
-        ] + ["grade_streams_json", "grade_stream_warnings_json"]
+        ] + [
+            "grade_streams_json", "grade_stream_warnings_json",
+            *INVENTORY_ADDITIONAL_FIELDS,
+        ]
         if "transaction_datetime" not in existing_columns:
             cursor.execute(
                 "ALTER TABLE opening_stockpile_inventories "
@@ -542,8 +971,17 @@ class OpeningStockpileInventories:
         })
         for column in extra_columns:
             if column not in existing_columns:
-                column_type = "TEXT" if column.endswith("_json") else "REAL"
-                cursor.execute(f"ALTER TABLE opening_stockpile_inventories ADD COLUMN {column} {column_type}")
+                column_type = (
+                    "TEXT"
+                    if column.endswith("_json") or column in INVENTORY_TEXT_FIELDS
+                    else "INTEGER"
+                    if column in INVENTORY_INTEGER_FIELDS
+                    else "REAL"
+                )
+                cursor.execute(
+                    f'ALTER TABLE opening_stockpile_inventories '
+                    f'ADD COLUMN "{column}" {column_type}'
+                )
 
         # Clear the table
         cursor.execute('DELETE FROM opening_stockpile_inventories')
@@ -598,7 +1036,10 @@ class OpeningStockpileInventories:
                 :grade_streams_json, :grade_stream_warnings_json
             )
             ''', mapped_row)
-            audit_values = flattened_streams.get(key, {})
+            audit_values = {
+                **inventory_additional_values(row),
+                **flattened_streams.get(key, {}),
+            }
             if audit_values:
                 assignments = ", ".join(
                     f'"{column}" = ?' for column in audit_values

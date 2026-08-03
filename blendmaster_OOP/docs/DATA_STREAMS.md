@@ -30,6 +30,17 @@ Inventory stockpiles use:
 The imported inventory ROM fields remain available for auditing, but they do
 not drive the inventory Modelled ROM or Adjusted ROM streams.
 
+The opening inventory snapshot also retains the extended APS stockpile
+properties available at the scenario start time. These include extended
+insitu/ROM/product/OPF/train chemistry, moisture and wet/dry yields, WHIMS
+minus/plus 1 mm, ore-type proportions and DMT, modelled Product 2 WMT/DMT,
+grade-block-derived Product 1 minus 1 mm, fines/lump yields, moisture,
+chemistry, WMT, DMT and volume, dry density, material classification, and the
+source stockpile metadata. The grade-block-derived fields use movements into
+the latest stockpile build as of the scenario start time. They are audit/model
+input properties; the existing five-analyte grade-stream selection remains the
+grade vector used by the optimiser.
+
 AMT hexagons use:
 
 - Modelled ROM = hex insitu baseline; no inventory-derived internal blend factor
