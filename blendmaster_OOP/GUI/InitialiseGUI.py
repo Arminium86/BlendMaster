@@ -4556,7 +4556,8 @@ class UserInputs(QMainWindow):
         search.setPlaceholderText("Type to find a field...")
         field_list = QListWidget()
         for header in all_headers:
-            item = QListWidgetItem(header)
+            item = QListWidgetItem(self.user_facing_field_label(header))
+            item.setData(Qt.UserRole, header)
             item.setFlags(
                 item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled
             )
@@ -4576,7 +4577,7 @@ class UserInputs(QMainWindow):
             for index in range(field_list.count()):
                 item = field_list.item(index)
                 item.setCheckState(
-                    Qt.Checked if item.text() in headers_to_check else Qt.Unchecked
+                    Qt.Checked if item.data(Qt.UserRole) in headers_to_check else Qt.Unchecked
                 )
 
         search.textChanged.connect(filter_fields)
@@ -4602,7 +4603,7 @@ class UserInputs(QMainWindow):
         if dialog.exec_() != QDialog.Accepted:
             return
         chosen = [
-            field_list.item(index).text()
+            field_list.item(index).data(Qt.UserRole)
             for index in range(field_list.count())
             if field_list.item(index).checkState() == Qt.Checked
         ]
@@ -4836,9 +4837,17 @@ class UserInputs(QMainWindow):
             table.setHorizontalHeaderItem(column_index, source_header)
 
         for row_index, field in enumerate(fields):
-            field_item = QTableWidgetItem(field)
+            field_item = QTableWidgetItem(self.user_facing_field_label(field))
             field_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            field_item.setToolTip(field)
+            field_item.setData(Qt.UserRole, field)
+            field_item.setToolTip(
+                (
+                    "Raw source key: " + field + "\n"
+                    "ROM / opening stockpile mass; not actual OPF plant feed."
+                )
+                if field in {"feed_wmt", "feed_dmt"}
+                else field
+            )
             field_item.setBackground(QColor("#f1f5f9"))
             table.setItem(row_index, 0, field_item)
             for column_index, descriptor in enumerate(sources, start=1):
@@ -5445,6 +5454,17 @@ class UserInputs(QMainWindow):
                     pass
         return sorted(str(field) for field in fields if str(field).strip())
 
+    @staticmethod
+    def user_facing_field_label(field):
+        """Clarify raw source aliases without changing persisted mapping keys."""
+        raw = str(field or "")
+        labels = {
+            "feed_wmt": "ROM / opening stockpile WMT",
+            "feed_dmt": "ROM / opening stockpile DMT",
+        }
+        label = labels.get(raw.strip().lower())
+        return f"{label} ({raw})" if label else raw
+
     def refresh_map_available_fields(self):
         if not hasattr(self, "map_fields_available_list"):
             return
@@ -5466,16 +5486,21 @@ class UserInputs(QMainWindow):
             return
         query = self.map_fields_filter.text().strip().lower()
         self.map_fields_available_list.clear()
-        self.map_fields_available_list.addItems([
-            field for field in getattr(self, "_map_fields_available_values", [])
-            if not query or query in field.lower()
-        ])
+        for field in getattr(self, "_map_fields_available_values", []):
+            label = self.user_facing_field_label(field)
+            if query and query not in field.lower() and query not in label.lower():
+                continue
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, field)
+            self.map_fields_available_list.addItem(item)
 
     def apply_available_field_to_mapping(self, item):
         row = self.field_mapping_table.currentRow()
         if row < 0:
             return
-        self.field_mapping_table.setItem(row, 3, QTableWidgetItem(item.text()))
+        self.field_mapping_table.setItem(
+            row, 3, QTableWidgetItem(item.data(Qt.UserRole) or item.text())
+        )
         self.field_mapping_table.setCurrentCell(row, 3)
 
     def ensure_field_mapping_migration(self):

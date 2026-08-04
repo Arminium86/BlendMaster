@@ -74,7 +74,8 @@ AMT mappings apply independently to each imported **hex** before chunks are
 formed. The AMT source list includes lineage-derived per-hex fields, including
 `prod1_wmt`, `prod1_dmt`, `prod2_wmt` and `prod2_dmt` where the contributing
 grade blocks supply explicit modelled product tonnes, including Product 3.
-It also includes `feed_wmt`/`feed_dmt`; map these to
+It also includes **ROM / opening stockpile WMT/DMT** (stored raw as
+`feed_wmt`/`feed_dmt` for compatibility); map these to
 `modelled_rom_wmt`/`modelled_rom_dmt`. Map the active product channel to
 `modelled_product_wmt` and `modelled_product_dmt`; the product-grade fields
 then use that DMT denominator when hexes are consolidated into chunks. The
@@ -132,7 +133,7 @@ grade vector used by the optimiser.
 Source properties use the same canonical names for inventory, AMT and APS
 sources. Important additive families are:
 
-- `feed_wmt` and `feed_dmt`;
+- ROM/opening-stockpile WMT and DMT (stored raw as `feed_wmt` and `feed_dmt`);
 - `oretype_<type>_wmt` and `oretype_<type>_dmt`, where `<type>` is `bid`,
   `cidl`, `cidm`, `cidu`, `did`, `hc` or `other`;
 - `prod1_wmt` through `prod3_wmt` and their `_dmt` equivalents;
@@ -150,8 +151,8 @@ For inventory stockpiles, the opening query calculates these additive values
 directly from the latest positive build balance at scenario start:
 
 ```text
-feed_wmt = BALANCEWMT
-feed_dmt = BALANCEWMT x (1 - insitu moisture)
+ROM/opening WMT (`feed_wmt`) = BALANCEWMT
+ROM/opening DMT (`feed_dmt`) = BALANCEWMT x (1 - insitu moisture)
 oretype_<type>_wmt = BALANCEWMT x insitu ore-type fraction
 oretype_<type>_dmt = feed_dmt x insitu ore-type fraction
 prod<n>_wmt = BALANCEWMT x Product n wet yield
