@@ -1301,14 +1301,23 @@ class UserInputs(QMainWindow):
     def capture_scenario_state(self):
         self.capture_stockpile_table_choices()
         self.capture_active_manual_plan_state()
-        if hasattr(self, "define_fields_table"):
+        # During project restore the authoritative values have already been
+        # read from the project file, but the setup widgets still contain the
+        # previous/default session until finish_site_config_submit hydrates
+        # them.  Capturing those stale widgets here silently replaced valid
+        # saved definitions, mappings and Data Streams settings.  Preserve the
+        # restored attributes until their controls have been populated.
+        restoring_project = bool(
+            getattr(self, "project_load_restore_in_progress", False)
+        )
+        if not restoring_project and hasattr(self, "define_fields_table"):
             try:
                 self.capture_define_fields_table()
             except ValueError:
                 pass
-        if hasattr(self, "field_mapping_table"):
+        if not restoring_project and hasattr(self, "field_mapping_table"):
             self.capture_map_fields_table()
-        if hasattr(self, "data_stream_selector"):
+        if not restoring_project and hasattr(self, "data_stream_selector"):
             self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
             self.data_stream_planning_categories = normalise_planning_categories({
                 "rom": self.rom_planning_category_input.text(),

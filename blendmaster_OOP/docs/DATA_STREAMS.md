@@ -441,7 +441,13 @@ coverage and spatial adjustments remain diagnostic/model-input provenance. A
 positive hex with incomplete lineage is actionable and is recorded in the
 `warnings` field. Partial coverage of the active product channel is also
 warned: the displayed modelled grade is based on covered lineage tonnes, while
-the coverage field quantifies the excluded share.
+the coverage field quantifies the excluded share. During chunk/source
+aggregation, product mass without a valid grade is excluded from that grade's
+weighted average rather than nullifying the complete stream. The corresponding
+brand-specific adjusted grade retains its historical regression ratio and is
+recalculated from the final covered-mass modelled grade. Uncovered tonnes still
+participate in chunking, so the coverage warning remains an important statement
+that the covered grade is being extrapolated over the complete source balance.
 
 #### Grade fields
 
@@ -456,6 +462,14 @@ means SiO2 and `al` means Al2O3.
 | `selected_stream` | The single stream selected on Data Streams for this run. | Yes; it controls which stored vector is requested. |
 | `selected_<brand>_<analyte>` | The effective grade resolved for that brand and analyte after applying the fallback chain. These are the clearest Database View representation of the grades that scheduling will use when that brand is active. | Yes, for the brand being produced. |
 | `fallback_<brand>_<analyte>` | Provenance of a fallback, for example `adjusted_product[CCFB] -> adjusted_rom[CCFB]`. A blank means the requested stream/brand value was available and no fallback was needed. | No. This is audit information explaining how the corresponding `selected_...` value was obtained. |
+
+Inventory and AMT modelled ROM is physically unbranded. Database View retains
+that source vector as `grade_modelled_rom_<analyte>` and also publishes an
+identical `grade_modelled_rom_<brand>_<analyte>` copy for every configured
+brand. APS modelled ROM uses the same branded field names, but each brand can
+contain a distinct value from its mapped APS header. Historical blend
+reconciliation is applied only when producing branded adjusted ROM; it never
+changes modelled ROM.
 
 Not every raw stream field is used at the same time. BlendMaster retains all
 five so the selected result can be traced and the user can switch streams

@@ -536,6 +536,11 @@ def inventory_grade_streams(
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
+        # Stockpile ROM is physically unbranded, but expose an identical
+        # brand-keyed modelled stream so Database View and downstream audit
+        # schemas match APS sources.  Historical blend reconciliation remains
+        # confined to adjusted_rom below.
+        result["modelled_rom"][brand] = copy.deepcopy(modelled_rom)
         adjusted_rom = {}
         for a in ANALYTES:
             adjusted_rom[a] = (
@@ -635,6 +640,10 @@ def amt_grade_streams(
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
+        # AMT ROM is also unbranded at source.  Preserve that source vector and
+        # publish equal brand-keyed copies for a consistent cross-source audit
+        # schema; only adjusted_rom receives the brand-specific blend factor.
+        result["modelled_rom"][brand] = copy.deepcopy(modelled_rom)
         adjusted_rom = {}
         for a in ANALYTES:
             adjusted_rom[a] = (
@@ -741,12 +750,18 @@ def weighted_merge_grade_streams(
                         continue
                     old_weight = max(old_weight or 0.0, 0.0)
                     new_weight = max(new_weight or 0.0, 0.0)
+                    # A partially covered grade stream must be averaged over
+                    # the mass that actually has that grade.  Product mass can
+                    # legitimately exist where grade-block lineage did not
+                    # supply a product assay; treating that uncovered mass as
+                    # fatal erased both modelled and adjusted streams for the
+                    # entire AMT chunk.  Exclude only the uncovered side here.
+                    # The independent coverage fields continue to quantify and
+                    # warn about the excluded mass.
                     if old_weight > 0 and old is None:
-                        vector[analyte] = None
-                        continue
+                        old_weight = 0.0
                     if new_weight > 0 and new is None:
-                        vector[analyte] = None
-                        continue
+                        new_weight = 0.0
                     total_weight = old_weight + new_weight
                     vector[analyte] = (
                         (old or 0.0) * old_weight + (new or 0.0) * new_weight
