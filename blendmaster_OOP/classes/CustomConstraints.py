@@ -358,10 +358,9 @@ def source_property_balance_report_fields(
 ) -> dict:
     """Expose opening, depleted and closing balances for additive fields.
 
-    ``source_property_<field>`` remains the amount depleted by the current
-    solver transaction for backwards compatibility.  These explicit audit
-    columns make that meaning unambiguous and keep configured-but-unmapped
-    fields visible as blank columns.
+    ``source_property_<field>`` is the amount depleted by the current solver
+    transaction.  Only opening and closing columns are added here so the
+    report does not contain a duplicate ``actual_depletion`` alias.
     """
     opening = dict(opening_properties or {})
     depleted = dict(depleted_properties or {})
@@ -387,9 +386,7 @@ def source_property_balance_report_fields(
             continue
         opening_value = finite_number(opening.get(key))
         depleted_value = finite_number(depleted.get(key))
-        result[f"{prefix}{key}"] = depleted_value
         result[f"{prefix}{key}_opening_balance"] = opening_value
-        result[f"{prefix}{key}_actual_depletion"] = depleted_value
         result[f"{prefix}{key}_closing_balance"] = (
             max(opening_value - depleted_value, 0.0)
             if opening_value is not None and depleted_value is not None

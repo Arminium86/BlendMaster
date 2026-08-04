@@ -1616,12 +1616,6 @@ class Optimizer:
                         numerator_coefficient = numerator_values[i]
                         denominator_coefficient = denominator_values[i]
                         transaction[
-                            f"custom_constraint_{key}_source_numerator"
-                        ] = numerator_coefficient
-                        transaction[
-                            f"custom_constraint_{key}_source_denominator"
-                        ] = denominator_coefficient
-                        transaction[
                             f"custom_constraint_{key}_source_numerator_coefficient"
                         ] = numerator_coefficient
                         transaction[

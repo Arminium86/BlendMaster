@@ -379,6 +379,17 @@ def apply_field_mappings(
             value = raw_fields.get(source_field)
             if value is None:
                 value = raw_by_canonical.get(canonical_property_key(source_field))
+            if value is None:
+                # Map Fields displays a few compatibility raw names with an
+                # explanatory caption, e.g. ``ROM / opening stockpile DMT
+                # (feed_dmt)``. Older projects persisted that caption instead
+                # of the raw field ID; recover the parenthesised ID here.
+                match = re.search(r"\(([^()]+)\)\s*$", str(source_field))
+                if match:
+                    alias = match.group(1).strip()
+                    value = raw_fields.get(
+                        alias, raw_by_canonical.get(canonical_property_key(alias))
+                    )
         else:
             # Exact-name fallback is a migration aid, not a hidden alias: it
             # lets canonical data already produced by BlendMaster survive.

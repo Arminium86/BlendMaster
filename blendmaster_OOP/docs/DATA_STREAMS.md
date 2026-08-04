@@ -557,26 +557,26 @@ For each active additive field, reports expose the full transaction audit:
 
 - `source_property_<field>_opening_balance`: the amount available to that
   solver event before selection;
-- `source_property_<field>_actual_depletion`: the amount consumed by the
-  transaction, proportionally depleted against ROM WMT;
 - `source_property_<field>_closing_balance`: opening less actual depletion;
-- `source_property_<field>`: retained compatibility name for the actual
-  depletion, not the opening balance.
+- `source_property_<field>`: the amount consumed by the transaction,
+  proportionally depleted against ROM WMT.
 
 `source_wmt` and `modelled_rom_wmt` are canonical ROM WMT and are synchronized
 to the balance tracker at source initialization, after builds, after ordinary
-reclaims and whenever the active AMT chunk changes. Other additive fields,
-including ROM DMT, product mass, ore-type tonnes and ultrafines tonnes, retain
-their mapped opening ratios and deplete in proportion to actual ROM WMT.
+reclaims and whenever the active AMT chunk changes. If restored properties are
+at a different mass scale from the active source/chunk balance, BlendMaster
+first rescales every additive property by `active balance / saved ROM WMT`.
+Other additive fields, including ROM DMT, product mass, ore-type tonnes and
+ultrafines tonnes, therefore retain their mapped ratios and deplete in
+proportion to actual ROM WMT.
 
 Custom-constraint report fields have three distinct levels. A
 `source_*_coefficient` is the expression value per source WMT used by the
 linear solver. A `source_*_contribution` is that coefficient multiplied by the
 source's actual selected WMT. The unqualified `numerator` and `denominator`
 are whole-blend totals (and are consequently repeated on each row of the same
-blend); `actual_ratio` is their ratio. Legacy `source_numerator` and
-`source_denominator` columns are retained as coefficient aliases. Thus, for a
-denominator of `modelled_rom_wmt`, each source coefficient is normally 1.0,
+blend); `actual_ratio` is their ratio. Thus, for a denominator of
+`modelled_rom_wmt`, each source coefficient is normally 1.0,
 each source denominator contribution is its actual depleted ROM WMT, and the
 blend denominator is the sum of all source contributions. It should not be
 expected to equal one row's `source_property_modelled_rom_wmt` unless the

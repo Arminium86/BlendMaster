@@ -1925,7 +1925,6 @@ class CaseModeller:
                 column for column in group.columns
                 if str(column).startswith("custom_constraint_")
                 and str(column).endswith((
-                    "_source_numerator", "_source_denominator",
                     "_source_numerator_coefficient",
                     "_source_denominator_coefficient",
                 ))

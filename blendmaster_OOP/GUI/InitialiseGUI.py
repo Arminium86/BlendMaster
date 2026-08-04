@@ -15628,7 +15628,7 @@ class UserInputs(QMainWindow):
         # ``DataFrame.columns`` is a pandas Index and intentionally has no
         # truth value. Project loading refreshes this preview immediately, so
         # do not use ``or []`` here.
-        columns = list(getattr(report, "columns", []))
+        columns = self.optimisation_snapshot_available_columns(report)
         selected = getattr(self, "optimisation_snapshot_selected_columns", None)
         if selected is None:
             selected = self.default_optimisation_snapshot_columns(columns)
@@ -15650,6 +15650,39 @@ class UserInputs(QMainWindow):
             column for column in columns
             if column in set(self.optimisation_snapshot_selected_columns or [])
         ]
+
+    @staticmethod
+    def optimisation_snapshot_available_columns(report):
+        """Remove compatibility aliases that duplicate clearer report fields."""
+        columns = list(getattr(report, "columns", []))
+        available = set(columns)
+        result = []
+        for column in columns:
+            name = str(column)
+            if name.endswith("_actual_depletion"):
+                continue
+            if name.startswith("source_property_source_wmt"):
+                continue
+            if name in {
+                "source_property_modelled_rom_wmt",
+                "source_property_modelled_rom_wmt_opening_balance",
+                "source_property_modelled_rom_wmt_closing_balance",
+            }:
+                continue
+            if name.startswith("custom_constraint_") and name.endswith(
+                "_source_numerator"
+            ):
+                replacement = name + "_coefficient"
+                if replacement in available:
+                    continue
+            if name.startswith("custom_constraint_") and name.endswith(
+                "_source_denominator"
+            ):
+                replacement = name + "_coefficient"
+                if replacement in available:
+                    continue
+            result.append(column)
+        return result
 
     def optimisation_snapshot_is_additive_field(self, column):
         key = canonical_property_key(column)
@@ -15678,45 +15711,8 @@ class UserInputs(QMainWindow):
         return f"{numeric_value:.2f}"
 
     def optimisation_snapshot_column_label(self, column):
-        """Return audit-friendly labels without changing database field IDs."""
-        raw = str(column)
-        if raw.startswith("source_property_"):
-            property_name = raw.removeprefix("source_property_")
-            suffixes = (
-                ("_opening_balance", "Opening Balance"),
-                ("_actual_depletion", "Actual Depletion"),
-                ("_closing_balance", "Closing Balance"),
-            )
-            for suffix, label in suffixes:
-                if property_name.endswith(suffix):
-                    name = property_name[:-len(suffix)].replace("_", " ").title()
-                    return f"{name} - {label}"
-            name = property_name.replace("_", " ").title()
-            if source_property_kind(
-                property_name, getattr(self, "source_property_kinds", {})
-            ) == "additive":
-                return f"{name} - Actual Depletion"
-            return name
-        if raw.startswith("custom_constraint_"):
-            suffixes = (
-                ("_source_numerator_coefficient", "Source Numerator Coefficient (per Source WMT)"),
-                ("_source_denominator_coefficient", "Source Denominator Coefficient (per Source WMT)"),
-                ("_source_numerator_contribution", "Source Numerator Contribution"),
-                ("_source_denominator_contribution", "Source Denominator Contribution"),
-                ("_source_numerator", "Source Numerator Coefficient (Legacy)"),
-                ("_source_denominator", "Source Denominator Coefficient (Legacy)"),
-                ("_actual_ratio", "Blend Actual Ratio"),
-                ("_numerator", "Blend Numerator Total"),
-                ("_denominator", "Blend Denominator Total"),
-                ("_target_min", "Target Minimum"),
-                ("_target_max", "Target Maximum"),
-            )
-            body = raw.removeprefix("custom_constraint_")
-            for suffix, label in suffixes:
-                if body.endswith(suffix):
-                    name = body[:-len(suffix)].replace("_", " ").title()
-                    return f"{name} - {label}"
-        return raw
+        """Use the database's underscore naming convention verbatim."""
+        return str(column)
 
     def populate_optimisation_plan_preview(self, report):
         preview = getattr(self, "optimisation_plan_preview", None)
@@ -15747,7 +15743,7 @@ class UserInputs(QMainWindow):
         report = self.fetch_optimised_blend_report(
             self.selected_optimisation_plan_id()
         )
-        columns = list(report.columns)
+        columns = self.optimisation_snapshot_available_columns(report)
         if not columns:
             QMessageBox.information(
                 self, "Optimised Blend Sequence",

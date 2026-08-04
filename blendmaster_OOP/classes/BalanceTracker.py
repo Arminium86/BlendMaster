@@ -17,6 +17,7 @@ from classes.CustomConstraints import (
     merge_source_properties,
     scale_additive_source_properties,
     source_properties_from_mapping,
+    source_property_kind,
 )
 class BalanceTracker:
     @staticmethod
@@ -83,7 +84,7 @@ class BalanceTracker:
         self.populate_total_AMT_stockpile_balances()
 
     def _synchronise_rom_wmt_properties(self, name, properties, balance=None):
-        """Make canonical ROM WMT properties agree with the tracked balance."""
+        """Scale every additive field onto the tracked ROM WMT balance."""
         result = dict(properties or {})
         try:
             current_balance = max(float(
@@ -91,6 +92,29 @@ class BalanceTracker:
             ), 0.0)
         except (TypeError, ValueError):
             current_balance = 0.0
+        reference_balance = None
+        for key in ("modelled_rom_wmt", "source_wmt"):
+            try:
+                candidate = float(result.get(key))
+            except (TypeError, ValueError):
+                continue
+            if pd.notna(candidate) and candidate > 0:
+                reference_balance = candidate
+                break
+        if (
+            reference_balance is not None
+            and abs(reference_balance - current_balance) > 1e-9
+        ):
+            scale = current_balance / reference_balance
+            for key, value in list(result.items()):
+                if source_property_kind(
+                    key, self.source_property_kinds
+                ) != "additive":
+                    continue
+                try:
+                    result[key] = float(value) * scale
+                except (TypeError, ValueError):
+                    result.pop(key, None)
         for key in ("source_wmt", "modelled_rom_wmt"):
             if (
                 self.required_source_property_keys is None

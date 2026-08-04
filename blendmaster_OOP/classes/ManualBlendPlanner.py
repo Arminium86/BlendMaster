@@ -819,12 +819,6 @@ class ManualBlendPlanner:
                 numerator_total += numerator * tonnes
                 denominator_total += denominator * tonnes
                 source_row[
-                    f"custom_constraint_{key}_source_numerator"
-                ] = numerator
-                source_row[
-                    f"custom_constraint_{key}_source_denominator"
-                ] = denominator
-                source_row[
                     f"custom_constraint_{key}_source_numerator_coefficient"
                 ] = numerator
                 source_row[
@@ -865,8 +859,6 @@ class ManualBlendPlanner:
                 f"{prefix}_actual_ratio",
                 f"{prefix}_target_min",
                 f"{prefix}_target_max",
-                f"{prefix}_source_numerator",
-                f"{prefix}_source_denominator",
                 f"{prefix}_source_numerator_coefficient",
                 f"{prefix}_source_denominator_coefficient",
                 f"{prefix}_source_numerator_contribution",
