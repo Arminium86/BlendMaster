@@ -16,7 +16,9 @@ from setup.AMTGradeBlockLineage import (
     direct_product_tonnage_select_sql,
     direct_product_tonnage_sum_sql,
     expit_select_sql,
+    expit_required_select_sql,
     property_object_sql,
+    truck_required_select_sql,
     weighted_property_sql,
 )
 
@@ -609,6 +611,8 @@ class OpeningStockpileInventories:
 
         requested_values = ", ".join(["(%s)"] * len(requested_builds))
         lineage_property_select = expit_select_sql()
+        expit_required_select = expit_required_select_sql()
+        truck_required_select = truck_required_select_sql()
         lineage_property_averages = weighted_property_sql()
         lineage_property_object = property_object_sql()
         direct_product_tonnage_select = direct_product_tonnage_select_sql()
@@ -672,7 +676,8 @@ class OpeningStockpileInventories:
                 ) = 1
             ),
             EXPIT_DETAILS AS (
-                SELECT expit.*
+                SELECT
+                    {expit_required_select}
                 FROM INBOUND_RAW inbound
                 CROSS JOIN PARAMS params
                 INNER JOIN AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS expit
@@ -686,18 +691,41 @@ class OpeningStockpileInventories:
                 ) = 1
             ),
             TRUCK_LIST_ATTRIBUTES AS (
-                SELECT truck.*
-                FROM SELECTED_INSTANCES selected
-                CROSS JOIN PARAMS params
+                SELECT
+                    {truck_required_select}
+                FROM INBOUND_RAW inbound
                 INNER JOIN AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_STOCKPILE_HEX_TRUCK_LIST truck
-                    ON truck.LOCATION_NAME = selected.LOCATION_NAME
-                WHERE truck.DUMPEDDATETIME <= params.AS_OF_TS
-                  AND truck.TRUCK_WMT > 0
+                    ON  truck.LOCATION_NAME = inbound.LOCATION_NAME
+                    AND truck.HEX = inbound.HEX
+                    AND truck.DUMPEDDATETIME = inbound.MOVEMENT_DATETIME
+                WHERE truck.TRUCK_WMT > 0
+            ),
+            GRADE_CONTROL_NAME_CANDIDATES AS (
+                SELECT UPPER(TRIM(expit.SOURCE_FMS)) AS GRADE_BLOCK_NAME
+                FROM INBOUND_RAW inbound
+                LEFT JOIN EXPIT_DETAILS expit
+                    ON expit.INTERNAL_ID = inbound.INTERNALID
+                WHERE expit.SOURCE_FMS IS NOT NULL
+                UNION
+                SELECT UPPER(TRIM(truck.GRADE_BLOCK)) AS GRADE_BLOCK_NAME
+                FROM INBOUND_RAW inbound
+                LEFT JOIN TRUCK_LIST_ATTRIBUTES truck
+                    ON  truck.LOCATION_NAME = inbound.LOCATION_NAME
+                    AND truck.HEX = inbound.HEX
+                    AND truck.DUMPEDDATETIME = inbound.MOVEMENT_DATETIME
+                WHERE truck.GRADE_BLOCK IS NOT NULL
+            ),
+            GRADE_CONTROL_KEYS AS (
+                SELECT DISTINCT
+                    SPLIT_PART(GRADE_BLOCK_NAME, '_', 1) AS MINE_CODE,
+                    SPLIT_PART(GRADE_BLOCK_NAME, '_', 2) AS LOCATION_NO
+                FROM GRADE_CONTROL_NAME_CANDIDATES
+                WHERE GRADE_BLOCK_NAME IS NOT NULL
             ),
             GRADE_CONTROL_BLOCKS AS (
                 SELECT
                     CONCAT(
-                        MINE_CODE, '_', LOCATION_NO, '_', PHASE, '_',
+                        gradeblock.MINE_CODE, '_', gradeblock.LOCATION_NO, '_', gradeblock.PHASE, '_',
                         BLAST_RL, '_', BLAST_NO, '_',
                         CASE
                             WHEN TRY_TO_NUMBER(BLAST_NO) BETWEEN 600 AND 699
@@ -744,7 +772,10 @@ class OpeningStockpileInventories:
                     PROD1_LUMP_AS,
                     GB_DRY_DENSITY,
                     LOI_425
-                FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS
+                FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS gradeblock
+                INNER JOIN GRADE_CONTROL_KEYS keys
+                    ON  gradeblock.MINE_CODE = keys.MINE_CODE
+                    AND gradeblock.LOCATION_NO = keys.LOCATION_NO
             ),
             INBOUND_ENRICHED AS (
                 SELECT
@@ -1494,7 +1525,10 @@ class OpeningStockpileInventories:
                     schema=schema,
                     role=role,
                     login_timeout=60,
-                    network_timeout=300,
+                    # AMT lineage is a warehouse query.  Five minutes was
+                    # cancelling valid executions at the connector boundary
+                    # (Snowflake error 57014), before Snowflake could return.
+                    network_timeout=900,
                 )
 
                 # Run a lightweight sanity check so we only return a truly usable connection

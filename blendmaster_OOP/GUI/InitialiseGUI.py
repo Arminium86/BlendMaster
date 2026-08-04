@@ -13397,7 +13397,15 @@ class UserInputs(QMainWindow):
         self.project_load_restore_in_progress = False
         if project_load_failed:
             self.finish_project_load_ui(success=False)
-        self.show_error_popup(error_message)
+        message = str(error_message or "")
+        if "57014" in message or "SQL execution canceled" in message:
+            message = (
+                "Snowflake cancelled the AMT opening query before it completed. "
+                "BlendMaster has narrowed this query and allows up to 15 minutes; "
+                "please retry. If it repeats, provide the scenario start time and "
+                "selected AMT footprints so the Snowflake execution can be profiled."
+            )
+        self.show_error_popup(message)
 
     def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
         headers = self.amt_stockpile_headers()

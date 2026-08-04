@@ -124,6 +124,36 @@ def expit_select_sql():
     )
 
 
+def expit_required_select_sql():
+    """Select only EXPIT columns consumed by AMT lineage, never ``expit.*``."""
+    columns = [
+        "expit.INTERNAL_ID",
+        "expit.SOURCE_GRADEBLOCK_ID",
+        "expit.SOURCE_FMS",
+        "expit.TRANSACTION_DATETIME",
+    ]
+    columns.extend(
+        source for source in LINEAGE_PROPERTY_COLUMNS.values()
+        if source.startswith("expit.")
+    )
+    return ",\n                    ".join(dict.fromkeys(columns))
+
+
+def truck_required_select_sql():
+    """Select only truck-list columns consumed by AMT lineage, never ``truck.*``."""
+    columns = [
+        "truck.LOCATION_NAME",
+        "truck.HEX",
+        "truck.DUMPEDDATETIME",
+        "truck.TRUCK_WMT",
+        "truck.GRADE_BLOCK",
+        "truck.ROM_MATS",
+        "truck.LAST_UPDATE",
+        *TRUCK_PROPERTY_COLUMNS.values(),
+    ]
+    return ",\n                    ".join(dict.fromkeys(columns))
+
+
 def weighted_property_sql(weight_column="WMT"):
     return ",\n                    ".join(
         (

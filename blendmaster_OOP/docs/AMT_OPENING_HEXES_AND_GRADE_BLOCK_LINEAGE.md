@@ -27,6 +27,17 @@ The opening operation uses six Snowflake objects:
 The exact build is selected from inventory and the hex universe comes from AMT
 movements plus `AMT_HEX_GRADES`.
 
+### Query performance
+
+The opening query first restricts EXPIT and truck-list reads to the inbound
+movements for the selected footprint instances, and selects only columns used
+by lineage. Before joining Grade Control, it extracts the distinct mine and
+location keys from both EXPIT and truck-list grade-block names; Grade Control
+is limited to those candidates before the exact full-name join. This avoids a
+whole-table Grade Control join for every inbound movement. The Snowflake
+connector allows 15 minutes for this warehouse query; the former five-minute
+connector timeout cancelled valid executions with Snowflake error `57014`.
+
 ## Processing sequence
 
 ### 1. Establish the as-of time
