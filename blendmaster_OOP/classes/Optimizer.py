@@ -42,6 +42,7 @@ from classes.CustomConstraints import (
     custom_constraint_coefficients,
     filter_source_properties,
     scale_additive_source_properties,
+    source_property_balance_report_fields,
     source_property_report_fields,
 )
 
@@ -1564,6 +1565,17 @@ class Optimizer:
                             "optimisation_source_property_fields"
                         ),
                     )
+                    active_property_fields = solver_config.get(
+                        "optimisation_source_property_fields"
+                    ) or []
+                    property_audit_fields = source_property_balance_report_fields(
+                        event.source_properties,
+                        visible_source_properties,
+                        active_fields=active_property_fields,
+                        property_kinds=getattr(
+                            event, "source_property_kinds", None
+                        ),
+                    )
                     transaction = {
                             "source": source_name,
                             "source_id": source_id,
@@ -1590,7 +1602,9 @@ class Optimizer:
                                 property_kinds=getattr(
                                     event, "source_property_kinds", None
                                 ),
+                                active_fields=active_property_fields,
                             ),
+                            **property_audit_fields,
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,
                             "equipment_rate_output": result.x[i]
@@ -1599,12 +1613,26 @@ class Optimizer:
                             else 0,
                         }
                     for key, numerator_values, denominator_values in custom_constraint_source_fields:
+                        numerator_coefficient = numerator_values[i]
+                        denominator_coefficient = denominator_values[i]
                         transaction[
                             f"custom_constraint_{key}_source_numerator"
-                        ] = numerator_values[i]
+                        ] = numerator_coefficient
                         transaction[
                             f"custom_constraint_{key}_source_denominator"
-                        ] = denominator_values[i]
+                        ] = denominator_coefficient
+                        transaction[
+                            f"custom_constraint_{key}_source_numerator_coefficient"
+                        ] = numerator_coefficient
+                        transaction[
+                            f"custom_constraint_{key}_source_denominator_coefficient"
+                        ] = denominator_coefficient
+                        transaction[
+                            f"custom_constraint_{key}_source_numerator_contribution"
+                        ] = numerator_coefficient * result.x[i]
+                        transaction[
+                            f"custom_constraint_{key}_source_denominator_contribution"
+                        ] = denominator_coefficient * result.x[i]
                     transactions.append(transaction)
 
             return {

@@ -1557,11 +1557,11 @@ class DrawGanttChart:
             "actual_direct_tip_ratio": "Actual Direct Tip Ratio",
             "crusher_actual_tonnes": "Crusher Tonnes",
             "crusher_rate_output": "Crusher Rate",
-            "crusher_actual_grade_fe": "Grade Fe (%)",
-            "crusher_actual_grade_si": "Grade Si (%)",
-            "crusher_actual_grade_al": "Grade Al (%)",
-            "crusher_actual_grade_p": "Grade P (%)",
-            "crusher_actual_grade_mn": "Grade Mn (%)",
+            "crusher_actual_grade_fe": "Actual Crusher Grade Fe",
+            "crusher_actual_grade_si": "Actual Crusher Grade Si",
+            "crusher_actual_grade_al": "Actual Crusher Grade Al",
+            "crusher_actual_grade_p": "Actual Crusher Grade P",
+            "crusher_actual_grade_mn": "Actual Crusher Grade Mn",
             "source": "Source Transaction",
             "source_type": "Source Type",
             "selected_grade_stream": "Selected Grade Stream",
@@ -1573,11 +1573,15 @@ class DrawGanttChart:
             if column.startswith("source_grade_")
         ]
         for column in source_grade_columns:
-            column_aliases[column] = (
-                column.replace("source_grade_", "")
-                .replace("_", " ")
-                .title()
-            )
+            selected_analyte = column.removeprefix("source_grade_")
+            if selected_analyte in {"fe", "si", "al", "p", "mn"}:
+                column_aliases[column] = (
+                    f"Selected Stream {selected_analyte.title()}"
+                )
+            else:
+                column_aliases[column] = (
+                    selected_analyte.replace("_", " ").title()
+                )
         # Keep the familiar summary fields first, then retain the complete
         # report snapshot below the Gantt.  The latter is especially useful
         # for auditing source streams, custom constraints and product builds;

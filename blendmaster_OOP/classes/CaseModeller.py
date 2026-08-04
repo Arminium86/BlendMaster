@@ -1884,7 +1884,9 @@ class CaseModeller:
                     "source_property_"
                 )
                 solver_config = getattr(self, "solver_config", {}) or {}
-                if source_property_kind(
+                if property_name.endswith((
+                    "_opening_balance", "_actual_depletion", "_closing_balance"
+                )) or source_property_kind(
                     property_name,
                     solver_config.get("source_property_kinds"),
                 ) == "additive":
@@ -1923,7 +1925,9 @@ class CaseModeller:
                 column for column in group.columns
                 if str(column).startswith("custom_constraint_")
                 and str(column).endswith((
-                    "_source_numerator", "_source_denominator"
+                    "_source_numerator", "_source_denominator",
+                    "_source_numerator_coefficient",
+                    "_source_denominator_coefficient",
                 ))
             ]:
                 coefficients = pd.to_numeric(
@@ -1941,6 +1945,21 @@ class CaseModeller:
                     / valid_tonnes
                     if valid_tonnes > Optimizer.SOLUTION_TOLERANCE
                     else None
+                )
+
+            for contribution_column in [
+                column for column in group.columns
+                if str(column).startswith("custom_constraint_")
+                and str(column).endswith((
+                    "_source_numerator_contribution",
+                    "_source_denominator_contribution",
+                ))
+            ]:
+                values = pd.to_numeric(
+                    group[contribution_column], errors="coerce"
+                )
+                record[contribution_column] = (
+                    values.sum(min_count=1) if values.notna().any() else None
                 )
 
             grouped_records.append(record)

@@ -15677,6 +15677,47 @@ class UserInputs(QMainWindow):
             return f"{numeric_value:,.0f}"
         return f"{numeric_value:.2f}"
 
+    def optimisation_snapshot_column_label(self, column):
+        """Return audit-friendly labels without changing database field IDs."""
+        raw = str(column)
+        if raw.startswith("source_property_"):
+            property_name = raw.removeprefix("source_property_")
+            suffixes = (
+                ("_opening_balance", "Opening Balance"),
+                ("_actual_depletion", "Actual Depletion"),
+                ("_closing_balance", "Closing Balance"),
+            )
+            for suffix, label in suffixes:
+                if property_name.endswith(suffix):
+                    name = property_name[:-len(suffix)].replace("_", " ").title()
+                    return f"{name} - {label}"
+            name = property_name.replace("_", " ").title()
+            if source_property_kind(
+                property_name, getattr(self, "source_property_kinds", {})
+            ) == "additive":
+                return f"{name} - Actual Depletion"
+            return name
+        if raw.startswith("custom_constraint_"):
+            suffixes = (
+                ("_source_numerator_coefficient", "Source Numerator Coefficient (per Source WMT)"),
+                ("_source_denominator_coefficient", "Source Denominator Coefficient (per Source WMT)"),
+                ("_source_numerator_contribution", "Source Numerator Contribution"),
+                ("_source_denominator_contribution", "Source Denominator Contribution"),
+                ("_source_numerator", "Source Numerator Coefficient (Legacy)"),
+                ("_source_denominator", "Source Denominator Coefficient (Legacy)"),
+                ("_actual_ratio", "Blend Actual Ratio"),
+                ("_numerator", "Blend Numerator Total"),
+                ("_denominator", "Blend Denominator Total"),
+                ("_target_min", "Target Minimum"),
+                ("_target_max", "Target Maximum"),
+            )
+            body = raw.removeprefix("custom_constraint_")
+            for suffix, label in suffixes:
+                if body.endswith(suffix):
+                    name = body[:-len(suffix)].replace("_", " ").title()
+                    return f"{name} - {label}"
+        return raw
+
     def populate_optimisation_plan_preview(self, report):
         preview = getattr(self, "optimisation_plan_preview", None)
         if preview is None:
@@ -15685,7 +15726,10 @@ class UserInputs(QMainWindow):
         preview.clearContents()
         preview.setRowCount(min(len(report), 200))
         preview.setColumnCount(len(columns))
-        preview.setHorizontalHeaderLabels([str(column) for column in columns])
+        preview.setHorizontalHeaderLabels([
+            self.optimisation_snapshot_column_label(column)
+            for column in columns
+        ])
         for row_index, (_, row) in enumerate(report.head(200).iterrows()):
             for column_index, column in enumerate(columns):
                 preview.setItem(
@@ -15720,7 +15764,10 @@ class UserInputs(QMainWindow):
         ))
         field_list = QListWidget()
         for column in columns:
-            item = QListWidgetItem(str(column))
+            item = QListWidgetItem(
+                self.optimisation_snapshot_column_label(column)
+            )
+            item.setToolTip(str(column))
             item.setData(Qt.UserRole, column)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(

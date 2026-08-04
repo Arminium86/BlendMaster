@@ -326,10 +326,16 @@ def filter_source_properties(properties, required_keys=None) -> dict:
 
 
 def source_property_report_fields(
-    properties, prefix="source_property_", property_kinds=None
+    properties, prefix="source_property_", property_kinds=None,
+    active_fields=None,
 ) -> dict:
     """Flatten the active numeric source properties into report columns."""
-    result = {}
+    result = {
+        f"{prefix}{canonical_property_key(key)}": None
+        for key in (active_fields or [])
+        if canonical_property_key(key)
+        and source_property_kind(key, property_kinds) != "runtime"
+    }
     for raw_key, raw_value in dict(properties or {}).items():
         key = canonical_property_key(raw_key)
         if not key or source_property_kind(key, property_kinds) == "runtime":
@@ -340,6 +346,55 @@ def source_property_report_fields(
             continue
         if math.isfinite(value):
             result[f"{prefix}{key}"] = value
+    return result
+
+
+def source_property_balance_report_fields(
+    opening_properties,
+    depleted_properties,
+    active_fields=None,
+    prefix="source_property_",
+    property_kinds=None,
+) -> dict:
+    """Expose opening, depleted and closing balances for additive fields.
+
+    ``source_property_<field>`` remains the amount depleted by the current
+    solver transaction for backwards compatibility.  These explicit audit
+    columns make that meaning unambiguous and keep configured-but-unmapped
+    fields visible as blank columns.
+    """
+    opening = dict(opening_properties or {})
+    depleted = dict(depleted_properties or {})
+    selected_keys = (
+        set(opening) | set(depleted)
+        if active_fields is None else active_fields
+    )
+    keys = {
+        canonical_property_key(key)
+        for key in selected_keys
+        if canonical_property_key(key)
+    }
+    result = {}
+    def finite_number(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    for key in sorted(keys):
+        if source_property_kind(key, property_kinds) != "additive":
+            continue
+        opening_value = finite_number(opening.get(key))
+        depleted_value = finite_number(depleted.get(key))
+        result[f"{prefix}{key}"] = depleted_value
+        result[f"{prefix}{key}_opening_balance"] = opening_value
+        result[f"{prefix}{key}_actual_depletion"] = depleted_value
+        result[f"{prefix}{key}_closing_balance"] = (
+            max(opening_value - depleted_value, 0.0)
+            if opening_value is not None and depleted_value is not None
+            else None
+        )
     return result
 
 

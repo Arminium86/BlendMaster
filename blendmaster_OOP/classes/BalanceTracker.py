@@ -72,11 +72,33 @@ class BalanceTracker:
         }
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
         self.balance_copy = self.balance.copy()
+        for name in self.source_properties:
+            self.source_properties[name] = self._synchronise_rom_wmt_properties(
+                name, self.source_properties[name], self.balance_copy.get(name)
+            )
         self.build_report = [] # Store transactions that meet the condition
         self.direct_tipped_tonnes_by_payload = {}
         self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
         self.total_AMT_stockpile_balances = {}
         self.populate_total_AMT_stockpile_balances()
+
+    def _synchronise_rom_wmt_properties(self, name, properties, balance=None):
+        """Make canonical ROM WMT properties agree with the tracked balance."""
+        result = dict(properties or {})
+        try:
+            current_balance = max(float(
+                self.balance_copy.get(name, 0) if balance is None else balance
+            ), 0.0)
+        except (TypeError, ValueError):
+            current_balance = 0.0
+        for key in ("source_wmt", "modelled_rom_wmt"):
+            if (
+                self.required_source_property_keys is None
+                or key in self.required_source_property_keys
+                or key in result
+            ):
+                result[key] = current_balance
+        return result
         
     def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
         """Update balance and grades after each optimisation step."""
@@ -108,6 +130,9 @@ class BalanceTracker:
                         if opening_balance > 0 else 0,
                         self.source_property_kinds,
                     )
+                )
+                self.source_properties[name] = self._synchronise_rom_wmt_properties(
+                    name, self.source_properties[name], closing_balance
                 )
        
         if not expit_payload_transactions.empty:
@@ -210,6 +235,9 @@ class BalanceTracker:
                         
                         # Update the balance
                         self.balance_copy[name] = updated_balance
+                        self.source_properties[name] = self._synchronise_rom_wmt_properties(
+                            name, self.source_properties[name], updated_balance
+                        )
                         
                         # Add the used transaction to the tracked list
                         self.build_report.append({
@@ -361,6 +389,9 @@ class BalanceTracker:
                         self.source_property_kinds,
                     )
                 )
+                partially_depleted_properties = self._synchronise_rom_wmt_properties(
+                    name, partially_depleted_properties, current_hex['balance']
+                )
             self.total_AMT_stockpile_balances[name] = max(
                 self.total_AMT_stockpile_balances.get(name, 0) - depleted_tonnes,
                 0
@@ -396,8 +427,17 @@ class BalanceTracker:
                     self.source_properties[name],
                     self.required_source_property_keys,
                 )
+            self.source_properties[name] = self._synchronise_rom_wmt_properties(
+                name, self.source_properties[name], self.balance_copy[name]
+            )
         else:
             self.balance_copy[name] = 0
+            self.source_properties[name] = scale_additive_source_properties(
+                self.source_properties.get(name), 0, self.source_property_kinds
+            )
+            self.source_properties[name] = self._synchronise_rom_wmt_properties(
+                name, self.source_properties[name], 0
+            )
 
     def return_total_AMT_stockpile_balances(self):
         return self.total_AMT_stockpile_balances

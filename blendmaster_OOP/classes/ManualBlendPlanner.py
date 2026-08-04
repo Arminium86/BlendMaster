@@ -824,6 +824,18 @@ class ManualBlendPlanner:
                 source_row[
                     f"custom_constraint_{key}_source_denominator"
                 ] = denominator
+                source_row[
+                    f"custom_constraint_{key}_source_numerator_coefficient"
+                ] = numerator
+                source_row[
+                    f"custom_constraint_{key}_source_denominator_coefficient"
+                ] = denominator
+                source_row[
+                    f"custom_constraint_{key}_source_numerator_contribution"
+                ] = numerator * tonnes
+                source_row[
+                    f"custom_constraint_{key}_source_denominator_contribution"
+                ] = denominator * tonnes
             minimum, maximum = self._custom_constraint_bounds(
                 definition, period
             )
@@ -855,6 +867,10 @@ class ManualBlendPlanner:
                 f"{prefix}_target_max",
                 f"{prefix}_source_numerator",
                 f"{prefix}_source_denominator",
+                f"{prefix}_source_numerator_coefficient",
+                f"{prefix}_source_denominator_coefficient",
+                f"{prefix}_source_numerator_contribution",
+                f"{prefix}_source_denominator_contribution",
             ])
         return columns
 
@@ -1035,6 +1051,9 @@ class ManualBlendPlanner:
                     **source_property_report_fields(
                         visible_source_properties,
                         property_kinds=self.source_property_kinds,
+                        active_fields=(
+                            self.calendar_inputs.get("solver_config") or {}
+                        ).get("optimisation_source_property_fields"),
                     ),
                     "source_blend_ratio": (
                         amount / total_tonnes if total_tonnes > 0 else 0

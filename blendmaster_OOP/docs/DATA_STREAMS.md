@@ -61,6 +61,12 @@ is checked automatically because it is part of the same calculation. Other
 unchecked properties stop at Database View. The five effective selected grades
 are always sent to optimisation independently of this checkbox.
 
+The checkbox does not manufacture a value or mapping. For example,
+`modelled_rom_dmt` must be mapped to the applicable Inventory/AMT `feed_dmt`
+field. If it is checked but unmapped, its report columns are deliberately
+present and blank; a custom constraint that requires it cannot obtain a valid
+coefficient. This makes the data gap distinguishable from a genuine zero.
+
 **Map Fields** maps raw Inventory, AMT and APS columns onto the canonical rows.
 Choose a source family (and, for APS, an optional brand), then double-click or
 drag an available raw field into **Source Field**. The page owns the 24HR
@@ -546,3 +552,32 @@ so, for example, `source_property_prod1_wmt` is the allocated Product 1 WMT,
 not the whole opening-source total. Unchecked physical properties remain
 available in Database View but are deliberately omitted from solve state and
 reports to avoid unnecessary build, depletion and database work.
+
+For each active additive field, reports expose the full transaction audit:
+
+- `source_property_<field>_opening_balance`: the amount available to that
+  solver event before selection;
+- `source_property_<field>_actual_depletion`: the amount consumed by the
+  transaction, proportionally depleted against ROM WMT;
+- `source_property_<field>_closing_balance`: opening less actual depletion;
+- `source_property_<field>`: retained compatibility name for the actual
+  depletion, not the opening balance.
+
+`source_wmt` and `modelled_rom_wmt` are canonical ROM WMT and are synchronized
+to the balance tracker at source initialization, after builds, after ordinary
+reclaims and whenever the active AMT chunk changes. Other additive fields,
+including ROM DMT, product mass, ore-type tonnes and ultrafines tonnes, retain
+their mapped opening ratios and deplete in proportion to actual ROM WMT.
+
+Custom-constraint report fields have three distinct levels. A
+`source_*_coefficient` is the expression value per source WMT used by the
+linear solver. A `source_*_contribution` is that coefficient multiplied by the
+source's actual selected WMT. The unqualified `numerator` and `denominator`
+are whole-blend totals (and are consequently repeated on each row of the same
+blend); `actual_ratio` is their ratio. Legacy `source_numerator` and
+`source_denominator` columns are retained as coefficient aliases. Thus, for a
+denominator of `modelled_rom_wmt`, each source coefficient is normally 1.0,
+each source denominator contribution is its actual depleted ROM WMT, and the
+blend denominator is the sum of all source contributions. It should not be
+expected to equal one row's `source_property_modelled_rom_wmt` unless the
+blend uses only that source.
