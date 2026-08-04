@@ -9,6 +9,7 @@ blendmaster_OOP/input/
 blendmaster_OOP/tests/
 *.spec
 *.db
+*.prj
 *.txt
 blendmaster_OOP/.blendmaster_agent_bridge/
 agent_runs/

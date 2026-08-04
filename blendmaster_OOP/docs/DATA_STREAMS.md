@@ -360,13 +360,15 @@ compact:
 - every `selected_<brand>_<analyte>` field, which is the effective grade vector
   after stream and per-analyte fallback resolution.
 
-Use **Select All** to expose reconciliation, lineage, coverage, intermediate
-streams and extended source properties, or **Defaults** to return to the compact
-view. Searching only filters the checklist; it does not remove fields from the
-underlying source record. The chosen field set is retained with scenario and
-project state. If saved fields are unavailable in a newly loaded dataset they
-are simply omitted, while newly available fields remain accessible through the
-selector.
+Use **Select All** to expose reconciliation, lineage, intermediate streams and
+extended source properties, or **Defaults** to return to the compact view.
+Coverage rows are audit fields and are hidden from the checklist by default;
+enable **Show coverage fields (audit / troubleshooting)** to make every
+`*_coverage_pct` row selectable. This switch changes presentation only and is
+retained with scenario and project state. Searching only filters the checklist;
+it does not remove fields from the underlying source record. If saved fields
+are unavailable in a newly loaded dataset they are simply omitted, while newly
+available fields remain accessible through the selector.
 
 **Choose Sources...** opens a second searchable checklist. All sources are
 selected by default; clear any inventory stockpile, AMT chunk or APS grade block
@@ -427,8 +429,8 @@ the available analytes from being shown.
 | `lineage_unmatched_final_wmt` | Final WMT represented by the unmatched lineage share. | Non-AMT sources; zero is preferred for AMT. |
 | `lineage_coverage_pct` | Percentage of lineage inbound WMT attributed through EXPIT or the AMT truck list. | Non-AMT sources or a hex with no inbound lineage. |
 | `grade_block_count` | Number of distinct resolved grade-block identities contributing to the hex, excluding `UNMATCHED`. | Non-AMT sources. |
-| `modelled_<property>` | Grade-block-lineage-weighted modelled chemistry or physical property. | Non-AMT sources, or when no contributing lineage supplies that property. |
-| `modelled_<property>_coverage_pct` | Percentage of final hex tonnes supporting the corresponding modelled property. | Non-AMT sources or a zero-tonne hex. |
+| `<property>` | Canonical grade-block-lineage-weighted physical property, using the same name as its Inventory/APS counterpart; examples include `oretype_bid_wmt` and `prod1_minus_1mm_wmt`. Database View does not add a second `modelled_` prefix. | Non-AMT sources, or when no contributing lineage supplies that property. |
+| `<property>_coverage_pct` | Percentage of final hex tonnes supporting the corresponding property. Hidden by default; enable the coverage checkbox in **Choose Fields...** for audit/troubleshooting. | Non-AMT sources or a zero-tonne hex. |
 | `cb_split_method` | Whether the CB split was grade-block-derived, unavailable, calculated with a back-calculated lump grade, or calculated with the equal-grade fallback. | Non-CB sources. |
 | `cb_split_warning` | Warning produced by the optional calculated CB split, including unavailable independent fines assays or a negative back-calculated lump assay. | Blank for a complete derived split or a calculated split requiring no warning. |
 

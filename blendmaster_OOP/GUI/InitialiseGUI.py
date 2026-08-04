@@ -1364,6 +1364,7 @@ class UserInputs(QMainWindow):
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
             "database_view_selected_columns", "database_view_known_columns",
+            "database_view_show_coverage_fields",
             "database_view_selected_sources", "database_view_known_sources",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
@@ -1674,6 +1675,9 @@ class UserInputs(QMainWindow):
             )
             self.database_view_known_columns = copy.deepcopy(
                 state.get("database_view_known_columns")
+            )
+            self.database_view_show_coverage_fields = bool(
+                state.get("database_view_show_coverage_fields", False)
             )
             self.database_view_selected_sources = copy.deepcopy(
                 state.get("database_view_selected_sources")
@@ -3625,6 +3629,7 @@ class UserInputs(QMainWindow):
         self.database_view_snapshot_signature = None
         self.database_view_selected_columns = None
         self.database_view_known_columns = None
+        self.database_view_show_coverage_fields = False
         self.database_view_selected_sources = None
         self.database_view_known_sources = None
         self.database_view_refresh_pending = True
@@ -3772,7 +3777,51 @@ class UserInputs(QMainWindow):
         warnings = [str(value) for value in (source_warnings or []) if str(value)]
         warnings.extend(fallback_messages)
         record["warnings"] = "; ".join(dict.fromkeys(warnings))
+        # The field registry and the grade-stream payload describe the same
+        # five grade vectors.  Database View presents the latter
+        # under one canonical ``grade_<stream>_*`` family rather than also
+        # exposing misleading aliases such as ``modelled_product_fe``.
+        for stream in STREAMS:
+            for analyte in ANALYTES:
+                record.pop(f"{stream}_{analyte}", None)
         return record
+
+    @staticmethod
+    def database_view_modelled_property_audit(values, coverage):
+        """Return one canonical Database View field per AMT property.
+
+        AMT properties are already modelled values.  Prefixing every key with
+        ``modelled_`` produced duplicate and sometimes double-prefixed names
+        (for example ``modelled_modelled_product_fe``).  Physical properties
+        retain their common inventory/AMT key, while grade-stream properties
+        use the same ``grade_<stream>_<analyte>`` family as all other sources.
+        """
+        fields = {}
+        grade_pattern = re.compile(
+            r"^(insitu|modelled_rom|adjusted_rom|modelled_product|adjusted_product)_"
+            r"(fe|si|al|p|mn)$"
+        )
+
+        def audit_name(raw_name):
+            name = canonical_property_key(raw_name)
+            if not name:
+                return ""
+            match = grade_pattern.fullmatch(name)
+            return f"grade_{name}" if match else name
+
+        for raw_name, value in (values or {}).items():
+            name = audit_name(raw_name)
+            if name:
+                fields[name] = value
+        for raw_name, value in (coverage or {}).items():
+            name = audit_name(raw_name)
+            if not name:
+                continue
+            percentage = numeric(value)
+            fields[f"{name}_coverage_pct"] = (
+                percentage * 100.0 if percentage is not None else None
+            )
+        return fields
 
     def database_view_stockpile_rows(self):
         records = []
@@ -3860,20 +3909,9 @@ class UserInputs(QMainWindow):
                         modelled_payload.get("coverage", {})
                         if isinstance(modelled_payload, dict) else {}
                     )
-                    property_audit = {
-                        name: value for name, value in modelled_values.items()
-                    }
-                    property_audit.update({
-                        f"modelled_{name}": value
-                        for name, value in modelled_values.items()
-                    })
-                    property_audit.update({
-                        f"modelled_{name}_coverage_pct": (
-                            numeric(value) * 100.0
-                            if numeric(value) is not None else None
-                        )
-                        for name, value in modelled_coverage.items()
-                    })
+                    property_audit = self.database_view_modelled_property_audit(
+                        modelled_values, modelled_coverage
+                    )
                     records.append(self.database_view_record_with_streams(
                         {
                             "source_type": "AMT Chunk",
@@ -4464,7 +4502,11 @@ class UserInputs(QMainWindow):
             "Database View could not be prepared."
         )
 
-    def database_view_all_headers(self):
+    @staticmethod
+    def database_view_is_coverage_field(header):
+        return str(header or "").lower().endswith("_coverage_pct")
+
+    def database_view_all_headers(self, include_coverage=None):
         fixed = [
             "source_type", "source_id", "parent_stockpile",
             "build_or_chunk", "sequence", "tonnes", "selected_stream",
@@ -4478,7 +4520,17 @@ class UserInputs(QMainWindow):
             for key in record
             if key not in fixed and key != "warnings"
         })
-        return [*fixed, *dynamic, "warnings"]
+        headers = [*fixed, *dynamic, "warnings"]
+        if include_coverage is None:
+            include_coverage = bool(
+                getattr(self, "database_view_show_coverage_fields", False)
+            )
+        if not include_coverage:
+            headers = [
+                header for header in headers
+                if not self.database_view_is_coverage_field(header)
+            ]
+        return headers
 
     @staticmethod
     def default_database_view_columns(headers):
@@ -4541,7 +4593,7 @@ class UserInputs(QMainWindow):
         )
 
     def choose_database_view_columns(self):
-        all_headers = self.database_view_all_headers()
+        all_headers = self.database_view_all_headers(include_coverage=True)
         if not all_headers:
             return
         selected = set(
@@ -4554,6 +4606,14 @@ class UserInputs(QMainWindow):
         layout = QVBoxLayout(dialog)
         search = QLineEdit()
         search.setPlaceholderText("Type to find a field...")
+        coverage_checkbox = QCheckBox("Show coverage fields (audit / troubleshooting)")
+        coverage_checkbox.setChecked(bool(
+            getattr(self, "database_view_show_coverage_fields", False)
+        ))
+        coverage_checkbox.setToolTip(
+            "Coverage is the percentage of source mass for which the field "
+            "could be derived. It does not change optimisation inputs."
+        )
         field_list = QListWidget()
         for header in all_headers:
             item = QListWidgetItem(self.user_facing_field_label(header))
@@ -4568,9 +4628,14 @@ class UserInputs(QMainWindow):
 
         def filter_fields(text):
             needle = str(text or "").strip().lower()
+            show_coverage = coverage_checkbox.isChecked()
             for index in range(field_list.count()):
                 item = field_list.item(index)
-                item.setHidden(bool(needle and needle not in item.text().lower()))
+                header = item.data(Qt.UserRole)
+                item.setHidden(
+                    (not show_coverage and self.database_view_is_coverage_field(header))
+                    or bool(needle and needle not in item.text().lower())
+                )
 
         def set_checked(headers_to_check):
             headers_to_check = set(headers_to_check)
@@ -4582,14 +4647,23 @@ class UserInputs(QMainWindow):
 
         search.textChanged.connect(filter_fields)
         layout.addWidget(search)
+        layout.addWidget(coverage_checkbox)
         layout.addWidget(field_list, stretch=1)
+        coverage_checkbox.toggled.connect(
+            lambda _checked: filter_fields(search.text())
+        )
+        filter_fields(search.text())
         actions = QHBoxLayout()
         defaults_button = QPushButton("Defaults")
         defaults_button.clicked.connect(
             lambda: set_checked(self.default_database_view_columns(all_headers))
         )
         all_button = QPushButton("Select All")
-        all_button.clicked.connect(lambda: set_checked(all_headers))
+        all_button.clicked.connect(lambda: set_checked([
+            header for header in all_headers
+            if coverage_checkbox.isChecked()
+            or not self.database_view_is_coverage_field(header)
+        ]))
         apply_button = QPushButton("Apply")
         cancel_button = QPushButton("Cancel")
         apply_button.clicked.connect(dialog.accept)
@@ -4610,6 +4684,7 @@ class UserInputs(QMainWindow):
         self.database_view_selected_columns = (
             chosen or self.default_database_view_columns(all_headers)
         )
+        self.database_view_show_coverage_fields = coverage_checkbox.isChecked()
         self.database_view_known_columns = list(all_headers)
         self.populate_database_view_table()
         self.save_active_scenario_state()
@@ -5461,6 +5536,8 @@ class UserInputs(QMainWindow):
         labels = {
             "feed_wmt": "ROM / opening stockpile WMT",
             "feed_dmt": "ROM / opening stockpile DMT",
+            "tonnes": "Insitu / opening source WMT",
+            "source_wmt": "Insitu / source WMT",
         }
         label = labels.get(raw.strip().lower())
         return f"{label} ({raw})" if label else raw
@@ -18946,6 +19023,9 @@ class UserInputs(QMainWindow):
                 "database_view_known_columns": copy.deepcopy(
                     getattr(self, "database_view_known_columns", None)
                 ),
+                "database_view_show_coverage_fields": bool(
+                    getattr(self, "database_view_show_coverage_fields", False)
+                ),
                 "database_view_selected_sources": copy.deepcopy(
                     getattr(self, "database_view_selected_sources", None)
                 ),
@@ -19388,6 +19468,9 @@ class UserInputs(QMainWindow):
         )
         self.database_view_known_columns = copy.deepcopy(
             loaded_state.get("database_view_known_columns")
+        )
+        self.database_view_show_coverage_fields = bool(
+            loaded_state.get("database_view_show_coverage_fields", False)
         )
         self.database_view_selected_sources = copy.deepcopy(
             loaded_state.get("database_view_selected_sources")
