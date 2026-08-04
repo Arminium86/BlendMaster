@@ -7,9 +7,10 @@ from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.CrusherTarget import CrusherTarget
-from classes.GradeStreams import grade_stream_audit_fields
+from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
 from classes.CustomConstraints import (
     custom_constraint_property_keys,
+    expand_required_property_keys,
     filter_source_properties,
     source_property_kind,
 )
@@ -131,7 +132,28 @@ class CaseModeller:
         required_source_property_keys = custom_constraint_property_keys(
             constraint_definitions
         )
+        required_source_property_keys.update(
+            self.solver_config.get("optimisation_source_property_fields") or []
+        )
+        selected_stream = str(
+            self.solver_config.get("selected_data_stream") or ""
+        ).strip().lower()
+        if selected_stream in STREAMS:
+            required_source_property_keys.update(
+                f"{selected_stream}_{analyte}" for analyte in ANALYTES
+            )
+        source_property_kinds = dict(
+            self.solver_config.get("source_property_kinds") or {}
+        )
+        source_property_weights = dict(
+            self.solver_config.get("source_property_weights") or {}
+        )
+        required_source_property_keys = expand_required_property_keys(
+            required_source_property_keys, source_property_weights
+        )
         for source in [*stockpiles, *grade_blocks]:
+            source.source_property_kinds = source_property_kinds
+            source.source_property_weights = source_property_weights
             source.source_properties = filter_source_properties(
                 getattr(source, "source_properties", None),
                 required_source_property_keys,
@@ -142,6 +164,8 @@ class CaseModeller:
             self.period_tracker,
             hex_sequence_table,
             required_source_property_keys=required_source_property_keys,
+            source_property_kinds=source_property_kinds,
+            source_property_weights=source_property_weights,
         )
         self.expit_payload_transactions = expit_payload_transactions
         if (
@@ -1856,16 +1880,34 @@ class CaseModeller:
                 values = pd.to_numeric(
                     group[property_column], errors="coerce"
                 )
+                property_name = str(property_column).removeprefix(
+                    "source_property_"
+                )
+                solver_config = getattr(self, "solver_config", {}) or {}
                 if source_property_kind(
-                    str(property_column).removeprefix("source_property_")
+                    property_name,
+                    solver_config.get("source_property_kinds"),
                 ) == "additive":
                     record[property_column] = (
                         values.sum(min_count=1)
                         if values.notna().any() else None
                     )
                     continue
+                weight_name = (
+                    solver_config.get("source_property_weights") or {}
+                ).get(property_name)
+                weight_column = (
+                    f"source_property_{weight_name}" if weight_name else ""
+                )
+                if weight_name and weight_column not in group.columns:
+                    record[property_column] = None
+                    continue
                 weights = pd.to_numeric(
-                    group["source_actual_tonnes"], errors="coerce"
+                    group[
+                        weight_column
+                        if weight_name else "source_actual_tonnes"
+                    ],
+                    errors="coerce",
                 ).fillna(0)
                 valid = values.notna() & (
                     weights > Optimizer.SOLUTION_TOLERANCE

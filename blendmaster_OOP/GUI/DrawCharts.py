@@ -24,6 +24,7 @@ from classes.GradeStreams import (
     UNBRANDED,
     format_grade_stream_vector,
     normalise_grade_streams,
+    reweight_grade_streams_from_properties,
     weighted_merge_grade_streams,
 )
 from classes.AMTChunking import (
@@ -31,7 +32,11 @@ from classes.AMTChunking import (
     DEFAULT_AMT_TARGET_CHUNK_HOURS,
     calculate_amt_chunk_plan,
 )
-from classes.CustomConstraints import source_property_kind
+from classes.CustomConstraints import (
+    canonical_property_key,
+    merge_source_properties,
+    source_property_kind,
+)
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -339,7 +344,7 @@ class DrawStockProfiles:
             fig.update_traces(
                 line=dict(color=stockpile_color, width=2.4),
                 fillcolor=self.hex_to_rgba(stockpile_color, 0.42),
-                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Balance: %{y:,.2f} WMT<extra></extra>",
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Balance: %{y:,.0f} WMT<extra></extra>",
             )
             fig.update_xaxes(
                 showgrid=True,
@@ -554,12 +559,12 @@ class DrawStockProfiles:
                 customdata=customdata,
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                    "%{customdata[0]} tonnes: %{y:,.2f} WMT<br>"
-                    "Target tonnes: %{customdata[5]:,.2f} WMT<br>"
+                    "%{customdata[0]} tonnes: %{y:,.0f} WMT<br>"
+                    "Target tonnes: %{customdata[5]:,.0f} WMT<br>"
                     "Steady State: %{customdata[1]}<br>"
                     "Blend ID: %{customdata[2]}<br>"
                     "Duration: %{customdata[3]:.2f} hrs<br>"
-                    "Added in state: %{customdata[4]:,.2f} WMT<br>"
+                    "Added in state: %{customdata[4]:,.0f} WMT<br>"
                     "Fe: %{customdata[6]:.2f}% (target %{customdata[7]:.2f}-%{customdata[8]:.2f}%)<br>"
                     "Si: %{customdata[9]:.2f}% (target %{customdata[10]:.2f}-%{customdata[11]:.2f}%)<br>"
                     "Al: %{customdata[12]:.2f}% (target %{customdata[13]:.2f}-%{customdata[14]:.2f}%)<br>"
@@ -575,7 +580,7 @@ class DrawStockProfiles:
                 name="Target Tonnes",
                 mode="lines",
                 line=dict(color="#dc2626", width=2.5),
-                hovertemplate="Target tonnes: %{y:,.2f} WMT<extra></extra>",
+                hovertemplate="Target tonnes: %{y:,.0f} WMT<extra></extra>",
             ))
             fig.update_layout(
                 height=260,
@@ -744,8 +749,8 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Stockpile Feed Rate: %{y:,.1f} t/h<br>"
-                "Stockpile Feed Tonnes: %{customdata[2]:,.2f} WMT<br>"
-                "Total Crusher Tonnes: %{customdata[3]:,.2f} WMT<br>"
+                "Stockpile Feed Tonnes: %{customdata[2]:,.0f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.0f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
                 "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
                 "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
@@ -769,8 +774,8 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Direct Tip Rate: %{y:,.1f} t/h<br>"
-                "Direct Tip Tonnes: %{customdata[2]:,.2f} WMT<br>"
-                "Total Crusher Tonnes: %{customdata[3]:,.2f} WMT<br>"
+                "Direct Tip Tonnes: %{customdata[2]:,.0f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[3]:,.0f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[4]:,.1f} t/h<br>"
                 "Fe: %{customdata[5]:.2f}% (target %{customdata[6]:.2f}-%{customdata[7]:.2f}%)<br>"
                 "Si: %{customdata[8]:.2f}% (target %{customdata[9]:.2f}-%{customdata[10]:.2f}%)<br>"
@@ -792,7 +797,7 @@ class DrawStockProfiles:
                 "End: %{customdata[0]}<br>"
                 "Duration: %{customdata[1]:.2f} hrs<br>"
                 "Crusher Rate Input: %{y:,.1f} t/h<br>"
-                "Total Crusher Tonnes: %{customdata[2]:,.2f} WMT<br>"
+                "Total Crusher Tonnes: %{customdata[2]:,.0f} WMT<br>"
                 "Actual Crusher Rate: %{customdata[3]:,.1f} t/h<br>"
                 "Fe: %{customdata[4]:.2f}% (target %{customdata[5]:.2f}-%{customdata[6]:.2f}%)<br>"
                 "Si: %{customdata[7]:.2f}% (target %{customdata[8]:.2f}-%{customdata[9]:.2f}%)<br>"
@@ -902,9 +907,9 @@ class DrawStockProfiles:
             customdata=customdata,
             hovertemplate=(
                 "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                "Sent to Stockpile at this time: %{customdata[0]:,.2f} WMT<br>"
-                "Cumulative Sent to Stockpile: %{customdata[2]:,.2f} WMT<br>"
-                "Total Sent: %{customdata[4]:,.2f} WMT<extra></extra>"
+                "Sent to Stockpile at this time: %{customdata[0]:,.0f} WMT<br>"
+                "Cumulative Sent to Stockpile: %{customdata[2]:,.0f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.0f} WMT<extra></extra>"
             ),
         ))
         fig.add_trace(go.Scatter(
@@ -918,9 +923,9 @@ class DrawStockProfiles:
             customdata=customdata,
             hovertemplate=(
                 "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
-                "Sent to Crusher at this time: %{customdata[1]:,.2f} WMT<br>"
-                "Cumulative Sent to Crusher: %{customdata[3]:,.2f} WMT<br>"
-                "Total Sent: %{customdata[4]:,.2f} WMT<extra></extra>"
+                "Sent to Crusher at this time: %{customdata[1]:,.0f} WMT<br>"
+                "Cumulative Sent to Crusher: %{customdata[3]:,.0f} WMT<br>"
+                "Total Sent: %{customdata[4]:,.0f} WMT<extra></extra>"
             ),
         ))
         fig.update_layout(
@@ -1166,7 +1171,7 @@ class DrawStockProfiles:
     @staticmethod
     def summary_chip(label, value, background_color, text_color):
         return html.Span(
-            f"{label}: {value:,.2f} WMT",
+            f"{label}: {value:,.0f} WMT",
             style={
                 "backgroundColor": background_color,
                 "color": text_color,
@@ -1509,7 +1514,7 @@ class DrawGanttChart:
                         ) +
                         f"Actual Direct Tip Ratio: {float(row['actual_direct_tip_ratio']):.2f}<br>"
                         f"Crusher Rate Output: {float(row['crusher_rate_output']):.1f}<br>"  # Format to 1 decimal point
-                        f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):.2f}<br>"
+                        f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):,.0f}<br>"
                         f"Crusher Actual Grade Fe: {float(row['crusher_actual_grade_fe']):.2f}%<br>"  # Format as percent
                         f"Crusher Actual Grade Si: {float(row['crusher_actual_grade_si']):.2f}%<br>"
                         f"Crusher Actual Grade Al: {float(row['crusher_actual_grade_al']):.2f}%<br>"
@@ -1909,13 +1914,21 @@ class DrawGanttChart:
             for column, decimals in {
                 "steady_state_duration": 2,
                 "actual_direct_tip_ratio": 2,
-                "crusher_actual_tonnes": 2,
+                "crusher_actual_tonnes": 0,
                 "crusher_rate_output": 1,
             }.items():
                 if column in data:
                     data[column] = pd.to_numeric(
                         data[column], errors="coerce"
                     ).round(decimals)
+            if "crusher_actual_tonnes" in data:
+                data["crusher_actual_tonnes"] = data[
+                    "crusher_actual_tonnes"
+                ].apply(
+                    lambda value: ""
+                    if pd.isna(value)
+                    else f"{float(value):,.0f}"
+                )
             for column in [
                 value for value in data.columns
                 if value.startswith("source_grade_")
@@ -2085,12 +2098,18 @@ class DrawAMTStockpile:
         "modelled_product_grades", "adjusted_product_grades",
     ]
 
-    def __init__(self, db_path, port, hex_sequence_table, chunk_settings=None):
+    def __init__(
+        self, db_path, port, hex_sequence_table, chunk_settings=None,
+        source_property_kinds=None,
+        source_property_weights=None,
+    ):
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = hex_sequence_table or []
         self.chunk_settings = chunk_settings or {}
+        self.source_property_kinds = dict(source_property_kinds or {})
+        self.source_property_weights = dict(source_property_weights or {})
         self.direction_clicks = {}
         self.reclaim_directions = {}
         self.cut_directions = {}
@@ -2139,11 +2158,14 @@ class DrawAMTStockpile:
         normalized_column = str(column or "").strip().lower()
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if (
-                normalized_column in {
-                    "balance", "chunk_size", "amt_total_wmt",
-                    "inventory_total_wmt", "lineage_coverage_pct",
-                    "lineage_unmatched_wmt", "geometry_quarantine_wmt",
+                source_property_kind(normalized_column) == "additive"
+                or normalized_column in {
+                    "balance", "chunk_size", "tonnes", "payload"
                 }
+            ):
+                return f"{float(value):,.0f}"
+            if (
+                normalized_column == "lineage_coverage_pct"
                 or normalized_column.startswith("grade_")
             ):
                 return f"{float(value):.2f}"
@@ -2434,28 +2456,28 @@ class DrawAMTStockpile:
             footprint, "raw_signed_amt_wmt", None
         )
         inventory_display = (
-            f"{inventory_total:,.2f} t"
+            f"{inventory_total:,.0f} t"
             if inventory_total is not None else "Unavailable"
         )
         self.footprint_geometry_rows(footprint, positive_only=True)
         geometry = self.geometry_outliers.get(footprint, {})
         geometry_display = (
             f" | Quarantined Coordinates: {geometry.get('outlier_count', 0)} "
-            f"hex(es), {geometry.get('outlier_wmt', 0.0):,.2f} t"
+            f"hex(es), {geometry.get('outlier_wmt', 0.0):,.0f} t"
         )
         if geometry.get("missing_position_count", 0):
             geometry_display += (
                 f" | Missing Coordinates: {geometry['missing_position_count']} "
-                f"hex(es), {geometry.get('missing_position_wmt', 0.0):,.2f} t"
+                f"hex(es), {geometry.get('missing_position_wmt', 0.0):,.0f} t"
             )
         return (
-            f"Raw Signed AMT WMT: {raw_signed_total:,.2f} t | "
+            f"Raw Signed AMT WMT: {raw_signed_total:,.0f} t | "
             if raw_signed_total is not None else "Raw Signed AMT WMT: Unavailable | "
         ) + (
-            f"AMT Total WMT: {amt_total:,.2f} t (Spatially Reconciled) | "
+            f"AMT Total WMT: {amt_total:,.0f} t (Spatially Reconciled) | "
             f"Inventory Stockpile Total WMT: {inventory_display} | "
             f"Calculated Chunks: {plan['chunk_count']} | "
-            f"Calculated Chunk Size: {plan['chunk_size']:,.2f} t | "
+            f"Calculated Chunk Size: {plan['chunk_size']:,.0f} t | "
             f"Resulting Hours/Chunk: {plan['resulting_chunk_hours']:.2f}"
             f"{geometry_display}"
         )
@@ -2570,9 +2592,11 @@ class DrawAMTStockpile:
         chunk_id = f"{footprint}_CHUNK_{sequence:03d}"
         weighted_grades = {}
         weighted_streams = None
+        stream_properties = {}
         accumulated_tonnes = 0.0
         property_mass = defaultdict(float)
         property_tonnes = defaultdict(float)
+        property_coverage_tonnes = defaultdict(float)
         additive_properties = set()
         lineage_keys = set()
         lineage_matched_final_wmt = 0.0
@@ -2591,12 +2615,6 @@ class DrawAMTStockpile:
 
         for row in chunk_rows:
             row_tonnes = row["_positive_balance"]
-            weighted_streams = weighted_merge_grade_streams(
-                weighted_streams,
-                accumulated_tonnes,
-                row.get("grade_streams"),
-                row_tonnes,
-            )
             property_payload = row.get("modelled_properties") or {}
             values = property_payload.get("values", {}) if isinstance(
                 property_payload, dict
@@ -2604,6 +2622,32 @@ class DrawAMTStockpile:
             coverage = property_payload.get("coverage", {}) if isinstance(
                 property_payload, dict
             ) else {}
+            canonical_values = {
+                canonical_property_key(name): raw
+                for name, raw in values.items()
+            }
+            row_properties = {
+                name: value
+                for name, raw in canonical_values.items()
+                if (value := self.to_float(raw, None)) is not None
+            }
+            weighted_streams = weighted_merge_grade_streams(
+                weighted_streams,
+                accumulated_tonnes,
+                row.get("grade_streams"),
+                row_tonnes,
+                stream_properties,
+                row_properties,
+                vars(self).get("source_property_weights", {}),
+            )
+            stream_properties = merge_source_properties(
+                stream_properties,
+                accumulated_tonnes,
+                row_properties,
+                row_tonnes,
+                vars(self).get("source_property_kinds", {}),
+                vars(self).get("source_property_weights", {}),
+            )
             for property_name, raw_value in values.items():
                 value = self.to_float(raw_value, None)
                 covered_fraction = self.to_float(
@@ -2614,15 +2658,36 @@ class DrawAMTStockpile:
                 if covered_fraction is None:
                     covered_fraction = 1.0
                 covered_fraction = min(max(covered_fraction, 0.0), 1.0)
-                denominator = row_tonnes * covered_fraction
-                if denominator <= 0:
-                    continue
-                if source_property_kind(property_name) == "additive":
+                coverage_tonnes = row_tonnes * covered_fraction
+                if source_property_kind(
+                    property_name,
+                    vars(self).get("source_property_kinds", {}),
+                ) == "additive":
+                    if coverage_tonnes <= 0:
+                        continue
                     property_mass[property_name] += value
                     additive_properties.add(property_name)
+                    denominator = coverage_tonnes
                 else:
+                    weight_field = canonical_property_key(
+                        vars(self).get("source_property_weights", {}).get(
+                            canonical_property_key(property_name), ""
+                        )
+                    )
+                    if weight_field:
+                        weight_value = self.to_float(
+                            canonical_values.get(weight_field), None
+                        )
+                        if weight_value is None:
+                            continue
+                        denominator = max(weight_value, 0.0) * covered_fraction
+                    else:
+                        denominator = coverage_tonnes
+                    if denominator <= 0:
+                        continue
                     property_mass[property_name] += value * denominator
                 property_tonnes[property_name] += denominator
+                property_coverage_tonnes[property_name] += coverage_tonnes
 
             lineage = row.get("grade_block_lineage") or []
             for contribution in lineage if isinstance(lineage, list) else []:
@@ -2661,10 +2726,14 @@ class DrawAMTStockpile:
             },
             "coverage": {
                 name: covered_tonnes / total_tonnes
-                for name, covered_tonnes in property_tonnes.items()
+                for name, covered_tonnes in property_coverage_tonnes.items()
                 if total_tonnes > 0
             },
         }
+        # Canonical weighted-average fields are the authoritative chunk values.
+        weighted_streams = reweight_grade_streams_from_properties(
+            weighted_streams, modelled_properties["values"]
+        )
         product_coverage_parts = []
         for product in (1, 2):
             values = []
@@ -2954,7 +3023,7 @@ class DrawAMTStockpile:
         message = (
             f"Generated {len(chunk_rows)} chunks for {footprint}. "
             f"Calculated target: {requested_chunk_count} chunks at "
-            f"{chunk_size:,.2f} tonnes each."
+            f"{chunk_size:,.0f} tonnes each."
         )
         if generated_chunk_count < requested_chunk_count:
             message += (
@@ -2967,7 +3036,7 @@ class DrawAMTStockpile:
             )
             message += (
                 f" Quarantined {len(quarantined_rows)} invalid coordinate "
-                f"hex(es), {quarantined_wmt:,.2f} t, from the spatial path; "
+                f"hex(es), {quarantined_wmt:,.0f} t, from the spatial path; "
                 "their tonnes were retained through non-spatial chunk allocation. "
                 "Hexes: "
                 + ", ".join(str(row.get("hex") or "") for row in quarantined_rows)
@@ -3595,13 +3664,13 @@ class DrawAMTStockpile:
                     "Chunk: %{customdata[9]}<br>" +
                     "Latitude: %{customdata[7]:.2f}<br>" +
                     "Longitude: %{customdata[8]:.2f}<br>" +
-                    "Final Balance: %{customdata[1]:,.2f} t<br>" +
-                    "Raw Signed Balance: %{customdata[10]:,.2f} t<br>" +
-                    "Spatial Adjustment: %{customdata[11]:+,.2f} t<br>" +
-                    "Inventory Adjustment: %{customdata[12]:+,.2f} t<br>" +
+                    "Final Balance: %{customdata[1]:,.0f} t<br>" +
+                    "Raw Signed Balance: %{customdata[10]:,.0f} t<br>" +
+                    "Spatial Adjustment: %{customdata[11]:+,.0f} t<br>" +
+                    "Inventory Adjustment: %{customdata[12]:+,.0f} t<br>" +
                     "Grade Blocks: %{customdata[13]:.0f}<br>" +
                     "Lineage Coverage: %{customdata[14]:.2f}%<br>" +
-                    "Unmatched Lineage: %{customdata[15]:,.2f} t<br>" +
+                    "Unmatched Lineage: %{customdata[15]:,.0f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +
@@ -3636,13 +3705,13 @@ class DrawAMTStockpile:
                     "Hex: %{customdata[0]}<br>" +
                     "Latitude: %{customdata[7]:.2f}<br>" +
                     "Longitude: %{customdata[8]:.2f}<br>" +
-                    "Final Balance: %{customdata[1]:,.2f} t<br>" +
-                    "Raw Signed Balance: %{customdata[9]:,.2f} t<br>" +
-                    "Spatial Adjustment: %{customdata[10]:+,.2f} t<br>" +
-                    "Inventory Adjustment: %{customdata[11]:+,.2f} t<br>" +
+                    "Final Balance: %{customdata[1]:,.0f} t<br>" +
+                    "Raw Signed Balance: %{customdata[9]:,.0f} t<br>" +
+                    "Spatial Adjustment: %{customdata[10]:+,.0f} t<br>" +
+                    "Inventory Adjustment: %{customdata[11]:+,.0f} t<br>" +
                     "Grade Blocks: %{customdata[12]:.0f}<br>" +
                     "Lineage Coverage: %{customdata[13]:.2f}%<br>" +
-                    "Unmatched Lineage: %{customdata[14]:,.2f} t<br>" +
+                    "Unmatched Lineage: %{customdata[14]:,.0f} t<br>" +
                     "Fe Grade: %{customdata[2]:.2f}%<br>" +
                     "Si Grade: %{customdata[3]:.2f}%<br>" +
                     "Al Grade: %{customdata[4]:.2f}%<br>" +

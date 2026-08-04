@@ -13,10 +13,65 @@ Resolution falls back independently per analyte in the order selected stream,
 next available upstream stream, then the legacy grade. A warning is retained
 when fallback occurs.
 
+## Canonical field workflow
+
+The Setup sequence is:
+
+```text
+Site Configuration -> Stockpile Inventories -> Define Fields -> Map Fields
+-> Data Streams -> Guidance Schedules -> AMT Stockpiles (when selected)
+-> Database View
+```
+
+**Stockpile Inventories** is intentionally pre-calculation. It shows source
+selection, inventory identity/build, opening balance and insitu assays. The
+modelled and adjusted fields are not treated as defined until the next steps.
+
+**Define Fields** creates the stable BlendMaster schema shared by Inventory,
+AMT and APS sources. A field name may contain letters, numbers and underscores
+and must start with a letter. Each row is one of:
+
+- **Additive**: a total such as WMT, DMT, ore-type tonnes or product tonnes.
+  Additive values are summed when sources are consolidated and scaled when a
+  source is partly depleted or selected.
+- **Weighted Average**: a grade, percentage, recovery, moisture or other
+  intensive value. Its **Weight Field** must be an additive field defined in a
+  higher row. This makes the mass basis explicit rather than inferring it from
+  a Snowflake or APS header name. Consolidated inventory, AMT chunk and APS
+  values use that additive field as their actual denominator, including the
+  grade stream subsequently selected by optimisation.
+
+Required rows cannot be deleted. The default contract includes
+`modelled_rom_<analyte>`, `adjusted_rom_<analyte>`,
+`modelled_product_<analyte>` and `adjusted_product_<analyte>` for the five
+analytes, as well as the additive source/product mass bases. Required fields
+may be left unmapped; they then remain blank and traceable rather than being
+silently removed from the source schema.
+
+**Use in Optimisation** is the compute/report gate. Checked properties are
+available in the custom-constraint field picker, carried through build,
+depletion and event generation, and written to optimised/manual reports.
+The additive Weight Field behind a required or checked weighted-average field
+is checked automatically because it is part of the same calculation. Other
+unchecked properties stop at Database View. The five effective selected grades
+are always sent to optimisation independently of this checkbox.
+
+**Map Fields** maps raw Inventory, AMT and APS columns onto the canonical rows.
+Choose a source family (and, for APS, an optional brand), then double-click or
+drag an available raw field into **Source Field**. The page owns the 24HR
+`Mining.csv` selector; Guidance Schedules reuses the same path. Mappings save
+the exact raw header while every downstream component uses only the stable
+BlendMaster field name. Older projects migrate their former APS mappings and
+receive explicit compatibility mappings for the established inventory and AMT
+stream inputs.
+Compatibility seeding runs once. Clearing a suggested mapping is therefore a
+persisted user decision; it is not recreated when mappings are applied or the
+project is loaded again.
+
 ## Source calculations
 
 APS grade blocks use the exact brand-specific ROM and product headers mapped on
-the Data Streams page. Legacy projects with one all-brand ROM mapping replicate
+the Map Fields page. Legacy projects with one all-brand ROM mapping replicate
 that mapping across configured brands. APS grades are authoritative, so no OPF
 factor is applied.
 
@@ -131,7 +186,7 @@ which APS has already calculated.
 
 - **Derive from grade blocks / mapped APS fields** retains the opening
   inventory split returned by Snowflake and derives each AMT hex split from
-  its grade-block lineage. APS sources use the fields mapped on Data Streams.
+  its grade-block lineage. APS sources use the fields mapped on Map Fields.
 - **Calculate from user lump percentage** replaces the inventory and AMT split
   using the entered **CB Lump Percentage (%)**. This is useful when the
   grade-block-derived split is unavailable or the scenario needs a controlled
@@ -199,19 +254,18 @@ effective factors are stored separately.
 The product-stream Planning Plan category defaults to `OPF Production`; ROM
 streams default to `OPF Feed`. Both remain configurable for APS model variants.
 
-## APS field mappings
+## Field mappings
 
-The Data Streams screen includes the first 24HR `Mining.csv` selector in the
-workflow, reads its header row and presents the distinct fields beside the
+The Map Fields screen includes the first 24HR `Mining.csv` selector in the
+workflow, reads its header row and presents the distinct APS fields beside the
 mapping grid. The selected path is carried forward into Guidance Schedules.
-Select a grade mapping cell and either double-click a field or drag it onto
-that cell. This avoids transcription errors in long APS process-stream field
-names.
+The same browser pattern is used for raw Inventory and AMT fields, which become
+available after Stockpile Inventories and the AMT opening fetch. Select a
+mapping cell and either double-click a field or drag it onto that cell. This
+avoids transcription errors in long Snowflake and APS process-stream names.
 
-The separate **APS 24HR Source Property Field Mappings** table maps
-site-specific APS headers to stable BlendMaster property names. Select the
-`24HR APS Field` cell and use the same double-click or drag-and-drop field
-browser. The standard catalogue is:
+The formerly separate APS grade/property tables are represented by the same
+canonical mapping grid. The standard prepopulated catalogue includes:
 
 | Property group | BlendMaster field names |
 | --- | --- |
@@ -227,19 +281,18 @@ value is copied unchanged. When payloads for the same grade block are
 consolidated, additive properties are summed and intensive properties are
 WMT-weighted.
 
-Unmapped numeric APS fields are still retained under a canonical version of
-their original header: lower-case, non-alphanumeric characters replaced by
-underscores, repeated underscores collapsed, and a leading digit or Python
-keyword prefixed with `field_`. If the name does not identify a recognised
-total or control field, BlendMaster treats it as an intensive WMT-weighted
-property and records an audit warning. Explicit mappings are therefore
-recommended for tonnes, mass, volume and other additive quantities.
+Raw fields that are not mapped do not become canonical source properties. A
+defined but unmapped canonical field remains present with a blank value on
+every Database View source. This is intentional: the gap is visible and can
+make a selected grade or constraint infeasible instead of being replaced by
+zero.
 
 ## Database View
 
-Stockpile Inventories always proceeds to AMT Stockpiles. Submitting the AMT
-step then opens **Database View**. This source-level audit snapshot is reused by
-the next optimisation run. It includes:
+Guidance Schedules proceeds to AMT Stockpiles when any footprint uses AMT;
+submitting its chunks opens **Database View**. Inventory-only scenarios open
+Database View directly from Guidance Schedules. This source-level audit
+snapshot is reused by the next optimisation run. It includes:
 
 - selected inventory stockpiles, excluding the duplicate inventory instance
   of a stockpile selected as AMT;
@@ -254,21 +307,22 @@ sources are columns. It intentionally excludes payload-level movement,
 destination, calendar and solver-configuration fields. It is a focused audit
 of the source tonnes and grades entering scheduling.
 
-Database View retains the full imported/calculated property catalogue for
-audit and constraint setup. Once Solver Configuration is submitted, the run
-projects that catalogue down to only the source properties referenced by
-enabled custom expressions; the five grade streams remain available separately
-for period/brand selection. This reduces steady-state build and depletion work
-without removing fields from Database View.
+Database View contains every field created in Define Fields for every source.
+A mapped/calculated value is shown when available; an unmapped or unavailable
+value is blank. Once Solver Configuration is submitted, the run projects that
+catalogue down to fields checked **Use in Optimisation**, plus any dependencies
+already referenced by a saved enabled custom expression. The five selected
+grades remain available separately for period/brand selection. This reduces
+steady-state build and depletion work without removing fields from Database
+View.
 
-The custom-constraint field picker takes the union of fields present on the
-current sources. Consequently a property with partial AMT lineage coverage or
-an optional APS mapping remains discoverable. This does not imply complete
-coverage: before solving, every selected source that could participate is
-checked for every referenced field. Preparation names the constraint and source
-when a value is missing, non-numeric or non-finite; missing data is not replaced
-with zero. Coverage fields in Database View should be reviewed before selecting
-a partially populated property.
+The custom-constraint field picker lists the built-in solver fields and the
+canonical rows checked **Use in Optimisation**. Being listed does not imply
+complete coverage: before solving, every selected source that could participate
+is checked for every referenced field. Preparation names the constraint and
+source when a value is missing, non-numeric or non-finite; missing data is not
+replaced with zero. Coverage fields in Database View should be reviewed before
+selecting a partially populated property.
 
 ### Choosing visible fields and sources
 
@@ -438,11 +492,11 @@ transaction table exposes the same fields, allowing a reported decision to be
 traced back through adjusted product, modelled product, adjusted ROM, modelled
 ROM and insitu values without re-running the model.
 
-Enabled custom expressions add only their referenced source properties to
-optimised and manual reports. Each is written dynamically as
+Fields checked **Use in Optimisation** (and fields referenced by a retained
+enabled custom expression) are written to optimised and manual reports as
 `source_property_<canonical_field>`. Intensive properties retain the source
 value. Additive properties are scaled to the tonnes selected on that report row,
 so, for example, `source_property_prod1_wmt` is the allocated Product 1 WMT,
-not the whole opening-source total. Unreferenced physical properties remain
+not the whole opening-source total. Unchecked physical properties remain
 available in Database View but are deliberately omitted from solve state and
 reports to avoid unnecessary build, depletion and database work.

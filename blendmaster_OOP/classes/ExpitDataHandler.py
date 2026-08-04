@@ -9,6 +9,7 @@ from classes.PeriodManager import PeriodManager
 from classes.GradeStreams import (
     aps_grade_streams,
     normalise_aps_grade_field_mappings,
+    reweight_grade_streams_from_properties,
     weighted_merge_grade_streams,
 )
 from classes.CustomConstraints import (
@@ -47,6 +48,9 @@ class ExpitDataHandler:
         "HaulageResult.NumberOfTrips",
     }
 
+    def property_kind(self, value):
+        return source_property_kind(value, self.source_property_kinds)
+
     def __init__(
         self,
         input_data,
@@ -61,6 +65,8 @@ class ExpitDataHandler:
         grade_field_mappings=None,
         source_property_field_mappings=None,
         configured_product_brands=None,
+        source_property_kinds=None,
+        source_property_weights=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
@@ -90,6 +96,8 @@ class ExpitDataHandler:
         }
         self.source_stockpile_fallbacks = {}
         self.configured_product_brands = configured_product_brands or []
+        self.source_property_kinds = dict(source_property_kinds or {})
+        self.source_property_weights = dict(source_property_weights or {})
         self.grade_field_mappings = normalise_aps_grade_field_mappings(
             grade_field_mappings, self.configured_product_brands
         )
@@ -143,8 +151,8 @@ class ExpitDataHandler:
             existing_field = self.mapped_property_column_keys.get(column)
             if (
                 existing_field
-                and source_property_kind(existing_field)
-                != source_property_kind(field)
+                and self.property_kind(existing_field)
+                != self.property_kind(field)
             ):
                 raise ValueError(
                     "APS 24HR source-property header "
@@ -181,7 +189,7 @@ class ExpitDataHandler:
             self.property_column_keys[column] = key
         unknown_property_columns = [
             column for column in self.property_columns
-            if source_property_kind(self.property_column_keys[column]) == "unknown"
+            if self.property_kind(self.property_column_keys[column]) == "unknown"
         ]
         self.property_warnings = []
         if unknown_property_columns:
@@ -1286,7 +1294,7 @@ class ExpitDataHandler:
                     * ratio
                 )
                 for property_column, key in self._property_columns_with_keys():
-                    if source_property_kind(key) != "additive":
+                    if self.property_kind(key) != "additive":
                         continue
                     value = pd.to_numeric(
                         pd.Series([row.get(property_column)]),
@@ -1567,12 +1575,12 @@ class ExpitDataHandler:
         intensive_property_columns = [
             column
             for column, key in property_columns_with_keys
-            if source_property_kind(key) in {"intensive", "unknown"}
+            if self.property_kind(key) in {"intensive", "unknown"}
         ]
         additive_property_columns = [
             column
             for column, key in property_columns_with_keys
-            if source_property_kind(key) == "additive"
+            if self.property_kind(key) == "additive"
         ]
         for column in additive_property_columns:
             self.data[column] = pd.to_numeric(
@@ -1714,7 +1722,7 @@ class ExpitDataHandler:
                 continue
             if not math.isfinite(value):
                 continue
-            kind = source_property_kind(field)
+            kind = self.property_kind(field)
             if kind not in {"intensive", "unknown", "additive"}:
                 continue
             properties[field] = (
@@ -1724,7 +1732,7 @@ class ExpitDataHandler:
             )
         for column in getattr(self, "property_columns", []):
             key = self.property_column_keys.get(column, "")
-            kind = source_property_kind(key)
+            kind = self.property_kind(key)
             if kind not in {"intensive", "unknown", "additive"}:
                 continue
             try:
@@ -1848,22 +1856,27 @@ class ExpitDataHandler:
                                 next_grade_streams = aps_grade_streams(
                                     next_row.to_dict(), self.grade_field_mappings, self.configured_product_brands
                                 )
+                                next_source_properties = self._payload_source_properties(
+                                    next_row,
+                                    top_up_tonnes,
+                                    group.at[i + 1, "Mining.wetTonnes"],
+                                )
                                 weighted_grade_streams = weighted_merge_grade_streams(
                                     row_grade_streams,
                                     current_fractional_tonnes,
                                     next_grade_streams,
                                     top_up_tonnes,
-                                )
-                                next_source_properties = self._payload_source_properties(
-                                    next_row,
-                                    top_up_tonnes,
-                                    group.at[i + 1, "Mining.wetTonnes"],
+                                    weighted_source_properties,
+                                    next_source_properties,
+                                    self.source_property_weights,
                                 )
                                 weighted_source_properties = merge_source_properties(
                                     weighted_source_properties,
                                     current_fractional_tonnes,
                                     next_source_properties,
                                     top_up_tonnes,
+                                    self.source_property_kinds,
+                                    self.source_property_weights,
                                 )
 
                                 # Update the next grouped row without duplicating
@@ -1882,7 +1895,7 @@ class ExpitDataHandler:
                                     property_column,
                                     key,
                                 ) in self._property_columns_with_keys():
-                                    if source_property_kind(key) != "additive":
+                                    if self.property_kind(key) != "additive":
                                         continue
                                     try:
                                         group.at[i + 1, property_column] = (
@@ -1936,6 +1949,12 @@ class ExpitDataHandler:
                             mining_start_time = start_time
 
                         # Append the topped-up trip
+                        weighted_grade_streams = (
+                            reweight_grade_streams_from_properties(
+                                weighted_grade_streams,
+                                weighted_source_properties,
+                            )
+                        )
                         self.results.append({
                             "agent": agent,
                             "source": source_name,

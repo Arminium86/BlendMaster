@@ -512,6 +512,9 @@ def inventory_grade_streams(
     """
     brands = configured_brands(brands) or [UNBRANDED]
     insitu = {a: _row_value(row, f"grade_{a}", f"{a}_insitu", f"insitu_{a}") for a in ANALYTES}
+    modelled_rom = {
+        a: _row_value(row, f"modelled_rom_{a}") for a in ANALYTES
+    }
     slot = internal_product_slot(opf)
     product = {
         a: _row_value(row, f"{slot}_{a}", f"{a}_{slot}", f"grade_{slot}_{a}") if slot else None
@@ -521,17 +524,27 @@ def inventory_grade_streams(
     for a in ANALYTES:
         if insitu[a] is None:
             insitu[a] = legacy_vector(row)[a]
+        if modelled_rom[a] is None:
+            modelled_rom[a] = insitu[a]
+        mapped_product = _row_value(row, f"modelled_product_{a}")
+        if mapped_product is not None:
+            product[a] = mapped_product
 
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
-    result["modelled_rom"][UNBRANDED] = copy.deepcopy(insitu)
+    result["modelled_rom"][UNBRANDED] = copy.deepcopy(modelled_rom)
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
-        adjusted_rom = {
-            a: (insitu[a] * blend[a] if insitu[a] is not None else None)
-            for a in ANALYTES
-        }
+        adjusted_rom = {}
+        for a in ANALYTES:
+            mapped = _row_value(row, f"adjusted_rom_{a}")
+            adjusted_rom[a] = (
+                mapped if mapped is not None else (
+                    modelled_rom[a] * blend[a]
+                    if modelled_rom[a] is not None else None
+                )
+            )
         result["adjusted_rom"][brand] = adjusted_rom
         if is_dry_plant(opf) or slot is None:
             result["modelled_product"][brand] = copy.deepcopy(adjusted_rom)
@@ -539,7 +552,14 @@ def inventory_grade_streams(
         else:
             result["modelled_product"][brand] = copy.deepcopy(product)
             result["adjusted_product"][brand] = {
-                a: (product[a] * regression[a] if product[a] is not None else None)
+                a: (
+                    _row_value(row, f"adjusted_product_{a}")
+                    if _row_value(row, f"adjusted_product_{a}") is not None
+                    else (
+                        product[a] * regression[a]
+                        if product[a] is not None else None
+                    )
+                )
                 for a in ANALYTES
             }
     return result
@@ -600,22 +620,37 @@ def amt_grade_streams(
             f"grade_{slot}_{analyte}",
         )
 
-    modelled_product = {
-        analyte: nested_product_value(analyte) for analyte in ANALYTES
+    modelled_rom = {
+        analyte: _row_value(lineage_source, f"modelled_rom_{analyte}")
+        for analyte in ANALYTES
     }
+    for analyte in ANALYTES:
+        if modelled_rom[analyte] is None:
+            modelled_rom[analyte] = insitu[analyte]
+    modelled_product = {}
+    for analyte in ANALYTES:
+        mapped = _row_value(lineage_source, f"modelled_product_{analyte}")
+        modelled_product[analyte] = (
+            mapped if mapped is not None else nested_product_value(analyte)
+        )
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
     # Historical blend reconciliation now forms the only AMT ROM adjustment.
     # Keeping modelled ROM equal to insitu preserves the five-stream audit
     # boundary while removing the obsolete inventory ROM/insitu workaround.
-    result["modelled_rom"][UNBRANDED] = copy.deepcopy(insitu)
+    result["modelled_rom"][UNBRANDED] = copy.deepcopy(modelled_rom)
     for brand in brands:
         blend = _factor_vector(historical_factors, brand, "blend")
         regression = _factor_vector(historical_factors, brand, "regression")
-        adjusted_rom = {
-            a: (insitu[a] * blend[a] if insitu[a] is not None else None)
-            for a in ANALYTES
-        }
+        adjusted_rom = {}
+        for a in ANALYTES:
+            mapped = _row_value(lineage_source, f"adjusted_rom_{a}")
+            adjusted_rom[a] = (
+                mapped if mapped is not None else (
+                    modelled_rom[a] * blend[a]
+                    if modelled_rom[a] is not None else None
+                )
+            )
         result["adjusted_rom"][brand] = adjusted_rom
         if is_dry_plant(opf):
             result["modelled_product"][brand] = copy.deepcopy(adjusted_rom)
@@ -628,7 +663,14 @@ def amt_grade_streams(
         else:
             result["modelled_product"][brand] = copy.deepcopy(modelled_product)
             result["adjusted_product"][brand] = {
-                a: (modelled_product[a] * regression[a] if modelled_product[a] is not None else None)
+                a: (
+                    _row_value(lineage_source, f"adjusted_product_{a}")
+                    if _row_value(lineage_source, f"adjusted_product_{a}") is not None
+                    else (
+                        modelled_product[a] * regression[a]
+                        if modelled_product[a] is not None else None
+                    )
+                )
                 for a in ANALYTES
             }
     return result
@@ -670,12 +712,29 @@ def aps_grade_streams(
 
 
 def weighted_merge_grade_streams(
-    current: Any, current_tonnes: Any, incoming: Any, incoming_tonnes: Any
+    current: Any,
+    current_tonnes: Any,
+    incoming: Any,
+    incoming_tonnes: Any,
+    current_properties: Any = None,
+    incoming_properties: Any = None,
+    property_weights: Any = None,
 ):
     left = normalise_grade_streams(current)
     right = normalise_grade_streams(incoming)
     left_tonnes = max(numeric(current_tonnes) or 0.0, 0.0)
     right_tonnes = max(numeric(incoming_tonnes) or 0.0, 0.0)
+    left_properties = (
+        current_properties if isinstance(current_properties, Mapping) else {}
+    )
+    right_properties = (
+        incoming_properties if isinstance(incoming_properties, Mapping) else {}
+    )
+    weight_fields = {
+        str(name).strip().lower(): str(weight).strip().lower()
+        for name, weight in dict(property_weights or {}).items()
+        if str(name).strip() and str(weight).strip()
+    }
     result = empty_streams()
     for stream in STREAMS:
         brands = set(left.get(stream, {})) | set(right.get(stream, {}))
@@ -684,7 +743,29 @@ def weighted_merge_grade_streams(
             for analyte in ANALYTES:
                 old = numeric((left.get(stream, {}).get(brand) or {}).get(analyte))
                 new = numeric((right.get(stream, {}).get(brand) or {}).get(analyte))
-                if old is None:
+                weight_field = weight_fields.get(f"{stream}_{analyte}")
+                if weight_field:
+                    old_weight = numeric(left_properties.get(weight_field))
+                    new_weight = numeric(right_properties.get(weight_field))
+                    if (
+                        (left_tonnes > 0 and old_weight is None)
+                        or (right_tonnes > 0 and new_weight is None)
+                    ):
+                        vector[analyte] = None
+                        continue
+                    old_weight = max(old_weight or 0.0, 0.0)
+                    new_weight = max(new_weight or 0.0, 0.0)
+                    if old_weight > 0 and old is None:
+                        vector[analyte] = None
+                        continue
+                    if new_weight > 0 and new is None:
+                        vector[analyte] = None
+                        continue
+                    total_weight = old_weight + new_weight
+                    vector[analyte] = (
+                        (old or 0.0) * old_weight + (new or 0.0) * new_weight
+                    ) / total_weight if total_weight > 0 else None
+                elif old is None:
                     vector[analyte] = new
                 elif new is None:
                     vector[analyte] = old
@@ -693,6 +774,58 @@ def weighted_merge_grade_streams(
                 else:
                     vector[analyte] = old
             result[stream][brand] = vector
+    return result
+
+
+def reweight_grade_streams_from_properties(streams: Any, properties: Any):
+    """Overlay canonical weighted stream fields while preserving brand factors.
+
+    Canonical modelled fields may use a product-mass basis that differs from
+    source WMT.  After source properties have been aggregated with their
+    declared weights, this helper makes those values authoritative for the
+    selected grade streams and reapplies the already-calculated per-brand
+    adjustment ratio.
+    """
+    result = normalise_grade_streams(streams)
+    properties = properties if isinstance(properties, Mapping) else {}
+    values = {str(key).strip().lower(): value for key, value in properties.items()}
+    for analyte in ANALYTES:
+        rom_value = numeric(values.get(f"modelled_rom_{analyte}"))
+        if rom_value is not None:
+            old_rom_by_brand = {
+                brand: dict(grades or {})
+                for brand, grades in result.get("modelled_rom", {}).items()
+            }
+            old_unbranded = old_rom_by_brand.get(UNBRANDED, {})
+            result.setdefault("modelled_rom", {}).setdefault(
+                UNBRANDED, {}
+            )[analyte] = rom_value
+            for brand, adjusted in result.get("adjusted_rom", {}).items():
+                old_model = numeric(
+                    (old_rom_by_brand.get(brand) or old_unbranded).get(analyte)
+                )
+                old_adjusted = numeric(adjusted.get(analyte))
+                if old_model not in (None, 0.0) and old_adjusted is not None:
+                    adjusted[analyte] = rom_value * old_adjusted / old_model
+
+        product_value = numeric(values.get(f"modelled_product_{analyte}"))
+        if product_value is None:
+            continue
+        product_brands = set(result.get("modelled_product", {})) | set(
+            result.get("adjusted_product", {})
+        )
+        for brand in product_brands or {UNBRANDED}:
+            modelled = result.setdefault("modelled_product", {}).setdefault(
+                brand, {}
+            )
+            adjusted = result.setdefault("adjusted_product", {}).setdefault(
+                brand, {}
+            )
+            old_model = numeric(modelled.get(analyte))
+            old_adjusted = numeric(adjusted.get(analyte))
+            modelled[analyte] = product_value
+            if old_model not in (None, 0.0) and old_adjusted is not None:
+                adjusted[analyte] = product_value * old_adjusted / old_model
     return result
 
 

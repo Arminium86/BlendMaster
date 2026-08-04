@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv, re
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QCompleter
@@ -51,12 +51,15 @@ from classes.GradeStreams import (
     normalise_aps_grade_field_mappings,
     normalise_planning_categories,
     numeric,
+    reweight_grade_streams_from_properties,
     resolve_grade_vector,
+    weighted_merge_grade_streams,
 )
 from classes.CustomConstraints import (
     BUILTIN_CONSTRAINT_FIELDS,
     CustomConstraintError,
     SafeNumericExpression,
+    canonical_property_key,
     constraint_property_fields,
     constraint_key,
     normalize_custom_constraints,
@@ -74,6 +77,21 @@ from classes.SourcePropertyMappings import (
     normalise_aps_source_property_mappings,
 )
 from classes.CloudbreakProductSplit import calculate_cb_lump_fines
+from classes.FieldDefinitions import (
+    FIELD_KINDS,
+    SOURCE_FAMILIES,
+    apply_field_mappings,
+    default_field_definitions,
+    field_weight_map,
+    flatten_available_source_fields,
+    legacy_aps_mappings,
+    mandatory_field_names,
+    mapping_lookup,
+    normalize_field_definitions,
+    normalize_field_mappings,
+    optimization_field_names,
+    validate_field_definitions,
+)
 import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -332,7 +350,6 @@ class UserInputs(QMainWindow):
 
         # Add Site Configuration Tab
         self.setup_site_configuration()
-        self.setup_data_streams()
 
         # Add Stockpile Tab
         self.stockpile_tab = QWidget()
@@ -341,12 +358,19 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.stockpile_tab,
             "Stockpile Inventories",
+            position=1,
         )
         self.stockpile_tab_layout = QVBoxLayout(self.stockpile_tab)
 
         # Stockpile Table
         self.stockpile_table = CustomTableWidget()
         self.stockpile_tab_layout.addWidget(self.stockpile_table)
+
+        # Canonical field schema and source mappings are deliberately defined
+        # after the opening inventory is visible and before streams are built.
+        self.setup_define_fields()
+        self.setup_map_fields()
+        self.setup_data_streams()
 
         # Add AMT Stockpile Tab
         self.AMT_stockpile_tab = QWidget()
@@ -641,6 +665,8 @@ class UserInputs(QMainWindow):
         # Disable tabs initially
         for page_id in (
             self.data_streams_tab_index,
+            self.define_fields_tab_index,
+            self.map_fields_tab_index,
             self.guidance_schedules_tab_index,
             self.stockpile_tab_index,
             self.AMT_stockpile_tab_index,
@@ -1239,6 +1265,15 @@ class UserInputs(QMainWindow):
             "selected_data_stream": getattr(
                 self, "selected_data_stream", DEFAULT_STREAM
             ),
+            "field_definitions": copy.deepcopy(getattr(
+                self, "field_definitions", default_field_definitions()
+            )),
+            "field_mappings": copy.deepcopy(getattr(
+                self, "field_mappings", []
+            )),
+            "field_mapping_schema_version": int(getattr(
+                self, "field_mapping_schema_version", 0
+            ) or 0),
             "aps_grade_field_mappings": copy.deepcopy(getattr(
                 self, "aps_grade_field_mappings", {}
             )),
@@ -1265,14 +1300,19 @@ class UserInputs(QMainWindow):
     def capture_scenario_state(self):
         self.capture_stockpile_table_choices()
         self.capture_active_manual_plan_state()
+        if hasattr(self, "define_fields_table"):
+            try:
+                self.capture_define_fields_table()
+            except ValueError:
+                pass
+        if hasattr(self, "field_mapping_table"):
+            self.capture_map_fields_table()
         if hasattr(self, "data_stream_selector"):
             self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
             self.data_stream_planning_categories = normalise_planning_categories({
                 "rom": self.rom_planning_category_input.text(),
                 "product": self.product_planning_category_input.text(),
             })
-            self.capture_aps_grade_mapping_table()
-            self.capture_aps_source_property_mapping_table()
             self.capture_cb_lump_fines_settings()
             if self.historical_recon_factors:
                 self.capture_recon_factor_table()
@@ -1307,7 +1347,9 @@ class UserInputs(QMainWindow):
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
-            "selected_data_stream", "aps_grade_field_mappings",
+            "selected_data_stream", "field_definitions", "field_mappings",
+            "field_mapping_schema_version",
+            "aps_grade_field_mappings",
             "aps_source_property_field_mappings",
             "cb_lump_fines_mode", "cb_lump_percentage",
             "historical_recon_factors", "historical_recon_warnings",
@@ -1358,6 +1400,7 @@ class UserInputs(QMainWindow):
 
     def reset_workflow_tabs_for_scenario(self):
         for tab_index in [
+            self.define_fields_tab_index, self.map_fields_tab_index,
             self.data_streams_tab_index, self.guidance_schedules_tab_index,
             self.stockpile_tab_index, self.AMT_stockpile_tab_index,
             self.database_view_tab_index,
@@ -1530,6 +1573,18 @@ class UserInputs(QMainWindow):
             )
             self.selected_data_stream = str(
                 state.get("selected_data_stream") or DEFAULT_STREAM
+            )
+            self.field_definitions = normalize_field_definitions(
+                state.get("field_definitions")
+            )
+            self.field_mappings = normalize_field_mappings(
+                state.get("field_mappings")
+            )
+            self.field_mapping_schema_version = int(
+                state.get(
+                    "field_mapping_schema_version",
+                    1 if "field_mappings" in state else 0,
+                ) or 0
             )
             self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
                 state.get("aps_grade_field_mappings"),
@@ -1749,6 +1804,11 @@ class UserInputs(QMainWindow):
             )
             self.populate_aps_grade_mapping_table()
             self.populate_aps_source_property_mapping_table()
+            self.populate_define_fields_table()
+            self.refresh_map_field_brands()
+            self.ensure_field_mapping_migration()
+            self.populate_map_fields_table()
+            self.refresh_map_available_fields()
             self.load_cb_lump_fines_settings()
             self.refresh_aps_grade_field_headers()
             self.populate_recon_factor_table()
@@ -1756,6 +1816,8 @@ class UserInputs(QMainWindow):
             self.data_stream_warning_label.setText(warning_text)
             self.data_stream_warning_label.setVisible(bool(warning_text))
             self.set_page_enabled(self.data_streams_tab_index, bool(self.stockpile_data))
+            self.set_page_enabled(self.define_fields_tab_index, bool(self.updated_stockpile_data))
+            self.set_page_enabled(self.map_fields_tab_index, bool(self.updated_stockpile_data))
             self.auto_load_2wp_targets_checkbox.setChecked(
                 self.auto_load_2wp_targets_choice
             )
@@ -2773,9 +2835,9 @@ class UserInputs(QMainWindow):
             value = setting.get(key, defaults[key])
             if key == "target_tonnes":
                 try:
-                    value = f"{math.floor(float(value)):.2f}"
+                    value = f"{math.floor(float(value)):,.0f}"
                 except (TypeError, ValueError, OverflowError):
-                    value = "0.00"
+                    value = "0"
             elif value is not None:
                 try:
                     value = f"{float(value):.2f}"
@@ -2809,8 +2871,8 @@ class UserInputs(QMainWindow):
             item = self.product_build_table.item(row, col)
             text = item.text().strip() if item else ""
             try:
-                return float(text or 0)
-            except ValueError:
+                return float((text or "0").replace(",", ""))
+            except (TypeError, ValueError):
                 if show_errors:
                     QMessageBox.warning(self, "Invalid Input", f"{label} in row {row + 1} must be a number.")
                 return None
@@ -3017,29 +3079,20 @@ class UserInputs(QMainWindow):
 
     def custom_constraint_available_fields(self):
         fields = set(BUILTIN_CONSTRAINT_FIELDS)
-        if not self.database_view_is_current():
-            return sorted(fields)
-        records = list(getattr(self, "database_view_rows", []) or [])
-        property_sets = []
-        for record in records:
-            available = set(constraint_property_fields(
-                source_properties_from_mapping(record),
-                record.get("tonnes", record.get("balance")),
-            ))
-            # Database View's selected_<brand>_* columns are presentation
-            # aliases. Runtime events expose the active brand as selected_*.
-            available = {
-                key for key in available
-                if not key.startswith("selected_")
-            }
-            property_sets.append(available)
-        property_sets = [values for values in property_sets if values]
-        if property_sets:
-            # Discover fields from any current source so partial AMT lineage or
-            # an optional APS mapping cannot make a useful property invisible.
-            # The optimiser retains its per-source preflight and identifies any
-            # selected source whose required value is unavailable.
-            fields.update(set.union(*property_sets))
+        definitions = vars(self).get("field_definitions")
+        if definitions is not None:
+            fields.update(optimization_field_names(definitions))
+        elif self.database_view_is_current():
+            records = list(vars(self).get("database_view_rows", []) or [])
+            for record in records:
+                available = constraint_property_fields(
+                    source_properties_from_mapping(record),
+                    record.get("tonnes", record.get("balance")),
+                )
+                fields.update(
+                    key for key in available
+                    if not key.startswith("selected_")
+                )
         return sorted(fields)
 
     def populate_custom_constraint_table(self):
@@ -3331,6 +3384,16 @@ class UserInputs(QMainWindow):
             raise ValueError(
                 "Invalid saved custom ratio constraint: " + str(error)
             ) from error
+        definitions = normalize_field_definitions(
+            vars(self).get("field_definitions")
+        )
+        merged["optimisation_source_property_fields"] = sorted(
+            optimization_field_names(definitions)
+        )
+        merged["source_property_kinds"] = {
+            row["name"]: row["kind"] for row in definitions
+        }
+        merged["source_property_weights"] = field_weight_map(definitions)
         return merged
 
     def apply_app_theme(self):
@@ -3459,6 +3522,7 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.database_view_tab,
             "Database View",
+            position=6,
         )
         self.set_page_enabled(self.database_view_tab_index, False)
 
@@ -3637,6 +3701,43 @@ class UserInputs(QMainWindow):
             )
         record.update(flatten_grade_streams(streams))
 
+        # Keep the field registry visible as a complete source schema. An
+        # unmapped field is deliberately represented by None, not omitted.
+        defined_values = record.get("defined_fields") or {}
+        if isinstance(defined_values, dict):
+            for key, value in defined_values.items():
+                record.setdefault(key, value)
+        numeric_properties = source_properties_from_mapping(record)
+        normalized_streams = normalise_grade_streams(streams)
+        for definition in normalize_field_definitions(
+            vars(self).get("field_definitions")
+        ):
+            name = definition["name"]
+            value = record.get(name, numeric_properties.get(name))
+            if value is None:
+                for stream in STREAMS:
+                    prefix = f"{stream}_"
+                    if not name.startswith(prefix):
+                        continue
+                    analyte = name[len(prefix):]
+                    if analyte not in ANALYTES:
+                        break
+                    brand_map = normalized_streams.get(stream) or {}
+                    candidate_brands = [
+                        *configured_brands(self.product_brand_labels_choice),
+                        "__unbranded__",
+                        *brand_map.keys(),
+                    ]
+                    for brand in dict.fromkeys(candidate_brands):
+                        candidate = numeric(
+                            (brand_map.get(brand) or {}).get(analyte)
+                        )
+                        if candidate is not None:
+                            value = candidate
+                            break
+                    break
+            record[name] = value
+
         fallback_messages = []
         for brand in configured_brands(self.product_brand_labels_choice):
             brand_key = "".join(
@@ -3678,21 +3779,49 @@ class UserInputs(QMainWindow):
             getattr(self, "updated_stockpile_data", {}) or {}
         )
         selected_chunks = copy.deepcopy(
-            getattr(self, "hex_sequence_table", []) or []
+            getattr(self, "hex_sequence_table", [])
+            or getattr(self, "hex_sequence_table_argument", [])
+            or []
         )
+
+        chunks_by_footprint = {}
+        for chunk in selected_chunks:
+            if not isinstance(chunk, dict):
+                continue
+            footprint_key = str(
+                chunk.get("footprint")
+                or chunk.get("parent_stockpile")
+                or ""
+            ).strip().upper()
+            if footprint_key:
+                chunks_by_footprint.setdefault(footprint_key, []).append(chunk)
+
+        amt_selections = {
+            str(name).strip().upper(): bool(selected)
+            for name, selected in (
+                vars(self).get("stockpile_data_AMT_column", {}) or {}
+            ).items()
+        }
 
         for stockpile_name, attributes in selected_stockpiles.items():
             attributes = attributes or {}
-            if attributes.get("amt", False):
+            stockpile_key = str(stockpile_name).strip().upper()
+            chunks = chunks_by_footprint.get(stockpile_key, [])
+            raw_amt_flag = attributes.get(
+                "amt", attributes.get("AMT", amt_selections.get(stockpile_key))
+            )
+            if isinstance(raw_amt_flag, str):
+                raw_amt_flag = raw_amt_flag.strip().lower() in {
+                    "1", "true", "yes", "y", "amt"
+                }
+            # A submitted chunk is the authoritative representation choice.
+            # It must suppress the weighted-average inventory instance even if
+            # a live/restored scenario contains a stale or missing AMT flag.
+            if chunks or bool(raw_amt_flag):
                 footprint_rows = (
                     getattr(self, "AMT_stockpile_data", {}) or {}
                 ).get(stockpile_name, []) or []
                 provenance = footprint_rows[0] if footprint_rows else {}
-                chunks = [
-                    chunk for chunk in selected_chunks
-                    if str(chunk.get("footprint", "")).strip().upper()
-                    == str(stockpile_name).strip().upper()
-                ]
                 if not chunks:
                     records.append(self.database_view_record_with_streams(
                         {
@@ -3712,9 +3841,15 @@ class UserInputs(QMainWindow):
                     chunks,
                     key=lambda item: (
                         numeric(item.get("sequence")) or float("inf"),
-                        str(item.get("hex", "")),
+                        str(item.get("hex") or item.get("chunk_id") or ""),
                     ),
                 ):
+                    chunk_id = (
+                        chunk.get("hex")
+                        or chunk.get("chunk_id")
+                        or chunk.get("source_id")
+                        or ""
+                    )
                     modelled_payload = chunk.get("modelled_properties") or {}
                     modelled_values = (
                         modelled_payload.get("values", {})
@@ -3741,11 +3876,13 @@ class UserInputs(QMainWindow):
                     records.append(self.database_view_record_with_streams(
                         {
                             "source_type": "AMT Chunk",
-                            "source_id": chunk.get("hex", ""),
+                            "source_id": chunk_id,
                             "parent_stockpile": stockpile_name,
-                            "build_or_chunk": chunk.get("hex", ""),
+                            "build_or_chunk": chunk_id,
                             "sequence": chunk.get("sequence"),
-                            "tonnes": numeric(chunk.get("balance")) or 0.0,
+                            "tonnes": numeric(
+                                chunk.get("balance", chunk.get("tonnes"))
+                            ) or 0.0,
                             "grade_block_count": chunk.get("grade_block_count"),
                             "lineage_coverage_pct": chunk.get(
                                 "lineage_coverage_pct"
@@ -3841,6 +3978,18 @@ class UserInputs(QMainWindow):
         if transactions is None or transactions.empty:
             return []
 
+        definitions = vars(self).get("field_definitions")
+        property_kinds = (
+            {
+                row["name"]: row["kind"]
+                for row in normalize_field_definitions(definitions)
+            }
+            if definitions is not None else {}
+        )
+        property_weights = (
+            field_weight_map(definitions) if definitions is not None else {}
+        )
+
         grouped = {}
         for transaction in transactions.to_dict(orient="records"):
             source = str(
@@ -3853,17 +4002,20 @@ class UserInputs(QMainWindow):
                 "tonnes": 0.0,
                 "raw_mass": {analyte: 0.0 for analyte in ANALYTES},
                 "raw_tonnes": {analyte: 0.0 for analyte in ANALYTES},
-                "stream_mass": {},
-                "stream_tonnes": {},
+                "grade_streams": None,
                 "source_properties": {},
             })
             previous_tonnes = group["tonnes"]
             group["tonnes"] += tonnes
+            previous_properties = group["source_properties"]
+            incoming_properties = source_properties_from_mapping(transaction)
             group["source_properties"] = merge_source_properties(
-                group["source_properties"],
+                previous_properties,
                 previous_tonnes,
-                source_properties_from_mapping(transaction),
+                incoming_properties,
                 tonnes,
+                property_kinds,
+                property_weights,
             )
 
             fallback = {
@@ -3881,21 +4033,15 @@ class UserInputs(QMainWindow):
             streams = normalise_grade_streams(
                 transaction.get("grade_streams"), fallback
             )
-            for stream_name, brand_values in streams.items():
-                for brand, grades in (brand_values or {}).items():
-                    for analyte in ANALYTES:
-                        value = numeric((grades or {}).get(analyte))
-                        if value is None or tonnes <= 0:
-                            continue
-                        key = (stream_name, str(brand), analyte)
-                        group["stream_mass"][key] = (
-                            group["stream_mass"].get(key, 0.0)
-                            + value * tonnes
-                        )
-                        group["stream_tonnes"][key] = (
-                            group["stream_tonnes"].get(key, 0.0)
-                            + tonnes
-                        )
+            group["grade_streams"] = weighted_merge_grade_streams(
+                group["grade_streams"],
+                previous_tonnes,
+                streams,
+                tonnes,
+                previous_properties,
+                incoming_properties,
+                property_weights,
+            )
 
         rows = []
         for source, group in grouped.items():
@@ -3908,20 +4054,12 @@ class UserInputs(QMainWindow):
                 )
                 for analyte in ANALYTES
             }
-            streams = {stream: {} for stream in STREAMS}
-            for (stream_name, brand, analyte), grade_mass in group[
-                "stream_mass"
-            ].items():
-                grade_tonnes = group["stream_tonnes"].get(
-                    (stream_name, brand, analyte), 0.0
-                )
-                streams.setdefault(stream_name, {}).setdefault(brand, {})[
-                    analyte
-                ] = (
-                    grade_mass / grade_tonnes
-                    if grade_tonnes > 0
-                    else None
-                )
+            streams = normalise_grade_streams(
+                group["grade_streams"], fallback
+            )
+            streams = reweight_grade_streams_from_properties(
+                streams, group["source_properties"]
+            )
             rows.append(self.database_view_record_with_streams(
                 {
                     **group["source_properties"],
@@ -4296,7 +4434,7 @@ class UserInputs(QMainWindow):
         self.database_view_summary_label.setText(
             f"Planning window: {result.get('window_start')} to "
             f"{result.get('window_end')} | {count_text} | "
-            f"Total audited source tonnes: {tonnes:,.2f}"
+            f"Total audited source tonnes: {tonnes:,.0f}"
         )
 
     def handle_database_view_error(
@@ -4704,7 +4842,11 @@ class UserInputs(QMainWindow):
             table.setItem(row_index, 0, field_item)
             for column_index, descriptor in enumerate(sources, start=1):
                 value = descriptor["record"].get(field, "")
-                display = self.database_view_display_value(field, value)
+                display = self.database_view_display_value(
+                    field,
+                    value,
+                    vars(self).get("field_definitions"),
+                )
                 item = QTableWidgetItem(display)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 item.setToolTip(display)
@@ -4739,13 +4881,17 @@ class UserInputs(QMainWindow):
         self.apply_database_view_filters()
 
     @staticmethod
-    def database_view_display_value(header, value):
+    def database_view_display_value(header, value, field_definitions=None):
         """Format audit quantities as sums and weighted values as averages."""
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return ""
         number = numeric(value)
+        declared_kinds = {
+            row["name"]: row["kind"]
+            for row in normalize_field_definitions(field_definitions)
+        }
         sum_property = (
-            source_property_kind(header) == "additive"
+            source_property_kind(header, declared_kinds) == "additive"
             or
             header == "tonnes"
             or header.endswith("_wmt")
@@ -4756,7 +4902,7 @@ class UserInputs(QMainWindow):
             or header == "balancedmt"
         )
         weighted_average_property = (
-            source_property_kind(header) in {"intensive", "unknown"}
+            source_property_kind(header, declared_kinds) in {"intensive", "unknown"}
             or
             header.startswith("grade_")
             or (
@@ -4823,8 +4969,680 @@ class UserInputs(QMainWindow):
         self.activate_manual_setup_tab()
         self.navigate_to_solver_configuration()
 
+    def setup_define_fields(self):
+        """Create the canonical field contract shared by every source type."""
+        self.define_fields_tab = QWidget()
+        self.define_fields_tab_index = self.register_page(
+            "define_fields",
+            self.setup_tabs,
+            self.define_fields_tab,
+            "Define Fields",
+            position=2,
+        )
+        self.set_page_enabled(self.define_fields_tab_index, False)
+        layout = QVBoxLayout(self.define_fields_tab)
+        layout.setContentsMargins(14, 12, 14, 12)
+        title = QLabel("Define Fields")
+        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
+        help_text = QLabel(
+            "Define the stable BlendMaster fields that every source will expose. "
+            "Weighted-average fields must use an additive weight field defined in "
+            "a higher row. Fields selected for optimisation are available to custom "
+            "constraints and written to solver reports; their additive weight fields "
+            "are selected automatically. Selected grades always flow."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color: #607080;")
+        layout.addWidget(title)
+        layout.addWidget(help_text)
+
+        self.define_fields_table = CustomTableWidget()
+        self.define_fields_table.setColumnCount(5)
+        self.define_fields_table.setHorizontalHeaderLabels([
+            "Field Name", "Type", "Weight Field", "Use in Optimisation", "Required"
+        ])
+        self.define_fields_table.verticalHeader().setVisible(False)
+        self.define_fields_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        for column in range(1, 5):
+            self.define_fields_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeToContents
+            )
+        self.define_fields_table.cellChanged.connect(
+            self.handle_define_fields_table_changed
+        )
+        layout.addWidget(self.define_fields_table, stretch=1)
+
+        buttons = QHBoxLayout()
+        add_button = QPushButton("Add Field")
+        delete_button = QPushButton("Delete Selected")
+        up_button = QPushButton("Move Up")
+        down_button = QPushButton("Move Down")
+        submit_button = QPushButton("Submit")
+        add_button.clicked.connect(self.add_defined_field)
+        delete_button.clicked.connect(self.delete_defined_field)
+        up_button.clicked.connect(lambda: self.move_defined_field(-1))
+        down_button.clicked.connect(lambda: self.move_defined_field(1))
+        submit_button.clicked.connect(self.handle_define_fields_submit)
+        for button in (add_button, delete_button, up_button, down_button, submit_button):
+            buttons.addWidget(button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self.populate_define_fields_table()
+
+    def field_definition_row(self, row):
+        name_item = self.define_fields_table.item(row, 0)
+        kind_combo = self.define_fields_table.cellWidget(row, 1)
+        weight_combo = self.define_fields_table.cellWidget(row, 2)
+        optimisation_widget = self.define_fields_table.cellWidget(row, 3)
+        required_item = self.define_fields_table.item(row, 4)
+        optimisation_checkbox = (
+            optimisation_widget.layout().itemAt(0).widget()
+            if optimisation_widget is not None else None
+        )
+        return {
+            "name": name_item.text().strip() if name_item else "",
+            "kind": kind_combo.currentData() if isinstance(kind_combo, QComboBox) else "",
+            "weight_field": (
+                weight_combo.currentData()
+                if isinstance(weight_combo, QComboBox) else ""
+            ),
+            "use_in_optimisation": bool(
+                optimisation_checkbox and optimisation_checkbox.isChecked()
+            ),
+            "required": bool(
+                required_item and required_item.data(Qt.UserRole)
+            ),
+        }
+
+    def capture_define_fields_table(self):
+        rows = [
+            self.field_definition_row(row)
+            for row in range(self.define_fields_table.rowCount())
+        ]
+        self.field_definitions = validate_field_definitions(rows)
+        return self.field_definitions
+
+    def populate_define_fields_table(self):
+        if not hasattr(self, "define_fields_table"):
+            return
+        rows = normalize_field_definitions(
+            getattr(self, "field_definitions", None)
+        )
+        self.field_definitions = copy.deepcopy(rows)
+        table = self.define_fields_table
+        table.blockSignals(True)
+        table.setRowCount(len(rows))
+        earlier_additives = []
+        for row_index, definition in enumerate(rows):
+            required = bool(definition.get("required"))
+            name_item = QTableWidgetItem(definition["name"])
+            name_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            if not required:
+                name_flags |= Qt.ItemIsEditable
+            name_item.setFlags(name_flags)
+            name_item.setToolTip(definition.get("description", ""))
+            table.setItem(row_index, 0, name_item)
+
+            kind_combo = QComboBox()
+            for kind in FIELD_KINDS:
+                kind_combo.addItem(kind.replace("_", " ").title(), kind)
+            kind_combo.setCurrentIndex(max(kind_combo.findData(definition["kind"]), 0))
+            kind_combo.setEnabled(not required)
+            kind_combo.currentIndexChanged.connect(
+                self.handle_define_fields_table_changed
+            )
+            table.setCellWidget(row_index, 1, kind_combo)
+
+            weight_combo = QComboBox()
+            weight_combo.addItem("", "")
+            for additive in earlier_additives:
+                weight_combo.addItem(additive, additive)
+            weight = definition.get("weight_field", "")
+            if weight and weight_combo.findData(weight) < 0:
+                weight_combo.addItem(weight, weight)
+            weight_combo.setCurrentIndex(max(weight_combo.findData(weight), 0))
+            weight_combo.setEnabled(definition["kind"] == "weighted_average")
+            table.setCellWidget(row_index, 2, weight_combo)
+
+            optimisation_checkbox = QCheckBox()
+            optimisation_checkbox.setChecked(bool(
+                definition.get("use_in_optimisation")
+            ))
+            optimisation_container = QWidget()
+            checkbox_layout = QHBoxLayout(optimisation_container)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            checkbox_layout.setAlignment(Qt.AlignCenter)
+            checkbox_layout.addWidget(optimisation_checkbox)
+            table.setCellWidget(row_index, 3, optimisation_container)
+
+            required_item = QTableWidgetItem("Yes" if required else "No")
+            required_item.setData(Qt.UserRole, required)
+            required_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            required_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row_index, 4, required_item)
+            if definition["kind"] == "additive":
+                earlier_additives.append(definition["name"])
+        table.blockSignals(False)
+
+    def handle_define_fields_table_changed(self, *_args):
+        """Refresh dependent weight choices while preserving current edits."""
+        if not hasattr(self, "define_fields_table"):
+            return
+        table = self.define_fields_table
+        earlier_additives = []
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 0)
+            name = canonical_property_key(name_item.text() if name_item else "")
+            kind_combo = table.cellWidget(row, 1)
+            weight_combo = table.cellWidget(row, 2)
+            kind = kind_combo.currentData() if isinstance(kind_combo, QComboBox) else ""
+            if isinstance(weight_combo, QComboBox):
+                current = weight_combo.currentData() or ""
+                weight_combo.blockSignals(True)
+                weight_combo.clear()
+                weight_combo.addItem("", "")
+                for additive in earlier_additives:
+                    weight_combo.addItem(additive, additive)
+                if current and weight_combo.findData(current) >= 0:
+                    weight_combo.setCurrentIndex(weight_combo.findData(current))
+                weight_combo.setEnabled(kind == "weighted_average")
+                weight_combo.blockSignals(False)
+            if kind == "additive" and name:
+                earlier_additives.append(name)
+
+    def add_defined_field(self):
+        try:
+            rows = [
+                self.field_definition_row(row)
+                for row in range(self.define_fields_table.rowCount())
+            ]
+        except Exception:
+            rows = copy.deepcopy(self.field_definitions)
+        existing = {canonical_property_key(row.get("name")) for row in rows}
+        number = 1
+        name = f"new_field_{number}"
+        while name in existing:
+            number += 1
+            name = f"new_field_{number}"
+        rows.append({
+            "name": name,
+            "kind": "additive",
+            "weight_field": "",
+            "required": False,
+            "use_in_optimisation": False,
+        })
+        self.field_definitions = rows
+        self.populate_define_fields_table()
+        self.define_fields_table.setCurrentCell(len(rows) - 1, 0)
+        self.define_fields_table.editItem(
+            self.define_fields_table.item(len(rows) - 1, 0)
+        )
+
+    def delete_defined_field(self):
+        row = self.define_fields_table.currentRow()
+        if row < 0:
+            return
+        definition = self.field_definition_row(row)
+        if definition.get("required"):
+            QMessageBox.information(
+                self, "Define Fields", "Required fields cannot be deleted."
+            )
+            return
+        self.define_fields_table.removeRow(row)
+        self.handle_define_fields_table_changed()
+
+    def move_defined_field(self, offset):
+        row = self.define_fields_table.currentRow()
+        target = row + int(offset)
+        if row < 0 or target < 0 or target >= self.define_fields_table.rowCount():
+            return
+        rows = [
+            self.field_definition_row(index)
+            for index in range(self.define_fields_table.rowCount())
+        ]
+        rows[row], rows[target] = rows[target], rows[row]
+        self.field_definitions = rows
+        self.populate_define_fields_table()
+        self.define_fields_table.setCurrentCell(target, 0)
+
+    def handle_define_fields_submit(self):
+        try:
+            self.capture_define_fields_table()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Define Fields", str(exc))
+            return
+        # Make automatically-required additive weights visible if the user
+        # returns to this step.
+        self.populate_define_fields_table()
+        targets = {row["name"] for row in self.field_definitions}
+        self.field_mappings = [
+            mapping for mapping in normalize_field_mappings(self.field_mappings)
+            if mapping["target_field"] in targets
+        ]
+        self.populate_map_fields_table()
+        self.refresh_map_available_fields()
+        self.set_page_enabled(self.map_fields_tab_index, True)
+        self.save_active_scenario_state()
+        self.show_page(self.map_fields_tab_index, force=True)
+
+    def setup_map_fields(self):
+        """Map Inventory, AMT and APS raw columns onto canonical fields."""
+        self.map_fields_tab = QWidget()
+        self.map_fields_tab_index = self.register_page(
+            "map_fields",
+            self.setup_tabs,
+            self.map_fields_tab,
+            "Map Fields",
+            position=3,
+        )
+        self.set_page_enabled(self.map_fields_tab_index, False)
+        layout = QVBoxLayout(self.map_fields_tab)
+        layout.setContentsMargins(14, 12, 14, 12)
+        title = QLabel("Map Fields")
+        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
+        help_text = QLabel(
+            "Map available source columns to the canonical fields. Double-click "
+            "or drag an available field into Source Field. Blank mappings are "
+            "allowed and remain visibly blank in Database View."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color: #607080;")
+        layout.addWidget(title)
+        layout.addWidget(help_text)
+
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("24HR Mining.csv:"))
+        self.map_fields_file_path_24hr = QLineEdit()
+        self.map_fields_file_path_24hr.setReadOnly(True)
+        self.map_fields_file_path_24hr.setText(str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ))
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self.browse_24hr_file)
+        file_row.addWidget(self.map_fields_file_path_24hr, stretch=1)
+        file_row.addWidget(browse_button)
+        layout.addLayout(file_row)
+
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(QLabel("Source:"))
+        self.map_fields_source_family = QComboBox()
+        for family in SOURCE_FAMILIES:
+            self.map_fields_source_family.addItem(family.upper(), family)
+        selector_row.addWidget(self.map_fields_source_family)
+        selector_row.addWidget(QLabel("APS Brand:"))
+        self.map_fields_brand = QComboBox()
+        selector_row.addWidget(self.map_fields_brand)
+        selector_row.addStretch()
+        layout.addLayout(selector_row)
+
+        mapping_area = QHBoxLayout()
+        self.field_mapping_table = APSGradeMappingTable(min_drop_column=3)
+        self.field_mapping_table.setColumnCount(4)
+        self.field_mapping_table.setHorizontalHeaderLabels([
+            "BlendMaster Field", "Type", "Weight Field", "Source Field"
+        ])
+        self.field_mapping_table.verticalHeader().setVisible(False)
+        self.field_mapping_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        mapping_area.addWidget(self.field_mapping_table, stretch=3)
+
+        available_panel = QFrame()
+        available_panel.setFrameShape(QFrame.StyledPanel)
+        available_layout = QVBoxLayout(available_panel)
+        available_layout.addWidget(QLabel("Available Source Fields"))
+        self.map_fields_filter = QLineEdit()
+        self.map_fields_filter.setPlaceholderText("Filter fields...")
+        self.map_fields_available_list = QListWidget()
+        self.map_fields_available_list.setDragEnabled(True)
+        self.map_fields_available_list.setDragDropMode(QAbstractItemView.DragOnly)
+        self.map_fields_status = QLabel("")
+        self.map_fields_status.setWordWrap(True)
+        self.map_fields_status.setStyleSheet("color: #607080;")
+        available_layout.addWidget(self.map_fields_filter)
+        available_layout.addWidget(self.map_fields_available_list, stretch=1)
+        available_layout.addWidget(self.map_fields_status)
+        mapping_area.addWidget(available_panel, stretch=1)
+        layout.addLayout(mapping_area, stretch=1)
+
+        submit_row = QHBoxLayout()
+        submit_button = QPushButton("Submit")
+        submit_button.clicked.connect(self.handle_map_fields_submit)
+        submit_row.addWidget(submit_button)
+        submit_row.addStretch()
+        layout.addLayout(submit_row)
+
+        self._map_fields_active_context = None
+        self.map_fields_source_family.currentIndexChanged.connect(
+            self.handle_map_fields_context_changed
+        )
+        self.map_fields_brand.currentIndexChanged.connect(
+            self.handle_map_fields_context_changed
+        )
+        self.map_fields_filter.textChanged.connect(
+            self.filter_map_available_fields
+        )
+        self.map_fields_available_list.itemDoubleClicked.connect(
+            self.apply_available_field_to_mapping
+        )
+        self.refresh_map_field_brands()
+        self.populate_map_fields_table()
+        self.refresh_map_available_fields()
+
+    def refresh_map_field_brands(self):
+        if not hasattr(self, "map_fields_brand"):
+            return
+        current = self.map_fields_brand.currentData()
+        self.map_fields_brand.blockSignals(True)
+        self.map_fields_brand.clear()
+        self.map_fields_brand.addItem("All / unbranded", "")
+        for brand in configured_brands(self.product_brand_labels_choice):
+            self.map_fields_brand.addItem(brand, brand)
+        index = self.map_fields_brand.findData(current)
+        self.map_fields_brand.setCurrentIndex(max(index, 0))
+        self.map_fields_brand.blockSignals(False)
+        self.update_map_fields_brand_enabled()
+
+    def update_map_fields_brand_enabled(self):
+        family = (
+            self.map_fields_source_family.currentData()
+            if hasattr(self, "map_fields_source_family") else "inventory"
+        )
+        self.map_fields_brand.setEnabled(family == "aps")
+        if family != "aps" and self.map_fields_brand.currentIndex() != 0:
+            self.map_fields_brand.setCurrentIndex(0)
+
+    def current_map_fields_context(self):
+        family = str(self.map_fields_source_family.currentData() or "inventory")
+        brand = str(self.map_fields_brand.currentData() or "") if family == "aps" else ""
+        return family, brand
+
+    def capture_map_fields_table(self):
+        if not hasattr(self, "field_mapping_table"):
+            return
+        family, brand = self._map_fields_active_context or self.current_map_fields_context()
+        retained = [
+            mapping for mapping in normalize_field_mappings(self.field_mappings)
+            if not (
+                mapping["source_family"] == family
+                and mapping.get("brand", "") == brand
+            )
+        ]
+        for row in range(self.field_mapping_table.rowCount()):
+            target_item = self.field_mapping_table.item(row, 0)
+            source_item = self.field_mapping_table.item(row, 3)
+            target = target_item.data(Qt.UserRole) if target_item else ""
+            source = source_item.text().strip() if source_item else ""
+            if target and source:
+                retained.append({
+                    "source_family": family,
+                    "brand": brand,
+                    "target_field": target,
+                    "source_field": source,
+                })
+        self.field_mappings = normalize_field_mappings(retained)
+
+    def populate_map_fields_table(self):
+        if not hasattr(self, "field_mapping_table"):
+            return
+        family, brand = self.current_map_fields_context()
+        lookup = mapping_lookup(self.field_mappings, family, brand)
+        rows = normalize_field_definitions(self.field_definitions)
+        self.field_mapping_table.setRowCount(len(rows))
+        for row_index, definition in enumerate(rows):
+            values = (
+                definition["name"],
+                definition["kind"].replace("_", " ").title(),
+                definition.get("weight_field", ""),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if column == 0:
+                    item.setData(Qt.UserRole, definition["name"])
+                self.field_mapping_table.setItem(row_index, column, item)
+            self.field_mapping_table.setItem(
+                row_index, 3,
+                QTableWidgetItem(lookup.get(definition["name"], "")),
+            )
+        self._map_fields_active_context = (family, brand)
+
+    def handle_map_fields_context_changed(self, *_args):
+        if self._map_fields_active_context is not None:
+            self.capture_map_fields_table()
+        self.update_map_fields_brand_enabled()
+        self.populate_map_fields_table()
+        self.refresh_map_available_fields()
+
+    def available_mapping_fields(self, family):
+        fields = set()
+        if family == "inventory":
+            source = self.updated_stockpile_data or self.stockpile_data or {}
+            for record in source.values():
+                fields.update(flatten_available_source_fields(record))
+                fields.update(inventory_additional_values(record))
+        elif family == "amt":
+            for rows in (self.AMT_stockpile_data or {}).values():
+                for record in rows or []:
+                    fields.update(flatten_available_source_fields(record))
+        elif family == "aps":
+            path = self.current_24hr_aps_path()
+            if path and os.path.isfile(path):
+                try:
+                    fields.update(self.distinct_aps_csv_headers(path))
+                except (OSError, csv.Error):
+                    pass
+        return sorted(str(field) for field in fields if str(field).strip())
+
+    def refresh_map_available_fields(self):
+        if not hasattr(self, "map_fields_available_list"):
+            return
+        family, _brand = self.current_map_fields_context()
+        fields = self.available_mapping_fields(family)
+        self._map_fields_available_values = fields
+        self.filter_map_available_fields()
+        self.map_fields_status.setText(
+            f"{len(fields)} distinct {family.upper()} field(s) available."
+        )
+
+    def filter_map_available_fields(self, *_args):
+        if not hasattr(self, "map_fields_available_list"):
+            return
+        query = self.map_fields_filter.text().strip().lower()
+        self.map_fields_available_list.clear()
+        self.map_fields_available_list.addItems([
+            field for field in getattr(self, "_map_fields_available_values", [])
+            if not query or query in field.lower()
+        ])
+
+    def apply_available_field_to_mapping(self, item):
+        row = self.field_mapping_table.currentRow()
+        if row < 0:
+            return
+        self.field_mapping_table.setItem(row, 3, QTableWidgetItem(item.text()))
+        self.field_mapping_table.setCurrentCell(row, 3)
+
+    def ensure_field_mapping_migration(self):
+        """Seed explicit mappings for legacy projects and familiar raw fields."""
+        if int(vars(self).get("field_mapping_schema_version", 0) or 0) >= 1:
+            return
+        mappings = normalize_field_mappings(
+            getattr(self, "field_mappings", None)
+        )
+        analyte_raw = {"fe": "FE", "si": "SIO2", "al": "AL2O3", "p": "P", "mn": "MN"}
+        inventory_product = internal_product_slot(getattr(self, "opf_input_choice", None))
+        amt_product = amt_modelled_product_slot(getattr(self, "opf_input_choice", None))
+        for family in ("inventory", "amt"):
+            mappings.append({
+                "source_family": family, "brand": "",
+                "target_field": "source_wmt",
+                "source_field": "BALANCE" if family == "inventory" else "FINAL_WMT",
+            })
+            for analyte, raw_name in analyte_raw.items():
+                mappings.append({
+                    "source_family": family, "brand": "",
+                    "target_field": f"modelled_rom_{analyte}",
+                    "source_field": (
+                        f"GRADE_{analyte.upper()}" if family == "inventory" else raw_name
+                    ),
+                })
+                if family == "inventory" and inventory_product:
+                    mappings.append({
+                        "source_family": family, "brand": "",
+                        "target_field": f"modelled_product_{analyte}",
+                        "source_field": f"{analyte.upper()}_{inventory_product.upper()}",
+                    })
+                elif family == "amt" and amt_product:
+                    mappings.append({
+                        "source_family": family, "brand": "",
+                        "target_field": f"modelled_product_{analyte}",
+                        "source_field": f"MODELLED_{amt_product.upper()}_{raw_name}",
+                    })
+
+        legacy_grades = normalise_aps_grade_field_mappings(
+            getattr(self, "aps_grade_field_mappings", None),
+            self.product_brand_labels_choice,
+        )
+        for stream, prefix in (("rom", "modelled_rom"), ("product", "modelled_product")):
+            for brand, grade_fields in (legacy_grades.get(stream, {}) or {}).items():
+                for analyte, source_field in (grade_fields or {}).items():
+                    if source_field:
+                        mappings.append({
+                            "source_family": "aps", "brand": brand,
+                            "target_field": f"{prefix}_{analyte}",
+                            "source_field": source_field,
+                        })
+        for target, source_field in normalise_aps_source_property_mappings(
+            getattr(self, "aps_source_property_field_mappings", None)
+        ).items():
+            if source_field:
+                mappings.append({
+                    "source_family": "aps", "brand": "",
+                    "target_field": target, "source_field": source_field,
+                })
+        self.field_mappings = normalize_field_mappings(mappings)
+        self.field_mapping_schema_version = 1
+
+    def apply_canonical_field_mappings(self):
+        """Attach canonical fields to Inventory and AMT records before streams."""
+        self.ensure_field_mapping_migration()
+        definitions = normalize_field_definitions(self.field_definitions)
+        for source in (self.stockpile_data or {}, self.updated_stockpile_data or {}):
+            for record in source.values():
+                explicit = mapping_lookup(
+                    self.field_mappings, "inventory"
+                )
+                for definition in definitions:
+                    name = definition["name"]
+                    if any(name.startswith(f"{stream}_") for stream in STREAMS) and name not in explicit:
+                        record.pop(name, None)
+                        if isinstance(record.get("source_properties"), dict):
+                            record["source_properties"].pop(name, None)
+                record.update(inventory_product_property_aliases(
+                    record, self.opf_input_choice
+                ))
+                canonical = apply_field_mappings(
+                    record, definitions, self.field_mappings, "inventory"
+                )
+                record["defined_fields"] = canonical
+                properties = dict(record.get("source_properties") or {})
+                properties.update({key: value for key, value in canonical.items() if value is not None})
+                record["source_properties"] = properties
+                record.update({key: value for key, value in canonical.items() if value is not None})
+        for rows in (self.AMT_stockpile_data or {}).values():
+            for record in rows or []:
+                explicit = mapping_lookup(self.field_mappings, "amt")
+                for definition in definitions:
+                    name = definition["name"]
+                    if any(name.startswith(f"{stream}_") for stream in STREAMS) and name not in explicit:
+                        record.pop(name, None)
+                        if isinstance(record.get("source_properties"), dict):
+                            record["source_properties"].pop(name, None)
+                canonical = apply_field_mappings(
+                    record, definitions, self.field_mappings, "amt"
+                )
+                record["defined_fields"] = canonical
+                properties = dict(record.get("source_properties") or {})
+                properties.update({key: value for key, value in canonical.items() if value is not None})
+                record["source_properties"] = properties
+                record.update({key: value for key, value in canonical.items() if value is not None})
+
+        grades, properties = legacy_aps_mappings(
+            definitions,
+            self.field_mappings,
+            self.product_brand_labels_choice,
+        )
+        self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
+            grades, self.product_brand_labels_choice
+        )
+        self.aps_source_property_field_mappings = (
+            normalise_aps_source_property_mappings(properties)
+        )
+        draw_amt = getattr(self, "draw_AMT_map", None)
+        if draw_amt is not None:
+            draw_amt.source_property_kinds = {
+                row["name"]: row["kind"] for row in definitions
+            }
+
+    def sync_canonical_grade_fields(self, record, streams):
+        """Project calculated streams onto the canonical audit/property keys."""
+        record = record if isinstance(record, dict) else {}
+        normalized = normalise_grade_streams(streams)
+        preferred = configured_brands(
+            vars(self).get("product_brand_labels_choice", "")
+        )
+        properties = dict(record.get("source_properties") or {})
+        defined = dict(record.get("defined_fields") or {})
+        field_names = {
+            row["name"]
+            for row in normalize_field_definitions(
+                vars(self).get("field_definitions")
+            )
+        }
+        for stream in ("modelled_rom", "adjusted_rom", "modelled_product", "adjusted_product"):
+            brand_map = normalized.get(stream) or {}
+            candidates = [*preferred, "__unbranded__", *brand_map.keys()]
+            for analyte in ANALYTES:
+                value = None
+                for brand in dict.fromkeys(candidates):
+                    value = numeric((brand_map.get(brand) or {}).get(analyte))
+                    if value is not None:
+                        break
+                key = f"{stream}_{analyte}"
+                if key in field_names:
+                    defined[key] = value
+                    if value is not None:
+                        record[key] = value
+                        properties[key] = value
+        record["defined_fields"] = defined
+        record["source_properties"] = properties
+
+    def handle_map_fields_submit(self):
+        self.capture_map_fields_table()
+        self.apply_canonical_field_mappings()
+        self.apply_grade_streams_to_inventory()
+        if self.AMT_stockpile_data:
+            self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
+                {
+                    name: values
+                    for name, values in (self.updated_stockpile_data or {}).items()
+                    if values.get("amt", False)
+                },
+                self.AMT_stockpile_data,
+            )
+            self.opening_stockpile_inventories.save_AMT_to_database(
+                self.AMT_stockpile_data
+            )
+            self.refresh_AMT_map_data_from_database()
+        self.set_page_enabled(self.data_streams_tab_index, True)
+        self.save_active_scenario_state()
+        self.show_page(self.data_streams_tab_index, force=True)
+        QTimer.singleShot(100, self.prepare_data_streams)
+
     def setup_data_streams(self):
-        """Set up grade stream selection, APS mappings and OPF factors."""
+        """Set up grade stream selection and OPF factors."""
         self.data_streams_tab = QWidget()
         self.data_streams_tab.setObjectName("dataStreamsTab")
         self.data_streams_tab_index = self.register_page(
@@ -4832,7 +5650,7 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.data_streams_tab,
             "Data Streams",
-            position=1,
+            position=4,
         )
         self.set_page_enabled(self.data_streams_tab_index, False)
 
@@ -4849,8 +5667,9 @@ class UserInputs(QMainWindow):
         title = QLabel("Data Streams")
         title.setStyleSheet("font-size: 22px; font-weight: 700; color: #1f2933;")
         subtitle = QLabel(
-            "Select the single grade stream used by optimisation, map APS 24HR grade fields, "
-            "and review or override historical OPF reconciliation factors."
+            "Select the single grade stream used by optimisation and review or "
+            "override historical OPF reconciliation factors. Field definitions "
+            "and source mappings are maintained in the preceding setup steps."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #607080;")
@@ -4942,6 +5761,9 @@ class UserInputs(QMainWindow):
         aps_file_row.addWidget(self.data_streams_file_24hr_button)
         aps_file_layout.addRow("Select 24HR Mining.csv:", aps_file_row)
         layout.addWidget(aps_file_card)
+        # Retained as hidden compatibility widgets for older project/schema
+        # migration. The user-facing selector now lives on Map Fields.
+        aps_file_card.hide()
 
         mapping_label = QLabel("APS 24HR ROM and Product Grade Field Mappings")
         mapping_label.setStyleSheet("font-size: 15px; font-weight: 700;")
@@ -4953,6 +5775,8 @@ class UserInputs(QMainWindow):
         mapping_help.setWordWrap(True)
         mapping_help.setStyleSheet("color: #607080;")
         layout.addWidget(mapping_help)
+        mapping_label.hide()
+        mapping_help.hide()
 
         mapping_area = QHBoxLayout()
         self.aps_grade_mapping_table = APSGradeMappingTable()
@@ -4995,6 +5819,8 @@ class UserInputs(QMainWindow):
         header_layout.addWidget(self.aps_header_status_label)
         mapping_area.addWidget(header_panel, stretch=1)
         layout.addLayout(mapping_area)
+        self.aps_grade_mapping_table.hide()
+        header_panel.hide()
 
         property_mapping_label = QLabel(
             "APS 24HR Source Property Field Mappings"
@@ -5029,6 +5855,9 @@ class UserInputs(QMainWindow):
         layout.addWidget(property_mapping_label)
         layout.addWidget(property_mapping_help)
         layout.addWidget(self.aps_source_property_mapping_table)
+        property_mapping_label.hide()
+        property_mapping_help.hide()
+        self.aps_source_property_mapping_table.hide()
 
         factor_label = QLabel("Historical OPF Reconciliation Factors")
         factor_label.setStyleSheet("font-size: 15px; font-weight: 700;")
@@ -5079,10 +5908,11 @@ class UserInputs(QMainWindow):
 
     def current_24hr_aps_path(self):
         for widget_name in (
+            "map_fields_file_path_24hr",
             "data_streams_file_path_24hr",
             "file_path_24hr",
         ):
-            widget = getattr(self, widget_name, None)
+            widget = vars(self).get(widget_name)
             if widget is not None:
                 widget_path = widget.text().strip()
                 if widget_path:
@@ -5103,10 +5933,11 @@ class UserInputs(QMainWindow):
         self.file_path_24hr_choice = normalized_path
 
         for widget_name in (
+            "map_fields_file_path_24hr",
             "data_streams_file_path_24hr",
             "file_path_24hr",
         ):
-            widget = getattr(self, widget_name, None)
+            widget = vars(self).get(widget_name)
             if widget is not None and widget.text() != normalized_path:
                 widget.setText(normalized_path)
 
@@ -5119,6 +5950,8 @@ class UserInputs(QMainWindow):
         self.refresh_aps_grade_field_headers(
             show_errors=show_mapping_errors
         )
+        if vars(self).get("map_fields_available_list") is not None:
+            self.refresh_map_available_fields()
 
     @staticmethod
     def distinct_aps_csv_headers(path):
@@ -5445,8 +6278,7 @@ class UserInputs(QMainWindow):
     def prepare_data_streams(self):
         if not self.stockpile_data:
             return
-        self.capture_aps_grade_mapping_table()
-        self.capture_aps_source_property_mapping_table()
+        self.apply_canonical_field_mappings()
         self.capture_cb_lump_fines_settings()
         overrides = {}
         if self.historical_recon_factors:
@@ -5690,6 +6522,7 @@ class UserInputs(QMainWindow):
             )
             row["GRADE_STREAMS"] = streams
             row["grade_streams"] = streams
+            self.sync_canonical_grade_fields(row, streams)
             warnings = self.inventory_stream_warnings(name, row)
             cb_warning = self.apply_cb_split_to_inventory_row(row)
             if cb_warning:
@@ -5765,15 +6598,27 @@ class UserInputs(QMainWindow):
             "rom": self.rom_planning_category_input.text(),
             "product": self.product_planning_category_input.text(),
         })
-        self.capture_aps_grade_mapping_table()
-        self.capture_aps_source_property_mapping_table()
         try:
             self.capture_cb_lump_fines_settings()
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
         self.capture_recon_factor_table()
+        self.apply_canonical_field_mappings()
         self.apply_grade_streams_to_inventory()
+        if self.AMT_stockpile_data:
+            self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
+                {
+                    name: values
+                    for name, values in (self.updated_stockpile_data or {}).items()
+                    if values.get("amt", False)
+                },
+                self.AMT_stockpile_data,
+            )
+            self.opening_stockpile_inventories.save_AMT_to_database(
+                self.AMT_stockpile_data
+            )
+            self.refresh_AMT_map_data_from_database()
         if self.data_stream_pending_build_targets:
             self.register_submitted_site_scenarios(self.data_stream_pending_build_targets)
         else:
@@ -5781,6 +6626,11 @@ class UserInputs(QMainWindow):
         # Scenario registration clears/initialises the scenario database, so
         # persist the auditable factors and enriched opening inventory after it.
         self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
+        if self.AMT_stockpile_data:
+            self.opening_stockpile_inventories.save_AMT_to_database(
+                self.AMT_stockpile_data
+            )
+            self.refresh_AMT_map_data_from_database()
         self.data_stream_reconciliation.save_to_database(
             self.opf_input_choice,
             self.start_time_choice,
@@ -5788,7 +6638,6 @@ class UserInputs(QMainWindow):
             self.historical_recon_warnings,
         )
         self.save_active_scenario_state()
-        self.setup_stockpile_table()
         self.set_page_enabled(self.data_streams_tab_index, True)
         self.set_page_enabled(self.guidance_schedules_tab_index, True)
         self.show_page(self.guidance_schedules_tab_index, force=True)
@@ -8256,21 +9105,25 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "BlendMaster", message)
 
         self.setup_stockpile_table()
-        self.populate_aps_grade_mapping_table()
-        self.populate_aps_source_property_mapping_table()
+        self.populate_define_fields_table()
+        self.refresh_map_field_brands()
+        self.ensure_field_mapping_migration()
+        self.populate_map_fields_table()
         self.load_cb_lump_fines_settings()
-        self.refresh_aps_grade_field_headers()
+        self.refresh_map_available_fields()
         self.populate_recon_factor_table()
-        self.set_page_enabled(self.data_streams_tab_index, True)
         self.set_page_enabled(
             self.stockpile_tab_index,
-            restoring_project,
+            True,
         )
         if not restoring_project:
+            self.set_page_enabled(self.define_fields_tab_index, False)
+            self.set_page_enabled(self.map_fields_tab_index, False)
+            self.set_page_enabled(self.data_streams_tab_index, False)
             self.set_page_enabled(self.guidance_schedules_tab_index, False)
-            self.show_page(self.data_streams_tab_index)
-            QTimer.singleShot(100, self.prepare_data_streams)
+            self.show_page(self.stockpile_tab_index)
         else:
+            self.apply_canonical_field_mappings()
             self.apply_grade_streams_to_inventory()
         self.validate_form()
 
@@ -8278,7 +9131,7 @@ class UserInputs(QMainWindow):
             self.agent_workflow_after_data_streams = True
 
     def handle_guidance_schedules_submit(self):
-        """Apply optional schedule guidance before stockpile selection."""
+        """Apply optional schedule guidance and advance to source chunking."""
         if not self.stockpile_data:
             QMessageBox.warning(
                 self,
@@ -8310,18 +9163,14 @@ class UserInputs(QMainWindow):
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
-        default_use = self.default_stockpile_use_for_active_crusher(
-            self.stockpile_data
-        )
-        if default_use is not None:
-            # Guidance is submitted before the user reaches Stockpiles, so
-            # replace any checkbox defaults captured by earlier setup pages.
-            self.stockpile_data_use_column = default_use
-
-        self.setup_stockpile_table()
-        self.set_page_enabled(self.stockpile_tab_index, True)
         self.save_active_scenario_state()
-        self.show_page(self.stockpile_tab_index, force=True)
+        if any((self.stockpile_data_AMT_column or {}).values()):
+            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+            self.show_page(self.AMT_stockpile_tab_index, force=True)
+        else:
+            self.hex_sequence_table = []
+            self.hex_sequence_table_argument = []
+            self.open_database_view(navigate=True)
         self.validate_form()
 
     def handle_site_config_error(self, error_message):
@@ -11177,13 +12026,6 @@ class UserInputs(QMainWindow):
             "Grade P (%)",
             "Grade Mn (%)",
         ]
-        headers.append("Modelled ROM Grades")
-        for brand in configured_brands(self.product_brand_labels_choice):
-            headers.extend([
-                f"Adjusted ROM Grades ({brand})",
-                f"Modelled Product Grades ({brand})",
-                f"Adjusted Product Grades ({brand})",
-            ])
         if self.is_total_feed_operating_crusher():
             headers.append("Max Reclaim Rate (t/h)")
         headers.append("Reclaim Threshold (WMT)")
@@ -11389,7 +12231,7 @@ class UserInputs(QMainWindow):
                 if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
                     value = float(value) if value else 0.0
-                    balance_item = QTableWidgetItem(f"{value:.2f}")
+                    balance_item = QTableWidgetItem(f"{value:,.0f}")
                     balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     balance_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     if value < 0:
@@ -11419,35 +12261,6 @@ class UserInputs(QMainWindow):
                     grade_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, grade_item)
 
-            streams = attributes.get("grade_streams") or attributes.get("GRADE_STREAMS")
-            modelled_rom_brand = (
-                configured_brands(self.product_brand_labels_choice) or [None]
-            )[0]
-            stream_cells = {
-                "Modelled ROM Grades": format_grade_stream_vector(
-                    streams, "modelled_rom", modelled_rom_brand
-                )
-            }
-            for brand in configured_brands(self.product_brand_labels_choice):
-                stream_cells.update({
-                    f"Adjusted ROM Grades ({brand})": format_grade_stream_vector(
-                        streams, "adjusted_rom", brand
-                    ),
-                    f"Modelled Product Grades ({brand})": format_grade_stream_vector(
-                        streams, "modelled_product", brand
-                    ),
-                    f"Adjusted Product Grades ({brand})": format_grade_stream_vector(
-                        streams, "adjusted_product", brand
-                    ),
-                })
-            for caption, display_value in stream_cells.items():
-                column = headers.index(caption)
-                item = QTableWidgetItem(display_value)
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                item.setToolTip(display_value)
-                self.stockpile_table.setItem(row_idx, column, item)
-
             if self.is_total_feed_operating_crusher():
                 max_reclaim_rate = attributes.get(
                     "max_reclaim_rate",
@@ -11468,7 +12281,7 @@ class UserInputs(QMainWindow):
             # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
             reclaim_value = float(reclaim_value)
-            reclaim_item = QTableWidgetItem(f"{reclaim_value:.2f}")
+            reclaim_item = QTableWidgetItem(f"{reclaim_value:,.0f}")
             reclaim_item.setTextAlignment(Qt.AlignCenter)
             self.stockpile_table.setItem(
                 row_idx,
@@ -11565,8 +12378,14 @@ class UserInputs(QMainWindow):
 
             if reclaim_item and balance_item:
                 try:
-                    reclaim_value = float(reclaim_item.text())
-                    balance_value = float(balance_item.text())
+                    reclaim_value = self.parse_formatted_number(
+                        reclaim_item.text()
+                    )
+                    balance_value = self.parse_formatted_number(
+                        balance_item.text()
+                    )
+                    if reclaim_value is None or balance_value is None:
+                        raise ValueError("Invalid formatted tonnage")
 
                     # Apply conditional formatting
                     if reclaim_value <= balance_value:
@@ -11638,7 +12457,10 @@ class UserInputs(QMainWindow):
                     reclaim_item = self.stockpile_table.item(
                         row, reclaim_threshold_column
                     )
-                    reclaim_threshold = float(reclaim_item.text()) if reclaim_item else 0
+                    reclaim_threshold = (
+                        self.parse_formatted_number(reclaim_item.text(), 0.0)
+                        if reclaim_item else 0.0
+                    )
 
                     # Update stockpile data
                     updated_stockpile_data[stockpile_name] = self.stockpile_data.get(stockpile_name, {})
@@ -11695,15 +12517,13 @@ class UserInputs(QMainWindow):
 
         if self.updated_stockpile_data:
             self.save_active_scenario_state()
-            # Enable the next tab (Calendar Tab)
             self.setup_calendar()
-            # Database View is deliberately gated by the AMT Stockpiles step.
-            # Even an inventory-only scenario passes through that page so the
-            # setup sequence remains Stockpile Inventories -> AMT Stockpiles ->
-            # Database View and the audit cannot be opened prematurely.
+            # Fetch AMT raw fields now so they are available on Map Fields, but
+            # leave chunk generation until after Guidance Schedules.
             self.setup_AMT_stockpile_table()
-            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
-            self.show_page(self.AMT_stockpile_tab_index)
+            self.populate_define_fields_table()
+            self.set_page_enabled(self.define_fields_tab_index, True)
+            self.show_page(self.define_fields_tab_index, force=True)
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -12086,7 +12906,7 @@ class UserInputs(QMainWindow):
                 f"state(s) using {transfer['blend_count']} manual blend "
                 f"definition(s).\n\n"
                 f"Transferred selected direct tip: "
-                f"{transfer['direct_tip_tonnes']:,.2f} t.",
+                f"{transfer['direct_tip_tonnes']:,.0f} t.",
             )
             self.show_page(self.blend_sequence_tab_index)
         return True
@@ -12106,9 +12926,14 @@ class UserInputs(QMainWindow):
     def parse_float_from_table_item(self, item, default=0.0):
         if not item or not item.text().strip():
             return default
+        return self.parse_formatted_number(item.text(), default)
+
+    @staticmethod
+    def parse_formatted_number(value, default=None):
+        """Parse a displayed number without letting grouping commas affect data."""
         try:
-            return float(item.text().strip())
-        except ValueError:
+            return float(str(value).strip().replace(",", ""))
+        except (TypeError, ValueError):
             return default
 
     def get_AMT_chunk_setting(self, stockpile_name):
@@ -12246,7 +13071,7 @@ class UserInputs(QMainWindow):
         self.AMT_stockpile_table.blockSignals(True)
         for column, display in (
             (count_column, str(plan["chunk_count"])),
-            (size_column, f'{plan["chunk_size"]:.2f}'),
+            (size_column, f'{plan["chunk_size"]:,.0f}'),
         ):
             item = QTableWidgetItem(display)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -12501,6 +13326,9 @@ class UserInputs(QMainWindow):
     def finish_AMT_stockpile_table_from_fetch(self, data_source, AMT_stockpile_data):
         self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data)
 
+        if hasattr(self, "map_fields_available_list"):
+            self.refresh_map_available_fields()
+
         if getattr(self, "project_load_waiting_for_AMT", False):
             self.project_load_waiting_for_AMT = False
             self.continue_project_load_after_stockpile_setup()
@@ -12569,7 +13397,7 @@ class UserInputs(QMainWindow):
                     ("AMT Total WMT", amt_total_wmt),
                     ("Inventory Stockpile Total WMT", inventory_total_wmt),
                 ):
-                    display = "" if value is None else f"{value:.2f}"
+                    display = "" if value is None else f"{value:,.0f}"
                     item = QTableWidgetItem(display)
                     item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     item.setTextAlignment(Qt.AlignCenter)
@@ -12600,7 +13428,7 @@ class UserInputs(QMainWindow):
                     ),
                     (
                         "Calculated Chunk Size (WMT)",
-                        f'{chunk_plan["chunk_size"]:.2f}',
+                        f'{chunk_plan["chunk_size"]:,.0f}',
                     ),
                 ):
                     item = QTableWidgetItem(display)
@@ -12801,6 +13629,23 @@ class UserInputs(QMainWindow):
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
+                canonical = apply_field_mappings(
+                    row,
+                    vars(self).get("field_definitions"),
+                    vars(self).get("field_mappings", []),
+                    "amt",
+                )
+                row["defined_fields"] = canonical
+                row.update({
+                    key: value for key, value in canonical.items()
+                    if value is not None
+                })
+                source_properties = dict(row.get("source_properties") or {})
+                source_properties.update({
+                    key: value for key, value in canonical.items()
+                    if value is not None
+                })
+                row["source_properties"] = source_properties
                 cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 insitu = {
                     "grade_fe": row.get("FE"),
@@ -12817,6 +13662,8 @@ class UserInputs(QMainWindow):
                     self.opf_input_choice,
                 )
                 row["GRADE_STREAMS"] = streams
+                row["grade_streams"] = streams
+                self.sync_canonical_grade_fields(row, streams)
                 inventory_name = str(row.get("FOOTPRINT") or footprint or "")
                 inventory_build = str(row.get("LOCATION_NAME") or "")
                 inventory_transaction_datetime = str(
@@ -14007,6 +14854,15 @@ class UserInputs(QMainWindow):
             "custom_constraints": copy.deepcopy(
                 getattr(self, "custom_constraint_definitions", [])
             ),
+            "optimisation_source_property_fields": sorted(
+                optimization_field_names(self.field_definitions)
+            ),
+            "source_property_kinds": {
+                row["name"]: row["kind"]
+                for row in normalize_field_definitions(
+                    self.field_definitions
+                )
+            },
         }
         self.solver_config = self.normalized_solver_config(self.solver_config)
 
@@ -14776,12 +15632,31 @@ class UserInputs(QMainWindow):
         self.populate_dataframe_table(self.sqlite_report_table, df)
 
     @staticmethod
-    def is_two_decimal_quantity_column(header):
+    def is_additive_tonne_column(header):
+        """Return whether a displayed field is a mass/tonnage quantity."""
         normalized = str(header or "").strip().lower()
-        return any(
-            marker in normalized
-            for marker in ("grade", "tonne", "balance", "wmt")
+        if not normalized:
+            return False
+        normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+        if any(marker in normalized for marker in (
+            "_rate", "rate_", "_tph", "per_hour", "per_source_wmt",
+            "_ratio", "_pct", "_percent", "coverage",
+        )):
+            return False
+        if source_property_kind(normalized) == "additive":
+            return True
+        return (
+            normalized
+            in {"tonnes", "wmt", "dmt", "balance", "payload", "max_quantity"}
+            or "tonne" in normalized
+            or normalized.endswith(("_balance", "_payload", "_chunk_size"))
+            or normalized.startswith("balance_")
         )
+
+    @classmethod
+    def is_two_decimal_quantity_column(cls, header):
+        normalized = str(header or "").strip().lower()
+        return not cls.is_additive_tonne_column(header) and "grade" in normalized
 
     def format_table_display_value(self, value, header=None):
         try:
@@ -14796,7 +15671,13 @@ class UserInputs(QMainWindow):
         if hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d %H:%M:%S")
 
+        force_zero_decimal_tonnes = self.is_additive_tonne_column(header)
         force_two_decimals = self.is_two_decimal_quantity_column(header)
+        if force_zero_decimal_tonnes:
+            try:
+                return f"{float(value):,.0f}"
+            except (TypeError, ValueError):
+                pass
         if isinstance(value, Real) and (
             force_two_decimals or not isinstance(value, Integral)
         ):
@@ -14989,7 +15870,16 @@ class UserInputs(QMainWindow):
                 db_path,
                 port=8054,
                 hex_sequence_table=self.hex_sequence_table,
-                chunk_settings=copy.deepcopy(self.AMT_chunk_settings)
+                chunk_settings=copy.deepcopy(self.AMT_chunk_settings),
+                source_property_kinds={
+                    row["name"]: row["kind"]
+                    for row in normalize_field_definitions(
+                        self.field_definitions
+                    )
+                },
+                source_property_weights=field_weight_map(
+                    self.field_definitions
+                ),
             )
 
             # Use a thread to run the Dash app server
@@ -14998,6 +15888,15 @@ class UserInputs(QMainWindow):
 
         else:
             self.draw_AMT_map.db_path = db_path
+            self.draw_AMT_map.source_property_kinds = {
+                row["name"]: row["kind"]
+                for row in normalize_field_definitions(
+                    self.field_definitions
+                )
+            }
+            self.draw_AMT_map.source_property_weights = field_weight_map(
+                self.field_definitions
+            )
             self.draw_AMT_map.update_chunk_settings(
                 copy.deepcopy(self.AMT_chunk_settings)
             )
@@ -15470,7 +16369,7 @@ class UserInputs(QMainWindow):
 
                     if key == "balance":
                         col_idx = 1  # Balance column
-                        item = QTableWidgetItem(f"{float(value):.2f}")
+                        item = QTableWidgetItem(f"{float(value):,.0f}")
                     else:
                         col_idx = keys.index(key) + 4  # Offset for additional columns
                         item = QTableWidgetItem(f"{float(value):.2f}")  # Format as float (2 decimals)
@@ -15481,7 +16380,7 @@ class UserInputs(QMainWindow):
 
                     if key == "balance":
                         col_idx = 1  # Balance column
-                        item = QTableWidgetItem(f"{float(balance):.2f}")
+                        item = QTableWidgetItem(f"{float(balance):,.0f}")
                     else:
                         col_idx = keys.index(key) + 4  # Offset for additional columns
                         item = QTableWidgetItem("AMT")
@@ -15621,7 +16520,7 @@ class UserInputs(QMainWindow):
                 delivered_text = ""
                 if latest_record is not None:
                     try:
-                        projected_text = f"{float(latest_record['closing_balance']):.2f}"
+                        projected_text = f"{float(latest_record['closing_balance']):,.0f}"
                     except (TypeError, ValueError):
                         projected_text = str(latest_record["closing_balance"])
                     delivered_text = str(latest_record["delivered_datetime"])
@@ -16109,9 +17008,13 @@ class UserInputs(QMainWindow):
                     .isChecked()
                 )
                 balance = (
-                    float(self.blend_config_table.item(row_idx, 2).text())  # Projected Balance
+                    self.parse_formatted_number(
+                        self.blend_config_table.item(row_idx, 2).text(), 0.0
+                    )  # Projected Balance
                     if use_projected
-                    else float(self.blend_config_table.item(row_idx, 1).text())  # Actual Balance
+                    else self.parse_formatted_number(
+                        self.blend_config_table.item(row_idx, 1).text(), 0.0
+                    )  # Actual Balance
                 )
                 available = (
                     self.blend_config_table.item(row_idx, 3).text()  # Last Payload Delivered
@@ -16223,7 +17126,7 @@ class UserInputs(QMainWindow):
                         self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item("AMT"))
                     else:
                         self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
-                self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:.2f}"))
+                self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:,.0f}"))
                 self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
                 self.blend_results_table.setItem(row_idx, 9, self.create_centered_item(sources_combined))
                 self.blend_results_table.setItem(row_idx, 10, self.create_centered_item(source_ratios_combined))
@@ -16379,12 +17282,13 @@ class UserInputs(QMainWindow):
         """
         Apply column formatting for the blend configuration table.
         """
-        # Format Balance and Projected Balance columns (two decimal places)
+        # Format Balance and Projected Balance columns as whole tonnes.
         for row_idx in range(self.blend_config_table.rowCount()):
             for col_idx in [1, 2]:  # Balance and Projected Balance columns
                 item = self.blend_config_table.item(row_idx, col_idx)
                 if item and item.text():
-                    item.setText(f"{float(item.text()):.2f}")
+                    value = self.parse_formatted_number(item.text(), 0.0)
+                    item.setText(f"{value:,.0f}")
                     item.setTextAlignment(Qt.AlignCenter)
 
         # Format Grade columns (two decimal places)
@@ -17152,6 +18056,18 @@ class UserInputs(QMainWindow):
                 configured_product_brands=context.get(
                     "product_brands", []
                 ),
+                source_property_kinds={
+                    str(row.get("name")): str(row.get("kind"))
+                    for row in (context.get("field_definitions") or [])
+                    if isinstance(row, dict) and row.get("name")
+                },
+                source_property_weights={
+                    str(row.get("name")): str(row.get("weight_field"))
+                    for row in (context.get("field_definitions") or [])
+                    if isinstance(row, dict)
+                    and row.get("name")
+                    and row.get("weight_field")
+                },
             )
             transactions = handler.process_transactions()
             if (
@@ -17873,7 +18789,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 14,
+                "project_format_version": 15,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -17903,6 +18819,11 @@ class UserInputs(QMainWindow):
                 "haul_cycle_routes": self.haul_cycle_routes,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "selected_data_stream": self.selected_data_stream,
+                "field_definitions": self.field_definitions,
+                "field_mappings": self.field_mappings,
+                "field_mapping_schema_version": int(getattr(
+                    self, "field_mapping_schema_version", 0
+                ) or 0),
                 "aps_grade_field_mappings": self.aps_grade_field_mappings,
                 "aps_source_property_field_mappings": (
                     self.aps_source_property_field_mappings
@@ -18263,6 +19184,18 @@ class UserInputs(QMainWindow):
         self.selected_data_stream = str(
             loaded_state.get("selected_data_stream") or DEFAULT_STREAM
         )
+        self.field_definitions = normalize_field_definitions(
+            loaded_state.get("field_definitions")
+        )
+        self.field_mappings = normalize_field_mappings(
+            loaded_state.get("field_mappings")
+        )
+        self.field_mapping_schema_version = int(
+            loaded_state.get(
+                "field_mapping_schema_version",
+                1 if "field_mappings" in loaded_state else 0,
+            ) or 0
+        )
         self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
             loaded_state.get("aps_grade_field_mappings"),
             self.product_brand_labels_choice,
@@ -18505,6 +19438,9 @@ class UserInputs(QMainWindow):
         self.selected_two_wp_product_crushers = []
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.selected_data_stream = DEFAULT_STREAM
+        self.field_definitions = default_field_definitions()
+        self.field_mappings = []
+        self.field_mapping_schema_version = 0
         self.aps_grade_field_mappings = {"rom": {}, "product": {}}
         self.aps_source_property_field_mappings = (
             normalise_aps_source_property_mappings()
@@ -18726,8 +19662,9 @@ class CustomTableWidget(QTableWidget):
 class APSGradeMappingTable(QTableWidget):
     """Mapping table that accepts a field dragged from the APS header list."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, min_drop_column=2):
         super().__init__(parent)
+        self.min_drop_column = int(min_drop_column)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DropOnly)
         self.setDropIndicatorShown(True)
@@ -18746,7 +19683,7 @@ class APSGradeMappingTable(QTableWidget):
             isinstance(source, QListWidget)
             and source.currentItem() is not None
             and index.isValid()
-            and index.column() >= 2
+            and index.column() >= self.min_drop_column
         ):
             event.acceptProposedAction()
             return
@@ -18759,7 +19696,7 @@ class APSGradeMappingTable(QTableWidget):
             not isinstance(source, QListWidget)
             or source.currentItem() is None
             or not index.isValid()
-            or index.column() < 2
+            or index.column() < self.min_drop_column
         ):
             event.ignore()
             return

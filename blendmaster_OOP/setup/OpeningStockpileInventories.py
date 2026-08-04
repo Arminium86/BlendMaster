@@ -1205,6 +1205,34 @@ class OpeningStockpileInventories:
                     for column, value in row.items()
                     if str(column).upper().startswith("MODELLED_")
                 }
+                property_payload = (
+                    row.get("MODELLED_PROPERTIES_JSON")
+                    or row.get("modelled_properties_json")
+                    or row.get("modelled_properties")
+                    or {}
+                )
+                if isinstance(property_payload, str):
+                    try:
+                        property_payload = json.loads(property_payload)
+                    except (TypeError, ValueError):
+                        property_payload = {}
+                property_payload = (
+                    dict(property_payload)
+                    if isinstance(property_payload, dict) else {}
+                )
+                property_values = dict(property_payload.get("values") or {})
+                property_coverage = dict(
+                    property_payload.get("coverage") or {}
+                )
+                for field_name, field_value in dict(
+                    row.get("defined_fields") or {}
+                ).items():
+                    if field_value is None:
+                        continue
+                    property_values[str(field_name)] = field_value
+                    property_coverage[str(field_name)] = 1.0
+                property_payload["values"] = property_values
+                property_payload["coverage"] = property_coverage
                 audit = {
                     "amt_inventory_matched": int(bool(row.get("AMT_INVENTORY_MATCHED"))),
                     "amt_inventory_stockpile": row.get("AMT_INVENTORY_STOCKPILE"),
@@ -1263,6 +1291,7 @@ class OpeningStockpileInventories:
                     "cb_split_method": row.get("CB_SPLIT_METHOD"),
                     "cb_split_warning": row.get("CB_SPLIT_WARNING"),
                     **modelled_audit,
+                    "modelled_properties_json": property_payload,
                     **flatten_grade_streams(
                         row.get("GRADE_STREAMS") or row.get("grade_streams")
                     ),

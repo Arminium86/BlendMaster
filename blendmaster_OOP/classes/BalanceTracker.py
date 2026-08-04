@@ -9,6 +9,7 @@ from pandas import DataFrame
 from classes.GradeStreams import (
     legacy_grade_streams,
     normalise_grade_streams,
+    reweight_grade_streams_from_properties,
     weighted_merge_grade_streams,
 )
 from classes.CustomConstraints import (
@@ -34,7 +35,11 @@ class BalanceTracker:
         period_tracker,
         hex_sequence_table,
         required_source_property_keys=None,
+        source_property_kinds=None,
+        source_property_weights=None,
     ):
+        self.source_property_kinds = dict(source_property_kinds or {})
+        self.source_property_weights = dict(source_property_weights or {})
         self.required_source_property_keys = (
             None
             if required_source_property_keys is None
@@ -101,6 +106,7 @@ class BalanceTracker:
                         self.source_properties.get(name),
                         closing_balance / opening_balance
                         if opening_balance > 0 else 0,
+                        self.source_property_kinds,
                     )
                 )
        
@@ -165,12 +171,6 @@ class BalanceTracker:
                                 f"grade_{analyte}": transaction.get(f"source_grade_{analyte}")
                                 for analyte in ("fe", "si", "al", "p", "mn")
                             })
-                        self.grade_streams[name] = weighted_merge_grade_streams(
-                            self.grade_streams.get(name),
-                            current_balance,
-                            incoming_streams,
-                            payload,
-                        )
                         incoming_properties = source_properties_from_mapping(
                             transaction
                         )
@@ -182,12 +182,30 @@ class BalanceTracker:
                             incoming_properties = scale_additive_source_properties(
                                 incoming_properties,
                                 payload / original_payload,
+                                self.source_property_kinds,
                             )
+                        self.grade_streams[name] = weighted_merge_grade_streams(
+                            self.grade_streams.get(name),
+                            current_balance,
+                            incoming_streams,
+                            payload,
+                            self.source_properties.get(name, {}),
+                            incoming_properties,
+                            self.source_property_weights,
+                        )
                         self.source_properties[name] = merge_source_properties(
                             self.source_properties.get(name, {}),
                             current_balance,
                             incoming_properties,
                             payload,
+                            self.source_property_kinds,
+                            self.source_property_weights,
+                        )
+                        self.grade_streams[name] = (
+                            reweight_grade_streams_from_properties(
+                                self.grade_streams.get(name),
+                                self.source_properties.get(name),
+                            )
                         )
                         
                         # Update the balance
@@ -340,6 +358,7 @@ class BalanceTracker:
                     scale_additive_source_properties(
                         self.source_properties.get(name),
                         current_hex['balance'] / current_balance,
+                        self.source_property_kinds,
                     )
                 )
             self.total_AMT_stockpile_balances[name] = max(

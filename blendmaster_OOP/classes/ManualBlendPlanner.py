@@ -16,6 +16,7 @@ from classes.GradeStreams import (
     legacy_grade_streams,
     normalise_brand,
     normalise_grade_streams,
+    reweight_grade_streams_from_properties,
     resolve_grade_vector,
     weighted_merge_grade_streams,
 )
@@ -25,6 +26,7 @@ from classes.CustomConstraints import (
     constraint_key,
     constraint_report_fields,
     custom_constraint_property_keys,
+    expand_required_property_keys,
     filter_source_properties,
     mapping_constraint_fields,
     merge_source_properties,
@@ -116,11 +118,43 @@ class ManualBlendPlanner:
         self.required_source_property_keys = (
             custom_constraint_property_keys(self.custom_constraints)
         )
+        self.required_source_property_keys.update(
+            solver_config.get("optimisation_source_property_fields") or []
+        )
+        self.source_property_kinds = dict(
+            solver_config.get("source_property_kinds") or {
+                str(row.get("name")): str(row.get("kind"))
+                for row in (site_context.get("field_definitions") or [])
+                if isinstance(row, Mapping) and row.get("name")
+            }
+        )
+        self.source_property_weights = dict(
+            solver_config.get("source_property_weights") or {
+                str(row.get("name")): str(row.get("weight_field"))
+                for row in (site_context.get("field_definitions") or [])
+                if isinstance(row, Mapping)
+                and row.get("name")
+                and row.get("weight_field")
+            }
+        )
+        self.required_source_property_keys = expand_required_property_keys(
+            self.required_source_property_keys,
+            self.source_property_weights,
+        )
         self.selected_data_stream = str(
             site_context.get("selected_data_stream")
             or solver_config.get("selected_data_stream")
             or DEFAULT_STREAM
         ).strip().lower()
+        if self.selected_data_stream in STREAMS:
+            self.required_source_property_keys.update(
+                f"{self.selected_data_stream}_{grade}"
+                for grade in self.GRADES
+            )
+            self.required_source_property_keys = expand_required_property_keys(
+                self.required_source_property_keys,
+                self.source_property_weights,
+            )
         self.opf = site_context.get("opf")
         self.crusher_rate = self._positive_number(
             crusher_rate, "Crusher rate"
@@ -549,23 +583,33 @@ class ManualBlendPlanner:
                             )
                             for grade in self.GRADES
                         })
+                    incoming_properties = filter_source_properties(
+                        source_properties_from_mapping(payload_row),
+                        self.required_source_property_keys,
+                    )
                     weighted_streams = weighted_merge_grade_streams(
                         weighted_streams,
                         accumulated_tonnes,
                         streams,
                         row_tonnes,
+                        weighted_properties,
+                        incoming_properties,
+                        self.source_property_weights,
                     )
                     weighted_properties = merge_source_properties(
                         weighted_properties,
                         accumulated_tonnes,
-                        filter_source_properties(
-                            source_properties_from_mapping(payload_row),
-                            self.required_source_property_keys,
-                        ),
+                        incoming_properties,
                         row_tonnes,
+                        self.source_property_kinds,
+                        self.source_property_weights,
                     )
                     accumulated_tonnes += row_tonnes
-                candidate["grade_streams"] = weighted_streams
+                candidate["grade_streams"] = (
+                    reweight_grade_streams_from_properties(
+                        weighted_streams, weighted_properties
+                    )
+                )
                 candidate["source_properties"] = weighted_properties
                 for grade in self.GRADES:
                     values = pd.to_numeric(
@@ -757,7 +801,9 @@ class ManualBlendPlanner:
             )
             for source_row in source_rows:
                 try:
-                    fields = mapping_constraint_fields(source_row)
+                    fields = mapping_constraint_fields(
+                        source_row, self.source_property_kinds
+                    )
                     numerator = numerator_expression.evaluate(fields)
                     denominator = denominator_expression.evaluate(fields)
                 except CustomConstraintError as error:
@@ -859,23 +905,32 @@ class ManualBlendPlanner:
                 source_properties = {}
                 accumulated_tonnes = 0.0
                 for chunk, opening, consumed_tonnes in consumed:
+                    consumed_properties = scale_additive_source_properties(
+                        chunk.get("source_properties"),
+                        consumed_tonnes / opening if opening > 0 else 0,
+                        self.source_property_kinds,
+                    )
                     source_streams = weighted_merge_grade_streams(
                         source_streams,
                         accumulated_tonnes,
                         chunk.get("grade_streams"),
                         consumed_tonnes,
-                    )
-                    consumed_properties = scale_additive_source_properties(
-                        chunk.get("source_properties"),
-                        consumed_tonnes / opening if opening > 0 else 0,
+                        source_properties,
+                        consumed_properties,
+                        self.source_property_weights,
                     )
                     source_properties = merge_source_properties(
                         source_properties,
                         accumulated_tonnes,
                         consumed_properties,
                         consumed_tonnes,
+                        self.source_property_kinds,
+                        self.source_property_weights,
                     )
                     accumulated_tonnes += consumed_tonnes
+                source_streams = reweight_grade_streams_from_properties(
+                    source_streams, source_properties
+                )
                 source_row["source_properties"] = source_properties
                 legacy = {
                     f"grade_{grade}": (
@@ -922,6 +977,7 @@ class ManualBlendPlanner:
                         candidate.get("source_properties") or {},
                         amount / candidate["available_tonnes"]
                         if candidate["available_tonnes"] > 0 else 0,
+                        self.source_property_kinds,
                     ),
                 }
                 source_row.update(self._selected_source_fields(
@@ -957,6 +1013,12 @@ class ManualBlendPlanner:
 
             for source_row in source_rows:
                 amount = source_row["source_actual_tonnes"]
+                visible_source_properties = filter_source_properties(
+                    source_row.get("source_properties"),
+                    (self.calendar_inputs.get("solver_config") or {}).get(
+                        "optimisation_source_property_fields"
+                    ),
+                )
                 report_rows.append({
                     "start_datetime": state["start_datetime"],
                     "end_datetime": state["end_datetime"],
@@ -969,8 +1031,10 @@ class ManualBlendPlanner:
                     "period": state["period"],
                     "actual_direct_tip_ratio": direct_tip_ratio,
                     **source_row,
+                    "source_properties": visible_source_properties,
                     **source_property_report_fields(
-                        source_row.get("source_properties")
+                        visible_source_properties,
+                        property_kinds=self.source_property_kinds,
                     ),
                     "source_blend_ratio": (
                         amount / total_tonnes if total_tonnes > 0 else 0

@@ -40,6 +40,7 @@ from classes.CustomConstraints import (
     constraint_key,
     constraint_report_fields,
     custom_constraint_coefficients,
+    filter_source_properties,
     scale_additive_source_properties,
     source_property_report_fields,
 )
@@ -1554,7 +1555,14 @@ class Optimizer:
                             event.source_properties,
                             result.x[i] / event.balance
                             if event.balance > 0 else 0.0,
+                            getattr(event, "source_property_kinds", None),
                         )
+                    )
+                    visible_source_properties = filter_source_properties(
+                        reported_source_properties,
+                        solver_config.get(
+                            "optimisation_source_property_fields"
+                        ),
                     )
                     transaction = {
                             "source": source_name,
@@ -1575,10 +1583,13 @@ class Optimizer:
                             "grade_stream_warnings": event.grade_stream_warnings,
                             "grade_streams": deepcopy(event.grade_streams),
                             "source_properties": deepcopy(
-                                reported_source_properties
+                                visible_source_properties
                             ),
                             **source_property_report_fields(
-                                reported_source_properties
+                                visible_source_properties,
+                                property_kinds=getattr(
+                                    event, "source_property_kinds", None
+                                ),
                             ),
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,

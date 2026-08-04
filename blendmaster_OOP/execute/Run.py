@@ -114,6 +114,18 @@ class Run:
             configured_product_brands=site_context.get(
                 "product_brands", []
             ),
+            source_property_kinds={
+                str(row.get("name")): str(row.get("kind"))
+                for row in (site_context.get("field_definitions") or [])
+                if isinstance(row, dict) and row.get("name")
+            },
+            source_property_weights={
+                str(row.get("name")): str(row.get("weight_field"))
+                for row in (site_context.get("field_definitions") or [])
+                if isinstance(row, dict)
+                and row.get("name")
+                and row.get("weight_field")
+            },
         )
         transactions = handler.process_transactions()
         transactions = self._ensure_direct_tip_ids(transactions)
@@ -300,6 +312,26 @@ class Run:
         solver_config["configured_product_brands"] = list(
             (site_context or {}).get("product_brands", []) or []
         )
+        field_definitions = [
+            row for row in (
+                (site_context or {}).get("field_definitions") or []
+            )
+            if isinstance(row, dict) and row.get("name")
+        ]
+        solver_config["optimisation_source_property_fields"] = [
+            str(row["name"])
+            for row in field_definitions
+            if row.get("use_in_optimisation")
+        ]
+        solver_config["source_property_kinds"] = {
+            str(row["name"]): str(row.get("kind") or "weighted_average")
+            for row in field_definitions
+        }
+        solver_config["source_property_weights"] = {
+            str(row["name"]): str(row.get("weight_field"))
+            for row in field_definitions
+            if row.get("weight_field")
+        }
         solver_config[
             "contingency_max_blend_options_per_steady_state"
         ] = max(
@@ -329,7 +361,15 @@ class Run:
         )
 
         # Load input data (this is combined user input and opening inventories)
-        input_data = DataLoader(stockpile_data, calendar_inputs, expit_payload_transactions, hex_sequence_table, periods)
+        loader_calendar_inputs = dict(calendar_inputs or {})
+        loader_calendar_inputs["solver_config"] = solver_config
+        input_data = DataLoader(
+            stockpile_data,
+            loader_calendar_inputs,
+            expit_payload_transactions,
+            hex_sequence_table,
+            periods,
+        )
 
         stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
 

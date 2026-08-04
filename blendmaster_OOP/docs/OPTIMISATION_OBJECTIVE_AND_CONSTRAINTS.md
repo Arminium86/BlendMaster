@@ -228,19 +228,19 @@ lower-case, non-alphanumeric characters become underscores, repeated
 underscores are collapsed, and a name beginning with a digit receives a
 `field_` prefix. Python keywords receive the same prefix. Explicit APS
 source-property mappings expose their stable BlendMaster names instead of the
-site-specific header. See [Data Streams](DATA_STREAMS.md#aps-field-mappings)
+site-specific header. See [Data Streams](DATA_STREAMS.md#field-mappings)
 for the mapping catalogue.
 
 CC OPF02 inventory `PROD3` physical properties are exposed as canonical
 `prod2_*` fields, matching the logical Product 2 channel used by EXPIT and AMT.
 The raw inventory names remain available for audit.
 
-The field selector advertises the union of imported/modelled properties found
-on the current Database View sources. This keeps optional APS fields and AMT
-properties with partial lineage coverage discoverable. Availability is still
-validated source by source before solving; appearing in the selector does not
-guarantee that every source has the field. The following built-in fields are
-always offered:
+The field selector advertises the canonical fields checked **Use in
+Optimisation** on Define Fields. This is the explicit solver/report contract;
+an optional property is not exposed merely because it happens to exist on one
+raw source. Availability is still validated source by source before solving,
+so appearing in the selector does not guarantee that every source has a mapped
+value. The following built-in fields are always offered:
 
 | Field | Per-source value |
 |---|---|
@@ -253,18 +253,15 @@ always offered:
 | `selected_fe`, `selected_si`, `selected_al`, `selected_p`, `selected_mn` | The active brand's effective selected grade after data-stream fallback. |
 | `grade_fe`, `grade_si`, `grade_al`, `grade_p`, `grade_mn` | Aliases of the same effective optimiser grades. |
 
-Numeric intensive properties—grades, percentages, ratios, moisture, yields,
+Weighted-average properties—grades, percentages, ratios, moisture, yields,
 recovery, ultrafines and density—are exposed directly under their canonical
-names. Additive source totals ending in `_wmt`, `_dmt`, `_tonnes`, `_mass` or
-`_volume` are instead exposed as per-source-tonne coefficients named
-`<field>_per_source_wmt`. For example, an imported `product_dmt` total is used
-as `product_dmt_per_source_wmt`. This preserves dimensions when inventory
-stockpiles, AMT chunks and grade blocks have different balances, and prevents a
-source-level total from being multiplied by selected tonnes as though it were
-an intensive grade. Other numeric APS fields are retained and WMT-weighted as
-intensive properties by default; Database View emits a warning naming fields
-where that assumption was required. Runtime/control columns are not advertised
-as constraint fields.
+names. A field declared **Additive** is exposed under that same canonical name
+as a per-source-WMT coefficient. The legacy alias
+`<field>_per_source_wmt` remains accepted for saved expressions. For example,
+if `product_dmt` is additive, `product_dmt` in an expression means its DMT per
+source WMT, preserving dimensions across inventory stockpiles, AMT chunks and
+grade blocks with different balances. The declared type, not the spelling of
+the raw Snowflake/APS header, controls aggregation and depletion.
 
 After Solver Configuration is submitted, Calendar adds **Min** and **Max** rows
 under each custom constraint for every planning period. Either side may be left
@@ -279,15 +276,17 @@ is missing, non-numeric or non-finite, or when an expression divides by zero.
 The denominator must be non-negative for every source and positive for at least
 one available source. Missing data is never silently replaced with zero.
 
-At run preparation BlendMaster compiles the field dependencies from every
-enabled numerator and denominator. Only those source properties are carried
-through dynamic stockpile builds, depletion, EventPool and optimisation; the
-full source-property catalogue remains in Database View and the saved APS
-source snapshot. The active properties are also written to optimised and manual
-reports under dynamic `source_property_<canonical_field>` columns. Intensive
-values remain unchanged for each report source; additive totals are scaled to
-the tonnes selected from that source. Unreferenced source properties are not
-duplicated through solve state or reports.
+At run preparation BlendMaster carries the canonical properties checked **Use
+in Optimisation**, plus the automatically checked additive weight of every
+active weighted-average field and any dependency referenced by an enabled saved
+expression, through dynamic stockpile builds, depletion, EventPool and
+optimisation. The full defined catalogue remains in Database View. Active
+properties are written to optimised and manual reports under dynamic
+`source_property_<canonical_field>` columns. Weighted-average values remain
+unchanged for each report source; additive totals are scaled to the tonnes
+selected from that source. Consolidation uses each weighted-average field's
+declared additive Weight Field, not source WMT unless that is the chosen weight.
+Unchecked properties are not duplicated through solve state or reports.
 
 ## Hard constraints inside each optimisation
 

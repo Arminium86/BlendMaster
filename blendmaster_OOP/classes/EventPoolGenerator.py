@@ -56,6 +56,12 @@ class EventPoolGenerator:
                             "aps_brand_proportions": stockpile.aps_brand_proportions,
                             "grade_streams": stockpile.grade_streams,
                             "source_properties": stockpile.source_properties,
+                            "source_property_kinds": getattr(
+                                stockpile, "source_property_kinds", {}
+                            ),
+                            "source_property_weights": getattr(
+                                stockpile, "source_property_weights", {}
+                            ),
                         })
 
         for grade_block in self.grade_blocks:
@@ -95,6 +101,12 @@ class EventPoolGenerator:
                         "delivered_datetime": delivered_datetime,
                         "grade_streams": grade_block.grade_streams,
                         "source_properties": grade_block.source_properties,
+                        "source_property_kinds": getattr(
+                            grade_block, "source_property_kinds", {}
+                        ),
+                        "source_property_weights": getattr(
+                            grade_block, "source_property_weights", {}
+                        ),
                     })
 
         return events
@@ -232,6 +244,8 @@ class EventPoolGenerator:
                 aps_brand_proportions=record.get("aps_brand_proportions"),
                 grade_streams=record.get("grade_streams"),
                 source_properties=record.get("source_properties"),
+                source_property_kinds=record.get("source_property_kinds"),
+                source_property_weights=record.get("source_property_weights"),
 
             )
             for record in event_data_dicts

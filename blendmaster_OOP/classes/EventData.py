@@ -25,6 +25,8 @@ class EventData:
         aps_brand_proportions=None,
         grade_streams=None,
         source_properties=None,
+        source_property_kinds=None,
+        source_property_weights=None,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -50,6 +52,8 @@ class EventData:
         self._aps_brand_proportions = aps_brand_proportions or {}
         self._grade_streams = grade_streams
         self._source_properties = dict(source_properties or {})
+        self._source_property_kinds = dict(source_property_kinds or {})
+        self._source_property_weights = dict(source_property_weights or {})
         self._selected_grade_stream = None
         self._selected_grade_brand = None
         self._grade_stream_warnings = []
@@ -150,6 +154,14 @@ class EventData:
     @property
     def source_properties(self):
         return self._source_properties
+
+    @property
+    def source_property_kinds(self):
+        return self._source_property_kinds
+
+    @property
+    def source_property_weights(self):
+        return self._source_property_weights
 
     @property
     def selected_grade_stream(self):

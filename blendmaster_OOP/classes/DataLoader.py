@@ -10,11 +10,12 @@ from classes.PeriodManager import PeriodManager
 from classes.CustomConstraints import (
     constraint_key,
     custom_constraint_property_keys,
+    expand_required_property_keys,
     filter_source_properties,
     normalize_custom_constraints,
     source_properties_from_mapping,
 )
-from classes.GradeStreams import inventory_product_property_aliases
+from classes.GradeStreams import ANALYTES, STREAMS, inventory_product_property_aliases
 from pandas import DataFrame
 
 class DataLoader:
@@ -28,6 +29,20 @@ class DataLoader:
         self.direct_tip_enabled = bool(self.solver_config.get("direct_tip_enabled", True))
         self.required_source_property_keys = custom_constraint_property_keys(
             self.solver_config.get("custom_constraints")
+        )
+        self.required_source_property_keys.update(
+            self.solver_config.get("optimisation_source_property_fields") or []
+        )
+        selected_stream = str(
+            self.solver_config.get("selected_data_stream") or ""
+        ).strip().lower()
+        if selected_stream in STREAMS:
+            self.required_source_property_keys.update(
+                f"{selected_stream}_{analyte}" for analyte in ANALYTES
+            )
+        self.required_source_property_keys = expand_required_property_keys(
+            self.required_source_property_keys,
+            self.solver_config.get("source_property_weights"),
         )
 
     def solver_source_properties(self, record, *, inventory=False):

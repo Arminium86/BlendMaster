@@ -107,9 +107,15 @@ BUILTIN_CONSTRAINT_FIELDS = {
 }
 
 
-def source_property_kind(value: Any) -> str:
+def source_property_kind(value: Any, property_kinds=None) -> str:
     """Classify an imported numeric field for safe mass-balance handling."""
     key = canonical_property_key(value)
+    declared = {
+        canonical_property_key(name): str(kind).strip().lower()
+        for name, kind in dict(property_kinds or {}).items()
+    }.get(key)
+    if declared in {"additive", "weighted_average", "intensive", "runtime"}:
+        return "intensive" if declared == "weighted_average" else declared
     if (
         not key
         or key in _RUNTIME_PROPERTY_NAMES
@@ -129,7 +135,29 @@ def source_property_kind(value: Any) -> str:
     return "unknown"
 
 
-def constraint_property_fields(properties, source_balance=None) -> dict:
+def expand_required_property_keys(required_keys, property_weights=None) -> set:
+    """Include additive weight dependencies for every required weighted field."""
+    required = {
+        canonical_property_key(key) for key in (required_keys or [])
+        if canonical_property_key(key)
+    }
+    weights = {
+        canonical_property_key(name): canonical_property_key(weight)
+        for name, weight in dict(property_weights or {}).items()
+        if canonical_property_key(name) and canonical_property_key(weight)
+    }
+    pending = list(required)
+    while pending:
+        dependency = weights.get(pending.pop())
+        if dependency and dependency not in required:
+            required.add(dependency)
+            pending.append(dependency)
+    return required
+
+
+def constraint_property_fields(
+    properties, source_balance=None, property_kinds=None
+) -> dict:
     """Expose dimensionally safe per-tonne coefficients to expressions."""
     result = {}
     try:
@@ -146,11 +174,13 @@ def constraint_property_fields(properties, source_balance=None) -> dict:
             continue
         if not key or not math.isfinite(value):
             continue
-        kind = source_property_kind(key)
+        kind = source_property_kind(key, property_kinds)
         if kind in {"intensive", "unknown"}:
             result[key] = value
         elif kind == "additive" and balance > 1e-12:
-            result[f"{key}_per_source_wmt"] = value / balance
+            coefficient = value / balance
+            result[key] = coefficient
+            result[f"{key}_per_source_wmt"] = coefficient
     return result
 
 
@@ -159,6 +189,8 @@ def merge_source_properties(
     current_tonnes,
     incoming,
     incoming_tonnes,
+    property_kinds=None,
+    property_weights=None,
 ) -> dict:
     """Merge source properties without averaging additive/control fields."""
     current = dict(current or {})
@@ -166,13 +198,18 @@ def merge_source_properties(
     current_tonnes = max(float(current_tonnes or 0), 0.0)
     incoming_tonnes = max(float(incoming_tonnes or 0), 0.0)
     total_tonnes = current_tonnes + incoming_tonnes
+    weight_fields = {
+        canonical_property_key(name): canonical_property_key(weight)
+        for name, weight in dict(property_weights or {}).items()
+        if canonical_property_key(name) and canonical_property_key(weight)
+    }
     merged = {
         key: value
         for key, value in current.items()
-        if source_property_kind(key) == "runtime"
+        if source_property_kind(key, property_kinds) == "runtime"
     }
     for key in set(current) | set(incoming):
-        kind = source_property_kind(key)
+        kind = source_property_kind(key, property_kinds)
         if kind not in {"intensive", "unknown", "additive"}:
             continue
         old_value = current.get(key)
@@ -186,27 +223,63 @@ def merge_source_properties(
             old_value = None
         if new_value is not None and not math.isfinite(new_value):
             new_value = None
-        # A property missing from either positive-tonnage component is not
-        # silently carried forward; doing so would overstate its coverage.
-        if current_tonnes > 0 and old_value is None:
-            continue
-        if incoming_tonnes > 0 and new_value is None:
-            continue
         if kind == "additive":
+            # A property missing from either positive-tonnage component is not
+            # silently carried forward; doing so would overstate its coverage.
+            if current_tonnes > 0 and old_value is None:
+                continue
+            if incoming_tonnes > 0 and new_value is None:
+                continue
             merged[key] = (old_value or 0.0) + (new_value or 0.0)
-        elif total_tonnes > 0:
+        else:
+            weight_field = weight_fields.get(canonical_property_key(key))
+            if weight_field:
+                try:
+                    old_weight = (
+                        float(current.get(weight_field))
+                        if current.get(weight_field) is not None else None
+                    )
+                    new_weight = (
+                        float(incoming.get(weight_field))
+                        if incoming.get(weight_field) is not None else None
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    (old_weight is not None and not math.isfinite(old_weight))
+                    or (new_weight is not None and not math.isfinite(new_weight))
+                ):
+                    continue
+                if current_tonnes > 0 and old_weight is None:
+                    continue
+                if incoming_tonnes > 0 and new_weight is None:
+                    continue
+                old_weight = max(old_weight or 0.0, 0.0)
+                new_weight = max(new_weight or 0.0, 0.0)
+            else:
+                old_weight = current_tonnes
+                new_weight = incoming_tonnes
+            if old_weight > 0 and old_value is None:
+                continue
+            if new_weight > 0 and new_value is None:
+                continue
+            total_weight = old_weight + new_weight
+            if total_weight <= 0:
+                continue
             merged[key] = (
-                (old_value or 0.0) * current_tonnes
-                + (new_value or 0.0) * incoming_tonnes
-            ) / total_tonnes
+                (old_value or 0.0) * old_weight
+                + (new_value or 0.0) * new_weight
+            ) / total_weight
     return merged
 
 
-def scale_additive_source_properties(properties, remaining_ratio) -> dict:
+def scale_additive_source_properties(
+    properties, remaining_ratio, property_kinds=None
+) -> dict:
     ratio = min(max(float(remaining_ratio or 0), 0.0), 1.0)
     result = dict(properties or {})
     for key, value in list(result.items()):
-        if source_property_kind(key) != "additive":
+        if source_property_kind(key, property_kinds) != "additive":
             continue
         try:
             result[key] = float(value) * ratio
@@ -252,12 +325,14 @@ def filter_source_properties(properties, required_keys=None) -> dict:
     }
 
 
-def source_property_report_fields(properties, prefix="source_property_") -> dict:
+def source_property_report_fields(
+    properties, prefix="source_property_", property_kinds=None
+) -> dict:
     """Flatten the active numeric source properties into report columns."""
     result = {}
     for raw_key, raw_value in dict(properties or {}).items():
         key = canonical_property_key(raw_key)
-        if not key or source_property_kind(key) == "runtime":
+        if not key or source_property_kind(key, property_kinds) == "runtime":
             continue
         try:
             value = float(raw_value)
@@ -398,6 +473,7 @@ def event_constraint_fields(event) -> dict:
     fields = constraint_property_fields(
         getattr(event, "source_properties", None),
         getattr(event, "balance", None),
+        getattr(event, "source_property_kinds", None),
     )
     fields.update({
         "one": 1.0,
@@ -426,7 +502,7 @@ def event_constraint_fields(event) -> dict:
     return fields
 
 
-def mapping_constraint_fields(record) -> dict:
+def mapping_constraint_fields(record, property_kinds=None) -> dict:
     """Return expression inputs for a manual/report source mapping."""
     record = record or {}
     source_type = str(record.get("source_type") or "").strip().lower()
@@ -443,6 +519,7 @@ def mapping_constraint_fields(record) -> dict:
                 record.get("balance"),
             ),
         ),
+        property_kinds or record.get("source_property_kinds"),
     )
     fields.update({
         "one": 1.0,
