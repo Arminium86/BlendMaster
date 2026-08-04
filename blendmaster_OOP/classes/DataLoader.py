@@ -14,6 +14,7 @@ from classes.CustomConstraints import (
     normalize_custom_constraints,
     source_properties_from_mapping,
 )
+from classes.GradeStreams import inventory_product_property_aliases
 from pandas import DataFrame
 
 class DataLoader:
@@ -29,7 +30,17 @@ class DataLoader:
             self.solver_config.get("custom_constraints")
         )
 
-    def solver_source_properties(self, record):
+    def solver_source_properties(self, record, *, inventory=False):
+        if inventory:
+            record = {
+                **dict(record or {}),
+                **inventory_product_property_aliases(
+                    record,
+                    ((self.calendar_inputs or {}).get(
+                        "site_context", {}
+                    ) or {}).get("opf"),
+                ),
+            }
         return filter_source_properties(
             source_properties_from_mapping(record),
             self.required_source_property_keys,
@@ -369,7 +380,10 @@ class DataLoader:
                 aps_brand_tonnes=nested_record.get("aps_brand_tonnes", {}),
                 max_reclaim_rate=max_reclaim_rate,
                 grade_streams=self.coerce_grade_streams(nested_record.get("grade_streams")),
-                source_properties=self.solver_source_properties(nested_record),
+                source_properties=self.solver_source_properties(
+                    nested_record,
+                    inventory=not bool(nested_record.get("amt", False)),
+                ),
                 period_values={
                     **{
                         f"state_{key}": states_by_period[label]

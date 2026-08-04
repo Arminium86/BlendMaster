@@ -108,6 +108,9 @@ class Run:
             grade_field_mappings=site_context.get(
                 "aps_grade_field_mappings", {}
             ),
+            source_property_field_mappings=site_context.get(
+                "aps_source_property_field_mappings", {}
+            ),
             configured_product_brands=site_context.get(
                 "product_brands", []
             ),

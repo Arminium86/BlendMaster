@@ -16,6 +16,9 @@ from classes.CustomConstraints import (
     merge_source_properties,
     source_property_kind,
 )
+from classes.SourcePropertyMappings import (
+    normalise_aps_source_property_mappings,
+)
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 2
@@ -56,6 +59,7 @@ class ExpitDataHandler:
         destination_guidance=None,
         selected_agent_names=None,
         grade_field_mappings=None,
+        source_property_field_mappings=None,
         configured_product_brands=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
@@ -89,6 +93,11 @@ class ExpitDataHandler:
         self.grade_field_mappings = normalise_aps_grade_field_mappings(
             grade_field_mappings, self.configured_product_brands
         )
+        self.source_property_field_mappings = (
+            normalise_aps_source_property_mappings(
+                source_property_field_mappings
+            )
+        )
         mapped_grade_columns = set()
         rom_mappings = self.grade_field_mappings.get("rom", {})
         if isinstance(rom_mappings, dict):
@@ -115,11 +124,42 @@ class ExpitDataHandler:
                 "APS 24HR grade field mapping column(s) were not found: "
                 + ", ".join(missing_mapped_columns)
             )
+        configured_property_mappings = {
+            field: header
+            for field, header in self.source_property_field_mappings.items()
+            if header
+        }
+        missing_property_columns = sorted(
+            set(configured_property_mappings.values()) - set(self.data.columns)
+        )
+        if missing_property_columns:
+            raise ValueError(
+                "APS 24HR source-property mapping column(s) were not found: "
+                + ", ".join(missing_property_columns)
+            )
+        mapped_property_columns = set(configured_property_mappings.values())
+        self.mapped_property_column_keys = {}
+        for field, column in configured_property_mappings.items():
+            existing_field = self.mapped_property_column_keys.get(column)
+            if (
+                existing_field
+                and source_property_kind(existing_field)
+                != source_property_kind(field)
+            ):
+                raise ValueError(
+                    "APS 24HR source-property header "
+                    f"'{column}' is mapped to fields with incompatible "
+                    f"mass-balance behaviour: '{existing_field}' and "
+                    f"'{field}'."
+                )
+            self.mapped_property_column_keys.setdefault(column, field)
         self.property_columns = []
         self.property_column_keys = {}
         canonical_sources = {}
-        ignored_property_columns = set(self.TRANSACTION_COLUMNS) | set(
-            self.mapped_grade_columns
+        ignored_property_columns = (
+            set(self.TRANSACTION_COLUMNS)
+            | set(self.mapped_grade_columns)
+            | mapped_property_columns
         )
         for column in self.data.columns:
             if column in ignored_property_columns:
@@ -155,9 +195,28 @@ class ExpitDataHandler:
                 "name were treated as WMT-weighted source properties: "
                 f"{preview}{suffix}."
             )
+
         if not self.data.empty:
             self._preprocess_data()
             self._group_data()
+
+    def _property_columns_with_keys(self):
+        """Return every APS property header with its mass-balance key.
+
+        Explicitly mapped headers are excluded from ``property_columns`` so
+        they are not also exposed under a site-specific normalised alias. They
+        still have to participate in destination splitting, row grouping and
+        top-up depletion, however, otherwise the mapped value is discarded
+        before payload records are created.
+        """
+        combined = {
+            column: self.property_column_keys.get(column, "")
+            for column in getattr(self, "property_columns", [])
+        }
+        combined.update(
+            getattr(self, "mapped_property_column_keys", {}) or {}
+        )
+        return list(combined.items())
 
     @staticmethod
     def _normalize_selected_crusher_names(selected_crusher_name):
@@ -1226,10 +1285,7 @@ class ExpitDataHandler:
                     ).fillna(0.0).iloc[0]
                     * ratio
                 )
-                for property_column in getattr(
-                    self, "property_columns", []
-                ):
-                    key = self.property_column_keys.get(property_column, "")
+                for property_column, key in self._property_columns_with_keys():
                     if source_property_kind(key) != "additive":
                         continue
                     value = pd.to_numeric(
@@ -1507,19 +1563,16 @@ class ExpitDataHandler:
         if weighted_grade_frames:
             self.data = pd.concat([self.data, *weighted_grade_frames], axis=1)
 
+        property_columns_with_keys = self._property_columns_with_keys()
         intensive_property_columns = [
             column
-            for column in getattr(self, "property_columns", [])
-            if source_property_kind(
-                self.property_column_keys.get(column)
-            ) in {"intensive", "unknown"}
+            for column, key in property_columns_with_keys
+            if source_property_kind(key) in {"intensive", "unknown"}
         ]
         additive_property_columns = [
             column
-            for column in getattr(self, "property_columns", [])
-            if source_property_kind(
-                self.property_column_keys.get(column)
-            ) == "additive"
+            for column, key in property_columns_with_keys
+            if source_property_kind(key) == "additive"
         ]
         for column in additive_property_columns:
             self.data[column] = pd.to_numeric(
@@ -1652,6 +1705,23 @@ class ExpitDataHandler:
             return properties
         if group_tonnes <= 0 or payload_tonnes <= 0:
             return properties
+        for field, column in self.source_property_field_mappings.items():
+            if not column:
+                continue
+            try:
+                value = float(row.get(column))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            kind = source_property_kind(field)
+            if kind not in {"intensive", "unknown", "additive"}:
+                continue
+            properties[field] = (
+                value * payload_tonnes / group_tonnes
+                if kind == "additive"
+                else value
+            )
         for column in getattr(self, "property_columns", []):
             key = self.property_column_keys.get(column, "")
             kind = source_property_kind(key)
@@ -1808,12 +1878,10 @@ class ExpitDataHandler:
                                     / next_opening_tonnes
                                     if next_opening_tonnes > 0 else 0
                                 )
-                                for property_column in getattr(
-                                    self, "property_columns", []
-                                ):
-                                    key = self.property_column_keys.get(
-                                        property_column, ""
-                                    )
+                                for (
+                                    property_column,
+                                    key,
+                                ) in self._property_columns_with_keys():
                                     if source_property_kind(key) != "additive":
                                         continue
                                     try:

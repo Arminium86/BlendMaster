@@ -226,9 +226,21 @@ also rejected.
 Imported field names are canonicalised for use in expressions: they are made
 lower-case, non-alphanumeric characters become underscores, repeated
 underscores are collapsed, and a name beginning with a digit receives a
-`field_` prefix. Python keywords receive the same prefix. The field selector advertises imported properties common to
-all current source records, helping prevent a constraint that only some sources
-can evaluate. The following built-in fields are always offered:
+`field_` prefix. Python keywords receive the same prefix. Explicit APS
+source-property mappings expose their stable BlendMaster names instead of the
+site-specific header. See [Data Streams](DATA_STREAMS.md#aps-field-mappings)
+for the mapping catalogue.
+
+CC OPF02 inventory `PROD3` physical properties are exposed as canonical
+`prod2_*` fields, matching the logical Product 2 channel used by EXPIT and AMT.
+The raw inventory names remain available for audit.
+
+The field selector advertises the union of imported/modelled properties found
+on the current Database View sources. This keeps optional APS fields and AMT
+properties with partial lineage coverage discoverable. Availability is still
+validated source by source before solving; appearing in the selector does not
+guarantee that every source has the field. The following built-in fields are
+always offered:
 
 | Field | Per-source value |
 |---|---|
@@ -271,9 +283,11 @@ At run preparation BlendMaster compiles the field dependencies from every
 enabled numerator and denominator. Only those source properties are carried
 through dynamic stockpile builds, depletion, EventPool and optimisation; the
 full source-property catalogue remains in Database View and the saved APS
-source snapshot. Reports store the definition, bounds, aggregate result and
-per-source numerator/denominator coefficients, rather than duplicating every
-unused source property.
+source snapshot. The active properties are also written to optimised and manual
+reports under dynamic `source_property_<canonical_field>` columns. Intensive
+values remain unchanged for each report source; additive totals are scaled to
+the tonnes selected from that source. Unreferenced source properties are not
+duplicated through solve state or reports.
 
 ## Hard constraints inside each optimisation
 
@@ -511,6 +525,17 @@ constraints do not require a schema migration. When payloads are consolidated
 to a grouped source row, their source coefficients are weighted by the reported
 source tonnes. These fields make the reported ratio independently
 reconstructable from the source rows.
+
+Each imported/modelled property referenced by an enabled expression also
+creates a numeric `source_property_<canonical_field>` column. The name is the
+underlying source property, not its expression coefficient. For example, an
+expression using `prod1_wmt_per_source_wmt` causes
+`source_property_prod1_wmt` to be reported. Because `prod1_wmt` is additive,
+that report value is scaled from the source total to the tonnes selected on the
+row. An intensive field such as `prod1_minus_1mm_pct` is reported unchanged as
+`source_property_prod1_minus_1mm_pct`. These selective columns provide the
+inputs needed to reconstruct a custom constraint without writing every unused
+Database View property to every result row.
 
 ## Why a run may be infeasible
 

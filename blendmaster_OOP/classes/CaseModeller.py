@@ -11,6 +11,7 @@ from classes.GradeStreams import grade_stream_audit_fields
 from classes.CustomConstraints import (
     custom_constraint_property_keys,
     filter_source_properties,
+    source_property_kind,
 )
 from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
@@ -1843,6 +1844,39 @@ class CaseModeller:
                     else None
                 )
 
+            # Payload transactions already carry additive properties scaled
+            # to the selected payload mass.  Sum those totals when several
+            # payloads from one readable grade block are collapsed.  Physical
+            # assays/percentages remain intensive and must be tonnes-weighted,
+            # just like the grade-stream audit fields above.
+            for property_column in [
+                column for column in group.columns
+                if str(column).startswith("source_property_")
+            ]:
+                values = pd.to_numeric(
+                    group[property_column], errors="coerce"
+                )
+                if source_property_kind(
+                    str(property_column).removeprefix("source_property_")
+                ) == "additive":
+                    record[property_column] = (
+                        values.sum(min_count=1)
+                        if values.notna().any() else None
+                    )
+                    continue
+                weights = pd.to_numeric(
+                    group["source_actual_tonnes"], errors="coerce"
+                ).fillna(0)
+                valid = values.notna() & (
+                    weights > Optimizer.SOLUTION_TOLERANCE
+                )
+                valid_tonnes = weights[valid].sum()
+                record[property_column] = (
+                    (values[valid] * weights[valid]).sum() / valid_tonnes
+                    if valid_tonnes > Optimizer.SOLUTION_TOLERANCE
+                    else None
+                )
+
             for coefficient_column in [
                 column for column in group.columns
                 if str(column).startswith("custom_constraint_")
@@ -2096,6 +2130,11 @@ class CaseModeller:
                         key: value
                         for key, value in transaction.items()
                         if str(key).startswith("custom_constraint_")
+                    },
+                    **{
+                        key: value
+                        for key, value in transaction.items()
+                        if str(key).startswith("source_property_")
                     },
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],

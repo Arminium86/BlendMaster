@@ -31,6 +31,7 @@ from classes.AMTChunking import (
     DEFAULT_AMT_TARGET_CHUNK_HOURS,
     calculate_amt_chunk_plan,
 )
+from classes.CustomConstraints import source_property_kind
 
 class DrawStockProfiles:
     def __init__(self, db_path, port):
@@ -2061,6 +2062,7 @@ class DrawAMTStockpile:
         "lineage_matched_final_wmt", "lineage_unmatched_final_wmt",
         "lineage_coverage_pct", "lineage_warning", "modelled_rom_mats",
         "modelled_dominant_ore_type",
+        "cb_split_method", "cb_split_warning",
         "grade_stream_warnings_json",
         "amt_inventory_matched", "amt_inventory_stockpile",
         "amt_inventory_build", "amt_inventory_transaction_datetime",
@@ -2571,6 +2573,7 @@ class DrawAMTStockpile:
         accumulated_tonnes = 0.0
         property_mass = defaultdict(float)
         property_tonnes = defaultdict(float)
+        additive_properties = set()
         lineage_keys = set()
         lineage_matched_final_wmt = 0.0
         grade_stream_warnings = []
@@ -2614,7 +2617,11 @@ class DrawAMTStockpile:
                 denominator = row_tonnes * covered_fraction
                 if denominator <= 0:
                     continue
-                property_mass[property_name] += value * denominator
+                if source_property_kind(property_name) == "additive":
+                    property_mass[property_name] += value
+                    additive_properties.add(property_name)
+                else:
+                    property_mass[property_name] += value * denominator
                 property_tonnes[property_name] += denominator
 
             lineage = row.get("grade_block_lineage") or []
@@ -2644,7 +2651,11 @@ class DrawAMTStockpile:
 
         modelled_properties = {
             "values": {
-                name: property_mass[name] / covered_tonnes
+                name: (
+                    property_mass[name]
+                    if name in additive_properties
+                    else property_mass[name] / covered_tonnes
+                )
                 for name, covered_tonnes in property_tonnes.items()
                 if covered_tonnes > 0
             },
@@ -2702,6 +2713,8 @@ class DrawAMTStockpile:
                 "internal_recon_inventory_transaction_datetime",
                 "internal_recon_match_rule",
                 "internal_recon_warning",
+                "cb_split_method",
+                "cb_split_warning",
             ):
                 provenance[key] = first_row.get(key)
 

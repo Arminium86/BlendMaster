@@ -58,6 +58,28 @@ PRODUCT_PROPERTY_SUFFIXES = (
     "WETDENSITY", "DRYDENSITY",
 )
 
+CB_PROD1_SPLIT_ASSAYS = (
+    "FE", "SIO2", "AL2O3", "MN", "P", "LOI_425", "LOI_TOTAL", "S", "AS",
+)
+
+# Cloudbreak's lump/fines properties are grade-block model outputs rather than
+# columns on the EXPIT transaction.  They are joined to each inbound movement
+# by the authoritative grade-block name in ``call_opening_AMT...``.
+GRADE_CONTROL_PROPERTY_COLUMNS = {
+    "PROD1_MINUS1MM_PCT": "gradeblock.PROD1_MINUS1MM_PCT",
+    "PROD1_FINES_YIELD_PCT": "gradeblock.PROD1_FINES_YIELD_PCT",
+    "PROD1_LUMP_YIELD_PCT": "gradeblock.PROD1_LUMP_YIELD_PCT",
+    "PROD1_FINES_MOISTURE": "gradeblock.PROD1_FINES_MOISTURE",
+    "PROD1_LUMP_MOISTURE": "gradeblock.PROD1_LUMP_MOISTURE",
+    "GRADE_BLOCK_DRY_DENSITY": "gradeblock.GB_DRY_DENSITY",
+    "GRADE_BLOCK_LOI_425": "gradeblock.LOI_425",
+    **{
+        f"PROD1_{size}_{assay}": f"gradeblock.PROD1_{size}_{assay}"
+        for size in ("FINES", "LUMP")
+        for assay in CB_PROD1_SPLIT_ASSAYS
+    },
+}
+
 EXPIT_PRODUCT_PROPERTY_COLUMNS = {
     f"PROD{product}_{suffix}": f"expit.PROD{product}_{suffix}"
     for product in (1, 2)
@@ -68,6 +90,7 @@ LINEAGE_PROPERTY_COLUMNS = {
     **TRUCK_PROPERTY_COLUMNS,
     **EXPIT_FEED_PROPERTY_COLUMNS,
     **EXPIT_PRODUCT_PROPERTY_COLUMNS,
+    **GRADE_CONTROL_PROPERTY_COLUMNS,
 }
 
 
@@ -105,6 +128,18 @@ def _number(value):
     return number if math.isfinite(number) else None
 
 
+def _fraction(value):
+    """Normalise model percentages/fractions to [0, 1]."""
+    number = _number(value)
+    if number is None or number < 0:
+        return None
+    if number > 1.0:
+        if number > 100.0:
+            return None
+        number /= 100.0
+    return min(number, 1.0)
+
+
 def _decode_lineage(value):
     if isinstance(value, list):
         return value
@@ -134,6 +169,15 @@ def align_amt_grade_block_lineage(rows):
         weighted_sums = defaultdict(float)
         property_denominators = defaultdict(float)
         rom_mats_tonnes = defaultdict(float)
+        additive_totals = defaultdict(float)
+        additive_coverage_wmt = defaultdict(float)
+        split_grade_masses = defaultdict(float)
+        split_grade_weights = defaultdict(float)
+        split_grade_coverage_wmt = defaultdict(float)
+
+        if final_wmt > 0:
+            additive_totals["feed_wmt"] = final_wmt
+            additive_coverage_wmt["feed_wmt"] = final_wmt
 
         for item in lineage:
             inbound_wmt = max(_number(item.get("inbound_wmt")) or 0.0, 0.0)
@@ -148,6 +192,10 @@ def align_amt_grade_block_lineage(rows):
                 rom_mats_tonnes[rom_mats] += remaining_wmt
             properties = item.get("properties")
             properties = properties if isinstance(properties, dict) else {}
+            properties = {
+                str(name).strip().lower(): raw_value
+                for name, raw_value in properties.items()
+            }
             for property_name, raw_value in properties.items():
                 value = _number(raw_value)
                 if value is None or remaining_wmt <= 0:
@@ -155,6 +203,127 @@ def align_amt_grade_block_lineage(rows):
                 key = str(property_name).strip().lower()
                 weighted_sums[key] += value * remaining_wmt
                 property_denominators[key] += remaining_wmt
+
+            feed_moisture = _fraction(properties.get("feed_moisture"))
+            feed_dmt = (
+                remaining_wmt * (1.0 - feed_moisture)
+                if feed_moisture is not None else None
+            )
+            if feed_dmt is not None:
+                additive_totals["feed_dmt"] += feed_dmt
+                additive_coverage_wmt["feed_dmt"] += remaining_wmt
+
+            # Ore-type fields are feed fractions.  Retain both wet and dry
+            # tonnes so constraints can use the appropriate mass basis.
+            for ore_type in ("bid", "did", "cidl", "cidm", "cidu", "hc", "other"):
+                fraction = _fraction(properties.get(f"oretype_{ore_type}"))
+                if fraction is None:
+                    continue
+                additive_totals[f"oretype_{ore_type}_wmt"] += (
+                    remaining_wmt * fraction
+                )
+                additive_coverage_wmt[f"oretype_{ore_type}_wmt"] += remaining_wmt
+                if feed_dmt is not None:
+                    additive_totals[f"oretype_{ore_type}_dmt"] += (
+                        feed_dmt * fraction
+                    )
+                    additive_coverage_wmt[f"oretype_{ore_type}_dmt"] += (
+                        remaining_wmt
+                    )
+
+            split_totals = {"wmt": 0.0, "dmt": 0.0}
+            split_available = {"wmt": True, "dmt": feed_dmt is not None}
+            for size in ("fines", "lump"):
+                yield_fraction = _fraction(
+                    properties.get(f"prod1_{size}_yield_pct")
+                )
+                if yield_fraction is None:
+                    split_available["wmt"] = False
+                    split_available["dmt"] = False
+                    continue
+                size_wmt = remaining_wmt * yield_fraction
+                additive_totals[f"prod1_{size}_wmt"] += size_wmt
+                additive_coverage_wmt[f"prod1_{size}_wmt"] += remaining_wmt
+                split_totals["wmt"] += size_wmt
+
+                size_dmt = (
+                    feed_dmt * yield_fraction
+                    if feed_dmt is not None else None
+                )
+                if size_dmt is not None:
+                    additive_totals[f"prod1_{size}_dmt"] += size_dmt
+                    additive_coverage_wmt[f"prod1_{size}_dmt"] += remaining_wmt
+                    split_totals["dmt"] += size_dmt
+
+                grade_weight = size_dmt if size_dmt is not None else size_wmt
+                if grade_weight <= 0:
+                    continue
+                for assay in (name.lower() for name in CB_PROD1_SPLIT_ASSAYS):
+                    grade_key = f"prod1_{size}_{assay}"
+                    grade = _number(properties.get(grade_key))
+                    if grade is None:
+                        continue
+                    split_grade_masses[grade_key] += grade * grade_weight
+                    split_grade_weights[grade_key] += grade_weight
+                    split_grade_coverage_wmt[grade_key] += remaining_wmt
+
+            for product in (1, 2):
+                recovery = _fraction(
+                    properties.get(f"prod{product}_mass_recovery")
+                )
+                product_moisture = _fraction(
+                    properties.get(f"prod{product}_moisture")
+                )
+                product_dmt = (
+                    feed_dmt * recovery
+                    if feed_dmt is not None and recovery is not None else None
+                )
+                product_wmt = (
+                    product_dmt / (1.0 - product_moisture)
+                    if product_dmt is not None
+                    and product_moisture is not None
+                    and product_moisture < 1.0
+                    else None
+                )
+
+                # For CB PROD1, the grade-control lump/fines yields are the
+                # authoritative split.  Require both size yields, then make
+                # the canonical product total equal their conserved sum.
+                if product == 1 and split_available["wmt"]:
+                    product_wmt = split_totals["wmt"]
+                if product == 1 and split_available["dmt"]:
+                    product_dmt = split_totals["dmt"]
+
+                if product_wmt is not None:
+                    additive_totals[f"prod{product}_wmt"] += product_wmt
+                    additive_coverage_wmt[f"prod{product}_wmt"] += remaining_wmt
+                if product_dmt is not None:
+                    additive_totals[f"prod{product}_dmt"] += product_dmt
+                    additive_coverage_wmt[f"prod{product}_dmt"] += remaining_wmt
+
+                minus_1mm = _fraction(
+                    properties.get(f"prod{product}_minus1mm_pct")
+                )
+                if minus_1mm is None:
+                    minus_1mm = _fraction(
+                        properties.get(
+                            f"prod{product}_mudrush_ultrafines_1mm"
+                        )
+                    )
+                if minus_1mm is not None and product_wmt is not None:
+                    additive_totals[f"prod{product}_minus_1mm_wmt"] += (
+                        product_wmt * minus_1mm
+                    )
+                    additive_coverage_wmt[
+                        f"prod{product}_minus_1mm_wmt"
+                    ] += remaining_wmt
+                if minus_1mm is not None and product_dmt is not None:
+                    additive_totals[f"prod{product}_minus_1mm_dmt"] += (
+                        product_dmt * minus_1mm
+                    )
+                    additive_coverage_wmt[
+                        f"prod{product}_minus_1mm_dmt"
+                    ] += remaining_wmt
 
         modelled_properties = {}
         property_coverage = {}
@@ -167,6 +336,88 @@ def align_amt_grade_block_lineage(rows):
                 if denominator > 0 else None
             )
             coverage = denominator / final_wmt if final_wmt > 0 else None
+            modelled_properties[property_name] = value
+            property_coverage[property_name] = coverage
+            column_name = f"MODELLED_{property_name.upper()}"
+            row[column_name] = value
+            row[f"{column_name}_COVERAGE_PCT"] = (
+                coverage * 100.0 if coverage is not None else None
+            )
+
+        # Component grades must be weighted by the component product mass, not
+        # by the unsplit feed mass used by the generic property loop above.
+        for property_name, weight in split_grade_weights.items():
+            if weight <= 0:
+                continue
+            value = split_grade_masses[property_name] / weight
+            coverage = (
+                min(split_grade_coverage_wmt[property_name] / final_wmt, 1.0)
+                if final_wmt > 0 else None
+            )
+            modelled_properties[property_name] = value
+            property_coverage[property_name] = coverage
+            column_name = f"MODELLED_{property_name.upper()}"
+            row[column_name] = value
+            row[f"{column_name}_COVERAGE_PCT"] = (
+                coverage * 100.0 if coverage is not None else None
+            )
+
+        for property_name, value in additive_totals.items():
+            coverage = (
+                min(additive_coverage_wmt[property_name] / final_wmt, 1.0)
+                if final_wmt > 0 else None
+            )
+            modelled_properties[property_name] = value
+            property_coverage[property_name] = coverage
+            column_name = f"MODELLED_{property_name.upper()}"
+            row[column_name] = value
+            row[f"{column_name}_COVERAGE_PCT"] = (
+                coverage * 100.0 if coverage is not None else None
+            )
+
+        # Canonical physical-field aliases are shared with inventory sources.
+        # Keep the PROD1-qualified names as the source of truth and retain the
+        # shorter legacy lump/fines names for existing projects.
+        canonical_aliases = {}
+        for product in (1, 2):
+            minus_1mm_value = modelled_properties.get(
+                f"prod{product}_minus1mm_pct"
+            )
+            minus_1mm_source = f"prod{product}_minus1mm_pct"
+            if minus_1mm_value is None:
+                minus_1mm_source = (
+                    f"prod{product}_mudrush_ultrafines_1mm"
+                )
+                minus_1mm_value = modelled_properties.get(minus_1mm_source)
+            if minus_1mm_value is not None:
+                canonical_aliases[f"prod{product}_minus_1mm_pct"] = (
+                    minus_1mm_value
+                )
+        for size in ("fines", "lump"):
+            for suffix in (
+                "yield_pct", "wmt", "dmt", "moisture", *(
+                    assay.lower() for assay in CB_PROD1_SPLIT_ASSAYS
+                ),
+            ):
+                qualified = f"prod1_{size}_{suffix}"
+                if modelled_properties.get(qualified) is not None:
+                    canonical_aliases[f"{size}_{suffix}"] = (
+                        modelled_properties[qualified]
+                    )
+        for property_name, value in canonical_aliases.items():
+            if property_name.startswith("prod") and property_name.endswith(
+                "_minus_1mm_pct"
+            ):
+                product = property_name.split("_", 1)[0]
+                preferred = f"{product}_minus1mm_pct"
+                qualified_name = (
+                    preferred
+                    if preferred in property_coverage
+                    else f"{product}_mudrush_ultrafines_1mm"
+                )
+            else:
+                qualified_name = f"prod1_{property_name}"
+            coverage = property_coverage.get(qualified_name)
             modelled_properties[property_name] = value
             property_coverage[property_name] = coverage
             column_name = f"MODELLED_{property_name.upper()}"
@@ -220,10 +471,9 @@ def align_amt_grade_block_lineage(rows):
             if rom_mats_tonnes else None
         )
         ore_types = {
-            name.removeprefix("oretype_").upper(): weighted_sums.get(name, 0.0)
-            for name in modelled_properties
-            if name.startswith("oretype_")
-            and property_denominators.get(name, 0.0) > 0
+            ore_type.upper(): additive_totals[f"oretype_{ore_type}_wmt"]
+            for ore_type in ("bid", "did", "cidl", "cidm", "cidu", "hc", "other")
+            if additive_coverage_wmt.get(f"oretype_{ore_type}_wmt", 0.0) > 0
         }
         for ore_type, tonnes in ore_types.items():
             row[f"MODELLED_ORETYPE_{ore_type}_TONNES"] = tonnes

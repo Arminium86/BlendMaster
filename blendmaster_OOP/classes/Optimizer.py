@@ -40,6 +40,8 @@ from classes.CustomConstraints import (
     constraint_key,
     constraint_report_fields,
     custom_constraint_coefficients,
+    scale_additive_source_properties,
+    source_property_report_fields,
 )
 
 
@@ -1547,6 +1549,13 @@ class Optimizer:
                 if result.x[i] >= 0:
                     source_id = event.stockpile if event.is_stockpile else event.grade_block
                     source_name = event.source_name or source_id
+                    reported_source_properties = (
+                        scale_additive_source_properties(
+                            event.source_properties,
+                            result.x[i] / event.balance
+                            if event.balance > 0 else 0.0,
+                        )
+                    )
                     transaction = {
                             "source": source_name,
                             "source_id": source_id,
@@ -1566,7 +1575,10 @@ class Optimizer:
                             "grade_stream_warnings": event.grade_stream_warnings,
                             "grade_streams": deepcopy(event.grade_streams),
                             "source_properties": deepcopy(
-                                event.source_properties
+                                reported_source_properties
+                            ),
+                            **source_property_report_fields(
+                                reported_source_properties
                             ),
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,

@@ -12,6 +12,7 @@ from classes.GradeStreams import (
     DEFAULT_STREAM,
     STREAMS,
     grade_stream_audit_fields,
+    inventory_product_property_aliases,
     legacy_grade_streams,
     normalise_brand,
     normalise_grade_streams,
@@ -29,6 +30,7 @@ from classes.CustomConstraints import (
     merge_source_properties,
     normalize_custom_constraints,
     scale_additive_source_properties,
+    source_property_report_fields,
     source_properties_from_mapping,
 )
 
@@ -119,6 +121,7 @@ class ManualBlendPlanner:
             or solver_config.get("selected_data_stream")
             or DEFAULT_STREAM
         ).strip().lower()
+        self.opf = site_context.get("opf")
         self.crusher_rate = self._positive_number(
             crusher_rate, "Crusher rate"
         )
@@ -274,6 +277,10 @@ class ManualBlendPlanner:
         for name, values in self.stockpile_data.items():
             if name in amt_footprints:
                 continue
+            values = {
+                **dict(values or {}),
+                **inventory_product_property_aliases(values, self.opf),
+            }
             chunk = {
                 "source_id": name,
                 "sequence": 1,
@@ -962,6 +969,9 @@ class ManualBlendPlanner:
                     "period": state["period"],
                     "actual_direct_tip_ratio": direct_tip_ratio,
                     **source_row,
+                    **source_property_report_fields(
+                        source_row.get("source_properties")
+                    ),
                     "source_blend_ratio": (
                         amount / total_tonnes if total_tonnes > 0 else 0
                     ),
@@ -988,6 +998,12 @@ class ManualBlendPlanner:
             produced_tonnes += total_tonnes
 
         custom_columns = self.custom_constraint_report_columns()
+        source_property_columns = sorted({
+            column
+            for row in report_rows
+            for column in row
+            if str(column).startswith("source_property_")
+        })
         base_columns = [
             column
             for column in self.REPORT_COLUMNS
@@ -995,13 +1011,18 @@ class ManualBlendPlanner:
         ]
         report = pd.DataFrame(
             report_rows,
-            columns=[*base_columns, *custom_columns],
+            columns=[
+                *base_columns,
+                *source_property_columns,
+                *custom_columns,
+            ],
         )
         report = ProductBuildProgress.annotate(
             report, self.product_build_settings
         )
         return report.reindex(columns=[
             *base_columns,
+            *source_property_columns,
             *custom_columns,
             *ProductBuildProgress.COLUMNS,
         ])

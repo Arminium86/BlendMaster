@@ -401,6 +401,85 @@ def amt_modelled_product_slot(opf: Any) -> Optional[str]:
     return None
 
 
+def inventory_product_property_aliases(
+    row: Mapping[str, Any], opf: Any
+) -> Dict[str, Any]:
+    """Return canonical physical-property aliases for an inventory source.
+
+    Inventory stores CC OPF02's applicable product in ``PROD3`` while EXPIT
+    and AMT use ``PROD2`` for that same logical product channel.  Custom
+    constraints must see one stable name across source modes, so every raw
+    PROD3 property is also projected onto its PROD2 spelling for CC OPF02.
+    The raw fields are retained for audit.  Common moisture/recovery aliases
+    are added for every confirmed inventory product slot.
+    """
+    row = row if isinstance(row, Mapping) else {}
+    raw_slot = internal_product_slot(opf)
+    canonical_slot = amt_modelled_product_slot(opf)
+    aliases: Dict[str, Any] = {}
+
+    if raw_slot and canonical_slot and raw_slot != canonical_slot:
+        token = re.compile(
+            rf"(?<![a-z0-9]){re.escape(raw_slot)}(?![a-z0-9])",
+            re.IGNORECASE,
+        )
+        for raw_name, value in row.items():
+            name = str(raw_name or "").strip().lower()
+            canonical_name = token.sub(canonical_slot, name)
+            if canonical_name and canonical_name != name:
+                aliases[canonical_name] = value
+
+    if raw_slot and canonical_slot:
+        mass_recovery = _row_value(
+            row,
+            f"{raw_slot}_mass_recovery",
+            f"dryyield_{raw_slot}_wtavg",
+            f"dryyield_{raw_slot}",
+        )
+        moisture = _row_value(
+            row,
+            f"{raw_slot}_moisture",
+            f"moisture_{raw_slot}_wtavg",
+            f"moisture_{raw_slot}",
+        )
+        if mass_recovery is not None:
+            aliases[f"{canonical_slot}_mass_recovery"] = mass_recovery
+        if moisture is not None:
+            aliases[f"{canonical_slot}_moisture"] = moisture
+
+        minus_1mm = _row_value(
+            row,
+            f"{raw_slot}_minus_1mm_pct",
+            f"{raw_slot}_minus1mm_pct",
+            f"{raw_slot}_mudrush_ultrafines_1mm",
+            "minus_1mm_pct",
+            "prod1_minus_1mm_pct",
+        )
+        if minus_1mm is not None:
+            aliases[f"{canonical_slot}_minus_1mm_pct"] = minus_1mm
+            fraction = minus_1mm / 100.0 if minus_1mm > 1.0 else minus_1mm
+            if 0.0 <= fraction <= 1.0:
+                for mass_basis in ("wmt", "dmt"):
+                    product_tonnes = numeric(aliases.get(
+                        f"{canonical_slot}_{mass_basis}"
+                    ))
+                    if product_tonnes is None:
+                        product_tonnes = _row_value(
+                            row, f"{raw_slot}_{mass_basis}"
+                        )
+                    if product_tonnes is not None:
+                        aliases[
+                            f"{canonical_slot}_minus_1mm_{mass_basis}"
+                        ] = product_tonnes * fraction
+
+    feed_moisture = _row_value(
+        row, "feed_moisture", "moisture_insitu_wtavg"
+    )
+    if feed_moisture is not None:
+        aliases["feed_moisture"] = feed_moisture
+    return aliases
+
+
 def canonical_product_channel(opf: Any) -> Optional[str]:
     slot = internal_product_slot(opf)
     if slot == "prod1":

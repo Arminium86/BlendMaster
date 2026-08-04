@@ -252,6 +252,22 @@ def filter_source_properties(properties, required_keys=None) -> dict:
     }
 
 
+def source_property_report_fields(properties, prefix="source_property_") -> dict:
+    """Flatten the active numeric source properties into report columns."""
+    result = {}
+    for raw_key, raw_value in dict(properties or {}).items():
+        key = canonical_property_key(raw_key)
+        if not key or source_property_kind(key) == "runtime":
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            result[f"{prefix}{key}"] = value
+    return result
+
+
 class SafeNumericExpression:
     """Evaluate arithmetic over named numeric source fields without ``eval``."""
 
@@ -504,7 +520,13 @@ def source_properties_from_mapping(record) -> dict:
             except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
-                properties[f"modelled_{str(name).lower()}"] = value
+                raw_name = canonical_property_key(name)
+                if raw_name:
+                    # Canonical raw aliases make inventory, AMT and mapped APS
+                    # properties interchangeable in custom expressions.  Keep
+                    # the explicit modelled_* alias for audit/backward use.
+                    properties.setdefault(raw_name, value)
+                    properties[f"modelled_{raw_name}"] = value
         for name, raw_value in (modelled.get("coverage") or {}).items():
             try:
                 value = float(raw_value) * 100.0

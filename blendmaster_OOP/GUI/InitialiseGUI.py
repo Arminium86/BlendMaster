@@ -42,6 +42,7 @@ from classes.GradeStreams import (
     amt_modelled_product_slot,
     configured_brands,
     internal_product_slot,
+    inventory_product_property_aliases,
     inventory_grade_streams,
     is_dry_plant,
     format_grade_stream_vector,
@@ -68,6 +69,11 @@ from classes.AMTChunking import (
     DEFAULT_AMT_TARGET_CHUNK_HOURS,
     calculate_amt_chunk_plan,
 )
+from classes.SourcePropertyMappings import (
+    APS_SOURCE_PROPERTY_CATALOGUE,
+    normalise_aps_source_property_mappings,
+)
+from classes.CloudbreakProductSplit import calculate_cb_lump_fines
 import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -1236,6 +1242,15 @@ class UserInputs(QMainWindow):
             "aps_grade_field_mappings": copy.deepcopy(getattr(
                 self, "aps_grade_field_mappings", {}
             )),
+            "aps_source_property_field_mappings": copy.deepcopy(getattr(
+                self, "aps_source_property_field_mappings", {}
+            )),
+            "cb_lump_fines_mode": str(getattr(
+                self, "cb_lump_fines_mode", "derived"
+            ) or "derived"),
+            "cb_lump_percentage": float(getattr(
+                self, "cb_lump_percentage", 50.0
+            ) or 0.0),
             "historical_recon_factors": copy.deepcopy(getattr(
                 self, "historical_recon_factors", {}
             )),
@@ -1257,6 +1272,8 @@ class UserInputs(QMainWindow):
                 "product": self.product_planning_category_input.text(),
             })
             self.capture_aps_grade_mapping_table()
+            self.capture_aps_source_property_mapping_table()
+            self.capture_cb_lump_fines_settings()
             if self.historical_recon_factors:
                 self.capture_recon_factor_table()
         if hasattr(self, "auto_load_2wp_targets_checkbox"):
@@ -1291,6 +1308,8 @@ class UserInputs(QMainWindow):
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "selected_data_stream", "aps_grade_field_mappings",
+            "aps_source_property_field_mappings",
+            "cb_lump_fines_mode", "cb_lump_percentage",
             "historical_recon_factors", "historical_recon_warnings",
             "data_stream_planning_categories",
             "auto_load_2wp_targets_choice",
@@ -1302,6 +1321,7 @@ class UserInputs(QMainWindow):
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
             "database_view_selected_columns", "database_view_known_columns",
+            "database_view_selected_sources", "database_view_known_sources",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
@@ -1515,6 +1535,19 @@ class UserInputs(QMainWindow):
                 state.get("aps_grade_field_mappings"),
                 self.product_brand_labels_choice,
             )
+            self.aps_source_property_field_mappings = (
+                normalise_aps_source_property_mappings(
+                    state.get("aps_source_property_field_mappings")
+                )
+            )
+            self.cb_lump_fines_mode = str(
+                state.get("cb_lump_fines_mode") or "derived"
+            )
+            self.cb_lump_percentage = float(
+                numeric(state.get("cb_lump_percentage"))
+                if numeric(state.get("cb_lump_percentage")) is not None
+                else 50.0
+            )
             self.historical_recon_factors = copy.deepcopy(
                 state.get("historical_recon_factors") or {}
             )
@@ -1586,6 +1619,12 @@ class UserInputs(QMainWindow):
             self.database_view_known_columns = copy.deepcopy(
                 state.get("database_view_known_columns")
             )
+            self.database_view_selected_sources = copy.deepcopy(
+                state.get("database_view_selected_sources")
+            )
+            self.database_view_known_sources = copy.deepcopy(
+                state.get("database_view_known_sources")
+            )
             self.database_view_rows = []
             self.database_view_expit_payload_transactions = None
             self.database_view_snapshot_signature = None
@@ -1597,6 +1636,7 @@ class UserInputs(QMainWindow):
             if hasattr(self, "database_view_table"):
                 self.database_view_table.clearContents()
                 self.database_view_table.setRowCount(0)
+                self.database_view_table.setColumnCount(0)
             if hasattr(self, "database_view_continue_button"):
                 self.database_view_continue_button.setEnabled(False)
             self.calendar_inputs = copy.deepcopy(state.get("calendar_inputs") or {})
@@ -1708,6 +1748,8 @@ class UserInputs(QMainWindow):
                 )
             )
             self.populate_aps_grade_mapping_table()
+            self.populate_aps_source_property_mapping_table()
+            self.load_cb_lump_fines_settings()
             self.refresh_aps_grade_field_headers()
             self.populate_recon_factor_table()
             warning_text = "\n".join(self.historical_recon_warnings)
@@ -2993,10 +3035,11 @@ class UserInputs(QMainWindow):
             property_sets.append(available)
         property_sets = [values for values in property_sets if values]
         if property_sets:
-            # Only advertise imported fields available for every current
-            # source. The optimiser still performs a per-source preflight and
-            # names any source whose data later becomes unavailable.
-            fields.update(set.intersection(*property_sets))
+            # Discover fields from any current source so partial AMT lineage or
+            # an optional APS mapping cannot make a useful property invisible.
+            # The optimiser retains its per-source preflight and identifies any
+            # selected source whose required value is unavailable.
+            fields.update(set.union(*property_sets))
         return sorted(fields)
 
     def populate_custom_constraint_table(self):
@@ -3427,9 +3470,9 @@ class UserInputs(QMainWindow):
         description = QLabel(
             "Audit the selected inventory stockpiles, selected AMT chunks, and "
             "APS 24HR grade blocks inside the configured planning horizon. Each "
-            "grade block is consolidated to one row. The table focuses on source "
-            "tonnes, raw grades, every calculated grade stream, and per-analyte "
-            "fallback provenance."
+            "source is displayed as a column and each selected field as a row. "
+            "The view focuses on source tonnes, raw grades, every calculated "
+            "grade stream, and per-analyte fallback provenance."
         )
         description.setWordWrap(True)
         description.setStyleSheet("color: #607080;")
@@ -3448,7 +3491,7 @@ class UserInputs(QMainWindow):
             self.database_view_source_filter.addItem(source_type, source_type)
         self.database_view_search = QLineEdit()
         self.database_view_search.setPlaceholderText(
-            "Filter source, stockpile, build, grade, warning..."
+            "Filter displayed sources by name, stockpile, build or value..."
         )
         self.database_view_source_filter.currentIndexChanged.connect(
             self.apply_database_view_filters
@@ -3456,13 +3499,22 @@ class UserInputs(QMainWindow):
         self.database_view_search.textChanged.connect(
             self.apply_database_view_filters
         )
-        self.database_view_column_button = QPushButton("Choose Columns...")
+        self.database_view_source_button = QPushButton("Choose Sources...")
+        self.database_view_source_button.setToolTip(
+            "Choose source columns for this audit view. This does not remove "
+            "sources from scheduling."
+        )
+        self.database_view_source_button.clicked.connect(
+            self.choose_database_view_sources
+        )
+        self.database_view_column_button = QPushButton("Choose Fields...")
         self.database_view_column_button.clicked.connect(
             self.choose_database_view_columns
         )
         filters.addWidget(QLabel("Source Type:"))
         filters.addWidget(self.database_view_source_filter)
         filters.addWidget(self.database_view_search, stretch=1)
+        filters.addWidget(self.database_view_source_button)
         filters.addWidget(self.database_view_column_button)
         layout.addLayout(filters)
 
@@ -3508,6 +3560,8 @@ class UserInputs(QMainWindow):
         self.database_view_snapshot_signature = None
         self.database_view_selected_columns = None
         self.database_view_known_columns = None
+        self.database_view_selected_sources = None
+        self.database_view_known_sources = None
         self.database_view_refresh_pending = True
         self.database_view_refresh_in_progress = False
         self.database_view_refresh_generation = 0
@@ -3534,6 +3588,11 @@ class UserInputs(QMainWindow):
             },
             "movement_rules": context.get("direct_tip_movement_rules", []),
             "grade_mappings": context.get("aps_grade_field_mappings", {}),
+            "property_mappings": context.get(
+                "aps_source_property_field_mappings", {}
+            ),
+            "cb_lump_fines_mode": context.get("cb_lump_fines_mode"),
+            "cb_lump_percentage": context.get("cb_lump_percentage"),
         }
         return json.dumps(signature, sort_keys=True, default=str)
 
@@ -3666,9 +3725,12 @@ class UserInputs(QMainWindow):
                         if isinstance(modelled_payload, dict) else {}
                     )
                     property_audit = {
+                        name: value for name, value in modelled_values.items()
+                    }
+                    property_audit.update({
                         f"modelled_{name}": value
                         for name, value in modelled_values.items()
-                    }
+                    })
                     property_audit.update({
                         f"modelled_{name}_coverage_pct": (
                             numeric(value) * 100.0
@@ -3709,6 +3771,12 @@ class UserInputs(QMainWindow):
                             ),
                             "geometry_quarantine_hexes": chunk.get(
                                 "geometry_quarantine_hexes"
+                            ),
+                            "cb_split_method": chunk.get(
+                                "cb_split_method", ""
+                            ),
+                            "cb_split_warning": chunk.get(
+                                "cb_split_warning", ""
                             ),
                             "internal_recon_matched": provenance.get(
                                 "AMT_INVENTORY_MATCHED",
@@ -4158,6 +4226,7 @@ class UserInputs(QMainWindow):
         self.database_view_snapshot_signature = None
         self.database_view_table.clearContents()
         self.database_view_table.setRowCount(0)
+        self.database_view_table.setColumnCount(0)
         self.database_view_continue_button.setEnabled(False)
         self.database_view_period_count_snapshot = self.planning_period_count()
         self.database_view_start_time_snapshot = (
@@ -4227,7 +4296,7 @@ class UserInputs(QMainWindow):
         self.database_view_summary_label.setText(
             f"Planning window: {result.get('window_start')} to "
             f"{result.get('window_end')} | {count_text} | "
-            f"Displayed source tonnes: {tonnes:,.2f}"
+            f"Total audited source tonnes: {tonnes:,.2f}"
         )
 
     def handle_database_view_error(
@@ -4249,6 +4318,7 @@ class UserInputs(QMainWindow):
         self.database_view_continue_button.setEnabled(False)
         self.database_view_table.clearContents()
         self.database_view_table.setRowCount(0)
+        self.database_view_table.setColumnCount(0)
         self.database_view_warning_label.setText(str(error_message))
         self.database_view_warning_label.show()
         self.database_view_summary_label.setText(
@@ -4328,7 +4398,7 @@ class UserInputs(QMainWindow):
         selected_count = sum(header in selected for header in all_headers)
         total_count = len(all_headers)
         self.database_view_column_button.setText(
-            f"Choose Columns... ({selected_count}/{total_count})"
+            f"Choose Fields... ({selected_count}/{total_count})"
         )
 
     def choose_database_view_columns(self):
@@ -4340,7 +4410,7 @@ class UserInputs(QMainWindow):
             or self.default_database_view_columns(all_headers)
         )
         dialog = QDialog(self)
-        dialog.setWindowTitle("Database View Columns")
+        dialog.setWindowTitle("Database View Fields")
         dialog.resize(520, 650)
         layout = QVBoxLayout(dialog)
         search = QLineEdit()
@@ -4404,39 +4474,268 @@ class UserInputs(QMainWindow):
         self.populate_database_view_table()
         self.save_active_scenario_state()
 
+    @staticmethod
+    def database_view_source_base_key(record):
+        """Return the stable identity portion of a Database View source."""
+        record = record or {}
+        return json.dumps(
+            [
+                str(record.get("source_type") or ""),
+                str(record.get("source_id") or ""),
+                str(record.get("parent_stockpile") or ""),
+            ],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+
+    def database_view_source_descriptors(self):
+        """Describe each source column with a stable key and unique caption."""
+        base_keys = []
+        base_labels = []
+        for index, record in enumerate(self.database_view_rows):
+            base_keys.append(self.database_view_source_base_key(record))
+            base_labels.append(
+                str(
+                    record.get("source_id")
+                    or record.get("build_or_chunk")
+                    or record.get("parent_stockpile")
+                    or f"Source {index + 1}"
+                )
+            )
+
+        label_counts = {}
+        for label in base_labels:
+            label_counts[label] = label_counts.get(label, 0) + 1
+        key_occurrences = {}
+        caption_occurrences = {}
+        descriptors = []
+        for index, record in enumerate(self.database_view_rows):
+            base_key = base_keys[index]
+            key_occurrences[base_key] = key_occurrences.get(base_key, 0) + 1
+            key = f"{base_key}#{key_occurrences[base_key]}"
+
+            base_label = base_labels[index]
+            caption = base_label
+            if label_counts.get(base_label, 0) > 1:
+                context = str(record.get("source_type") or "Source")
+                parent = str(record.get("parent_stockpile") or "").strip()
+                if parent and parent != base_label:
+                    context = f"{context} | {parent}"
+                caption = f"{base_label} [{context}]"
+            caption_occurrences[caption] = (
+                caption_occurrences.get(caption, 0) + 1
+            )
+            if caption_occurrences[caption] > 1:
+                caption = f"{caption} #{caption_occurrences[caption]}"
+
+            search_text = " ".join(
+                str(value)
+                for value in record.values()
+                if value is not None
+            ).lower()
+            descriptors.append({
+                "key": key,
+                "label": caption,
+                "record_index": index,
+                "record": record,
+                "source_type": str(record.get("source_type") or ""),
+                "search_text": search_text,
+            })
+        return descriptors
+
+    def database_view_selected_source_descriptors(self):
+        """Resolve saved source choices and auto-select newly appearing sources."""
+        descriptors = self.database_view_source_descriptors()
+        current_keys = [descriptor["key"] for descriptor in descriptors]
+        selected = getattr(self, "database_view_selected_sources", None)
+        known_values = list(
+            getattr(self, "database_view_known_sources", None) or []
+        )
+        known = set(known_values)
+        if selected is None:
+            selected = list(current_keys)
+        else:
+            selected = list(selected)
+            selected.extend(
+                key for key in current_keys
+                if key not in known and key not in selected
+            )
+        self.database_view_selected_sources = list(dict.fromkeys(selected))
+        self.database_view_known_sources = list(
+            dict.fromkeys([*known_values, *current_keys])
+        )
+        selected_set = set(self.database_view_selected_sources)
+        return [
+            descriptor for descriptor in descriptors
+            if descriptor["key"] in selected_set
+        ]
+
+    def update_database_view_source_button(self):
+        if not hasattr(self, "database_view_source_button"):
+            return
+        descriptors = self.database_view_source_descriptors()
+        selected = set(
+            getattr(self, "database_view_selected_sources", []) or []
+        )
+        selected_count = sum(
+            descriptor["key"] in selected for descriptor in descriptors
+        )
+        self.database_view_source_button.setText(
+            f"Choose Sources... ({selected_count}/{len(descriptors)})"
+        )
+
+    def choose_database_view_sources(self):
+        descriptors = self.database_view_source_descriptors()
+        if not descriptors:
+            return
+        # Resolve defaults and newly appearing sources before building the list.
+        self.database_view_selected_source_descriptors()
+        selected = set(self.database_view_selected_sources or [])
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Database View Sources")
+        dialog.resize(620, 650)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Type to find a source, stockpile or type...")
+        source_list = QListWidget()
+        for descriptor in descriptors:
+            item = QListWidgetItem(descriptor["label"])
+            item.setData(Qt.UserRole, descriptor["key"])
+            item.setToolTip(
+                " | ".join(
+                    value for value in (
+                        descriptor["source_type"],
+                        str(descriptor["record"].get("parent_stockpile") or ""),
+                        str(descriptor["record"].get("build_or_chunk") or ""),
+                    ) if value
+                )
+            )
+            item.setFlags(
+                item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled
+            )
+            item.setCheckState(
+                Qt.Checked
+                if descriptor["key"] in selected
+                else Qt.Unchecked
+            )
+            source_list.addItem(item)
+
+        def filter_sources(text):
+            needle = str(text or "").strip().lower()
+            for index, descriptor in enumerate(descriptors):
+                item = source_list.item(index)
+                item.setHidden(
+                    bool(
+                        needle
+                        and needle not in descriptor["label"].lower()
+                        and needle not in descriptor["search_text"]
+                    )
+                )
+
+        def set_checked(check):
+            state = Qt.Checked if check else Qt.Unchecked
+            for index in range(source_list.count()):
+                source_list.item(index).setCheckState(state)
+
+        search.textChanged.connect(filter_sources)
+        layout.addWidget(search)
+        layout.addWidget(source_list, stretch=1)
+        actions = QHBoxLayout()
+        all_button = QPushButton("Select All")
+        all_button.clicked.connect(lambda: set_checked(True))
+        none_button = QPushButton("Clear")
+        none_button.clicked.connect(lambda: set_checked(False))
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        actions.addWidget(all_button)
+        actions.addWidget(none_button)
+        actions.addStretch()
+        actions.addWidget(apply_button)
+        actions.addWidget(cancel_button)
+        layout.addLayout(actions)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.database_view_selected_sources = [
+            source_list.item(index).data(Qt.UserRole)
+            for index in range(source_list.count())
+            if source_list.item(index).checkState() == Qt.Checked
+        ]
+        self.database_view_known_sources = list(
+            dict.fromkeys([
+                *(self.database_view_known_sources or []),
+                *(descriptor["key"] for descriptor in descriptors),
+            ])
+        )
+        self.populate_database_view_table()
+        self.save_active_scenario_state()
+
     def populate_database_view_table(self):
         table = self.database_view_table
-        headers = self.database_view_headers()
+        fields = self.database_view_headers()
+        sources = self.database_view_selected_source_descriptors()
         table.setSortingEnabled(False)
         table.clearContents()
-        table.setRowCount(len(self.database_view_rows))
-        table.setColumnCount(len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        for row_index, record in enumerate(self.database_view_rows):
-            for column_index, header in enumerate(headers):
-                value = record.get(header, "")
-                display = self.database_view_display_value(header, value)
+        table.setRowCount(len(fields))
+        table.setColumnCount(len(sources) + 1)
+        field_header = QTableWidgetItem("Field")
+        field_header.setToolTip("Database field or calculated property")
+        table.setHorizontalHeaderItem(0, field_header)
+        for column_index, descriptor in enumerate(sources, start=1):
+            source_header = QTableWidgetItem(descriptor["label"])
+            source_header.setData(Qt.UserRole, descriptor["key"])
+            source_header.setToolTip(
+                " | ".join(
+                    value for value in (
+                        descriptor["source_type"],
+                        str(descriptor["record"].get("parent_stockpile") or ""),
+                        str(descriptor["record"].get("build_or_chunk") or ""),
+                    ) if value
+                )
+            )
+            table.setHorizontalHeaderItem(column_index, source_header)
+
+        for row_index, field in enumerate(fields):
+            field_item = QTableWidgetItem(field)
+            field_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            field_item.setToolTip(field)
+            field_item.setBackground(QColor("#f1f5f9"))
+            table.setItem(row_index, 0, field_item)
+            for column_index, descriptor in enumerate(sources, start=1):
+                value = descriptor["record"].get(field, "")
+                display = self.database_view_display_value(field, value)
                 item = QTableWidgetItem(display)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 item.setToolTip(display)
-                item.setData(Qt.UserRole, row_index)
-                if header.startswith("fallback_") and display:
+                item.setData(Qt.UserRole, descriptor["key"])
+                if field.startswith("fallback_") and display:
                     item.setBackground(QColor("#fff3cd"))
                 elif (
                     (
-                        header.startswith("grade_")
+                        field.startswith("grade_")
                         or (
-                            header.startswith("selected_")
-                            and header != "selected_stream"
+                            field.startswith("selected_")
+                            and field != "selected_stream"
                         )
                     )
                     and not display
                 ):
                     item.setBackground(QColor("#fee2e2"))
                 table.setItem(row_index, column_index, item)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.setSortingEnabled(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.resizeColumnToContents(0)
+        table.setColumnWidth(
+            0, min(max(table.columnWidth(0), 180), 360)
+        )
+        for column_index in range(1, table.columnCount()):
+            table.resizeColumnToContents(column_index)
+            table.setColumnWidth(
+                column_index,
+                min(max(table.columnWidth(column_index), 100), 260),
+            )
         self.update_database_view_column_button()
+        self.update_database_view_source_button()
         self.apply_database_view_filters()
 
     @staticmethod
@@ -4485,27 +4784,31 @@ class UserInputs(QMainWindow):
             self.database_view_source_filter.currentData() or ""
         )
         search = self.database_view_search.text().strip().lower()
-        for row_index in range(self.database_view_table.rowCount()):
-            row_item = self.database_view_table.item(row_index, 0)
-            record_index = (
-                row_item.data(Qt.UserRole) if row_item is not None else None
+        descriptors = {
+            descriptor["key"]: descriptor
+            for descriptor in self.database_view_source_descriptors()
+        }
+        self.database_view_table.setColumnHidden(0, False)
+        for column_index in range(1, self.database_view_table.columnCount()):
+            header_item = self.database_view_table.horizontalHeaderItem(
+                column_index
             )
-            try:
-                record = self.database_view_rows[int(record_index)]
-            except (TypeError, ValueError, IndexError):
-                record = {}
+            source_key = (
+                header_item.data(Qt.UserRole)
+                if header_item is not None else None
+            )
+            descriptor = descriptors.get(source_key, {})
             type_matches = (
                 not source_type
-                or str(record.get("source_type") or "") == source_type
+                or descriptor.get("source_type", "") == source_type
             )
             search_matches = (
                 not search
-                or search in " ".join(
-                    str(value) for value in record.values()
-                ).lower()
+                or search in descriptor.get("label", "").lower()
+                or search in descriptor.get("search_text", "")
             )
-            self.database_view_table.setRowHidden(
-                row_index, not (type_matches and search_matches)
+            self.database_view_table.setColumnHidden(
+                column_index, not (type_matches and search_matches)
             )
 
     def continue_from_database_view(self):
@@ -4586,6 +4889,38 @@ class UserInputs(QMainWindow):
         )
         selection_layout.addRow("ROM Planning Category:", self.rom_planning_category_input)
         selection_layout.addRow("Product Planning Category:", self.product_planning_category_input)
+
+        self.cb_lump_fines_mode_input = QComboBox()
+        self.cb_lump_fines_mode_input.addItem(
+            "Derive from grade blocks / mapped APS fields", "derived"
+        )
+        self.cb_lump_fines_mode_input.addItem(
+            "Calculate from user lump percentage", "calculated"
+        )
+        self.cb_lump_fines_mode_input.currentIndexChanged.connect(
+            self.update_cb_lump_fines_controls
+        )
+        self.cb_lump_percentage_input = QLineEdit(
+            str(getattr(self, "cb_lump_percentage", 50.0))
+        )
+        self.cb_lump_percentage_input.setValidator(
+            QDoubleValidator(0.0, 100.0, 4)
+        )
+        self.cb_lump_percentage_input.setMaximumWidth(120)
+        self.cb_lump_percentage_input.setToolTip(
+            "Cloudbreak only. Splits source wet/dry tonnes into PROD1 lump "
+            "and fines; size grades remain mass-balanced to total PROD1."
+        )
+        self.cb_lump_fines_mode_label = QLabel("CB Lump/Fines Source:")
+        self.cb_lump_percentage_label = QLabel("CB Lump Percentage (%):")
+        selection_layout.addRow(
+            self.cb_lump_fines_mode_label,
+            self.cb_lump_fines_mode_input,
+        )
+        selection_layout.addRow(
+            self.cb_lump_percentage_label,
+            self.cb_lump_percentage_input,
+        )
         layout.addWidget(selection_card)
 
         aps_file_card = QFrame()
@@ -4628,6 +4963,11 @@ class UserInputs(QMainWindow):
         self.aps_grade_mapping_table.verticalHeader().setVisible(False)
         self.aps_grade_mapping_table.setMinimumHeight(180)
         self.aps_grade_mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.aps_grade_mapping_table.cellClicked.connect(
+            lambda row, column: self.set_aps_mapping_target(
+                "grade", row, column
+            )
+        )
         mapping_area.addWidget(self.aps_grade_mapping_table, stretch=3)
 
         header_panel = QFrame()
@@ -4655,6 +4995,40 @@ class UserInputs(QMainWindow):
         header_layout.addWidget(self.aps_header_status_label)
         mapping_area.addWidget(header_panel, stretch=1)
         layout.addLayout(mapping_area)
+
+        property_mapping_label = QLabel(
+            "APS 24HR Source Property Field Mappings"
+        )
+        property_mapping_label.setStyleSheet(
+            "font-size: 15px; font-weight: 700;"
+        )
+        property_mapping_help = QLabel(
+            "Map optional additive and physical-property fields to stable "
+            "BlendMaster names. Unmapped numeric APS fields are still retained "
+            "under a normalised version of their original header."
+        )
+        property_mapping_help.setWordWrap(True)
+        property_mapping_help.setStyleSheet("color: #607080;")
+        self.aps_source_property_mapping_table = APSGradeMappingTable()
+        self.aps_source_property_mapping_table.setColumnCount(3)
+        self.aps_source_property_mapping_table.setHorizontalHeaderLabels(
+            ["Property Group", "BlendMaster Field", "24HR APS Field"]
+        )
+        self.aps_source_property_mapping_table.verticalHeader().setVisible(
+            False
+        )
+        self.aps_source_property_mapping_table.setMinimumHeight(300)
+        self.aps_source_property_mapping_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.aps_source_property_mapping_table.cellClicked.connect(
+            lambda row, column: self.set_aps_mapping_target(
+                "property", row, column
+            )
+        )
+        layout.addWidget(property_mapping_label)
+        layout.addWidget(property_mapping_help)
+        layout.addWidget(self.aps_source_property_mapping_table)
 
         factor_label = QLabel("Historical OPF Reconciliation Factors")
         factor_label.setStyleSheet("font-size: 15px; font-weight: 700;")
@@ -4699,6 +5073,8 @@ class UserInputs(QMainWindow):
         scroll.setWidget(content)
         root.addWidget(scroll)
         self.populate_aps_grade_mapping_table()
+        self.populate_aps_source_property_mapping_table()
+        self.load_cb_lump_fines_settings()
         self.refresh_aps_grade_field_headers()
 
     def current_24hr_aps_path(self):
@@ -4809,17 +5185,31 @@ class UserInputs(QMainWindow):
             item = header_list.item(row)
             item.setHidden(bool(search and search not in item.text().lower()))
 
+    def set_aps_mapping_target(self, mapping_type, row, column):
+        if mapping_type == "grade" and column >= 2:
+            self.aps_mapping_target = (mapping_type, row, column)
+        elif mapping_type == "property" and column == 2:
+            self.aps_mapping_target = (mapping_type, row, column)
+
     def apply_aps_header_to_mapping_cell(self, header_item):
-        table = getattr(self, "aps_grade_mapping_table", None)
+        mapping_type, row, column = getattr(
+            self, "aps_mapping_target", ("grade", -1, -1)
+        )
+        table = (
+            getattr(self, "aps_source_property_mapping_table", None)
+            if mapping_type == "property"
+            else getattr(self, "aps_grade_mapping_table", None)
+        )
         if table is None or header_item is None:
             return
-        row = table.currentRow()
-        column = table.currentColumn()
-        if row < 0 or column < 2:
+        valid_column = (
+            column == 2 if mapping_type == "property" else column >= 2
+        )
+        if row < 0 or not valid_column or row >= table.rowCount():
             QMessageBox.information(
                 self,
-                "APS Grade Field Mapping",
-                "Select an Fe, SiO2, Al2O3, P, or Mn mapping cell first.",
+                "APS Field Mapping",
+                "Select a grade or source-property 24HR APS mapping cell first.",
             )
             return
         table.setItem(row, column, QTableWidgetItem(header_item.text()))
@@ -4868,6 +5258,93 @@ class UserInputs(QMainWindow):
         self.aps_grade_field_mappings = normalise_aps_grade_field_mappings(
             mappings, self.product_brand_labels_choice
         )
+
+    def populate_aps_source_property_mapping_table(self):
+        table = getattr(self, "aps_source_property_mapping_table", None)
+        if table is None:
+            return
+        mappings = normalise_aps_source_property_mappings(
+            getattr(self, "aps_source_property_field_mappings", None)
+        )
+        self.aps_source_property_field_mappings = copy.deepcopy(mappings)
+        catalogue = list(APS_SOURCE_PROPERTY_CATALOGUE)
+        known = {field for _group, field, _label in catalogue}
+        catalogue.extend(
+            ("Saved / Custom", field, field)
+            for field in mappings
+            if field not in known
+        )
+        table.setRowCount(len(catalogue))
+        for row, (group, field, description) in enumerate(catalogue):
+            group_item = QTableWidgetItem(group)
+            group_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            table.setItem(row, 0, group_item)
+            field_item = QTableWidgetItem(field)
+            field_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            field_item.setToolTip(description)
+            table.setItem(row, 1, field_item)
+            header_item = QTableWidgetItem(str(mappings.get(field) or ""))
+            header_item.setToolTip(
+                f"{description}. Drag or double-click a 24HR APS field to map it."
+            )
+            table.setItem(row, 2, header_item)
+
+    def capture_aps_source_property_mapping_table(self):
+        table = getattr(self, "aps_source_property_mapping_table", None)
+        if table is None:
+            return
+        mappings = {}
+        for row in range(table.rowCount()):
+            field_item = table.item(row, 1)
+            header_item = table.item(row, 2)
+            field = str(field_item.text() if field_item else "").strip()
+            header = str(header_item.text() if header_item else "").strip()
+            if field:
+                mappings[field] = header
+        self.aps_source_property_field_mappings = (
+            normalise_aps_source_property_mappings(mappings)
+        )
+
+    def load_cb_lump_fines_settings(self):
+        combo = getattr(self, "cb_lump_fines_mode_input", None)
+        percentage = getattr(self, "cb_lump_percentage_input", None)
+        if combo is None or percentage is None:
+            return
+        mode = str(getattr(self, "cb_lump_fines_mode", "derived") or "derived")
+        index = combo.findData(mode)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        percentage.setText(f"{float(getattr(self, 'cb_lump_percentage', 50.0)):g}")
+        self.update_cb_lump_fines_controls()
+
+    def update_cb_lump_fines_controls(self, *_args):
+        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
+        combo = getattr(self, "cb_lump_fines_mode_input", None)
+        percentage = getattr(self, "cb_lump_percentage_input", None)
+        calculated = bool(
+            combo is not None and combo.currentData() == "calculated"
+        )
+        for widget_name in (
+            "cb_lump_fines_mode_label", "cb_lump_fines_mode_input",
+            "cb_lump_percentage_label", "cb_lump_percentage_input",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(is_cb)
+        if percentage is not None:
+            percentage.setEnabled(is_cb and calculated)
+
+    def capture_cb_lump_fines_settings(self):
+        combo = getattr(self, "cb_lump_fines_mode_input", None)
+        percentage = getattr(self, "cb_lump_percentage_input", None)
+        if combo is not None:
+            self.cb_lump_fines_mode = str(combo.currentData() or "derived")
+        if percentage is not None:
+            value = numeric(percentage.text())
+            if value is None or not 0 <= value <= 100:
+                raise ValueError(
+                    "CB Lump Percentage must be between 0 and 100."
+                )
+            self.cb_lump_percentage = float(value)
 
     def populate_recon_factor_table(self):
         table = self.recon_factor_table
@@ -4969,6 +5446,8 @@ class UserInputs(QMainWindow):
         if not self.stockpile_data:
             return
         self.capture_aps_grade_mapping_table()
+        self.capture_aps_source_property_mapping_table()
+        self.capture_cb_lump_fines_settings()
         overrides = {}
         if self.historical_recon_factors:
             self.capture_recon_factor_table()
@@ -5083,6 +5562,95 @@ class UserInputs(QMainWindow):
             "target_errors": {},
         })
 
+    def apply_cb_split_to_inventory_row(self, row):
+        """Attach canonical CB PROD1 split properties to one inventory row."""
+        row = row if isinstance(row, dict) else {}
+        state = self.__dict__
+        if str(state.get("mine_input_choice", "") or "").upper() != "CB":
+            return ""
+        mode = str(state.get("cb_lump_fines_mode", "derived") or "derived")
+        if mode != "calculated":
+            method = "grade_block_derived"
+            if numeric(row.get("PROD1_LUMP_WMT", row.get("prod1_lump_wmt"))) is None:
+                method = "grade_block_derived_unavailable"
+            row["CB_SPLIT_METHOD"] = row["cb_split_method"] = method
+            return ""
+        calculated = calculate_cb_lump_fines(
+            row,
+            state.get("cb_lump_percentage", 50.0),
+            source_wmt=row.get("BALANCE", row.get("balance")),
+            source_dmt=row.get("FEED_DMT", row.get("feed_dmt")),
+        )
+        for key, value in calculated.items():
+            if key.startswith(("prod1_", "lump_", "fines_", "cb_")):
+                row[key] = value
+                row[key.upper()] = value
+        return str(calculated.get("cb_split_warning") or "")
+
+    def apply_cb_split_to_amt_row(self, row):
+        """Apply the optional user-calculated CB split to one AMT hex."""
+        row = row if isinstance(row, dict) else {}
+        state = self.__dict__
+        if str(state.get("mine_input_choice", "") or "").upper() != "CB":
+            return ""
+        mode = str(state.get("cb_lump_fines_mode", "derived") or "derived")
+        raw_payload = row.get("MODELLED_PROPERTIES_JSON")
+        if isinstance(raw_payload, str):
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, ValueError):
+                payload = {}
+        else:
+            payload = copy.deepcopy(raw_payload or {})
+        values = dict(payload.get("values") or {})
+        coverage = dict(payload.get("coverage") or {})
+        if mode != "calculated":
+            method = "grade_block_derived"
+            if numeric(values.get("prod1_lump_wmt")) is None:
+                method = "grade_block_derived_unavailable"
+            row["CB_SPLIT_METHOD"] = method
+            row["CB_SPLIT_WARNING"] = ""
+            return ""
+
+        calculated = calculate_cb_lump_fines(
+            values,
+            state.get("cb_lump_percentage", 50.0),
+            source_wmt=row.get("FINAL_WMT", row.get("final_wmt")),
+            source_dmt=values.get("feed_dmt"),
+        )
+        for key, value in calculated.items():
+            if not key.startswith(("prod1_", "lump_", "fines_", "cb_")):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                values[key] = float(value)
+                if key.startswith("prod1_") and any(
+                    key.endswith("_" + assay)
+                    for assay in (
+                        "fe", "sio2", "al2o3", "mn", "p", "loi_425",
+                        "loi_total", "s", "as",
+                    )
+                ):
+                    assay = next(
+                        assay for assay in (
+                            "loi_total", "loi_425", "al2o3", "sio2",
+                            "fe", "mn", "p", "s", "as",
+                        ) if key.endswith("_" + assay)
+                    )
+                    coverage[key] = coverage.get(f"prod1_{assay}", 1.0)
+                else:
+                    coverage[key] = 1.0
+                column = f"MODELLED_{key.upper()}"
+                row[column] = float(value)
+                row[f"{column}_COVERAGE_PCT"] = coverage[key] * 100.0
+        payload["values"] = values
+        payload["coverage"] = coverage
+        row["MODELLED_PROPERTIES_JSON"] = json.dumps(
+            payload, default=str, separators=(",", ":")
+        )
+        row["CB_SPLIT_METHOD"] = str(calculated.get("cb_split_method") or "")
+        row["CB_SPLIT_WARNING"] = str(calculated.get("cb_split_warning") or "")
+        return row["CB_SPLIT_WARNING"]
+
     def apply_grade_streams_to_inventory(self):
         source_prefixes = tuple(
             f"{name}:" for name in (self.stockpile_data or {})
@@ -5111,6 +5679,9 @@ class UserInputs(QMainWindow):
         )
         self.data_stream_source_warnings = {}
         for name, row in (self.stockpile_data or {}).items():
+            row.update(inventory_product_property_aliases(
+                row, self.opf_input_choice
+            ))
             streams = inventory_grade_streams(
                 row,
                 self.product_brand_labels_choice,
@@ -5120,6 +5691,9 @@ class UserInputs(QMainWindow):
             row["GRADE_STREAMS"] = streams
             row["grade_streams"] = streams
             warnings = self.inventory_stream_warnings(name, row)
+            cb_warning = self.apply_cb_split_to_inventory_row(row)
+            if cb_warning:
+                warnings.append(f"{name}: {cb_warning}")
             row["GRADE_STREAM_WARNINGS"] = warnings
             row["grade_stream_warnings"] = warnings
             if warnings:
@@ -5192,6 +5766,12 @@ class UserInputs(QMainWindow):
             "product": self.product_planning_category_input.text(),
         })
         self.capture_aps_grade_mapping_table()
+        self.capture_aps_source_property_mapping_table()
+        try:
+            self.capture_cb_lump_fines_settings()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Data Streams", str(exc))
+            return
         self.capture_recon_factor_table()
         self.apply_grade_streams_to_inventory()
         if self.data_stream_pending_build_targets:
@@ -7645,6 +8225,8 @@ class UserInputs(QMainWindow):
         # mappings that were just read from the project file.
         if restoring_project:
             self.populate_aps_grade_mapping_table()
+            self.populate_aps_source_property_mapping_table()
+            self.load_cb_lump_fines_settings()
             self.populate_recon_factor_table()
         if self.haul_cycle_file_path_choice:
             self.refresh_haul_cycle_routes(show_errors=True)
@@ -7675,6 +8257,8 @@ class UserInputs(QMainWindow):
 
         self.setup_stockpile_table()
         self.populate_aps_grade_mapping_table()
+        self.populate_aps_source_property_mapping_table()
+        self.load_cb_lump_fines_settings()
         self.refresh_aps_grade_field_headers()
         self.populate_recon_factor_table()
         self.set_page_enabled(self.data_streams_tab_index, True)
@@ -9989,6 +10573,19 @@ class UserInputs(QMainWindow):
             loaded_state.get("aps_grade_field_mappings"),
             loaded_state["product_brand_labels_choice"],
         )
+        loaded_state["aps_source_property_field_mappings"] = (
+            normalise_aps_source_property_mappings(
+                loaded_state.get("aps_source_property_field_mappings")
+            )
+        )
+        loaded_state["cb_lump_fines_mode"] = str(
+            loaded_state.get("cb_lump_fines_mode") or "derived"
+        )
+        loaded_state["cb_lump_percentage"] = (
+            numeric(loaded_state.get("cb_lump_percentage"))
+            if numeric(loaded_state.get("cb_lump_percentage")) is not None
+            else 50.0
+        )
         loaded_state["historical_recon_factors"] = copy.deepcopy(
             loaded_state.get("historical_recon_factors") or {}
         )
@@ -12204,6 +12801,7 @@ class UserInputs(QMainWindow):
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
+                cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 insitu = {
                     "grade_fe": row.get("FE"),
                     "grade_si": row.get("SIO2"),
@@ -12256,6 +12854,8 @@ class UserInputs(QMainWindow):
                 )
                 lineage_warning = str(row.get("LINEAGE_WARNING") or "").strip()
                 source_warnings = [lineage_warning] if lineage_warning else []
+                if cb_split_warning:
+                    source_warnings.append(cb_split_warning)
                 product_slot = amt_modelled_product_slot(self.opf_input_choice)
                 if product_slot and not is_dry_plant(self.opf_input_choice):
                     labels = {
@@ -12542,6 +13142,13 @@ class UserInputs(QMainWindow):
             "red": QColor("#7f1d1d"),
         }
 
+        # Rebuilding the Calendar can insert or remove dynamic custom-constraint
+        # rows ahead of the stockpile rows.  Drop the old rows first so Qt also
+        # removes their cell widgets; otherwise an old stockpile State combo can
+        # remain painted over a newly inserted numeric Min/Max cell.
+        self.main_table.setRowCount(0)
+        self.main_table.setColumnCount(0)
+
         # Configure the main table
         self.main_table.setColumnCount(len(self.calendar_headers))
         self.main_table.setRowCount(len(self.calendar_rows))
@@ -12633,7 +13240,7 @@ class UserInputs(QMainWindow):
                         brand_combo.setCurrentIndex(max(brand_index, 0))
                     self.main_table.setCellWidget(row_idx, col_idx, brand_combo)
                     continue
-                if is_editable and row_key and row_key.endswith("_state"):
+                if is_editable and self.is_calendar_stockpile_state_row(row_key):
                     state_combo = QComboBox()
                     state_options = ["Auto", "Build", "Reclaim"]
                     state_value = str(default_value)
@@ -12680,6 +13287,12 @@ class UserInputs(QMainWindow):
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.main_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.main_table.setColumnWidth(0, max(260, self.main_table.columnWidth(0)))
+
+    @staticmethod
+    def is_calendar_stockpile_state_row(row_key):
+        """Return whether a Calendar key represents a stockpile State row."""
+        key = str(row_key or "").strip().lower()
+        return key.startswith("stockpiles_") and key.endswith("_state")
 
     def load_calendar_inputs(self):
         if self.calendar_inputs:
@@ -16530,6 +17143,15 @@ class UserInputs(QMainWindow):
                 selected_agent_names=getattr(
                     self, "selected_24hr_expit_agents", []
                 ),
+                grade_field_mappings=context.get(
+                    "aps_grade_field_mappings", {}
+                ),
+                source_property_field_mappings=context.get(
+                    "aps_source_property_field_mappings", {}
+                ),
+                configured_product_brands=context.get(
+                    "product_brands", []
+                ),
             )
             transactions = handler.process_transactions()
             if (
@@ -17251,7 +17873,7 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 13,
+                "project_format_version": 14,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -17282,6 +17904,11 @@ class UserInputs(QMainWindow):
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "selected_data_stream": self.selected_data_stream,
                 "aps_grade_field_mappings": self.aps_grade_field_mappings,
+                "aps_source_property_field_mappings": (
+                    self.aps_source_property_field_mappings
+                ),
+                "cb_lump_fines_mode": self.cb_lump_fines_mode,
+                "cb_lump_percentage": self.cb_lump_percentage,
                 "historical_recon_factors": self.historical_recon_factors,
                 "historical_recon_warnings": self.historical_recon_warnings,
                 "data_stream_planning_categories": self.data_stream_planning_categories,
@@ -17340,6 +17967,12 @@ class UserInputs(QMainWindow):
                 ),
                 "database_view_known_columns": copy.deepcopy(
                     getattr(self, "database_view_known_columns", None)
+                ),
+                "database_view_selected_sources": copy.deepcopy(
+                    getattr(self, "database_view_selected_sources", None)
+                ),
+                "database_view_known_sources": copy.deepcopy(
+                    getattr(self, "database_view_known_sources", None)
                 ),
                 "solver_config": self.solver_config,
             }
@@ -17634,6 +18267,19 @@ class UserInputs(QMainWindow):
             loaded_state.get("aps_grade_field_mappings"),
             self.product_brand_labels_choice,
         )
+        self.aps_source_property_field_mappings = (
+            normalise_aps_source_property_mappings(
+                loaded_state.get("aps_source_property_field_mappings")
+            )
+        )
+        self.cb_lump_fines_mode = str(
+            loaded_state.get("cb_lump_fines_mode") or "derived"
+        )
+        self.cb_lump_percentage = float(
+            numeric(loaded_state.get("cb_lump_percentage"))
+            if numeric(loaded_state.get("cb_lump_percentage")) is not None
+            else 50.0
+        )
         self.historical_recon_factors = copy.deepcopy(
             loaded_state.get("historical_recon_factors") or {}
         )
@@ -17753,6 +18399,12 @@ class UserInputs(QMainWindow):
         self.database_view_known_columns = copy.deepcopy(
             loaded_state.get("database_view_known_columns")
         )
+        self.database_view_selected_sources = copy.deepcopy(
+            loaded_state.get("database_view_selected_sources")
+        )
+        self.database_view_known_sources = copy.deepcopy(
+            loaded_state.get("database_view_known_sources")
+        )
         self.database_view_rows = []
         self.database_view_expit_payload_transactions = None
         self.database_view_snapshot_signature = None
@@ -17760,6 +18412,10 @@ class UserInputs(QMainWindow):
         self.database_view_refresh_generation = (
             getattr(self, "database_view_refresh_generation", 0) + 1
         )
+        if hasattr(self, "database_view_table"):
+            self.database_view_table.clearContents()
+            self.database_view_table.setRowCount(0)
+            self.database_view_table.setColumnCount(0)
         if hasattr(self, "database_view_continue_button"):
             self.database_view_continue_button.setEnabled(False)
         self.seed_active_scenario_database()
@@ -17850,6 +18506,11 @@ class UserInputs(QMainWindow):
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.selected_data_stream = DEFAULT_STREAM
         self.aps_grade_field_mappings = {"rom": {}, "product": {}}
+        self.aps_source_property_field_mappings = (
+            normalise_aps_source_property_mappings()
+        )
+        self.cb_lump_fines_mode = "derived"
+        self.cb_lump_percentage = 50.0
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
         self.data_stream_planning_categories = normalise_planning_categories()

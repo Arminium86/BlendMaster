@@ -54,6 +54,10 @@ for _stream, _properties in (
 for _ore_type in ("BID", "CIDL", "CIDM", "CIDU", "DID", "HC", "OTHER"):
     _INVENTORY_EXTRA_SELECTS.extend([
         (
+            f"oretype_{_ore_type.lower()}_wmt",
+            f"LT.ORETYPE_{_ore_type}_INSITU_WTAVG * LT.BALANCEWMT",
+        ),
+        (
             f"oretype_{_ore_type.lower()}_dmt",
             f"LT.ORETYPE_{_ore_type}_INSITU_WTAVG * "
             "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG))",
@@ -65,17 +69,46 @@ for _ore_type in ("BID", "CIDL", "CIDM", "CIDU", "DID", "HC", "OTHER"):
     ])
 
 _INVENTORY_EXTRA_SELECTS.extend([
-    ("prod2_wmt", "LT.WETYIELD_PROD2_WTAVG * LT.BALANCEWMT"),
-    (
-        "prod2_dmt",
-        "LT.DRYYIELD_PROD2_WTAVG * "
-        "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG))",
-    ),
+    ("feed_wmt", "LT.BALANCEWMT"),
+    ("feed_dmt", "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG)"),
+    *[
+        (
+            f"prod{product}_wmt",
+            f"LT.WETYIELD_PROD{product}_WTAVG * LT.BALANCEWMT",
+        )
+        for product in (1, 2, 3)
+    ],
+    *[
+        (
+            f"prod{product}_dmt",
+            f"LT.DRYYIELD_PROD{product}_WTAVG * "
+            "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG))",
+        )
+        for product in (1, 2, 3)
+    ],
     ("minus_1mm_pct", "M.MINUS_1MM_PCT"),
+    ("prod1_minus_1mm_pct", "M.MINUS_1MM_PCT"),
+    (
+        "prod1_minus_1mm_wmt",
+        "LT.WETYIELD_PROD1_WTAVG * LT.BALANCEWMT * "
+        "CASE WHEN ABS(M.MINUS_1MM_PCT) > 1 "
+        "THEN M.MINUS_1MM_PCT / 100 ELSE M.MINUS_1MM_PCT END",
+    ),
+    (
+        "prod1_minus_1mm_dmt",
+        "LT.DRYYIELD_PROD1_WTAVG * "
+        "(LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG)) * "
+        "CASE WHEN ABS(M.MINUS_1MM_PCT) > 1 "
+        "THEN M.MINUS_1MM_PCT / 100 ELSE M.MINUS_1MM_PCT END",
+    ),
     ("lump_yield_pct", "M.LUMP_YIELD_PCT"),
     ("fines_yield_pct", "M.FINES_YIELD_PCT"),
+    ("prod1_lump_yield_pct", "M.LUMP_YIELD_PCT"),
+    ("prod1_fines_yield_pct", "M.FINES_YIELD_PCT"),
     ("lump_wmt", "LT.BALANCEWMT * M.LUMP_YIELD_PCT"),
     ("fines_wmt", "LT.BALANCEWMT * M.FINES_YIELD_PCT"),
+    ("prod1_lump_wmt", "LT.BALANCEWMT * M.LUMP_YIELD_PCT"),
+    ("prod1_fines_wmt", "LT.BALANCEWMT * M.FINES_YIELD_PCT"),
     (
         "balancedmt",
         "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG)",
@@ -88,8 +121,18 @@ _INVENTORY_EXTRA_SELECTS.extend([
         "fines_dmt",
         "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * M.FINES_YIELD_PCT",
     ),
+    (
+        "prod1_lump_dmt",
+        "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * M.LUMP_YIELD_PCT",
+    ),
+    (
+        "prod1_fines_dmt",
+        "LT.BALANCEWMT * (1 - LT.MOISTURE_INSITU_WTAVG) * M.FINES_YIELD_PCT",
+    ),
     ("fines_moisture", "M.FINES_MOISTURE"),
     ("lump_moisture", "M.LUMP_MOISTURE"),
+    ("prod1_fines_moisture", "M.FINES_MOISTURE"),
+    ("prod1_lump_moisture", "M.LUMP_MOISTURE"),
     ("gb_dry_density", "M.GB_DRY_DENSITY"),
     (
         "lump_volume",
@@ -109,14 +152,24 @@ for _size in ("FINES", "LUMP"):
     ):
         _alias = f"{_size}_{_property}".lower()
         _INVENTORY_EXTRA_SELECTS.append((_alias, f"M.{_size}_{_property}"))
+        _INVENTORY_EXTRA_SELECTS.append((
+            f"prod1_{_alias}", f"M.{_size}_{_property}"
+        ))
 
 INVENTORY_ADDITIONAL_FIELDS = tuple(
-    ["cbmaterial", *[alias for alias, _expression in _INVENTORY_EXTRA_SELECTS]]
+    [
+        "cbmaterial",
+        *[alias for alias, _expression in _INVENTORY_EXTRA_SELECTS],
+        "cb_lump_fraction_input",
+        "cb_split_method",
+        "cb_split_warning",
+    ]
 )
 INVENTORY_TEXT_FIELDS = {
     "stockpileid", "areaname", "hub", "stockpilesubcategory",
     "stockpiletype", "transactiondirection", "material", "cbmaterial",
     "product",
+    "cb_split_method", "cb_split_warning",
 }
 INVENTORY_INTEGER_FIELDS = {"isfeedable", "isinbuildpurity"}
 
@@ -635,6 +688,46 @@ class OpeningStockpileInventories:
                 WHERE truck.DUMPEDDATETIME <= params.AS_OF_TS
                   AND truck.TRUCK_WMT > 0
             ),
+            GRADE_CONTROL_BLOCKS AS (
+                SELECT
+                    CONCAT(
+                        MINE_CODE, '_', LOCATION_NO, '_', PHASE, '_',
+                        BLAST_RL, '_', BLAST_NO, '_',
+                        CASE
+                            WHEN TRY_TO_NUMBER(BLAST_NO) BETWEEN 600 AND 699
+                             AND TRY_TO_NUMBER(FLITCH_RL) IS NOT NULL
+                                THEN TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL) + 1)
+                            ELSE FLITCH_RL
+                        END,
+                        '_', GB_NAME
+                    ) AS FULL_NAME_WITH_SITE,
+                    TRY_TO_DOUBLE(PROD1_MINUS1MM_PCT) AS PROD1_MINUS1MM_PCT,
+                    PROD1_FINES_YIELD_PCT,
+                    PROD1_LUMP_YIELD_PCT,
+                    PROD1_FINES_MOISTURE,
+                    PROD1_LUMP_MOISTURE,
+                    PROD1_FINES_FE,
+                    PROD1_FINES_SIO2,
+                    PROD1_FINES_AL2O3,
+                    PROD1_FINES_MN,
+                    PROD1_FINES_P,
+                    PROD1_FINES_LOI_425,
+                    PROD1_FINES_LOI_TOTAL,
+                    PROD1_FINES_S,
+                    PROD1_FINES_AS,
+                    PROD1_LUMP_FE,
+                    PROD1_LUMP_SIO2,
+                    PROD1_LUMP_AL2O3,
+                    PROD1_LUMP_MN,
+                    PROD1_LUMP_P,
+                    PROD1_LUMP_LOI_425,
+                    PROD1_LUMP_LOI_TOTAL,
+                    PROD1_LUMP_S,
+                    PROD1_LUMP_AS,
+                    GB_DRY_DENSITY,
+                    LOI_425
+                FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS
+            ),
             INBOUND_ENRICHED AS (
                 SELECT
                     inbound.*,
@@ -656,12 +749,22 @@ class OpeningStockpileInventories:
                     ON  truck.LOCATION_NAME = inbound.LOCATION_NAME
                     AND truck.HEX = inbound.HEX
                     AND truck.DUMPEDDATETIME = inbound.MOVEMENT_DATETIME
+                LEFT JOIN GRADE_CONTROL_BLOCKS gradeblock
+                    ON UPPER(TRIM(gradeblock.FULL_NAME_WITH_SITE)) IN (
+                        UPPER(TRIM(expit.SOURCE_FMS)),
+                        UPPER(TRIM(truck.GRADE_BLOCK))
+                    )
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY inbound.LOCATION_NAME, inbound.INTERNALID
                     ORDER BY
                         CASE WHEN truck.GRADE_BLOCK IS NULL THEN 1 ELSE 0 END,
                         ABS(COALESCE(truck.TRUCK_WMT, inbound.WMT) - inbound.WMT),
-                        truck.LAST_UPDATE DESC NULLS LAST
+                        truck.LAST_UPDATE DESC NULLS LAST,
+                        CASE
+                            WHEN UPPER(TRIM(gradeblock.FULL_NAME_WITH_SITE))
+                               = UPPER(TRIM(expit.SOURCE_FMS)) THEN 0
+                            ELSE 1
+                        END
                 ) = 1
             ),
             LINEAGE_BY_GRADE_BLOCK AS (
@@ -1157,6 +1260,8 @@ class OpeningStockpileInventories:
                     "grade_stream_warnings_json": row.get(
                         "GRADE_STREAM_WARNINGS"
                     ),
+                    "cb_split_method": row.get("CB_SPLIT_METHOD"),
+                    "cb_split_warning": row.get("CB_SPLIT_WARNING"),
                     **modelled_audit,
                     **flatten_grade_streams(
                         row.get("GRADE_STREAMS") or row.get("grade_streams")
@@ -1182,6 +1287,8 @@ class OpeningStockpileInventories:
             "modelled_properties_json",
             "modelled_rom_mats",
             "modelled_dominant_ore_type",
+            "cb_split_method",
+            "cb_split_warning",
         }
         audit_columns = sorted({
             column for values in amt_audit_by_hex.values() for column in values

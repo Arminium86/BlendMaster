@@ -379,14 +379,21 @@ class DatabaseManager:
             )
 
         for column in results.columns:
+            column_name = str(column)
+            is_custom_constraint = column_name.startswith(
+                "custom_constraint_"
+            )
+            is_source_property = column_name.startswith(
+                "source_property_"
+            )
             if (
-                not str(column).startswith("custom_constraint_")
+                not (is_custom_constraint or is_source_property)
                 or column in existing_columns
             ):
                 continue
             column_type = (
                 "TEXT"
-                if str(column).endswith((
+                if is_custom_constraint and column_name.endswith((
                     "_name",
                     "_numerator_expression",
                     "_denominator_expression",
