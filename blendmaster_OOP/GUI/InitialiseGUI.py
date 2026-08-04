@@ -15663,12 +15663,6 @@ class UserInputs(QMainWindow):
                 continue
             if name.startswith("source_property_source_wmt"):
                 continue
-            if name in {
-                "source_property_modelled_rom_wmt",
-                "source_property_modelled_rom_wmt_opening_balance",
-                "source_property_modelled_rom_wmt_closing_balance",
-            }:
-                continue
             if name.startswith("custom_constraint_") and name.endswith(
                 "_source_numerator"
             ):
