@@ -80,6 +80,29 @@ GRADE_CONTROL_PROPERTY_COLUMNS = {
     },
 }
 
+# Grade Control stores absolute modelled product tonnes for the whole grade
+# block.  The AMT opening query allocates these to each inbound movement by its
+# share of ``GB_WET_TONNES``.  They are then scaled with the remaining lineage
+# share in ``align_amt_grade_block_lineage`` so reclaimed material cannot leave
+# its product mass behind in a hex.
+DIRECT_LINEAGE_TONNE_COLUMNS = {
+    "FEED_DMT": "gradeblock.GB_DRY_TONNES",
+    **{
+        f"PROD{product}_{basis}": (
+            f"gradeblock.PROD{product}_TONNES_{source_basis}"
+        )
+        for product in (1, 2, 3)
+        for basis, source_basis in (("WMT", "WET"), ("DMT", "DRY"))
+    },
+    **{
+        f"PROD1_{size}_{basis}": (
+            f"gradeblock.PROD1_{size}_TONNES_{source_basis}"
+        )
+        for size in ("FINES", "LUMP")
+        for basis, source_basis in (("WMT", "WET"), ("DMT", "DRY"))
+    },
+}
+
 EXPIT_PRODUCT_PROPERTY_COLUMNS = {
     f"PROD{product}_{suffix}": f"expit.PROD{product}_{suffix}"
     for product in (1, 2)
@@ -117,6 +140,35 @@ def property_object_sql():
     return ",\n                                    ".join(
         f"'{alias.lower()}', {alias}"
         for alias in LINEAGE_PROPERTY_COLUMNS
+    )
+
+
+def direct_product_tonnage_select_sql():
+    """Allocate whole-grade-block product tonnes to an inbound AMT movement."""
+    return ",\n                    ".join(
+        (
+            "IFF(gradeblock.GB_WET_TONNES > 0 "
+            f"AND {source} IS NOT NULL, "
+            f"{source} * inbound.WMT / gradeblock.GB_WET_TONNES, NULL) "
+            f"AS DIRECT_{alias}"
+        )
+        for alias, source in DIRECT_LINEAGE_TONNE_COLUMNS.items()
+    )
+
+
+def direct_product_tonnage_sum_sql():
+    """Aggregate allocated direct product tonnes for a hex/grade-block lineage."""
+    return ",\n                    ".join(
+        f"SUM(DIRECT_{alias}) AS DIRECT_{alias}"
+        for alias in DIRECT_LINEAGE_TONNE_COLUMNS
+    )
+
+
+def direct_product_tonnage_object_sql():
+    """Build the direct additive-tonne lineage object stored for Python alignment."""
+    return ",\n                                ".join(
+        f"'{alias.lower()}', DIRECT_{alias}"
+        for alias in DIRECT_LINEAGE_TONNE_COLUMNS
     )
 
 
@@ -196,6 +248,32 @@ def align_amt_grade_block_lineage(rows):
                 str(name).strip().lower(): raw_value
                 for name, raw_value in properties.items()
             }
+            direct_product_tonnes = item.get("direct_product_tonnes")
+            direct_product_tonnes = (
+                {
+                    str(name).strip().lower(): raw_value
+                    for name, raw_value in direct_product_tonnes.items()
+                }
+                if isinstance(direct_product_tonnes, dict) else {}
+            )
+            remaining_share = (
+                remaining_wmt / inbound_wmt if inbound_wmt > 0 else 0.0
+            )
+            direct_remaining_tonnes = {}
+            # The SQL query has already allocated each Grade Control total to
+            # the inbound AMT movement.  Scale that allocated amount once more
+            # by the residual hex share after reclaim/spatial reconciliation.
+            for property_name, raw_value in direct_product_tonnes.items():
+                direct_amount = _number(raw_value)
+                if direct_amount is None or direct_amount < 0:
+                    continue
+                direct_remaining_tonnes[property_name] = (
+                    direct_amount * remaining_share
+                )
+                additive_totals[property_name] += direct_remaining_tonnes[
+                    property_name
+                ]
+                additive_coverage_wmt[property_name] += remaining_wmt
             for property_name, raw_value in properties.items():
                 value = _number(raw_value)
                 if value is None or remaining_wmt <= 0:
@@ -204,12 +282,13 @@ def align_amt_grade_block_lineage(rows):
                 weighted_sums[key] += value * remaining_wmt
                 property_denominators[key] += remaining_wmt
 
+            direct_feed_dmt = direct_remaining_tonnes.get("feed_dmt")
             feed_moisture = _fraction(properties.get("feed_moisture"))
-            feed_dmt = (
+            feed_dmt = direct_feed_dmt if direct_feed_dmt is not None else (
                 remaining_wmt * (1.0 - feed_moisture)
                 if feed_moisture is not None else None
             )
-            if feed_dmt is not None:
+            if feed_dmt is not None and direct_feed_dmt is None:
                 additive_totals["feed_dmt"] += feed_dmt
                 additive_coverage_wmt["feed_dmt"] += remaining_wmt
 
@@ -234,29 +313,43 @@ def align_amt_grade_block_lineage(rows):
             split_totals = {"wmt": 0.0, "dmt": 0.0}
             split_available = {"wmt": True, "dmt": feed_dmt is not None}
             for size in ("fines", "lump"):
+                direct_wmt = direct_remaining_tonnes.get(
+                    f"prod1_{size}_wmt"
+                )
+                direct_dmt = direct_remaining_tonnes.get(
+                    f"prod1_{size}_dmt"
+                )
                 yield_fraction = _fraction(
                     properties.get(f"prod1_{size}_yield_pct")
                 )
-                if yield_fraction is None:
-                    split_available["wmt"] = False
-                    split_available["dmt"] = False
-                    continue
-                size_wmt = remaining_wmt * yield_fraction
-                additive_totals[f"prod1_{size}_wmt"] += size_wmt
-                additive_coverage_wmt[f"prod1_{size}_wmt"] += remaining_wmt
-                split_totals["wmt"] += size_wmt
-
-                size_dmt = (
-                    feed_dmt * yield_fraction
-                    if feed_dmt is not None else None
-                )
+                size_wmt = direct_wmt
+                size_dmt = direct_dmt
+                if size_wmt is None or size_dmt is None:
+                    if yield_fraction is None:
+                        if size_wmt is None:
+                            split_available["wmt"] = False
+                        if size_dmt is None:
+                            split_available["dmt"] = False
+                    else:
+                        if size_wmt is None:
+                            size_wmt = remaining_wmt * yield_fraction
+                            additive_totals[f"prod1_{size}_wmt"] += size_wmt
+                            additive_coverage_wmt[
+                                f"prod1_{size}_wmt"
+                            ] += remaining_wmt
+                        if size_dmt is None and feed_dmt is not None:
+                            size_dmt = feed_dmt * yield_fraction
+                            additive_totals[f"prod1_{size}_dmt"] += size_dmt
+                            additive_coverage_wmt[
+                                f"prod1_{size}_dmt"
+                            ] += remaining_wmt
+                if size_wmt is not None:
+                    split_totals["wmt"] += size_wmt
                 if size_dmt is not None:
-                    additive_totals[f"prod1_{size}_dmt"] += size_dmt
-                    additive_coverage_wmt[f"prod1_{size}_dmt"] += remaining_wmt
                     split_totals["dmt"] += size_dmt
 
                 grade_weight = size_dmt if size_dmt is not None else size_wmt
-                if grade_weight <= 0:
+                if grade_weight is None or grade_weight <= 0:
                     continue
                 for assay in (name.lower() for name in CB_PROD1_SPLIT_ASSAYS):
                     grade_key = f"prod1_{size}_{assay}"
@@ -268,17 +361,23 @@ def align_amt_grade_block_lineage(rows):
                     split_grade_coverage_wmt[grade_key] += remaining_wmt
 
             for product in (1, 2):
+                direct_product_wmt = direct_remaining_tonnes.get(
+                    f"prod{product}_wmt"
+                )
+                direct_product_dmt = direct_remaining_tonnes.get(
+                    f"prod{product}_dmt"
+                )
                 recovery = _fraction(
                     properties.get(f"prod{product}_mass_recovery")
                 )
                 product_moisture = _fraction(
                     properties.get(f"prod{product}_moisture")
                 )
-                product_dmt = (
+                product_dmt = direct_product_dmt if direct_product_dmt is not None else (
                     feed_dmt * recovery
                     if feed_dmt is not None and recovery is not None else None
                 )
-                product_wmt = (
+                product_wmt = direct_product_wmt if direct_product_wmt is not None else (
                     product_dmt / (1.0 - product_moisture)
                     if product_dmt is not None
                     and product_moisture is not None
@@ -289,15 +388,23 @@ def align_amt_grade_block_lineage(rows):
                 # For CB PROD1, the grade-control lump/fines yields are the
                 # authoritative split.  Require both size yields, then make
                 # the canonical product total equal their conserved sum.
-                if product == 1 and split_available["wmt"]:
+                if (
+                    product == 1
+                    and direct_product_wmt is None
+                    and split_available["wmt"]
+                ):
                     product_wmt = split_totals["wmt"]
-                if product == 1 and split_available["dmt"]:
+                if (
+                    product == 1
+                    and direct_product_dmt is None
+                    and split_available["dmt"]
+                ):
                     product_dmt = split_totals["dmt"]
 
-                if product_wmt is not None:
+                if product_wmt is not None and direct_product_wmt is None:
                     additive_totals[f"prod{product}_wmt"] += product_wmt
                     additive_coverage_wmt[f"prod{product}_wmt"] += remaining_wmt
-                if product_dmt is not None:
+                if product_dmt is not None and direct_product_dmt is None:
                     additive_totals[f"prod{product}_dmt"] += product_dmt
                     additive_coverage_wmt[f"prod{product}_dmt"] += remaining_wmt
 

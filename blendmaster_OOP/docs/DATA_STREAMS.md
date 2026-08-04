@@ -44,9 +44,14 @@ and must start with a letter. Each row is one of:
 Required rows cannot be deleted. The default contract includes
 `modelled_rom_<analyte>`, `adjusted_rom_<analyte>`,
 `modelled_product_<analyte>` and `adjusted_product_<analyte>` for the five
-analytes, as well as the additive source/product mass bases. Required fields
-may be left unmapped; they then remain blank and traceable rather than being
-silently removed from the source schema.
+analytes, `source_wmt`, `modelled_product_wmt` and
+`modelled_product_dmt`, plus `modelled_rom_wmt` and `modelled_rom_dmt`.
+Modelled/adjusted ROM grades use `modelled_rom_wmt`; modelled/adjusted product
+grades use `modelled_product_dmt`. Map the product fields to the active OPF
+product channel's per-source Product 1/2/3 WMT/DMT. `source_wmt` mirrors
+`modelled_rom_wmt`, because ROM WMT is the opening insitu balance. Required
+fields may be left unmapped; they then remain blank and traceable rather than
+being silently removed from the source schema.
 
 **Use in Optimisation** is the compute/report gate. Checked properties are
 available in the custom-constraint field picker, carried through build,
@@ -64,6 +69,22 @@ the exact raw header while every downstream component uses only the stable
 BlendMaster field name. Older projects migrate their former APS mappings and
 receive explicit compatibility mappings for the established inventory and AMT
 stream inputs.
+
+AMT mappings apply independently to each imported **hex** before chunks are
+formed. The AMT source list includes lineage-derived per-hex fields, including
+`prod1_wmt`, `prod1_dmt`, `prod2_wmt` and `prod2_dmt` where the contributing
+grade blocks supply explicit modelled product tonnes, including Product 3.
+It also includes `feed_wmt`/`feed_dmt`; map these to
+`modelled_rom_wmt`/`modelled_rom_dmt`. Map the active product channel to
+`modelled_product_wmt` and `modelled_product_dmt`; the product-grade fields
+then use that DMT denominator when hexes are consolidated into chunks. The
+same canonical mass mappings are available for inventory stockpiles, whose
+`feed_wmt` is their opening balance and whose `feed_dmt` is its dry equivalent.
+
+`adjusted_rom_*` and `adjusted_product_*` are deliberately absent from Map
+Fields. They are calculated fields: adjusted ROM is modelled ROM multiplied by
+historical blend recon, and adjusted product is modelled product multiplied by
+historical regression recon (or adjusted ROM for dry plants).
 Compatibility seeding runs once. Clearing a suggested mapping is therefore a
 persisted user decision; it is not recreated when mappings are applied or the
 project is loaded again.

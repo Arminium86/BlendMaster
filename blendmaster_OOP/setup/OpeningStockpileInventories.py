@@ -12,6 +12,9 @@ from classes.GradeStreams import ANALYTES, flatten_grade_streams
 from setup.AMTSpatialReconciliation import reconcile_amt_hex_rows
 from setup.AMTGradeBlockLineage import (
     align_amt_grade_block_lineage,
+    direct_product_tonnage_object_sql,
+    direct_product_tonnage_select_sql,
+    direct_product_tonnage_sum_sql,
     expit_select_sql,
     property_object_sql,
     weighted_property_sql,
@@ -608,6 +611,9 @@ class OpeningStockpileInventories:
         lineage_property_select = expit_select_sql()
         lineage_property_averages = weighted_property_sql()
         lineage_property_object = property_object_sql()
+        direct_product_tonnage_select = direct_product_tonnage_select_sql()
+        direct_product_tonnage_sums = direct_product_tonnage_sum_sql()
+        direct_product_tonnage_object = direct_product_tonnage_object_sql()
         query = f"""
             WITH REQUESTED_BUILDS AS (
                 SELECT COLUMN1::VARCHAR AS REQUESTED_BUILD
@@ -701,6 +707,18 @@ class OpeningStockpileInventories:
                         END,
                         '_', GB_NAME
                     ) AS FULL_NAME_WITH_SITE,
+                    GB_WET_TONNES,
+                    GB_DRY_TONNES,
+                    PROD1_TONNES_WET,
+                    PROD1_TONNES_DRY,
+                    PROD2_TONNES_WET,
+                    PROD2_TONNES_DRY,
+                    PROD3_TONNES_WET,
+                    PROD3_TONNES_DRY,
+                    PROD1_FINES_TONNES_WET,
+                    PROD1_FINES_TONNES_DRY,
+                    PROD1_LUMP_TONNES_WET,
+                    PROD1_LUMP_TONNES_DRY,
                     TRY_TO_DOUBLE(PROD1_MINUS1MM_PCT) AS PROD1_MINUS1MM_PCT,
                     PROD1_FINES_YIELD_PCT,
                     PROD1_LUMP_YIELD_PCT,
@@ -741,7 +759,8 @@ class OpeningStockpileInventories:
                             THEN 'TRUCK_LIST_TIME_HEX'
                         ELSE 'UNMATCHED'
                     END AS MATCH_METHOD,
-                    {lineage_property_select}
+                    {lineage_property_select},
+                    {direct_product_tonnage_select}
                 FROM INBOUND_RAW inbound
                 LEFT JOIN EXPIT_DETAILS expit
                     ON expit.INTERNAL_ID = inbound.INTERNALID
@@ -785,7 +804,8 @@ class OpeningStockpileInventories:
                     COUNT(DISTINCT INTERNALID) AS TRIP_COUNT,
                     MIN(MOVEMENT_DATETIME) AS FIRST_DUMP_DATETIME,
                     MAX(MOVEMENT_DATETIME) AS LAST_DUMP_DATETIME,
-                    {lineage_property_averages}
+                    {lineage_property_averages},
+                    {direct_product_tonnage_sums}
                 FROM INBOUND_ENRICHED
                 WHERE HEX <> '__UNATTRIBUTED__'
                 GROUP BY
@@ -815,6 +835,9 @@ class OpeningStockpileInventories:
                             'trip_count', TRIP_COUNT,
                             'first_dump_datetime', FIRST_DUMP_DATETIME,
                             'last_dump_datetime', LAST_DUMP_DATETIME,
+                            'direct_product_tonnes', OBJECT_CONSTRUCT_KEEP_NULL(
+                                {direct_product_tonnage_object}
+                            ),
                             'properties', OBJECT_CONSTRUCT_KEEP_NULL(
                                 {lineage_property_object}
                             )

@@ -538,12 +538,9 @@ def inventory_grade_streams(
         regression = _factor_vector(historical_factors, brand, "regression")
         adjusted_rom = {}
         for a in ANALYTES:
-            mapped = _row_value(row, f"adjusted_rom_{a}")
             adjusted_rom[a] = (
-                mapped if mapped is not None else (
-                    modelled_rom[a] * blend[a]
-                    if modelled_rom[a] is not None else None
-                )
+                modelled_rom[a] * blend[a]
+                if modelled_rom[a] is not None else None
             )
         result["adjusted_rom"][brand] = adjusted_rom
         if is_dry_plant(opf) or slot is None:
@@ -553,12 +550,8 @@ def inventory_grade_streams(
             result["modelled_product"][brand] = copy.deepcopy(product)
             result["adjusted_product"][brand] = {
                 a: (
-                    _row_value(row, f"adjusted_product_{a}")
-                    if _row_value(row, f"adjusted_product_{a}") is not None
-                    else (
-                        product[a] * regression[a]
-                        if product[a] is not None else None
-                    )
+                    product[a] * regression[a]
+                    if product[a] is not None else None
                 )
                 for a in ANALYTES
             }
@@ -644,12 +637,9 @@ def amt_grade_streams(
         regression = _factor_vector(historical_factors, brand, "regression")
         adjusted_rom = {}
         for a in ANALYTES:
-            mapped = _row_value(lineage_source, f"adjusted_rom_{a}")
             adjusted_rom[a] = (
-                mapped if mapped is not None else (
-                    modelled_rom[a] * blend[a]
-                    if modelled_rom[a] is not None else None
-                )
+                modelled_rom[a] * blend[a]
+                if modelled_rom[a] is not None else None
             )
         result["adjusted_rom"][brand] = adjusted_rom
         if is_dry_plant(opf):
@@ -664,12 +654,8 @@ def amt_grade_streams(
             result["modelled_product"][brand] = copy.deepcopy(modelled_product)
             result["adjusted_product"][brand] = {
                 a: (
-                    _row_value(lineage_source, f"adjusted_product_{a}")
-                    if _row_value(lineage_source, f"adjusted_product_{a}") is not None
-                    else (
-                        modelled_product[a] * regression[a]
-                        if modelled_product[a] is not None else None
-                    )
+                    modelled_product[a] * regression[a]
+                    if modelled_product[a] is not None else None
                 )
                 for a in ANALYTES
             }

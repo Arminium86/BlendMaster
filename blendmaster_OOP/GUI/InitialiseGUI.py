@@ -84,6 +84,7 @@ from classes.FieldDefinitions import (
     default_field_definitions,
     field_weight_map,
     flatten_available_source_fields,
+    is_calculated_stream_field,
     legacy_aps_mappings,
     mandatory_field_names,
     mapping_lookup,
@@ -5268,8 +5269,12 @@ class UserInputs(QMainWindow):
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Source:"))
         self.map_fields_source_family = QComboBox()
-        for family in SOURCE_FAMILIES:
-            self.map_fields_source_family.addItem(family.upper(), family)
+        for label, family in (
+            ("Inventory Stockpile", "inventory"),
+            ("AMT Hex", "amt"),
+            ("APS 24HR", "aps"),
+        ):
+            self.map_fields_source_family.addItem(label, family)
         selector_row.addWidget(self.map_fields_source_family)
         selector_row.addWidget(QLabel("APS Brand:"))
         self.map_fields_brand = QComboBox()
@@ -5389,7 +5394,11 @@ class UserInputs(QMainWindow):
             return
         family, brand = self.current_map_fields_context()
         lookup = mapping_lookup(self.field_mappings, family, brand)
-        rows = normalize_field_definitions(self.field_definitions)
+        rows = [
+            definition
+            for definition in normalize_field_definitions(self.field_definitions)
+            if not is_calculated_stream_field(definition["name"])
+        ]
         self.field_mapping_table.setRowCount(len(rows))
         for row_index, definition in enumerate(rows):
             values = (
@@ -5444,7 +5453,12 @@ class UserInputs(QMainWindow):
         self._map_fields_available_values = fields
         self.filter_map_available_fields()
         self.map_fields_status.setText(
-            f"{len(fields)} distinct {family.upper()} field(s) available."
+            (
+                f"{len(fields)} distinct AMT hex field(s) available; mappings "
+                "are applied separately to every imported hex."
+                if family == "amt"
+                else f"{len(fields)} distinct {family.upper()} field(s) available."
+            )
         )
 
     def filter_map_available_fields(self, *_args):
@@ -6639,6 +6653,14 @@ class UserInputs(QMainWindow):
         )
         self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
+        # The field schema remains editable after Data Streams. It is common
+        # to return to the raw sources while auditing recon factors.
+        for page_id in (
+            self.stockpile_tab_index,
+            self.define_fields_tab_index,
+            self.map_fields_tab_index,
+        ):
+            self.set_page_enabled(page_id, True)
         self.set_page_enabled(self.guidance_schedules_tab_index, True)
         self.show_page(self.guidance_schedules_tab_index, force=True)
 
@@ -7404,9 +7426,11 @@ class UserInputs(QMainWindow):
             and product_guidance_ready
         )
         self.submit_button.setEnabled(site_fields_populated)
+        # Guidance is optional. Its detailed validation still runs when the
+        # user has supplied a schedule, but an otherwise configured scenario
+        # must be able to continue without one.
         self.guidance_schedules_submit_button.setEnabled(
-            guidance_fields_populated
-            and bool(getattr(self, "stockpile_data", None))
+            bool(getattr(self, "stockpile_data", None))
         )
         self.save_button.setEnabled(
             site_fields_populated and guidance_fields_populated

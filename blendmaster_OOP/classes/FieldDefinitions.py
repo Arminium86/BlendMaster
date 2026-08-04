@@ -26,6 +26,12 @@ STREAM_PREFIXES = (
     "modelled_product",
     "adjusted_product",
 )
+CALCULATED_STREAM_PREFIXES = ("adjusted_rom", "adjusted_product")
+
+
+def is_calculated_stream_field(value) -> bool:
+    name = canonical_property_key(value)
+    return any(name.startswith(f"{prefix}_") for prefix in CALCULATED_STREAM_PREFIXES)
 
 
 def _definition(
@@ -53,11 +59,21 @@ def default_field_definitions():
         _definition(
             "source_wmt", "additive", required=True,
             use_in_optimisation=True,
-            description="Opening/source wet tonnes used as the default feed weight.",
+            description="Opening/source wet tonnes. Mirrors modelled ROM WMT when only one is mapped.",
+        ),
+        _definition(
+            "modelled_rom_wmt", "additive", required=True,
+            use_in_optimisation=True,
+            description="Modelled ROM wet tonnes (the opening insitu/ROM balance).",
+        ),
+        _definition(
+            "modelled_rom_dmt", "additive", required=True,
+            use_in_optimisation=True,
+            description="Modelled ROM dry tonnes (the opening insitu/ROM dry balance).",
         ),
         _definition(
             "modelled_product_wmt", "additive", required=True,
-            description="Modelled product wet tonnes.",
+            description="Modelled product wet tonnes for the active OPF product stream.",
         ),
         _definition(
             "modelled_product_dmt", "additive", required=True,
@@ -83,8 +99,10 @@ def default_field_definitions():
             deferred_weighted.append((name, description))
 
     for stream in STREAM_PREFIXES:
-        product = "product" in stream
-        weight = "modelled_product_dmt" if product else "source_wmt"
+        weight = (
+            "modelled_product_dmt"
+            if "product" in stream else "modelled_rom_wmt"
+        )
         for analyte in ANALYTES:
             rows.append(_definition(
                 f"{stream}_{analyte}",
@@ -263,7 +281,11 @@ def normalize_field_mappings(values=None):
         target = canonical_property_key(raw.get("target_field"))
         source_field = str(raw.get("source_field") or "").strip()
         brand = normalise_brand(raw.get("brand"))
-        if family not in SOURCE_FAMILIES or not target:
+        if (
+            family not in SOURCE_FAMILIES
+            or not target
+            or is_calculated_stream_field(target)
+        ):
             continue
         if family != "aps" or brand == UNBRANDED:
             brand = ""
@@ -308,7 +330,10 @@ def flatten_available_source_fields(record):
         nested = record.get(key)
         if isinstance(nested, Mapping):
             result.update({str(name): value for name, value in nested.items()})
-    for key in ("modelled_properties", "MODELLED_PROPERTIES"):
+    for key in (
+        "modelled_properties", "MODELLED_PROPERTIES",
+        "modelled_properties_json", "MODELLED_PROPERTIES_JSON",
+    ):
         nested = record.get(key)
         if isinstance(nested, str) and nested.strip():
             try:
@@ -346,6 +371,9 @@ def apply_field_mappings(
     result = {}
     for definition in normalize_field_definitions(definitions):
         target = definition["name"]
+        if is_calculated_stream_field(target):
+            result[target] = None
+            continue
         source_field = lookup.get(target, "")
         if source_field:
             value = raw_fields.get(source_field)
@@ -356,6 +384,13 @@ def apply_field_mappings(
             # lets canonical data already produced by BlendMaster survive.
             value = raw_fields.get(target, raw_by_canonical.get(target))
         result[target] = _number(value)
+    # The opening source balance and modelled ROM WMT describe the same
+    # material.  Users can map either canonical name once without creating
+    # conflicting copies of the stockpile/hex balance.
+    if result.get("source_wmt") is None:
+        result["source_wmt"] = result.get("modelled_rom_wmt")
+    if result.get("modelled_rom_wmt") is None:
+        result["modelled_rom_wmt"] = result.get("source_wmt")
     return result
 
 

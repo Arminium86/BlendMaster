@@ -21,7 +21,7 @@ The opening operation uses six Snowflake objects:
 | `AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_HEX_GRADES` | Supply the existing AMT insitu grades and hex coordinates. | `FOOTPRINT`, `LOCATION_NAME`, `HEX`, `FE`, `SIO2`, `AL2O3`, `P`, `MN`, `LATITUDE`, `LONGITUDE`, `LAST_UPDATE` |
 | `AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_STOCKPILE_HEX_TRUCK_LIST` | Link inbound dumps to a grade-block name and provide truck-list chemical properties and `ROM_MATS`. | `LOCATION_NAME`, `HEX`, `DUMPEDDATETIME`, `TRUCK_WMT`, `GRADE_BLOCK`, `ROM_MATS`, `GBI`, chemical-grade columns, `LAST_UPDATE` |
 | `AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS` | Link the same inbound trip to its numeric grade-block ID and modelled feed/product properties. | `INTERNAL_ID`, `SOURCE_GRADEBLOCK_ID`, `SOURCE_FMS`, `WMT_REPORTING`, `TRANSACTION_DATETIME`, feed properties, `PROD1_*`, `PROD2_*`, `IS_DELETED`, `DISCRIMINATOR` |
-| `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS` | Supply Product 1 minus-1-mm and CB lump/fines model properties for the resolved inbound grade block. | grade-block name components used to form `FULL_NAME_WITH_SITE`, `PROD1_MINUS1MM_PCT`, `PROD1_FINES_*`, `PROD1_LUMP_*`, `GB_DRY_DENSITY`, `LOI_425` |
+| `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS` | Supply explicit Product 1/2/3 WMT/DMT, Product 1 lump/fines tonnes, minus-1-mm and CB split properties for the resolved inbound grade block. | grade-block name components used to form `FULL_NAME_WITH_SITE`, `GB_WET_TONNES`, `PROD<n>_TONNES_WET`, `PROD<n>_TONNES_DRY`, `PROD1_FINES_TONNES_*`, `PROD1_LUMP_TONNES_*`, `PROD1_MINUS1MM_PCT`, `PROD1_FINES_*`, `PROD1_LUMP_*` |
 
 `AMT_STOCKPILE_HEX_MAP_AS_BUILD` is not required by this opening calculation.
 The exact build is selected from inventory and the hex universe comes from AMT
@@ -185,8 +185,9 @@ match method is `TRUCK_LIST_TIME_HEX`.
 The resolved EXPIT `SOURCE_FMS` or truck-list `GRADE_BLOCK` is matched,
 case-insensitively, to the canonical `FULL_NAME_WITH_SITE` constructed from
 `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS`. This adds the properties that
-are not present as usable AMT hex values: Product 1 minus-1-mm percentage,
-fines/lump yields, moisture and assays, grade-block dry density and LOI 425.
+are not present as usable AMT hex values: direct Product 1/2/3 WMT/DMT,
+Product 1 fines/lump tonnes, Product 1 minus-1-mm percentage, fines/lump
+yields, moisture and assays, grade-block dry density and LOI 425.
 EXPIT identity remains preferred for lineage identity; the grade-control join
 enriches that lineage and does not create a new movement or tonnes record.
 
@@ -273,8 +274,8 @@ feed_dmt = FINAL_WMT x (1 - feed_moisture)
 oretype_<type>_wmt = lineage final WMT x ore-type fraction
 oretype_<type>_dmt = lineage feed DMT x ore-type fraction
 
-prod<n>_dmt = lineage feed DMT x PROD<n> mass recovery
-prod<n>_wmt = prod<n> DMT / (1 - PROD<n> moisture)
+prod<n>_wmt = direct Grade Control Product n wet tonnes x remaining lineage share
+prod<n>_dmt = direct Grade Control Product n dry tonnes x remaining lineage share
 
 prod<n>_minus_1mm_wmt = prod<n> WMT x minus-1-mm fraction
 prod<n>_minus_1mm_dmt = prod<n> DMT x minus-1-mm fraction
@@ -285,18 +286,21 @@ Minus-1-mm uses `prod<n>_minus1mm_pct` when present and otherwise the EXPIT
 `prod<n>_mudrush_ultrafines_1mm` value. Values in either 0..1 or 0..100 form
 are normalised to a fraction before multiplication.
 
-For CB Product 1, grade-control fines and lump yields are applied to lineage
-feed WMT/DMT. When both size yields are present, the canonical `prod1_wmt` and
-`prod1_dmt` equal the conserved sum of the two size products instead of the
-EXPIT recovery result. Each `prod1_fines_<assay>` or
+For CB Product 1, direct grade-control fines and lump tonnes are also used
+when available. Each `prod1_fines_<assay>` or
 `prod1_lump_<assay>` is weighted by its own component mass. Canonical aliases
 such as `prod1_minus_1mm_pct`, `prod1_fines_wmt` and `prod1_lump_fe` are shared
 with inventory and mapped APS sources; shorter `fines_*` and `lump_*` aliases
 are retained for existing projects.
 
-Every additive property still receives its own coverage value. A missing
-moisture, yield, recovery or size fraction leaves the dependent tonnes blank
-rather than manufacturing zero tonnes.
+Direct Grade Control tonnes are allocated to each inbound AMT movement by
+`movement WMT / GB_WET_TONNES`, then scaled by the grade block's remaining
+share after reclaim and spatial reconciliation. If an individual direct tonne
+field is unavailable, BlendMaster falls back to the previous recovery/moisture
+calculation (and CB size-yield calculation where applicable). Every additive
+property still receives its own coverage value. A missing direct value and its
+fallback inputs leaves the dependent tonnes blank rather than manufacturing
+zero tonnes.
 
 `MODELLED_PROPERTIES_JSON` retains the complete value and coverage dictionaries.
 `GRADE_BLOCK_LINEAGE_JSON` retains the contributing grade-block detail.
