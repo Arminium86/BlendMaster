@@ -47,6 +47,7 @@ from classes.GradeStreams import (
     is_dry_plant,
     format_grade_stream_vector,
     flatten_grade_streams,
+    historical_factor,
     normalise_grade_streams,
     normalise_aps_grade_field_mappings,
     normalise_planning_categories,
@@ -1375,6 +1376,8 @@ class UserInputs(QMainWindow):
             "database_view_selected_columns", "database_view_known_columns",
             "database_view_show_coverage_fields",
             "database_view_selected_sources", "database_view_known_sources",
+            "optimisation_snapshot_selected_columns",
+            "optimisation_snapshot_known_columns",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
@@ -1693,6 +1696,12 @@ class UserInputs(QMainWindow):
             )
             self.database_view_known_sources = copy.deepcopy(
                 state.get("database_view_known_sources")
+            )
+            self.optimisation_snapshot_selected_columns = copy.deepcopy(
+                state.get("optimisation_snapshot_selected_columns")
+            )
+            self.optimisation_snapshot_known_columns = copy.deepcopy(
+                state.get("optimisation_snapshot_known_columns")
             )
             self.database_view_rows = []
             self.database_view_expit_payload_transactions = None
@@ -3707,6 +3716,34 @@ class UserInputs(QMainWindow):
         """Flatten stored and optimiser-resolved grades into one audit row."""
         record = dict(record or {})
         fallback = fallback or {}
+        normalized_streams = normalise_grade_streams(streams, fallback)
+
+        # Stockpile modelled ROM is physically unbranded. Older saved
+        # inventory rows and chunks can therefore contain only the ``*``
+        # vector. Publish an equal vector for every configured brand at the
+        # Database View boundary without altering brand-specific adjusted ROM.
+        # APS rows are excluded because their mapped modelled ROM can genuinely
+        # differ by brand.
+        source_type = str(record.get("source_type") or "").strip().lower()
+        if "stockpile" in source_type or source_type.startswith("amt chunk"):
+            rom_by_brand = normalized_streams.setdefault("modelled_rom", {})
+            unbranded_rom = rom_by_brand.get("*")
+            if not isinstance(unbranded_rom, dict):
+                unbranded_rom = next(
+                    (
+                        values
+                        for values in rom_by_brand.values()
+                        if isinstance(values, dict)
+                    ),
+                    None,
+                )
+            if isinstance(unbranded_rom, dict):
+                rom_by_brand["*"] = copy.deepcopy(unbranded_rom)
+                for brand in configured_brands(
+                    self.product_brand_labels_choice
+                ):
+                    rom_by_brand[brand] = copy.deepcopy(unbranded_rom)
+
         record["selected_stream"] = self.selected_data_stream
         for analyte in ANALYTES:
             record[f"grade_{analyte}"] = numeric(
@@ -3714,7 +3751,7 @@ class UserInputs(QMainWindow):
                 if f"grade_{analyte}" in fallback
                 else fallback.get(f"source_grade_{analyte}")
             )
-        record.update(flatten_grade_streams(streams))
+        record.update(flatten_grade_streams(normalized_streams))
 
         # Keep the field registry visible as a complete source schema. An
         # unmapped field is deliberately represented by None, not omitted.
@@ -3723,7 +3760,6 @@ class UserInputs(QMainWindow):
             for key, value in defined_values.items():
                 record.setdefault(key, value)
         numeric_properties = source_properties_from_mapping(record)
-        normalized_streams = normalise_grade_streams(streams)
         for definition in normalize_field_definitions(
             vars(self).get("field_definitions")
         ):
@@ -3760,7 +3796,7 @@ class UserInputs(QMainWindow):
                 for character in brand
             ).strip("_") or "unbranded"
             grades, fallbacks = resolve_grade_vector(
-                streams,
+                normalized_streams,
                 self.selected_data_stream,
                 brand,
                 fallback,
@@ -4401,6 +4437,7 @@ class UserInputs(QMainWindow):
     def refresh_database_view(self):
         if getattr(self, "database_view_refresh_in_progress", False):
             return
+        self.reconcile_saved_AMT_chunk_grade_streams()
         self.database_view_refresh_in_progress = True
         self.database_view_refresh_pending = False
         self.database_view_refresh_generation = (
@@ -6729,6 +6766,7 @@ class UserInputs(QMainWindow):
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
         self.capture_recon_factor_table()
+        self.reconcile_saved_AMT_chunk_grade_streams()
         self.apply_canonical_field_mappings()
         self.apply_grade_streams_to_inventory()
         if self.AMT_stockpile_data:
@@ -13887,12 +13925,123 @@ class UserInputs(QMainWindow):
         if draw_AMT_map is None:
             return
 
+        self.reconcile_saved_AMT_chunk_grade_streams()
         draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
         draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table or [])
         draw_AMT_map.data = draw_AMT_map.fetch_data()
         draw_AMT_map.unique_footprints = draw_AMT_map.get_unique_footprints()
         draw_AMT_map.clean_up_hex_sequence_table()
         draw_AMT_map.update_sequence_counter()
+
+    def reconcile_saved_AMT_chunk_grade_streams(self):
+        """Refresh derived brand streams in saved AMT chunks.
+
+        Projects saved before partial-lineage aggregation was corrected can
+        contain a valid modelled product but a blank adjusted product. Chunk
+        membership and modelled values remain authoritative; only the derived
+        brand copies and historical reconciliation layers are rebuilt here.
+        """
+        brands = configured_brands(
+            getattr(self, "product_brand_labels_choice", None)
+        )
+        if not brands:
+            return 0
+
+        factors = getattr(self, "historical_recon_factors", None)
+        opf = getattr(self, "opf_input_choice", None)
+        refreshed = 0
+
+        def first_vector(brand_map, brand=None):
+            if not isinstance(brand_map, dict):
+                return None
+            candidates = []
+            if brand:
+                candidates.append(brand_map.get(brand))
+            candidates.append(brand_map.get("*"))
+            candidates.extend(brand_map.values())
+            return next(
+                (value for value in candidates if isinstance(value, dict)),
+                None,
+            )
+
+        def reconcile_rows(rows):
+            nonlocal refreshed
+            result = copy.deepcopy(rows or [])
+            for chunk in result:
+                if not isinstance(chunk, dict):
+                    continue
+                raw_streams = (
+                    chunk.get("grade_streams")
+                    or chunk.get("GRADE_STREAMS")
+                )
+                if not isinstance(raw_streams, dict):
+                    continue
+                streams = normalise_grade_streams(raw_streams)
+                rom_by_brand = streams.setdefault("modelled_rom", {})
+                base_rom = first_vector(rom_by_brand)
+                product_by_brand = streams.setdefault(
+                    "modelled_product", {}
+                )
+
+                for brand in brands:
+                    if isinstance(base_rom, dict):
+                        rom = copy.deepcopy(base_rom)
+                        rom_by_brand[brand] = copy.deepcopy(rom)
+                        adjusted_rom = {
+                            analyte: (
+                                numeric(rom.get(analyte))
+                                * historical_factor(
+                                    factors, brand, "blend", analyte
+                                )
+                                if numeric(rom.get(analyte)) is not None
+                                else None
+                            )
+                            for analyte in ANALYTES
+                        }
+                        streams.setdefault("adjusted_rom", {})[
+                            brand
+                        ] = adjusted_rom
+                    else:
+                        adjusted_rom = None
+
+                    if is_dry_plant(opf) and adjusted_rom is not None:
+                        streams.setdefault("modelled_product", {})[
+                            brand
+                        ] = copy.deepcopy(adjusted_rom)
+                        streams.setdefault("adjusted_product", {})[
+                            brand
+                        ] = copy.deepcopy(adjusted_rom)
+                        continue
+
+                    modelled_product = first_vector(product_by_brand, brand)
+                    if not isinstance(modelled_product, dict):
+                        continue
+                    modelled_product = copy.deepcopy(modelled_product)
+                    product_by_brand[brand] = copy.deepcopy(modelled_product)
+                    streams.setdefault("adjusted_product", {})[brand] = {
+                        analyte: (
+                            numeric(modelled_product.get(analyte))
+                            * historical_factor(
+                                factors, brand, "regression", analyte
+                            )
+                            if numeric(modelled_product.get(analyte)) is not None
+                            else None
+                        )
+                        for analyte in ANALYTES
+                    }
+
+                chunk["grade_streams"] = streams
+                chunk["GRADE_STREAMS"] = streams
+                refreshed += 1
+            return result
+
+        self.hex_sequence_table = reconcile_rows(
+            getattr(self, "hex_sequence_table", [])
+        )
+        self.hex_sequence_table_argument = reconcile_rows(
+            getattr(self, "hex_sequence_table_argument", [])
+        )
+        return refreshed
 
     def get_AMT_stockpile_data(self, builds):
         if any(self.stockpile_data_AMT_column.values()):
@@ -15125,6 +15274,7 @@ class UserInputs(QMainWindow):
         self.decision_current_steady_state = None
 
     def execute_run_program(self):
+        self.reconcile_saved_AMT_chunk_grade_streams()
         active_solver_config = self.normalized_solver_config(
             (self.calendar_inputs or {}).get("solver_config", self.solver_config)
         )
@@ -15336,6 +15486,8 @@ class UserInputs(QMainWindow):
         )
         self.optimisation_plan_preview.setMaximumHeight(240)
         self.results_layout.addWidget(self.optimisation_plan_preview)
+        self.optimisation_snapshot_selected_columns = None
+        self.optimisation_snapshot_known_columns = None
 
         # Create a QFrame
         self.top_frame = QFrame()
@@ -15364,6 +15516,13 @@ class UserInputs(QMainWindow):
 
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(self.load_chart_button)
+        self.optimisation_snapshot_fields_button = QPushButton(
+            "Choose Snapshot Fields..."
+        )
+        self.optimisation_snapshot_fields_button.clicked.connect(
+            self.choose_optimisation_snapshot_columns
+        )
+        controls_layout.addWidget(self.optimisation_snapshot_fields_button)
         controls_layout.addStretch()
         self.results_layout.addLayout(controls_layout)
 
@@ -15448,20 +15607,164 @@ class UserInputs(QMainWindow):
         if chart is not None:
             chart.set_plan_id(plan_id)
         report = self.fetch_optimised_blend_report(plan_id)
+        self.populate_optimisation_plan_preview(report)
+
+    @staticmethod
+    def default_optimisation_snapshot_columns(columns):
+        """Return a compact, useful opening view of the report snapshot."""
+        preferred = [
+            "start_datetime", "end_datetime", "steady_state_number",
+            "blend_ID", "source", "source_id", "source_type",
+            "source_opening_balance", "source_actual_tonnes",
+            "source_closing_balance", "source_blend_ratio",
+            "selected_grade_stream", "selected_grade_brand",
+            "source_grade_fe", "source_grade_si", "source_grade_al",
+            "source_grade_p", "source_grade_mn",
+        ]
+        available = set(columns) if columns is not None else set()
+        return [column for column in preferred if column in available]
+
+    def optimisation_snapshot_columns(self, report):
+        # ``DataFrame.columns`` is a pandas Index and intentionally has no
+        # truth value. Project loading refreshes this preview immediately, so
+        # do not use ``or []`` here.
+        columns = list(getattr(report, "columns", []))
+        selected = getattr(self, "optimisation_snapshot_selected_columns", None)
+        if selected is None:
+            selected = self.default_optimisation_snapshot_columns(columns)
+            self.optimisation_snapshot_selected_columns = list(selected)
+        else:
+            # Keep saved user choices, but add newly introduced useful fields
+            # when a newer report schema is opened.
+            known = set(getattr(self, "optimisation_snapshot_known_columns", []) or [])
+            selected = [column for column in selected if column in columns]
+            selected.extend(
+                column for column in self.default_optimisation_snapshot_columns(columns)
+                if column not in known and column not in selected
+            )
+            self.optimisation_snapshot_selected_columns = list(
+                dict.fromkeys(selected)
+            )
+        self.optimisation_snapshot_known_columns = list(columns)
+        return [
+            column for column in columns
+            if column in set(self.optimisation_snapshot_selected_columns or [])
+        ]
+
+    def optimisation_snapshot_is_additive_field(self, column):
+        key = canonical_property_key(column)
+        if source_property_kind(
+            key, getattr(self, "source_property_kinds", {})
+        ) == "additive":
+            return True
+        return (
+            key.endswith(("_tonnes", "_wmt", "_dmt", "_mass", "_volume"))
+            or "tonnes" in key
+            or key.endswith("_balance")
+            or key in {"payload", "crusher_actual_tonnes"}
+        )
+
+    def format_optimisation_snapshot_value(self, column, value):
+        if value is None or pd.isna(value):
+            return ""
+        numeric_value = numeric(value)
+        if numeric_value is None:
+            return str(value)
+        key = canonical_property_key(column)
+        if self.optimisation_snapshot_is_additive_field(key):
+            return f"{numeric_value:,.0f}"
+        if key.endswith(("_count", "_number", "_option", "_sequence")):
+            return f"{numeric_value:,.0f}"
+        return f"{numeric_value:.2f}"
+
+    def populate_optimisation_plan_preview(self, report):
+        preview = getattr(self, "optimisation_plan_preview", None)
+        if preview is None:
+            return
+        columns = self.optimisation_snapshot_columns(report)
         preview.clearContents()
         preview.setRowCount(min(len(report), 200))
-        preview.setColumnCount(len(report.columns))
-        preview.setHorizontalHeaderLabels(
-            [str(column) for column in report.columns]
-        )
+        preview.setColumnCount(len(columns))
+        preview.setHorizontalHeaderLabels([str(column) for column in columns])
         for row_index, (_, row) in enumerate(report.head(200).iterrows()):
-            for column_index, value in enumerate(row):
+            for column_index, column in enumerate(columns):
                 preview.setItem(
                     row_index,
                     column_index,
-                    QTableWidgetItem("" if pd.isna(value) else str(value)),
+                    QTableWidgetItem(
+                        self.format_optimisation_snapshot_value(
+                            column, row.get(column)
+                        )
+                    ),
                 )
         preview.resizeColumnsToContents()
+
+    def choose_optimisation_snapshot_columns(self):
+        report = self.fetch_optimised_blend_report(
+            self.selected_optimisation_plan_id()
+        )
+        columns = list(report.columns)
+        if not columns:
+            QMessageBox.information(
+                self, "Optimised Blend Sequence",
+                "Run or load an optimisation plan before choosing snapshot fields.",
+            )
+            return
+        selected = set(self.optimisation_snapshot_columns(report))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Optimised Blend Sequence Snapshot Fields")
+        dialog.resize(520, 620)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            "Choose the report fields shown in the data snapshot above the chart."
+        ))
+        field_list = QListWidget()
+        for column in columns:
+            item = QListWidgetItem(str(column))
+            item.setData(Qt.UserRole, column)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if column in selected else Qt.Unchecked
+            )
+            field_list.addItem(item)
+        layout.addWidget(field_list)
+
+        buttons = QHBoxLayout()
+        defaults_button = QPushButton("Defaults")
+        select_all_button = QPushButton("Select All")
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        buttons.addWidget(defaults_button)
+        buttons.addWidget(select_all_button)
+        buttons.addStretch()
+        buttons.addWidget(apply_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+        def set_checked(chosen):
+            chosen = set(chosen)
+            for index in range(field_list.count()):
+                item = field_list.item(index)
+                item.setCheckState(
+                    Qt.Checked if item.data(Qt.UserRole) in chosen else Qt.Unchecked
+                )
+
+        defaults_button.clicked.connect(
+            lambda: set_checked(self.default_optimisation_snapshot_columns(columns))
+        )
+        select_all_button.clicked.connect(lambda: set_checked(columns))
+        apply_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.optimisation_snapshot_selected_columns = [
+            field_list.item(index).data(Qt.UserRole)
+            for index in range(field_list.count())
+            if field_list.item(index).checkState() == Qt.Checked
+        ] or self.default_optimisation_snapshot_columns(columns)
+        self.optimisation_snapshot_known_columns = list(columns)
+        self.populate_optimisation_plan_preview(report)
+        self.save_active_scenario_state()
 
     def load_AMT_map(self):
         self.ensure_AMT_map_panel()
@@ -19469,6 +19772,7 @@ class UserInputs(QMainWindow):
         )
         self.hex_sequence_table = loaded_state.get("hex_sequence_table", [])
         self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
+        self.reconcile_saved_AMT_chunk_grade_streams()
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
         self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
@@ -19486,6 +19790,12 @@ class UserInputs(QMainWindow):
         )
         self.database_view_known_sources = copy.deepcopy(
             loaded_state.get("database_view_known_sources")
+        )
+        self.optimisation_snapshot_selected_columns = copy.deepcopy(
+            loaded_state.get("optimisation_snapshot_selected_columns")
+        )
+        self.optimisation_snapshot_known_columns = copy.deepcopy(
+            loaded_state.get("optimisation_snapshot_known_columns")
         )
         self.database_view_rows = []
         self.database_view_expit_payload_transactions = None

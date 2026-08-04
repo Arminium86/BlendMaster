@@ -471,6 +471,14 @@ contain a distinct value from its mapped APS header. Historical blend
 reconciliation is applied only when producing branded adjusted ROM; it never
 changes modelled ROM.
 
+When an older project contains saved AMT chunks, BlendMaster preserves each
+chunk's membership, sequence, tonnes and modelled grades, then refreshes the
+branded modelled-ROM copies and recalculates adjusted ROM/product grades from
+the current editable historical factors. This upgrade runs during project
+restore, Data Streams submission, Database View refresh and immediately before
+solving, so a legacy blank adjusted-product vector does not force an obsolete
+fallback to modelled product.
+
 Not every raw stream field is used at the same time. BlendMaster retains all
 five so the selected result can be traced and the user can switch streams
 without losing the underlying calculations. The `selected_...` fields are

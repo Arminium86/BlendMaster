@@ -1578,26 +1578,39 @@ class DrawGanttChart:
                 .replace("_", " ")
                 .title()
             )
-        self.property_table_columns = [
-            column for column in [
-                "start_datetime", "end_datetime", "blend_ID", "lane",
-                "steady_state_number", "steady_state_duration",
-                "stockpile_component", "source", "source_type",
-                "source_agg", "source_blend_ratio_agg",
-                "selected_grade_stream", "selected_grade_brand",
-                "actual_direct_tip_ratio", "crusher_actual_tonnes",
-                "crusher_rate_output",
-                *source_grade_columns,
-                *[
-                    column for column in report_columns
-                    if column.startswith("crusher_actual_grade_")
-                ],
-            ]
-            if column in report_columns or column in {
-                "lane", "stockpile_component", "source_agg",
-                "source_blend_ratio_agg",
-            }
+        # Keep the familiar summary fields first, then retain the complete
+        # report snapshot below the Gantt.  The latter is especially useful
+        # for auditing source streams, custom constraints and product builds;
+        # reducing this table to only the chart-driving fields hid that detail.
+        summary_columns = [
+            "start_datetime", "end_datetime", "blend_ID", "lane",
+            "steady_state_number", "steady_state_duration",
+            "stockpile_component", "source", "source_id", "source_type",
+            "source_agg", "source_blend_ratio_agg",
+            "selected_grade_stream", "selected_grade_brand",
+            "actual_direct_tip_ratio", "source_opening_balance",
+            "source_actual_tonnes", "source_closing_balance",
+            "crusher_actual_tonnes", "crusher_rate_output",
+            *source_grade_columns,
+            *[
+                column for column in report_columns
+                if column.startswith("crusher_actual_grade_")
+            ],
         ]
+        excluded_detail_columns = {"plan_id", "plan_rank", "solver_score"}
+        self.property_table_columns = list(dict.fromkeys([
+            *[
+                column for column in summary_columns
+                if column in report_columns or column in {
+                    "lane", "stockpile_component", "source_agg",
+                    "source_blend_ratio_agg",
+                }
+            ],
+            *[
+                column for column in report_columns
+                if column not in excluded_detail_columns
+            ],
+        ]))
         self.app.layout = html.Div(
             style={
                 'display': 'flex',
@@ -1910,33 +1923,37 @@ class DrawGanttChart:
             ]
             data = data[visible_columns].copy()
             
-            # Apply rounding to specific numeric columns
-            for column, decimals in {
-                "steady_state_duration": 2,
-                "actual_direct_tip_ratio": 2,
-                "crusher_actual_tonnes": 0,
-                "crusher_rate_output": 1,
-            }.items():
-                if column in data:
-                    data[column] = pd.to_numeric(
-                        data[column], errors="coerce"
-                    ).round(decimals)
-            if "crusher_actual_tonnes" in data:
-                data["crusher_actual_tonnes"] = data[
-                    "crusher_actual_tonnes"
-                ].apply(
-                    lambda value: ""
-                    if pd.isna(value)
-                    else f"{float(value):,.0f}"
+            def additive_column(column):
+                key = str(column or "").strip().lower()
+                return (
+                    key.endswith(("_tonnes", "_wmt", "_dmt", "_mass", "_volume"))
+                    or "tonnes" in key
+                    or key.endswith("_balance")
+                    or key in {"payload", "crusher_actual_tonnes"}
                 )
-            for column in [
-                value for value in data.columns
-                if value.startswith("source_grade_")
-                or value.startswith("crusher_actual_grade_")
-            ]:
-                data[column] = pd.to_numeric(
-                    data[column], errors="coerce"
-                ).round(2)
+
+            # Preserve report precision semantics in the detailed snapshot:
+            # additive quantities are whole tonnes with separators, while
+            # grades, ratios and other weighted-average values show two
+            # decimal places.
+            for column in data.columns:
+                if pd.api.types.is_datetime64_any_dtype(data[column]):
+                    data[column] = data[column].dt.strftime("%Y-%m-%d %H:%M:%S")
+                    continue
+                values = pd.to_numeric(data[column], errors="coerce")
+                if values.notna().any() and data[column].notna().sum() == values.notna().sum():
+                    if additive_column(column):
+                        data[column] = values.map(
+                            lambda value: "" if pd.isna(value) else f"{float(value):,.0f}"
+                        )
+                    elif str(column).lower().endswith(
+                        ("_count", "_number", "_option", "_sequence")
+                    ):
+                        data[column] = values.map(
+                            lambda value: "" if pd.isna(value) else f"{float(value):,.0f}"
+                        )
+                    else:
+                        data[column] = values.round(2)
             
             data = data.drop_duplicates()
 
