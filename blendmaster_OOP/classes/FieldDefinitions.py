@@ -98,7 +98,7 @@ def default_field_definitions():
         elif kind in {"intensive", "unknown"}:
             deferred_weighted.append((name, description))
 
-    for stream in STREAM_PREFIXES:
+    for stream in ("insitu", *STREAM_PREFIXES):
         weight = (
             "modelled_product_dmt"
             if "product" in stream else "modelled_rom_wmt"

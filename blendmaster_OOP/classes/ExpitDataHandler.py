@@ -1772,6 +1772,9 @@ class ExpitDataHandler:
                     row_source_properties = self._payload_source_properties(
                         row, payload, tonnes
                     )
+                    row_grade_streams = reweight_grade_streams_from_properties(
+                        row_grade_streams, row_source_properties
+                    )
                     num_trips = tonnes / payload
                     int_trips = int(num_trips)
                     delivery_time = None

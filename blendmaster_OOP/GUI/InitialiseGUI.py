@@ -5660,12 +5660,37 @@ class UserInputs(QMainWindow):
 
     def ensure_field_mapping_migration(self):
         """Seed explicit mappings for legacy projects and familiar raw fields."""
-        if int(vars(self).get("field_mapping_schema_version", 0) or 0) >= 1:
+        schema_version = int(
+            vars(self).get("field_mapping_schema_version", 0) or 0
+        )
+        if schema_version >= 2:
             return
         mappings = normalize_field_mappings(
             getattr(self, "field_mappings", None)
         )
         analyte_raw = {"fe": "FE", "si": "SIO2", "al": "AL2O3", "p": "P", "mn": "MN"}
+        if schema_version == 1:
+            # Version 2 adds the newly explicit required insitu fields only.
+            # Do not recreate any older mapping the user deliberately cleared.
+            for family in ("inventory", "amt"):
+                for analyte, raw_name in analyte_raw.items():
+                    mappings.append({
+                        "source_family": family, "brand": "",
+                        "target_field": f"insitu_{analyte}",
+                        "source_field": (
+                            f"GRADE_{analyte.upper()}"
+                            if family == "inventory" else raw_name
+                        ),
+                    })
+            for analyte in ANALYTES:
+                mappings.append({
+                    "source_family": "aps", "brand": "",
+                    "target_field": f"insitu_{analyte}",
+                    "source_field": f"Mining.grades_{analyte}",
+                })
+            self.field_mappings = normalize_field_mappings(mappings)
+            self.field_mapping_schema_version = 2
+            return
         inventory_product = internal_product_slot(getattr(self, "opf_input_choice", None))
         amt_product = amt_modelled_product_slot(getattr(self, "opf_input_choice", None))
         for family in ("inventory", "amt"):
@@ -5675,6 +5700,13 @@ class UserInputs(QMainWindow):
                 "source_field": "BALANCE" if family == "inventory" else "FINAL_WMT",
             })
             for analyte, raw_name in analyte_raw.items():
+                mappings.append({
+                    "source_family": family, "brand": "",
+                    "target_field": f"insitu_{analyte}",
+                    "source_field": (
+                        f"GRADE_{analyte.upper()}" if family == "inventory" else raw_name
+                    ),
+                })
                 mappings.append({
                     "source_family": family, "brand": "",
                     "target_field": f"modelled_rom_{analyte}",
@@ -5716,8 +5748,14 @@ class UserInputs(QMainWindow):
                     "source_family": "aps", "brand": "",
                     "target_field": target, "source_field": source_field,
                 })
+        for analyte in ANALYTES:
+            mappings.append({
+                "source_family": "aps", "brand": "",
+                "target_field": f"insitu_{analyte}",
+                "source_field": f"Mining.grades_{analyte}",
+            })
         self.field_mappings = normalize_field_mappings(mappings)
-        self.field_mapping_schema_version = 1
+        self.field_mapping_schema_version = 2
 
     def apply_canonical_field_mappings(self):
         """Attach canonical fields to Inventory and AMT records before streams."""
@@ -5795,7 +5833,7 @@ class UserInputs(QMainWindow):
                 vars(self).get("field_definitions")
             )
         }
-        for stream in ("modelled_rom", "adjusted_rom", "modelled_product", "adjusted_product"):
+        for stream in ("insitu", "modelled_rom", "adjusted_rom", "modelled_product", "adjusted_product"):
             brand_map = normalized.get(stream) or {}
             candidates = [*preferred, "__unbranded__", *brand_map.keys()]
             for analyte in ANALYTES:
@@ -5911,9 +5949,9 @@ class UserInputs(QMainWindow):
         self.product_build_tonnes_selector = tonne_stream_selector(
             getattr(self, "product_build_tonnes_stream", "modelled_product_wmt")
         )
-        selection_layout.addRow("Crusher Tonnes Stream:", self.crusher_tonnes_selector)
-        selection_layout.addRow("Reclaimer Tonnes Stream:", self.reclaimer_tonnes_selector)
-        selection_layout.addRow("Product Build Tonnes Stream:", self.product_build_tonnes_selector)
+        selection_layout.addRow("Crusher Quantity Field:", self.crusher_tonnes_selector)
+        selection_layout.addRow("Reclaimer Quantity Field:", self.reclaimer_tonnes_selector)
+        selection_layout.addRow("Product Build Quantity Field:", self.product_build_tonnes_selector)
 
         self.rom_planning_category_input = QLineEdit(
             self.data_stream_planning_categories.get("rom", "OPF Feed")
@@ -13905,11 +13943,11 @@ class UserInputs(QMainWindow):
                 row["source_properties"] = source_properties
                 cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 insitu = {
-                    "grade_fe": row.get("FE"),
-                    "grade_si": row.get("SIO2"),
-                    "grade_al": row.get("AL2O3"),
-                    "grade_p": row.get("P"),
-                    "grade_mn": row.get("MN"),
+                    "insitu_fe": row.get("insitu_fe", row.get("FE")),
+                    "insitu_si": row.get("insitu_si", row.get("SIO2")),
+                    "insitu_al": row.get("insitu_al", row.get("AL2O3")),
+                    "insitu_p": row.get("insitu_p", row.get("P")),
+                    "insitu_mn": row.get("insitu_mn", row.get("MN")),
                 }
                 streams = amt_grade_streams(
                     insitu,

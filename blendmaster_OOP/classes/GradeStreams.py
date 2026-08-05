@@ -22,11 +22,11 @@ STREAMS = (
     "adjusted_product",
 )
 STREAM_LABELS = {
-    "insitu": "Insitu",
-    "modelled_rom": "Modelled ROM",
-    "adjusted_rom": "Adjusted ROM",
-    "modelled_product": "Modelled Product",
-    "adjusted_product": "Adjusted Product",
+    "insitu": "insitu_<grades>",
+    "modelled_rom": "modelled_rom_<grades>",
+    "adjusted_rom": "adjusted_rom_<grades>",
+    "modelled_product": "modelled_product_<grades>",
+    "adjusted_product": "adjusted_product_<grades>",
 }
 DEFAULT_STREAM = "adjusted_product"
 UNBRANDED = "*"
@@ -133,7 +133,10 @@ def grade_vector(values: Optional[Mapping[str, Any]] = None) -> Dict[str, Option
 
 def legacy_vector(source: Any) -> Dict[str, Optional[float]]:
     def read(analyte: str) -> Any:
-        names = (f"grade_{analyte}", analyte, f"GRADE_{analyte.upper()}")
+        names = (
+            f"insitu_{analyte}", f"grade_{analyte}", analyte,
+            f"GRADE_{analyte.upper()}",
+        )
         if isinstance(source, Mapping):
             for name in names:
                 if name in source:
@@ -791,6 +794,11 @@ def reweight_grade_streams_from_properties(streams: Any, properties: Any):
     properties = properties if isinstance(properties, Mapping) else {}
     values = {str(key).strip().lower(): value for key, value in properties.items()}
     for analyte in ANALYTES:
+        insitu_value = numeric(values.get(f"insitu_{analyte}"))
+        if insitu_value is not None:
+            result.setdefault("insitu", {}).setdefault(
+                UNBRANDED, {}
+            )[analyte] = insitu_value
         rom_value = numeric(values.get(f"modelled_rom_{analyte}"))
         if rom_value is not None:
             old_rom_by_brand = {

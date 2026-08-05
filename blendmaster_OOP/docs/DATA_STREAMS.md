@@ -1,13 +1,13 @@
 # Data Streams
 
-BlendMaster retains five grade streams for Fe, SiO2, Al2O3, P and Mn and
+BlendMaster retains five grade families for Fe, SiO2, Al2O3, P and Mn and
 projects one selected stream onto the existing optimiser grade fields:
 
-1. Insitu
-2. Modelled ROM
-3. Adjusted ROM
-4. Modelled Product
-5. Adjusted Product (default)
+1. `insitu_<grades>`
+2. `modelled_rom_<grades>`
+3. `adjusted_rom_<grades>`
+4. `modelled_product_<grades>`
+5. `adjusted_product_<grades>` (default)
 
 Resolution falls back independently per analyte in the order selected stream,
 next available upstream stream, then the legacy grade. A warning is retained
@@ -15,22 +15,22 @@ when fallback occurs.
 
 ## Independent optimiser tonne streams
 
-The selected grade stream answers only *which grades* are constrained.  The
+The **Optimiser Grade Stream** selection answers only *which grades* are constrained. The
 Data Streams page separately selects the additive field used for each mass
 basis:
 
-- **Crusher Tonnes Stream** (default `modelled_rom_wmt`) drives only crusher
+- **Crusher Quantity Field** (default `modelled_rom_wmt`) drives only crusher
   throughput and capacity. It does not change grade weighting.
-- **Reclaimer Tonnes Stream** (default `modelled_rom_wmt`) drives the reported
+- **Reclaimer Quantity Field** (default `modelled_rom_wmt`) drives the reported
   reclaimer rate and per-source reclaim capacity. Physical source depletion
   and opening/closing balances remain ROM WMT so inventory reconciliation is
   never distorted.
-- **Product Build Tonnes Stream** (default `modelled_product_wmt`) drives
+- **Product Build Quantity Field** (default `modelled_product_wmt`) drives
   product-build accumulation and completion. It does not override a grade's
   configured weight field.
 
 Calendar grades, product-build grades, optimised profiles and manual profiles
-all use the selected Optimiser Grade Stream. Each analyte is independently
+all use the selected Optimiser Grade Stream family. Each analyte is independently
 weighted by the additive Weight Field configured for that grade in Define
 Fields. For example, an adjusted product Fe field weighted by
 `modelled_product_dmt` continues to use product DMT even when crusher capacity
@@ -79,11 +79,11 @@ and must start with a letter. Each row is one of:
   grade stream subsequently selected by optimisation.
 
 Required rows cannot be deleted. The default contract includes
-`modelled_rom_<analyte>`, `adjusted_rom_<analyte>`,
+`insitu_<analyte>`, `modelled_rom_<analyte>`, `adjusted_rom_<analyte>`,
 `modelled_product_<analyte>` and `adjusted_product_<analyte>` for the five
 analytes, `source_wmt`, `modelled_product_wmt` and
 `modelled_product_dmt`, plus `modelled_rom_wmt` and `modelled_rom_dmt`.
-Modelled/adjusted ROM grades use `modelled_rom_wmt`; modelled/adjusted product
+Insitu/modelled/adjusted ROM grades use `modelled_rom_wmt`; modelled/adjusted product
 grades use `modelled_product_dmt`. Map the product fields to the active OPF
 product channel's per-source Product 1/2/3 WMT/DMT. `source_wmt` mirrors
 `modelled_rom_wmt`, because ROM WMT is the opening insitu balance. Required
@@ -124,6 +124,10 @@ It also includes **ROM / opening stockpile WMT/DMT** (stored raw as
 then use that DMT denominator when hexes are consolidated into chunks. The
 same canonical mass mappings are available for inventory stockpiles, whose
 `feed_wmt` is their opening balance and whose `feed_dmt` is its dry equivalent.
+
+The required `insitu_*` fields are visible in Map Fields for Inventory, AMT
+and APS. They default to the established raw assay fields during migration but
+remain explicit and user-editable like other source mappings.
 
 `adjusted_rom_*` and `adjusted_product_*` are deliberately absent from Map
 Fields. They are calculated fields: adjusted ROM is modelled ROM multiplied by
