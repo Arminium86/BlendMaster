@@ -737,66 +737,30 @@ class DatabaseManager:
             )
 
     def write_build_report_to_database (self, results: pd.DataFrame):
-        # Connect to the SQLite database or create it
         database_name = get_database_path()
         conn = sqlite3.connect(database_name)
-        cursor = conn.cursor()
-
-        # Create the table or use if it already exists
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS build_report (
-            steady_state_number INTEGER,
-            steady_state_start_datetime TEXT,
-            steady_state_end_datetime TEXT,
-            agent TEXT,
-            mining_start_datetime TEXT,
-            source TEXT,
-            stockpile TEXT,
-            payload REAL,
-            delivered_datetime TEXT,
-            closing_balance REAL,
-            grade_fe REAL,
-            grade_si REAL,
-            grade_al REAL,
-            grade_p REAL,
-            grade_mn REAL
-        )
-        ''')
-
-        cursor.execute('DELETE FROM build_report')
-
-        if not results.empty:
-
-            results['steady_state_start_datetime'] = pd.to_datetime(results['steady_state_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            results['steady_state_end_datetime'] = pd.to_datetime(results['steady_state_end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            results['mining_start_datetime'] = pd.to_datetime(results['mining_start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-
-            # Insert each row from the DataFrame into the database
-            for _, row in results.iterrows():
-                cursor.execute('''
-                INSERT INTO build_report VALUES (
-                :steady_state_number, 
-                :steady_state_start_datetime, 
-                :steady_state_end_datetime, 
-                :agent, 
-                :mining_start_datetime, 
-                :source, 
-                :stockpile, 
-                :payload, 
-                :delivered_datetime, 
-                :closing_balance, 
-                :grade_fe, 
-                :grade_si, 
-                :grade_al, 
-                :grade_p, 
-                :grade_mn
-                )
-                ''', row.to_dict())
-
-        # Commit and close the connection
-        conn.commit()
-        conn.close()
+        try:
+            data = results.copy()
+            if len(data.columns) == 0:
+                data = pd.DataFrame(columns=[
+                    "steady_state_number", "steady_state_start_datetime",
+                    "steady_state_end_datetime", "agent",
+                    "mining_start_datetime", "source", "stockpile",
+                    "payload", "delivered_datetime", "closing_balance",
+                    "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
+                ])
+            for column in data.columns:
+                if pd.api.types.is_datetime64_any_dtype(data[column]):
+                    data[column] = pd.to_datetime(data[column]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                elif data[column].dtype == object:
+                    data[column] = data[column].map(
+                        lambda value: json.dumps(value, default=str)
+                        if isinstance(value, (dict, list, tuple, set)) else value
+                    )
+            data.to_sql("build_report", conn, if_exists="replace", index=False)
+            conn.commit()
+        finally:
+            conn.close()
 
         print(f"Build report (if used) saved to database {database_name}")
         print(f"Expit payload transactions (if used) saved to database {database_name}")

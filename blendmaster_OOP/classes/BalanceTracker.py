@@ -227,6 +227,9 @@ class BalanceTracker:
                             incoming_properties,
                             self.required_source_property_keys,
                         )
+                        opening_properties = copy.deepcopy(
+                            self.source_properties.get(name, {})
+                        )
                         if original_payload > 0 and payload < original_payload:
                             incoming_properties = scale_additive_source_properties(
                                 incoming_properties,
@@ -284,6 +287,22 @@ class BalanceTracker:
                             "source_properties": copy.deepcopy(
                                 self.source_properties.get(name)
                             ),
+                            **{
+                                f"source_property_{key}_{suffix}": value
+                                for key in sorted(
+                                    set(opening_properties)
+                                    | set(incoming_properties)
+                                    | set(self.source_properties.get(name, {}))
+                                )
+                                if source_property_kind(
+                                    key, self.source_property_kinds
+                                ) == "additive"
+                                for suffix, value in (
+                                    ("opening_balance", opening_properties.get(key)),
+                                    ("built", incoming_properties.get(key)),
+                                    ("closing_balance", self.source_properties.get(name, {}).get(key)),
+                                )
+                            },
                             
                         })
                     

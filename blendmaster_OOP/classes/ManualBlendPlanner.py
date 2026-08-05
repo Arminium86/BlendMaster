@@ -32,6 +32,7 @@ from classes.CustomConstraints import (
     merge_source_properties,
     normalize_custom_constraints,
     scale_additive_source_properties,
+    source_property_balance_report_fields,
     source_property_report_fields,
     source_properties_from_mapping,
 )
@@ -59,6 +60,10 @@ class ManualBlendPlanner:
         "actual_direct_tip_ratio", "source", "source_id", "source_type",
         "source_blend_ratio", "source_opening_balance",
         "source_actual_tonnes", "source_closing_balance",
+        "reclaimer_source_tonnes", "crusher_source_tonnes", "product_build_source_tonnes",
+        *[f"selected_grade_weight_{grade}_tonnes" for grade in GRADE_NAMES],
+        "reclaimer_tonnes_stream", "crusher_tonnes_stream",
+        "product_build_tonnes_stream", "product_build_actual_tonnes",
         "source_grade_fe", "source_grade_si", "source_grade_al",
         "source_grade_p", "source_grade_mn",
         "selected_grade_stream", "selected_grade_brand",
@@ -146,6 +151,26 @@ class ManualBlendPlanner:
             or solver_config.get("selected_data_stream")
             or DEFAULT_STREAM
         ).strip().lower()
+        self.crusher_tonnes_stream = str(
+            site_context.get("crusher_tonnes_stream")
+            or solver_config.get("crusher_tonnes_stream")
+            or "modelled_rom_wmt"
+        )
+        self.reclaimer_tonnes_stream = str(
+            site_context.get("reclaimer_tonnes_stream")
+            or solver_config.get("reclaimer_tonnes_stream")
+            or "modelled_rom_wmt"
+        )
+        self.product_build_tonnes_stream = str(
+            site_context.get("product_build_tonnes_stream")
+            or solver_config.get("product_build_tonnes_stream")
+            or "modelled_product_wmt"
+        )
+        self.required_source_property_keys.update({
+            self.crusher_tonnes_stream,
+            self.reclaimer_tonnes_stream,
+            self.product_build_tonnes_stream,
+        })
         if self.selected_data_stream in STREAMS:
             self.required_source_property_keys.update(
                 f"{self.selected_data_stream}_{grade}"
@@ -998,15 +1023,56 @@ class ManualBlendPlanner:
                 ))
                 source_rows.append(source_row)
 
+            # The physical source balance remains ROM WMT.  The selected
+            # streams control the independently reported crusher and product
+            # quantities, exactly as in the optimiser.
+            for row in source_rows:
+                physical = self._number(row.get("source_actual_tonnes"))
+                properties = row.get("source_properties") or {}
+                def mapped_tonnes(stream):
+                    value = self._number(properties.get(stream), 0.0)
+                    return value if value > 1e-9 else physical
+                row["crusher_source_tonnes"] = mapped_tonnes(self.crusher_tonnes_stream)
+                row["reclaimer_source_tonnes"] = mapped_tonnes(self.reclaimer_tonnes_stream)
+                row["product_build_source_tonnes"] = mapped_tonnes(self.product_build_tonnes_stream)
+                row["reclaimer_tonnes_stream"] = self.reclaimer_tonnes_stream
+                row["crusher_tonnes_stream"] = self.crusher_tonnes_stream
+                row["product_build_tonnes_stream"] = self.product_build_tonnes_stream
+                try:
+                    warnings = json.loads(row.get("grade_stream_warnings") or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    warnings = []
+                for grade in self.GRADES:
+                    used_stream = self.selected_data_stream
+                    for warning in warnings:
+                        if str(warning.get("analyte") or "").lower() == grade:
+                            used_stream = str(
+                                warning.get("used_stream") or used_stream
+                            ).lower()
+                            break
+                    weight_field = self.source_property_weights.get(
+                        f"{used_stream}_{grade}"
+                    )
+                    row[f"selected_grade_weight_{grade}_tonnes"] = (
+                        mapped_tonnes(weight_field) if weight_field else physical
+                    )
+            crusher_tonnes = sum(
+                self._number(row.get("crusher_source_tonnes"))
+                for row in source_rows
+            )
             crusher_grades = {}
             for grade in self.GRADES:
+                grade_weight = sum(
+                    self._number(row.get(f"selected_grade_weight_{grade}_tonnes"))
+                    for row in source_rows
+                )
                 crusher_grades[grade] = (
                     sum(
                         row[f"source_grade_{grade}"]
-                        * row["source_actual_tonnes"]
+                        * row[f"selected_grade_weight_{grade}_tonnes"]
                         for row in source_rows
-                    ) / total_tonnes
-                    if total_tonnes > 0 else 0
+                    ) / grade_weight
+                    if grade_weight > 0 else 0
                 )
 
             direct_tip_ratio = (
@@ -1026,6 +1092,12 @@ class ManualBlendPlanner:
                     (self.calendar_inputs.get("solver_config") or {}).get(
                         "optimisation_source_property_fields"
                     ),
+                )
+                opening_source_properties = scale_additive_source_properties(
+                    visible_source_properties,
+                    self._number(source_row.get("source_opening_balance")) / amount
+                    if amount > 0 else 0,
+                    self.source_property_kinds,
                 )
                 report_rows.append({
                     "start_datetime": state["start_datetime"],
@@ -1047,21 +1119,33 @@ class ManualBlendPlanner:
                             self.calendar_inputs.get("solver_config") or {}
                         ).get("optimisation_source_property_fields"),
                     ),
+                    **source_property_balance_report_fields(
+                        opening_source_properties,
+                        visible_source_properties,
+                        active_fields=(
+                            self.calendar_inputs.get("solver_config") or {}
+                        ).get("optimisation_source_property_fields"),
+                        property_kinds=self.source_property_kinds,
+                    ),
                     "source_blend_ratio": (
-                        amount / total_tonnes if total_tonnes > 0 else 0
+                        source_row.get("crusher_source_tonnes", 0) / crusher_tonnes if crusher_tonnes > 0 else 0
                     ),
                     "equipment_rate_input": (
                         amount / duration if duration > 0 else 0
                     ),
                     "equipment_rate_output": (
-                        amount / duration if duration > 0 else 0
+                        self._number(source_row.get("reclaimer_source_tonnes")) / duration if duration > 0 else 0
                     ),
-                    "crusher_actual_tonnes": total_tonnes,
+                    "crusher_actual_tonnes": crusher_tonnes,
+                    "product_build_actual_tonnes": sum(
+                        self._number(item.get("product_build_source_tonnes"))
+                        for item in source_rows
+                    ),
                     "crusher_rate_input": state.get(
                         "crusher_rate", self.crusher_rate
                     ),
-                    "crusher_rate_output": state.get(
-                        "crusher_rate", self.crusher_rate
+                    "crusher_rate_output": (
+                        crusher_tonnes / duration if duration > 0 else 0
                     ),
                     **{
                         f"crusher_actual_grade_{grade}": value

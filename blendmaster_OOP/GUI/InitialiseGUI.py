@@ -1267,6 +1267,9 @@ class UserInputs(QMainWindow):
             "selected_data_stream": getattr(
                 self, "selected_data_stream", DEFAULT_STREAM
             ),
+            "crusher_tonnes_stream": getattr(self, "crusher_tonnes_stream", "modelled_rom_wmt"),
+            "reclaimer_tonnes_stream": getattr(self, "reclaimer_tonnes_stream", "modelled_rom_wmt"),
+            "product_build_tonnes_stream": getattr(self, "product_build_tonnes_stream", "modelled_product_wmt"),
             "field_definitions": copy.deepcopy(getattr(
                 self, "field_definitions", default_field_definitions()
             )),
@@ -1320,6 +1323,9 @@ class UserInputs(QMainWindow):
             self.capture_map_fields_table()
         if not restoring_project and hasattr(self, "data_stream_selector"):
             self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
+            self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
+            self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"
+            self.product_build_tonnes_stream = self.product_build_tonnes_selector.currentData() or "modelled_product_wmt"
             self.data_stream_planning_categories = normalise_planning_categories({
                 "rom": self.rom_planning_category_input.text(),
                 "product": self.product_planning_category_input.text(),
@@ -1358,7 +1364,8 @@ class UserInputs(QMainWindow):
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
-            "selected_data_stream", "field_definitions", "field_mappings",
+            "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
+            "product_build_tonnes_stream", "field_definitions", "field_mappings",
             "field_mapping_schema_version",
             "aps_grade_field_mappings",
             "aps_source_property_field_mappings",
@@ -1588,6 +1595,9 @@ class UserInputs(QMainWindow):
             self.selected_data_stream = str(
                 state.get("selected_data_stream") or DEFAULT_STREAM
             )
+            self.crusher_tonnes_stream = str(state.get("crusher_tonnes_stream") or "modelled_rom_wmt")
+            self.reclaimer_tonnes_stream = str(state.get("reclaimer_tonnes_stream") or "modelled_rom_wmt")
+            self.product_build_tonnes_stream = str(state.get("product_build_tonnes_stream") or "modelled_product_wmt")
             self.field_definitions = normalize_field_definitions(
                 state.get("field_definitions")
             )
@@ -1817,6 +1827,13 @@ class UserInputs(QMainWindow):
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
             stream_index = self.data_stream_selector.findData(self.selected_data_stream)
             self.data_stream_selector.setCurrentIndex(max(stream_index, 0))
+            for selector, selected_value in [
+                (self.crusher_tonnes_selector, self.crusher_tonnes_stream),
+                (self.reclaimer_tonnes_selector, self.reclaimer_tonnes_stream),
+                (self.product_build_tonnes_selector, self.product_build_tonnes_stream),
+            ]:
+                index = selector.findData(selected_value)
+                selector.setCurrentIndex(max(index, 0))
             self.rom_planning_category_input.setText(
                 self.data_stream_planning_categories.get("rom", "OPF Feed")
             )
@@ -3417,6 +3434,21 @@ class UserInputs(QMainWindow):
             row["name"]: row["kind"] for row in definitions
         }
         merged["source_property_weights"] = field_weight_map(definitions)
+        merged["crusher_tonnes_stream"] = str(
+            merged.get("crusher_tonnes_stream")
+            or vars(self).get("crusher_tonnes_stream")
+            or "modelled_rom_wmt"
+        )
+        merged["reclaimer_tonnes_stream"] = str(
+            merged.get("reclaimer_tonnes_stream")
+            or vars(self).get("reclaimer_tonnes_stream")
+            or "modelled_rom_wmt"
+        )
+        merged["product_build_tonnes_stream"] = str(
+            merged.get("product_build_tonnes_stream")
+            or vars(self).get("product_build_tonnes_stream")
+            or "modelled_product_wmt"
+        )
         return merged
 
     def apply_app_theme(self):
@@ -5851,6 +5883,38 @@ class UserInputs(QMainWindow):
         )
         selection_layout.addRow("Optimiser Grade Stream:", self.data_stream_selector)
 
+        additive_streams = [
+            str(row.get("name"))
+            for row in (getattr(self, "field_definitions", []) or [])
+            if str(row.get("kind", "")).lower() == "additive" and row.get("name")
+        ]
+        # The defaults are always available, including in legacy projects whose
+        # saved field definitions pre-date the canonical stream fields.
+        additive_streams = list(dict.fromkeys([
+            "modelled_rom_wmt", "modelled_product_wmt", *additive_streams
+        ]))
+
+        def tonne_stream_selector(current):
+            selector = QComboBox()
+            for field_name in additive_streams:
+                selector.addItem(field_name, field_name)
+            index = selector.findData(current)
+            selector.setCurrentIndex(max(index, 0))
+            return selector
+
+        self.crusher_tonnes_selector = tonne_stream_selector(
+            getattr(self, "crusher_tonnes_stream", "modelled_rom_wmt")
+        )
+        self.reclaimer_tonnes_selector = tonne_stream_selector(
+            getattr(self, "reclaimer_tonnes_stream", "modelled_rom_wmt")
+        )
+        self.product_build_tonnes_selector = tonne_stream_selector(
+            getattr(self, "product_build_tonnes_stream", "modelled_product_wmt")
+        )
+        selection_layout.addRow("Crusher Tonnes Stream:", self.crusher_tonnes_selector)
+        selection_layout.addRow("Reclaimer Tonnes Stream:", self.reclaimer_tonnes_selector)
+        selection_layout.addRow("Product Build Tonnes Stream:", self.product_build_tonnes_selector)
+
         self.rom_planning_category_input = QLineEdit(
             self.data_stream_planning_categories.get("rom", "OPF Feed")
         )
@@ -6756,6 +6820,9 @@ class UserInputs(QMainWindow):
 
     def handle_data_streams_submit(self):
         self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
+        self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
+        self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"
+        self.product_build_tonnes_stream = self.product_build_tonnes_selector.currentData() or "modelled_product_wmt"
         self.data_stream_planning_categories = normalise_planning_categories({
             "rom": self.rom_planning_category_input.text(),
             "product": self.product_planning_category_input.text(),
@@ -11590,6 +11657,15 @@ class UserInputs(QMainWindow):
         )
         loaded_state["selected_data_stream"] = str(
             loaded_state.get("selected_data_stream") or DEFAULT_STREAM
+        )
+        loaded_state["crusher_tonnes_stream"] = str(
+            loaded_state.get("crusher_tonnes_stream") or "modelled_rom_wmt"
+        )
+        loaded_state["reclaimer_tonnes_stream"] = str(
+            loaded_state.get("reclaimer_tonnes_stream") or "modelled_rom_wmt"
+        )
+        loaded_state["product_build_tonnes_stream"] = str(
+            loaded_state.get("product_build_tonnes_stream") or "modelled_product_wmt"
         )
         loaded_state["aps_grade_field_mappings"] = normalise_aps_grade_field_mappings(
             loaded_state.get("aps_grade_field_mappings"),
@@ -19302,6 +19378,9 @@ class UserInputs(QMainWindow):
                 "haul_cycle_routes": self.haul_cycle_routes,
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "selected_data_stream": self.selected_data_stream,
+                "crusher_tonnes_stream": self.crusher_tonnes_stream,
+                "reclaimer_tonnes_stream": self.reclaimer_tonnes_stream,
+                "product_build_tonnes_stream": self.product_build_tonnes_stream,
                 "field_definitions": self.field_definitions,
                 "field_mappings": self.field_mappings,
                 "field_mapping_schema_version": int(getattr(
@@ -19670,6 +19749,9 @@ class UserInputs(QMainWindow):
         self.selected_data_stream = str(
             loaded_state.get("selected_data_stream") or DEFAULT_STREAM
         )
+        self.crusher_tonnes_stream = str(loaded_state.get("crusher_tonnes_stream") or "modelled_rom_wmt")
+        self.reclaimer_tonnes_stream = str(loaded_state.get("reclaimer_tonnes_stream") or "modelled_rom_wmt")
+        self.product_build_tonnes_stream = str(loaded_state.get("product_build_tonnes_stream") or "modelled_product_wmt")
         self.field_definitions = normalize_field_definitions(
             loaded_state.get("field_definitions")
         )
@@ -19934,6 +20016,9 @@ class UserInputs(QMainWindow):
         self.selected_two_wp_product_crushers = []
         self.product_brand_labels_choice = self.default_product_brand_labels()
         self.selected_data_stream = DEFAULT_STREAM
+        self.crusher_tonnes_stream = "modelled_rom_wmt"
+        self.reclaimer_tonnes_stream = "modelled_rom_wmt"
+        self.product_build_tonnes_stream = "modelled_product_wmt"
         self.field_definitions = default_field_definitions()
         self.field_mappings = []
         self.field_mapping_schema_version = 0

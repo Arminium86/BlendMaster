@@ -83,11 +83,14 @@ class ProductBuildProgress:
         return builds
 
     @classmethod
-    def _is_on_spec(cls, tonnes, grade_metal, build):
+    def _is_on_spec(cls, tonnes, grade_metal, build, grade_weights=None):
         if tonnes <= 0:
             return False
         for grade in cls.GRADES:
-            value = grade_metal[grade] / tonnes
+            denominator = (grade_weights or {}).get(grade, tonnes)
+            if denominator <= 0:
+                return False
+            value = grade_metal[grade] / denominator
             if (
                 value < build[f"target_{grade}_min"] - 1e-7
                 or value > build[f"target_{grade}_max"] + 1e-7
@@ -112,7 +115,6 @@ class ProductBuildProgress:
 
         builds = cls.normalize_builds(product_build_settings)
         required = {
-            "source_actual_tonnes",
             "crusher_actual_tonnes",
             *(
                 f"source_grade_{grade}"
@@ -155,6 +157,7 @@ class ProductBuildProgress:
         build_index = 0
         build_tonnes = 0.0
         grade_metal = {grade: 0.0 for grade in cls.GRADES}
+        grade_weights = {grade: 0.0 for grade in cls.GRADES}
 
         for _, state_rows in data.groupby(
             group_columns, sort=False, dropna=False
@@ -164,29 +167,41 @@ class ProductBuildProgress:
 
             build = builds[build_index]
             opening_tonnes = build_tonnes
-            crusher_tonnes = cls._number(
-                state_rows.iloc[0].get("crusher_actual_tonnes"), 0.0
+            product_tonnes = cls._number(
+                pd.to_numeric(
+                    state_rows.get("product_build_source_tonnes", pd.Series()),
+                    errors="coerce",
+                ).fillna(0).sum(),
+                0.0,
             )
+            if product_tonnes <= 0:
+                product_tonnes = cls._number(
+                    state_rows.iloc[0].get("crusher_actual_tonnes"), 0.0
+                )
             remaining_before = max(
                 build["target_tonnes"] - opening_tonnes, 0.0
             )
             added_tonnes = min(
-                max(crusher_tonnes, 0.0), remaining_before
+                max(product_tonnes, 0.0), remaining_before
             )
             allocation_fraction = (
-                added_tonnes / crusher_tonnes
-                if crusher_tonnes > 0 else 0.0
+                added_tonnes / product_tonnes
+                if product_tonnes > 0 else 0.0
             )
 
             for grade in cls.GRADES:
-                grade_metal[grade] += sum(
-                    cls._number(row.get("source_actual_tonnes"), 0.0)
-                    * allocation_fraction
-                    * cls._number(
+                for _, row in state_rows.iterrows():
+                    weight = cls._number(
+                        row.get(f"selected_grade_weight_{grade}_tonnes"),
+                        cls._number(
+                            row.get("product_build_source_tonnes"),
+                            cls._number(row.get("source_actual_tonnes"), 0.0),
+                        ),
+                    ) * allocation_fraction
+                    grade_weights[grade] += weight
+                    grade_metal[grade] += weight * cls._number(
                         row.get(f"source_grade_{grade}"), 0.0
                     )
-                    for _, row in state_rows.iterrows()
-                )
 
             build_tonnes = min(
                 opening_tonnes + added_tonnes,
@@ -197,7 +212,7 @@ class ProductBuildProgress:
             )
             complete = remaining_tonnes <= cls.TOLERANCE
             current_on_spec = cls._is_on_spec(
-                build_tonnes, grade_metal, build
+                build_tonnes, grade_metal, build, grade_weights
             )
             values = {
                 "product_build_id": build["build_id"],
@@ -216,8 +231,8 @@ class ProductBuildProgress:
             }
             for grade in cls.GRADES:
                 values[f"product_build_grade_{grade}"] = (
-                    grade_metal[grade] / build_tonnes
-                    if build_tonnes > 0 else 0.0
+                    grade_metal[grade] / grade_weights[grade]
+                    if grade_weights[grade] > 0 else 0.0
                 )
                 values[f"product_build_target_{grade}_min"] = (
                     build[f"target_{grade}_min"]
@@ -234,6 +249,9 @@ class ProductBuildProgress:
                 build_index += 1
                 build_tonnes = 0.0
                 grade_metal = {
+                    grade: 0.0 for grade in cls.GRADES
+                }
+                grade_weights = {
                     grade: 0.0 for grade in cls.GRADES
                 }
 

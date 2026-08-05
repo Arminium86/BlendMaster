@@ -36,6 +36,14 @@ class DataLoader:
         selected_stream = str(
             self.solver_config.get("selected_data_stream") or ""
         ).strip().lower()
+        self.required_source_property_keys.update(
+            str(self.solver_config.get(key) or default)
+            for key, default in {
+                "crusher_tonnes_stream": "modelled_rom_wmt",
+                "reclaimer_tonnes_stream": "modelled_rom_wmt",
+                "product_build_tonnes_stream": "modelled_product_wmt",
+            }.items()
+        )
         if selected_stream in STREAMS:
             self.required_source_property_keys.update(
                 f"{selected_stream}_{analyte}" for analyte in ANALYTES

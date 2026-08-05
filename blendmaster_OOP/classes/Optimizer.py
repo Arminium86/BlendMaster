@@ -233,15 +233,17 @@ class Optimizer:
         target_tonnes = safe_float(target_build.get("target_tonnes"), 0.0)
         opening_tonnes = safe_float(target_build_state.get("tonnes"), 0.0)
         remaining_tonnes = target_tonnes - opening_tonnes
-        crusher_rate_output = safe_float(result.get("crusher_rate_output"), 0.0)
+        product_build_rate_output = safe_float(
+            result.get("product_build_actual_tonnes"), 0.0
+        ) / max(float(steady_state_duration), Optimizer.SOLUTION_TOLERANCE)
         if (
             target_tonnes <= Optimizer.SOLUTION_TOLERANCE
             or remaining_tonnes <= Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE
-            or crusher_rate_output <= Optimizer.SOLUTION_TOLERANCE
+            or product_build_rate_output <= Optimizer.SOLUTION_TOLERANCE
         ):
             return steady_state_duration, None, None
 
-        duration_to_complete = remaining_tonnes / crusher_rate_output
+        duration_to_complete = remaining_tonnes / product_build_rate_output
         if (
             duration_to_complete > Optimizer.SOLUTION_TOLERANCE
             and duration_to_complete < steady_state_duration - Optimizer.SOLUTION_TOLERANCE
@@ -488,14 +490,22 @@ class Optimizer:
             for source_set in (excluded_stockpile_sets or [])
         ]
 
-        # Step 1: Define bounds (how many tonnes each event contributes)
-        bounds = [(0, min(event.rate * steady_state_duration, event.balance)) for event in event_pool]
-
         def safe_float(value, default=0.0):
             try:
                 return float(value)
             except (TypeError, ValueError):
                 return default
+
+        def stream_tonnes(event, stream_name, fallback):
+            """Return a mapped additive tonne stream for one source."""
+            value = safe_float(
+                (getattr(event, "source_properties", {}) or {}).get(stream_name),
+                None,
+            )
+            # Legacy APS/direct-tip rows often do not carry the canonical
+            # additive field.  Treat a missing/zero value as un-mapped and
+            # preserve their physical ROM quantity.
+            return value if value is not None and value > Optimizer.SOLUTION_TOLERANCE else fallback
 
         target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
         selected_data_stream = str(
@@ -506,6 +516,74 @@ class Optimizer:
         # falls back without discarding otherwise valid grades.
         for event in event_pool:
             apply_selected_stream(event, selected_data_stream, target_product_brand)
+        crusher_tonnes_stream = str(
+            solver_config.get("crusher_tonnes_stream") or "modelled_rom_wmt"
+        )
+        reclaimer_tonnes_stream = str(
+            solver_config.get("reclaimer_tonnes_stream") or "modelled_rom_wmt"
+        )
+        product_build_tonnes_stream = str(
+            solver_config.get("product_build_tonnes_stream") or "modelled_product_wmt"
+        )
+        # Coefficients are source-stream tonnes per physical ROM tonne.  A
+        # missing mapping deliberately falls back to physical ROM tonnes for
+        # backwards-compatible projects.
+        physical_tonnes = [max(safe_float(event.balance), 0.0) for event in event_pool]
+        crusher_coefficients = [
+            stream_tonnes(event, crusher_tonnes_stream, physical) / physical
+            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        reclaimer_coefficients = [
+            stream_tonnes(event, reclaimer_tonnes_stream, physical) / physical
+            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        product_build_coefficients = [
+            stream_tonnes(event, product_build_tonnes_stream, physical) / physical
+            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        source_property_weights = {
+            str(name).strip().lower(): str(weight).strip().lower()
+            for name, weight in dict(
+                solver_config.get("source_property_weights") or {}
+            ).items()
+            if str(name).strip() and str(weight).strip()
+        }
+
+        def used_grade_stream(event, analyte):
+            for warning in getattr(event, "grade_stream_warnings", []) or []:
+                if str(warning.get("analyte") or "").lower() == analyte:
+                    return str(warning.get("used_stream") or selected_data_stream).lower()
+            return selected_data_stream
+
+        grade_weight_coefficients = {}
+        for analyte in ("fe", "si", "al", "p", "mn"):
+            coefficients = []
+            for event, physical in zip(event_pool, physical_tonnes):
+                grade_field = f"{used_grade_stream(event, analyte)}_{analyte}"
+                weight_field = source_property_weights.get(grade_field)
+                weight_tonnes = stream_tonnes(
+                    event, weight_field, physical
+                ) if weight_field else physical
+                coefficients.append(
+                    weight_tonnes / physical
+                    if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+                )
+            grade_weight_coefficients[analyte] = coefficients
+
+        # The decision variable is physical ROM depletion. Reclaimer capacity
+        # is converted from the selected reclaimer stream back to that physical
+        # basis for each source independently.
+        bounds = []
+        for event, coefficient in zip(event_pool, reclaimer_coefficients):
+            reclaim_capacity = max(safe_float(event.rate), 0.0) * steady_state_duration
+            physical_capacity = (
+                reclaim_capacity / coefficient
+                if coefficient > Optimizer.SOLUTION_TOLERANCE else 0.0
+            )
+            bounds.append((0, min(max(safe_float(event.balance), 0.0), physical_capacity)))
         brand_guidance_mode = solver_config.get("brand_guidance_mode", "ignore")
         brand_guidance_enabled = bool(
             solver_config.get(
@@ -853,8 +931,8 @@ class Optimizer:
             0.0,
         )
         c = [
-            cost - throughput_incentive_per_tonne
-            for cost in base_costs
+            cost - throughput_incentive_per_tonne * crusher_coefficient
+            for cost, crusher_coefficient in zip(base_costs, crusher_coefficients)
         ]
 
         # Equality constraint is only used when a stockpile is depleted early
@@ -886,35 +964,35 @@ class Optimizer:
 
         # Minimum crusher grade (turned into an upper-bound inequality)
         if enforce_calendar_crusher_grades:
-            A_ub_min_crusher_grade_fe = [[-event.grade_fe + period_crusher_target["target_fe_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            A_ub_min_crusher_grade_fe = [[coefficient * (-event.grade_fe + period_crusher_target["target_fe_min"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["fe"])]]
             b_ub_min_crusher_grade_fe = [0]
 
-            A_ub_min_crusher_grade_si = [[-event.grade_si + period_crusher_target["target_si_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            A_ub_min_crusher_grade_si = [[coefficient * (-event.grade_si + period_crusher_target["target_si_min"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["si"])]]
             b_ub_min_crusher_grade_si = [0]
 
-            A_ub_min_crusher_grade_al = [[-event.grade_al + period_crusher_target["target_al_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            A_ub_min_crusher_grade_al = [[coefficient * (-event.grade_al + period_crusher_target["target_al_min"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["al"])]]
             b_ub_min_crusher_grade_al = [0]
 
-            A_ub_min_crusher_grade_p = [[-event.grade_p + period_crusher_target["target_p_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            A_ub_min_crusher_grade_p = [[coefficient * (-event.grade_p + period_crusher_target["target_p_min"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["p"])]]
             b_ub_min_crusher_grade_p = [0]
 
-            A_ub_min_crusher_grade_mn = [[-event.grade_mn + period_crusher_target["target_mn_min"] for event in event_pool]]  # Multiply by -1 to enforce "greater than or equal to"
+            A_ub_min_crusher_grade_mn = [[coefficient * (-event.grade_mn + period_crusher_target["target_mn_min"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["mn"])]]
             b_ub_min_crusher_grade_mn = [0]
 
             # Max crusher grade (upper-bound inequality)
-            A_ub_max_crusher_grade_fe = [[event.grade_fe - period_crusher_target["target_fe_max"] for event in event_pool]]
+            A_ub_max_crusher_grade_fe = [[coefficient * (event.grade_fe - period_crusher_target["target_fe_max"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["fe"])]]
             b_ub_max_crusher_grade_fe = [0]
 
-            A_ub_max_crusher_grade_si = [[event.grade_si - period_crusher_target["target_si_max"] for event in event_pool]]
+            A_ub_max_crusher_grade_si = [[coefficient * (event.grade_si - period_crusher_target["target_si_max"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["si"])]]
             b_ub_max_crusher_grade_si = [0]
 
-            A_ub_max_crusher_grade_al = [[event.grade_al - period_crusher_target["target_al_max"] for event in event_pool]]
+            A_ub_max_crusher_grade_al = [[coefficient * (event.grade_al - period_crusher_target["target_al_max"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["al"])]]
             b_ub_max_crusher_grade_al = [0]
 
-            A_ub_max_crusher_grade_p = [[event.grade_p - period_crusher_target["target_p_max"] for event in event_pool]]
+            A_ub_max_crusher_grade_p = [[coefficient * (event.grade_p - period_crusher_target["target_p_max"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["p"])]]
             b_ub_max_crusher_grade_p = [0]
 
-            A_ub_max_crusher_grade_mn = [[event.grade_mn - period_crusher_target["target_mn_max"] for event in event_pool]]
+            A_ub_max_crusher_grade_mn = [[coefficient * (event.grade_mn - period_crusher_target["target_mn_max"]) for event, coefficient in zip(event_pool, grade_weight_coefficients["mn"])]]
             b_ub_max_crusher_grade_mn = [0]
         else:
             A_ub_min_crusher_grade_fe = []
@@ -939,7 +1017,7 @@ class Optimizer:
             b_ub_max_crusher_grade_mn = []
 
         # Step 3: Crusher capacity constraint
-        A_ub = [[1] * len(event_pool)]  # Sum of all events' tonnes
+        A_ub = [crusher_coefficients]
         b_ub = [period_crusher_target["crusher_rate"] * steady_state_duration]  # Must be <= crusher rate * steady state duration
 
         # Generate a list of indices for each unique stockpile/source.
@@ -978,12 +1056,14 @@ class Optimizer:
                 min_row = [0] * len(event_pool)
                 max_row = [0] * len(event_pool)
                 for event_index in stockpile_indices:
+                    analyte = grade_attribute.replace("grade_", "")
+                    grade_weight = grade_weight_coefficients[analyte][event_index]
                     min_row[event_index] = (
                         period_crusher_target[min_key] - getattr(event_pool[event_index], grade_attribute)
-                    )
+                    ) * grade_weight
                     max_row[event_index] = (
                         getattr(event_pool[event_index], grade_attribute) - period_crusher_target[max_key]
-                    )
+                    ) * grade_weight
                 A_ub_stockpile_grade_feasibility.extend([min_row, max_row])
                 b_ub_stockpile_grade_feasibility.extend([0, 0])
 
@@ -1003,7 +1083,24 @@ class Optimizer:
             product_build_can_complete = Optimizer.product_build_can_complete_in_steady_state(
                 target_product_tonnes,
                 opening_product_tonnes,
-                safe_float(period_crusher_target.get("crusher_rate"), 0.0),
+                min(
+                    sum(
+                        upper * coefficient
+                        for (_, upper), coefficient in zip(bounds, product_build_coefficients)
+                    ),
+                    safe_float(period_crusher_target.get("crusher_rate"), 0.0)
+                    * steady_state_duration
+                    * max(
+                        (
+                            product_coefficient / crusher_coefficient
+                            if crusher_coefficient > Optimizer.SOLUTION_TOLERANCE
+                            else 0.0
+                        )
+                        for product_coefficient, crusher_coefficient in zip(
+                            product_build_coefficients, crusher_coefficients
+                        )
+                    ),
+                ) / max(steady_state_duration, Optimizer.SOLUTION_TOLERANCE),
                 steady_state_duration,
             )
             allow_offspec_build_state = bool(
@@ -1025,12 +1122,12 @@ class Optimizer:
                     min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
                     max_target = safe_float(target_product_build.get(f"target_{grade_key}_max"), 100.0)
                     A_ub_product_build_grade.extend([
-                        [min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0)) for event in event_pool],
+                        [coefficient * (min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0))) for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])],
                         [
-                            safe_float(
+                            coefficient * (safe_float(
                                 getattr(event, f"grade_{grade_key}", 0.0)
-                            ) - max_target
-                            for event in event_pool
+                            ) - max_target)
+                            for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
                         ],
                     ])
                     b_ub_product_build_grade.extend([0, 0])
@@ -1045,19 +1142,23 @@ class Optimizer:
                         target_product_build_state.get(f"grade_{grade_key}_metal"),
                         0.0,
                     )
+                    opening_grade_weight = safe_float(
+                        target_product_build_state.get(f"grade_{grade_key}_weight"),
+                        opening_product_tonnes,
+                    )
 
                     min_row = [
-                        min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0))
-                        for event in event_pool
+                        coefficient * (min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0)))
+                        for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
                     ]
                     max_row = [
-                        safe_float(getattr(event, f"grade_{grade_key}", 0.0)) - max_target
-                        for event in event_pool
+                        coefficient * (safe_float(getattr(event, f"grade_{grade_key}", 0.0)) - max_target)
+                        for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
                     ]
                     A_ub_product_build_grade.extend([min_row, max_row])
                     b_ub_product_build_grade.extend([
-                        opening_grade_metal - min_target * opening_product_tonnes,
-                        max_target * opening_product_tonnes - opening_grade_metal,
+                        opening_grade_metal - min_target * opening_grade_weight,
+                        max_target * opening_grade_weight - opening_grade_metal,
                     ])
 
         # Step 4: Add a constraint for grade block to stockpile feed ratio
@@ -1585,6 +1686,18 @@ class Optimizer:
                             ),
                             "opening_balance": event.balance,
                             "actual_tonnes": result.x[i],
+                            "reclaimer_source_tonnes": result.x[i] * reclaimer_coefficients[i],
+                            "crusher_source_tonnes": result.x[i] * crusher_coefficients[i],
+                            "product_build_source_tonnes": result.x[i] * product_build_coefficients[i],
+                            **{
+                                f"selected_grade_weight_{analyte}_tonnes": (
+                                    result.x[i] * grade_weight_coefficients[analyte][i]
+                                )
+                                for analyte in ("fe", "si", "al", "p", "mn")
+                            },
+                            "reclaimer_tonnes_stream": reclaimer_tonnes_stream,
+                            "crusher_tonnes_stream": crusher_tonnes_stream,
+                            "product_build_tonnes_stream": product_build_tonnes_stream,
                             "grade_fe": event.grade_fe,
                             "grade_si": event.grade_si,
                             "grade_al": event.grade_al,
@@ -1607,7 +1720,7 @@ class Optimizer:
                             **property_audit_fields,
                             "equipment": event.equipment,
                             "equipment_rate_input": event.rate,
-                            "equipment_rate_output": result.x[i]
+                            "equipment_rate_output": result.x[i] * reclaimer_coefficients[i]
                             / steady_state_duration
                             if steady_state_duration != 0
                             else 0,
@@ -1634,35 +1747,35 @@ class Optimizer:
                 "transactions": transactions,
                 "steady_state_duration": steady_state_duration,
                 "crusher_actual_grade_fe": sum(
-                    event.grade_fe * result.x[i] for i, event in enumerate(event_pool)
+                    event.grade_fe * result.x[i] * grade_weight_coefficients["fe"][i] for i, event in enumerate(event_pool)
                 )
-                / sum(result.x)
-                if sum(result.x) != 0
+                / sum(result.x[i] * grade_weight_coefficients["fe"][i] for i in range(len(event_pool)))
+                if sum(result.x[i] * grade_weight_coefficients["fe"][i] for i in range(len(event_pool))) != 0
                 else "",
                 "crusher_actual_grade_si": sum(
-                    event.grade_si * result.x[i] for i, event in enumerate(event_pool)
+                    event.grade_si * result.x[i] * grade_weight_coefficients["si"][i] for i, event in enumerate(event_pool)
                 )
-                / sum(result.x)
-                if sum(result.x) != 0
+                / sum(result.x[i] * grade_weight_coefficients["si"][i] for i in range(len(event_pool)))
+                if sum(result.x[i] * grade_weight_coefficients["si"][i] for i in range(len(event_pool))) != 0
                 else "",
                 "crusher_actual_grade_al": sum(
-                    event.grade_al * result.x[i] for i, event in enumerate(event_pool)
+                    event.grade_al * result.x[i] * grade_weight_coefficients["al"][i] for i, event in enumerate(event_pool)
                 )
-                / sum(result.x)
-                if sum(result.x) != 0
+                / sum(result.x[i] * grade_weight_coefficients["al"][i] for i in range(len(event_pool)))
+                if sum(result.x[i] * grade_weight_coefficients["al"][i] for i in range(len(event_pool))) != 0
                 else "",
                 "crusher_actual_grade_p": sum(
-                    event.grade_p * result.x[i] for i, event in enumerate(event_pool)
+                    event.grade_p * result.x[i] * grade_weight_coefficients["p"][i] for i, event in enumerate(event_pool)
                 )
-                / sum(result.x)
-                if sum(result.x) != 0
+                / sum(result.x[i] * grade_weight_coefficients["p"][i] for i in range(len(event_pool)))
+                if sum(result.x[i] * grade_weight_coefficients["p"][i] for i in range(len(event_pool))) != 0
                 else "",
                 "crusher_actual_grade_mn": sum(
-                    event.grade_mn * result.x[i]
+                    event.grade_mn * result.x[i] * grade_weight_coefficients["mn"][i]
                     for i, event in enumerate(event_pool)
                 )
-                / sum(result.x)
-                if sum(result.x) != 0
+                / sum(result.x[i] * grade_weight_coefficients["mn"][i] for i in range(len(event_pool)))
+                if sum(result.x[i] * grade_weight_coefficients["mn"][i] for i in range(len(event_pool))) != 0
                 else "",
                 "crusher_grade_target_min_fe": period_crusher_target["target_fe_min"],
                 "crusher_grade_target_max_fe": period_crusher_target["target_fe_max"],
@@ -1675,10 +1788,11 @@ class Optimizer:
                 "crusher_grade_target_min_mn": period_crusher_target["target_mn_min"],
                 "crusher_grade_target_max_mn": period_crusher_target["target_mn_max"],
                 "crusher_rate_input": period_crusher_target["crusher_rate"],
-                "crusher_rate_output": sum(result.x) / steady_state_duration
+                "crusher_rate_output": sum(result.x[i] * crusher_coefficients[i] for i in range(len(event_pool))) / steady_state_duration
                 if steady_state_duration != 0
                 else 0,
-                "crusher_actual_tonnes": sum(result.x),
+                "crusher_actual_tonnes": sum(result.x[i] * crusher_coefficients[i] for i in range(len(event_pool))),
+                "product_build_actual_tonnes": sum(result.x[i] * product_build_coefficients[i] for i in range(len(event_pool))),
                 **custom_constraint_fields,
                 "solver_score": solver_score,
                 "solver_objective_value": objective_value,

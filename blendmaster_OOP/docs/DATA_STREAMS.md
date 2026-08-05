@@ -13,6 +13,43 @@ Resolution falls back independently per analyte in the order selected stream,
 next available upstream stream, then the legacy grade. A warning is retained
 when fallback occurs.
 
+## Independent optimiser tonne streams
+
+The selected grade stream answers only *which grades* are constrained.  The
+Data Streams page separately selects the additive field used for each mass
+basis:
+
+- **Crusher Tonnes Stream** (default `modelled_rom_wmt`) drives only crusher
+  throughput and capacity. It does not change grade weighting.
+- **Reclaimer Tonnes Stream** (default `modelled_rom_wmt`) drives the reported
+  reclaimer rate and per-source reclaim capacity. Physical source depletion
+  and opening/closing balances remain ROM WMT so inventory reconciliation is
+  never distorted.
+- **Product Build Tonnes Stream** (default `modelled_product_wmt`) drives
+  product-build accumulation and completion. It does not override a grade's
+  configured weight field.
+
+Calendar grades, product-build grades, optimised profiles and manual profiles
+all use the selected Optimiser Grade Stream. Each analyte is independently
+weighted by the additive Weight Field configured for that grade in Define
+Fields. For example, an adjusted product Fe field weighted by
+`modelled_product_dmt` continues to use product DMT even when crusher capacity
+is configured in ROM WMT.
+
+For example, selecting `adjusted_product` as the optimiser grade stream does
+not turn a 100 kt ROM source into 100 kt of product. Its product build receives
+only that source's mapped `modelled_product_wmt` (or the user-selected product
+tonne field). The selected fields are loaded even when they are not checked as
+general optimisation properties, because they are required to define the
+solver's physical bases. Legacy rows without the canonical field fall back to
+their physical ROM quantity to remain runnable.
+
+For every additive field enabled for optimisation, the source-level reports
+carry its opening balance, transaction depletion (the unsuffixed
+`source_property_<field>` column), and closing balance. Stockpile build
+transactions additionally carry `<field>_opening_balance`, `<field>_built`
+and `<field>_closing_balance`.
+
 ## Canonical field workflow
 
 The Setup sequence is:

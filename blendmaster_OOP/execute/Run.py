@@ -309,6 +309,12 @@ class Run:
         solver_config["selected_data_stream"] = (
             (site_context or {}).get("selected_data_stream") or "adjusted_product"
         )
+        for key, default in {
+            "crusher_tonnes_stream": "modelled_rom_wmt",
+            "reclaimer_tonnes_stream": "modelled_rom_wmt",
+            "product_build_tonnes_stream": "modelled_product_wmt",
+        }.items():
+            solver_config[key] = (site_context or {}).get(key) or solver_config.get(key) or default
         solver_config["configured_product_brands"] = list(
             (site_context or {}).get("product_brands", []) or []
         )

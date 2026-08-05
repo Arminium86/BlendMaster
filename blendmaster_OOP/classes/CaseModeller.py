@@ -138,6 +138,14 @@ class CaseModeller:
         selected_stream = str(
             self.solver_config.get("selected_data_stream") or ""
         ).strip().lower()
+        required_source_property_keys.update(
+            str(self.solver_config.get(key) or default)
+            for key, default in {
+                "crusher_tonnes_stream": "modelled_rom_wmt",
+                "reclaimer_tonnes_stream": "modelled_rom_wmt",
+                "product_build_tonnes_stream": "modelled_product_wmt",
+            }.items()
+        )
         if selected_stream in STREAMS:
             required_source_property_keys.update(
                 f"{selected_stream}_{analyte}" for analyte in ANALYTES
@@ -211,10 +219,15 @@ class CaseModeller:
             {
                 "tonnes": 0.0,
                 "grade_fe_metal": 0.0,
+                "grade_fe_weight": 0.0,
                 "grade_si_metal": 0.0,
+                "grade_si_weight": 0.0,
                 "grade_al_metal": 0.0,
+                "grade_al_weight": 0.0,
                 "grade_p_metal": 0.0,
+                "grade_p_weight": 0.0,
                 "grade_mn_metal": 0.0,
+                "grade_mn_weight": 0.0,
             }
             for _ in self.product_build_settings
         ]
@@ -396,18 +409,23 @@ class CaseModeller:
             return None
 
         data = selected_results.copy()
-        if "source_actual_tonnes" not in data or "crusher_actual_tonnes" not in data:
-            return None
-        data["source_actual_tonnes"] = pd.to_numeric(data["source_actual_tonnes"], errors="coerce").fillna(0)
-        data["crusher_actual_tonnes"] = pd.to_numeric(data["crusher_actual_tonnes"], errors="coerce").fillna(0)
+        if "product_build_source_tonnes" not in data:
+            # Existing reports and callers use the historical physical ROM
+            # quantity.  Keep them readable while new runs provide the
+            # explicit product-build stream.
+            data["product_build_source_tonnes"] = data.get(
+                "source_actual_tonnes", 0
+            )
+        data["product_build_source_tonnes"] = pd.to_numeric(
+            data["product_build_source_tonnes"], errors="coerce"
+        ).fillna(0)
         data = data[
-            (data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
-            & (data["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
+            data["product_build_source_tonnes"] > Optimizer.SOLUTION_TOLERANCE
         ]
         if data.empty:
             return None
 
-        crusher_tonnes = float(data["crusher_actual_tonnes"].iloc[0] or 0)
+        product_tonnes = float(data["product_build_source_tonnes"].sum() or 0)
         build_index = self.current_product_build_index()
         if build_index is None:
             return None
@@ -418,13 +436,20 @@ class CaseModeller:
         if capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
             return build_index
 
-        allocation_tonnes = min(crusher_tonnes, capacity)
-        allocation_fraction = allocation_tonnes / crusher_tonnes if crusher_tonnes else 0
+        allocation_tonnes = min(product_tonnes, capacity)
+        allocation_fraction = allocation_tonnes / product_tonnes if product_tonnes else 0
         for _, row in data.iterrows():
-            source_to_build = float(row.get("source_actual_tonnes") or 0) * allocation_fraction
             for grade in ["fe", "si", "al", "p", "mn"]:
                 grade_value = float(row.get(f"source_grade_{grade}") or 0)
-                build_state[f"grade_{grade}_metal"] += source_to_build * grade_value
+                grade_weight = float(
+                    row.get(f"selected_grade_weight_{grade}_tonnes")
+                    or row.get("product_build_source_tonnes")
+                    or 0
+                ) * allocation_fraction
+                build_state[f"grade_{grade}_metal"] += grade_weight * grade_value
+                build_state[f"grade_{grade}_weight"] = float(
+                    build_state.get(f"grade_{grade}_weight", build_state.get("tonnes", 0))
+                ) + grade_weight
         build_state["tonnes"] += allocation_tonnes
         if (
             build_state["tonnes"]
@@ -587,7 +612,9 @@ class CaseModeller:
             and Optimizer.product_build_can_complete_in_steady_state(
                 build_setting["target_tonnes"],
                 build_state["tonnes"],
-                period_crusher_target.get("crusher_rate", 0.0),
+                self.product_build_capacity_rate(
+                    period_crusher_target.get("crusher_rate", 0.0)
+                ),
                 steady_state_duration,
             )
         )
@@ -1513,11 +1540,40 @@ class CaseModeller:
                 )
             except (TypeError, ValueError):
                 crusher_rate = 0.0
-            remaining_capacity += crusher_rate * hours
+            remaining_capacity += (
+                self.product_build_capacity_rate(crusher_rate) * hours
+            )
 
         return remaining_tonnes <= (
             remaining_capacity + self.PRODUCT_BUILD_TONNES_TOLERANCE
         )
+
+    def product_build_capacity_rate(self, crusher_rate):
+        """Convert configured crusher capacity to an optimistic build rate."""
+        crusher_stream = str(
+            self.solver_config.get("crusher_tonnes_stream")
+            or "modelled_rom_wmt"
+        )
+        product_stream = str(
+            self.solver_config.get("product_build_tonnes_stream")
+            or "modelled_product_wmt"
+        )
+        ratios = []
+        for event in getattr(self, "event_pool", []) or []:
+            properties = getattr(event, "source_properties", {}) or {}
+            try:
+                physical = float(event.balance or 0)
+                crusher_tonnes = float(properties.get(crusher_stream) or physical)
+                product_tonnes = float(properties.get(product_stream) or physical)
+            except (TypeError, ValueError):
+                continue
+            if crusher_tonnes > Optimizer.SOLUTION_TOLERANCE:
+                ratios.append(max(product_tonnes, 0.0) / crusher_tonnes)
+        ratio = max(ratios) if ratios else 1.0
+        try:
+            return max(float(crusher_rate), 0.0) * ratio
+        except (TypeError, ValueError):
+            return 0.0
 
     def configured_min_grade_block_pair_duration_hours(self):
         try:
@@ -2266,7 +2322,12 @@ class CaseModeller:
         if build_state["tonnes"] <= Optimizer.SOLUTION_TOLERANCE:
             return False
         for grade in ["fe", "si", "al", "p", "mn"]:
-            grade_value = build_state[f"grade_{grade}_metal"] / build_state["tonnes"]
+            grade_weight = float(
+                build_state.get(f"grade_{grade}_weight", build_state["tonnes"])
+            )
+            if grade_weight <= Optimizer.SOLUTION_TOLERANCE:
+                return False
+            grade_value = build_state[f"grade_{grade}_metal"] / grade_weight
             if (
                 grade_value < build_setting[f"target_{grade}_min"]
                 or grade_value > build_setting[f"target_{grade}_max"]
@@ -2332,6 +2393,10 @@ class CaseModeller:
         data = self.group_grade_block_rows(self.results).copy()
         data["source_actual_tonnes"] = pd.to_numeric(data.get("source_actual_tonnes"), errors="coerce").fillna(0)
         data["crusher_actual_tonnes"] = pd.to_numeric(data.get("crusher_actual_tonnes"), errors="coerce").fillna(0)
+        data["product_build_source_tonnes"] = pd.to_numeric(
+            data.get("product_build_source_tonnes", data["source_actual_tonnes"]),
+            errors="coerce",
+        ).fillna(0)
         data = data[
             (data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
             & (data["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
@@ -2346,10 +2411,15 @@ class CaseModeller:
             {
                 "tonnes": 0.0,
                 "grade_fe_metal": 0.0,
+                "grade_fe_weight": 0.0,
                 "grade_si_metal": 0.0,
+                "grade_si_weight": 0.0,
                 "grade_al_metal": 0.0,
+                "grade_al_weight": 0.0,
                 "grade_p_metal": 0.0,
+                "grade_p_weight": 0.0,
                 "grade_mn_metal": 0.0,
+                "grade_mn_weight": 0.0,
             }
             for _ in self.product_build_settings
         ]
@@ -2362,7 +2432,8 @@ class CaseModeller:
                 break
 
             crusher_tonnes = float(steady_state_group["crusher_actual_tonnes"].iloc[0] or 0)
-            if crusher_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+            product_tonnes = float(steady_state_group["product_build_source_tonnes"].sum() or 0)
+            if product_tonnes <= Optimizer.SOLUTION_TOLERANCE:
                 continue
 
             build_setting = self.product_build_settings[active_build_index]
@@ -2373,15 +2444,21 @@ class CaseModeller:
                 active_build_index += 1
                 continue
 
-            allocation_tonnes = min(crusher_tonnes, build_capacity)
-            allocation_fraction = allocation_tonnes / crusher_tonnes if crusher_tonnes else 0
+            allocation_tonnes = min(product_tonnes, build_capacity)
+            allocation_fraction = allocation_tonnes / product_tonnes if product_tonnes else 0
 
             for _, row in steady_state_group.iterrows():
                 source_tonnes = float(row.get("source_actual_tonnes") or 0)
-                source_to_build = source_tonnes * allocation_fraction
+                source_to_build = float(row.get("product_build_source_tonnes") or 0) * allocation_fraction
                 for grade in ["fe", "si", "al", "p", "mn"]:
                     grade_value = float(row.get(f"source_grade_{grade}") or 0)
-                    build_state[f"grade_{grade}_metal"] += source_to_build * grade_value
+                    grade_weight = float(
+                        row.get(f"selected_grade_weight_{grade}_tonnes")
+                        or row.get("product_build_source_tonnes")
+                        or 0
+                    ) * allocation_fraction
+                    build_state[f"grade_{grade}_metal"] += grade_weight * grade_value
+                    build_state[f"grade_{grade}_weight"] += grade_weight
 
                 records.append({
                     "product_build_id": build_setting["build_id"],
@@ -2440,8 +2517,8 @@ class CaseModeller:
             build_on_spec = self.product_build_grade_on_spec(build_state, build_setting) if build_complete else False
             build_grades = {
                 f"build_grade_{grade}": (
-                    build_state[f"grade_{grade}_metal"] / build_state["tonnes"]
-                    if build_state["tonnes"] > Optimizer.SOLUTION_TOLERANCE
+                    build_state[f"grade_{grade}_metal"] / build_state[f"grade_{grade}_weight"]
+                    if build_state[f"grade_{grade}_weight"] > Optimizer.SOLUTION_TOLERANCE
                     else 0
                 )
                 for grade in ["fe", "si", "al", "p", "mn"]
