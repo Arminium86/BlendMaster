@@ -9,8 +9,40 @@ import requests
 from dash import dcc, html, Input, Output, dash_table, Dash
 from flask import Flask, jsonify, request
 import threading
+import math
 from datetime import date, datetime
 from classes.ManualBlendRules import ManualBlendRules
+
+
+def grade_profile_y_axis_settings(values):
+    """Return a readable, one-decimal grade axis with no duplicate labels."""
+    numeric_values = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if numeric_values.empty:
+        return {"tickformat": ".1f"}
+
+    minimum = float(numeric_values.min())
+    maximum = float(numeric_values.max())
+    span = max(maximum - minimum, 0.0)
+    target_step = max(span / 6.0, 0.01)
+    step = next(
+        candidate
+        for candidate in (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0)
+        if candidate >= target_step
+    )
+    lower = math.floor(minimum / step) * step
+    upper = math.ceil(maximum / step) * step
+    if upper <= lower:
+        lower -= step
+        upper += step
+
+    return {
+        "autorange": False,
+        "range": [lower, upper],
+        "tickmode": "linear",
+        "dtick": step,
+        "tickformat": ".1f",
+    }
+
 
 class ManualBlendDash:
     def __init__(self, stored_blend_sequence_table_for_gantt, manual_gantt_legend_and_tooltip, port, crusher_rate):
@@ -1055,7 +1087,7 @@ class DrawGradeProfiles:
             )
             fig.update_traces(mode='lines')
             fig.update_layout(hovermode="x unified")
-            fig.update_yaxes(type="linear", autorange=True)
+            fig.update_yaxes(type="linear", **grade_profile_y_axis_settings(grade_data["grade"]))
             charts.append(html.Div(dcc.Graph(figure=fig), style={'margin-bottom': '20px'}))
 
         return charts
@@ -1437,7 +1469,16 @@ class DrawOptimisedGradeProfiles:
                 margin=dict(l=60, r=24, t=54, b=46),
             )
             fig.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.30)", zeroline=False)
-            fig.update_yaxes(type="linear", autorange=True, showgrid=True, gridcolor="rgba(148, 163, 184, 0.35)", zeroline=False)
+            fig.update_yaxes(
+                type="linear",
+                # Keep the Optimised chart on the same basis as Manual:
+                # selected-stream Crusher Feed grades.  Product Build is an
+                # additional cumulative series and must not alter that scale.
+                **grade_profile_y_axis_settings(crusher_grade_data["grade"]),
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.35)",
+                zeroline=False,
+            )
             charts.append(html.Div(
                 dcc.Graph(figure=fig, config={"displayModeBar": False, "responsive": True}),
                 style={
