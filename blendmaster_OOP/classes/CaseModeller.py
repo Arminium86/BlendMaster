@@ -1558,8 +1558,19 @@ class CaseModeller:
             self.solver_config.get("product_build_tonnes_stream")
             or "modelled_product_wmt"
         )
+        event_pool = getattr(self, "event_pool", None)
+        if isinstance(event_pool, EventPoolGenerator):
+            capacity_sources = [
+                *(event_pool.stockpiles or []),
+                *(event_pool.grade_blocks or []),
+            ]
+        else:
+            # Retain compatibility with callers and tests that provide an
+            # already-generated event list.
+            capacity_sources = event_pool or []
+
         ratios = []
-        for event in getattr(self, "event_pool", []) or []:
+        for event in capacity_sources:
             properties = getattr(event, "source_properties", {}) or {}
             try:
                 physical = float(event.balance or 0)
