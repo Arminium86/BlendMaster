@@ -2751,6 +2751,14 @@ class DrawAMTStockpile:
                 if total_tonnes > 0
             },
         }
+        # ROM WMT is the physical opening balance of this chunk.  Never carry
+        # a footprint-level mapped ROM WMT into a chunk: it would provide a
+        # false scaling reference for every other additive property.
+        for quantity_field in ("source_wmt", "modelled_rom_wmt"):
+            modelled_properties["values"][quantity_field] = total_tonnes
+            modelled_properties["coverage"][quantity_field] = (
+                1.0 if total_tonnes > 0 else 0.0
+            )
         # Canonical weighted-average fields are the authoritative chunk values.
         weighted_streams = reweight_grade_streams_from_properties(
             weighted_streams, modelled_properties["values"]

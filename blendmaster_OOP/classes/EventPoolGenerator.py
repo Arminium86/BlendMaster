@@ -175,6 +175,13 @@ class EventPoolGenerator:
                 )
                 if callable(get_properties):
                     event.source_properties = get_properties(event.stockpile)
+                get_active_chunk = getattr(
+                    balance_tracker, "get_active_amt_chunk_id", None
+                )
+                if event.is_amt and callable(get_active_chunk):
+                    event.source_name = (
+                        get_active_chunk(event.stockpile) or event.stockpile
+                    )
             elif event.is_grade_block:
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p = balance_tracker.get_balance(event.grade_block)
                 event.grade_streams = balance_tracker.get_grade_streams(event.grade_block)

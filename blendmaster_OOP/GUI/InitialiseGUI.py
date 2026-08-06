@@ -3758,6 +3758,15 @@ class UserInputs(QMainWindow):
         # differ by brand.
         source_type = str(record.get("source_type") or "").strip().lower()
         if "stockpile" in source_type or source_type.startswith("amt chunk"):
+            # Inventory and AMT ROM WMT is their physical opening balance.
+            # This direct value also repairs legacy saved chunks containing a
+            # footprint-level mapped ROM quantity in modelled_properties.
+            opening_wmt = numeric(
+                record.get("tonnes", record.get("balance"))
+            )
+            if opening_wmt is not None:
+                record["source_wmt"] = opening_wmt
+                record["modelled_rom_wmt"] = opening_wmt
             rom_by_brand = normalized_streams.setdefault("modelled_rom", {})
             unbranded_rom = rom_by_brand.get("*")
             if not isinstance(unbranded_rom, dict):
@@ -12378,10 +12387,19 @@ class UserInputs(QMainWindow):
 
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
+        sort_header = self.stockpile_table.horizontalHeader()
+        previous_sorting_enabled = self.stockpile_table.isSortingEnabled()
+        previous_sort_column = sort_header.sortIndicatorSection()
+        previous_sort_order = sort_header.sortIndicatorOrder()
+        # Sorting while adding rows causes Qt to move partially populated rows.
+        # Disable it for construction, then restore interactive header sorting.
+        self.stockpile_table.setSortingEnabled(False)
         headers = self.stockpile_inventory_headers()
         self.stockpile_table.setColumnCount(len(headers))
         self.stockpile_table.setHorizontalHeaderLabels(headers)
         self.stockpile_table.verticalHeader().setVisible(False)
+        sort_header.setSectionsClickable(True)
+        sort_header.setSortIndicatorShown(True)
 
         # Bold headers
         header_font = self.stockpile_table.horizontalHeader().font()
@@ -12518,7 +12536,8 @@ class UserInputs(QMainWindow):
                 if key == "BALANCE" or key == 'balance':
                     # Round balance and apply conditional formatting
                     value = float(value) if value else 0.0
-                    balance_item = QTableWidgetItem(f"{value:,.0f}")
+                    balance_item = NumericSortTableWidgetItem(f"{value:,.0f}")
+                    balance_item.setData(Qt.UserRole, value)
                     balance_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     balance_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     if value < 0:
@@ -12543,7 +12562,8 @@ class UserInputs(QMainWindow):
                 else:
                     # Round grade values to 2 decimal points
                     value = round(float(value), 2) if value else 0
-                    grade_item = QTableWidgetItem(f"{value:.2f}")
+                    grade_item = NumericSortTableWidgetItem(f"{value:.2f}")
+                    grade_item.setData(Qt.UserRole, value)
                     grade_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                     grade_item.setTextAlignment(Qt.AlignCenter)  # Center-align value
                     self.stockpile_table.setItem(row_idx, col_idx, grade_item)
@@ -12557,7 +12577,8 @@ class UserInputs(QMainWindow):
                     max_reclaim_rate = float(max_reclaim_rate)
                 except (TypeError, ValueError):
                     max_reclaim_rate = 1000.0
-                max_rate_item = QTableWidgetItem(f"{max_reclaim_rate:g}")
+                max_rate_item = NumericSortTableWidgetItem(f"{max_reclaim_rate:g}")
+                max_rate_item.setData(Qt.UserRole, max_reclaim_rate)
                 max_rate_item.setTextAlignment(Qt.AlignCenter)
                 self.stockpile_table.setItem(
                     row_idx,
@@ -12568,7 +12589,8 @@ class UserInputs(QMainWindow):
             # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
             reclaim_value = float(reclaim_value)
-            reclaim_item = QTableWidgetItem(f"{reclaim_value:,.0f}")
+            reclaim_item = NumericSortTableWidgetItem(f"{reclaim_value:,.0f}")
+            reclaim_item.setData(Qt.UserRole, reclaim_value)
             reclaim_item.setTextAlignment(Qt.AlignCenter)
             self.stockpile_table.setItem(
                 row_idx,
@@ -12586,6 +12608,10 @@ class UserInputs(QMainWindow):
             self.stockpile_table.horizontalHeader().setSectionResizeMode(
                 column, resize_mode
             )
+
+        self.stockpile_table.setSortingEnabled(True)
+        if previous_sorting_enabled and 0 <= previous_sort_column < len(headers):
+            self.stockpile_table.sortItems(previous_sort_column, previous_sort_order)
 
         if self.setup_stockpile_table_first_call:
             # Connect cellChanged signal to a slot for live formatting
@@ -12653,9 +12679,12 @@ class UserInputs(QMainWindow):
             if rate_item is None:
                 return
             try:
-                valid_rate = float(rate_item.text()) > 0
+                rate_value = float(rate_item.text())
+                valid_rate = rate_value > 0
             except (AttributeError, TypeError, ValueError):
                 valid_rate = False
+            else:
+                rate_item.setData(Qt.UserRole, rate_value)
             rate_item.setForeground(QColor("green" if valid_rate else "red"))
             return
 
@@ -12674,6 +12703,7 @@ class UserInputs(QMainWindow):
                     if reclaim_value is None or balance_value is None:
                         raise ValueError("Invalid formatted tonnage")
 
+                    reclaim_item.setData(Qt.UserRole, reclaim_value)
                     # Apply conditional formatting
                     if reclaim_value <= balance_value:
                         reclaim_item.setForeground(QColor("green"))
@@ -20169,6 +20199,21 @@ class UserInputs(QMainWindow):
         shutil.rmtree(getattr(self, "scenario_session_directory", ""), ignore_errors=True)
         super().closeEvent(event)
     
+class NumericSortTableWidgetItem(QTableWidgetItem):
+    """A table item that sorts by its numeric UserRole when one is supplied."""
+
+    def __lt__(self, other):
+        if isinstance(other, QTableWidgetItem):
+            left = self.data(Qt.UserRole)
+            right = other.data(Qt.UserRole)
+            try:
+                if left is not None and right is not None:
+                    return float(left) < float(right)
+            except (TypeError, ValueError):
+                pass
+        return super().__lt__(other)
+
+
 class CustomTableWidget(QTableWidget):
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.Copy):

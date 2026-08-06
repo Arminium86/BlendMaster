@@ -84,7 +84,14 @@ class BalanceTracker:
         self.populate_total_AMT_stockpile_balances()
 
     def _synchronise_rom_wmt_properties(self, name, properties, balance=None):
-        """Scale every additive field onto the tracked ROM WMT balance."""
+        """Keep physical ROM quantity fields aligned with the tracked balance.
+
+        Other additive properties already belong to the active source scope
+        (an AMT chunk, inventory stockpile, or grade block).  They must not be
+        rescaled from a possibly footprint-level ROM field: doing so corrupts
+        every valid chunk property whenever a footprint contains >1 chunk.
+        Depletion scaling is performed explicitly by the caller.
+        """
         result = dict(properties or {})
         try:
             current_balance = max(float(
@@ -92,29 +99,6 @@ class BalanceTracker:
             ), 0.0)
         except (TypeError, ValueError):
             current_balance = 0.0
-        reference_balance = None
-        for key in ("modelled_rom_wmt", "source_wmt"):
-            try:
-                candidate = float(result.get(key))
-            except (TypeError, ValueError):
-                continue
-            if pd.notna(candidate) and candidate > 0:
-                reference_balance = candidate
-                break
-        if (
-            reference_balance is not None
-            and abs(reference_balance - current_balance) > 1e-9
-        ):
-            scale = current_balance / reference_balance
-            for key, value in list(result.items()):
-                if source_property_kind(
-                    key, self.source_property_kinds
-                ) != "additive":
-                    continue
-                try:
-                    result[key] = float(value) * scale
-                except (TypeError, ValueError):
-                    result.pop(key, None)
         for key in ("source_wmt", "modelled_rom_wmt"):
             if (
                 self.required_source_property_keys is None
@@ -130,7 +114,14 @@ class BalanceTracker:
         
         # Loop through user choice of decision point results and deplete balances
         for _, transaction in filtered_decision_point_results_to_user_choice.iterrows():
-            name = transaction.get("source_id", transaction["source"])
+            # AMT report rows identify the active chunk. Balances remain
+            # tracked by their parent footprint so sequential chunks continue
+            # to deplete one physical stockpile correctly.
+            name = (
+                transaction.get("balance_tracker_source_id")
+                or transaction.get("parent_stockpile")
+                or transaction.get("source_id", transaction["source"])
+            )
             if name not in self.balance_copy:
                 continue
 
@@ -397,6 +388,22 @@ class BalanceTracker:
 
     def get_source_properties(self, name):
         return copy.deepcopy(self.source_properties.get(name, {}))
+
+    def get_active_amt_chunk_id(self, footprint):
+        """Return the currently reclaimable chunk for an AMT footprint."""
+        if not self.is_amt.get(footprint, False):
+            return None
+        candidates = sorted(
+            (
+                entry for entry in self.hex_sequence_table
+                if entry.get("footprint") == footprint
+                and max(float(entry.get("balance", 0) or 0), 0) > 0
+            ),
+            key=lambda entry: entry.get("sequence", float("inf")),
+        )
+        if not candidates:
+            return None
+        return candidates[0].get("hex") or candidates[0].get("chunk_id")
     
     def process_hex_sequence(self, name, reclaimed_tonnes):
         # Filter the hex sequence table for entries matching the stockpile name

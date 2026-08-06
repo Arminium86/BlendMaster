@@ -91,6 +91,7 @@ class CaseModeller:
         "optimization_diagnostics", "previous_selected_stockpile_source_ids",
         "previous_selected_grade_block_pairs", "grade_block_pair_locks",
         "selected_blend_signatures", "contingency_reuse_fallbacks",
+        "previous_chemical_blend_signature",
     )
 
     def __init__(
@@ -214,6 +215,10 @@ class CaseModeller:
         }
         self.selected_blend_signatures = set()
         self.contingency_reuse_fallbacks = 0
+        # Blend ID identifies one contiguous chemical blend, rather than a
+        # solver steady state.  It changes only when the selected material
+        # composition changes.
+        self.previous_chemical_blend_signature = None
         self.product_build_settings = self.normalized_product_build_settings(product_build_settings)
         self.product_build_runtime_states = [
             {
@@ -376,7 +381,8 @@ class CaseModeller:
         if expected and getattr(solution, "success", False):
             selected = {
                 self.normalize_two_wp_stockpile_name(
-                    transaction.get("source")
+                    transaction.get("parent_stockpile")
+                    or transaction.get("source")
                     or transaction.get("source_id")
                 )
                 for transaction in (result or {}).get(
@@ -703,6 +709,8 @@ class CaseModeller:
             self.selected_blend_signatures = set()
         if not hasattr(self, "contingency_reuse_fallbacks"):
             self.contingency_reuse_fallbacks = 0
+        if not hasattr(self, "previous_chemical_blend_signature"):
+            self.previous_chemical_blend_signature = None
         if not hasattr(self, "product_build_hard_repair_from_states"):
             self.product_build_hard_repair_from_states = {}
         print(
@@ -1135,21 +1143,12 @@ class CaseModeller:
                     self.select_automatic_blend_option()
                 )
 
-                if self.steady_state_tracker != 0:
-                    if not list(current_filtered_sources) == list(previous_filtered_sources):
-                        self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
-                        self.blend_ID += 1
-                    else: pass
-                else: pass
-
 
             elif self.user_interaction_mode == 2 and self.steady_state_tracker != 0:
                 
                 if not list(current_filtered_sources) == list(previous_filtered_sources):
                     print("Blend fully depleted.")
                     self.user_blend_choice = input("Choose new blend: ")
-                    self.results.loc[self.results['blend_ID'] == self.blend_ID, 'blend_ID'] -= 1
-                    self.blend_ID += 1
                     # Cast user choice to appropriate type
                     try:
                         self.user_blend_choice = int(self.user_blend_choice)
@@ -1179,6 +1178,18 @@ class CaseModeller:
                     |
                     (self.decision_point_results["blend_option"] == "Rare case")
                 ]
+
+            # Candidate options are all recorded before the user/automatic
+            # choice is known.  Assign the persistent Blend ID only to the
+            # chosen option, using source identity and contribution ratios.
+            filtered_decision_point_results_to_user_choice = (
+                filtered_decision_point_results_to_user_choice.copy()
+            )
+            filtered_decision_point_results_to_user_choice["blend_ID"] = (
+                self.assign_selected_chemical_blend_id(
+                    filtered_decision_point_results_to_user_choice
+                )
+            )
             
             self.append_results(filtered_decision_point_results_to_user_choice)
             self.previous_selected_stockpile_source_ids = self.stockpile_source_ids_from_dataframe(
@@ -1303,9 +1314,9 @@ class CaseModeller:
         for _, row in active.iterrows():
             source_type = self.contingency_source_type(row)
             source = str(
-                row.get("source")
-                or row.get("source_id")
-                or ""
+                row.get("parent_stockpile")
+                if source_type == "stockpile" and row.get("parent_stockpile")
+                else row.get("source") or row.get("source_id") or ""
             ).strip().upper()
             if not source:
                 continue
@@ -1323,6 +1334,65 @@ class CaseModeller:
         ):
             signature.update(grade_block_signature)
         return frozenset(signature)
+
+    def chemical_blend_signature_from_dataframe(self, data):
+        """Return the source-and-ratio signature that defines a Blend ID.
+
+        The contingency signature intentionally records only source identity.
+        Blend IDs are more specific: a stockpile-ratio change or a direct-tip
+        grade-block/rate change represents a different chemical blend even if
+        the set of source IDs is unchanged.
+        """
+        if data is None or data.empty:
+            return tuple()
+
+        active = data.copy()
+        if "source_actual_tonnes" not in active:
+            return tuple()
+        active["_blend_tonnes"] = pd.to_numeric(
+            active["source_actual_tonnes"], errors="coerce"
+        ).fillna(0.0)
+        active = active[
+            active["_blend_tonnes"] > Optimizer.SOLUTION_TOLERANCE
+        ]
+        if active.empty:
+            return tuple()
+
+        contributions = {}
+        for _, row in active.iterrows():
+            source_type = self.contingency_source_type(row) or "unknown"
+            source_id = str(
+                row.get("source_id") or row.get("source") or ""
+            ).strip().upper()
+            if not source_id:
+                continue
+            key = (source_type, source_id)
+            contributions[key] = contributions.get(key, 0.0) + float(
+                row["_blend_tonnes"]
+            )
+
+        total_tonnes = sum(contributions.values())
+        if total_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+            return tuple()
+        # Eight decimal places prevents insignificant solver tolerance noise
+        # from producing a new blend while retaining meaningful mix changes.
+        return tuple(sorted(
+            (source_type, source_id, round(tonnes / total_tonnes, 8))
+            for (source_type, source_id), tonnes in contributions.items()
+        ))
+
+    def assign_selected_chemical_blend_id(self, selected_rows):
+        """Assign the persistent Blend ID for the selected steady state."""
+        signature = self.chemical_blend_signature_from_dataframe(selected_rows)
+        if not signature:
+            return self.blend_ID
+        if (
+            self.previous_chemical_blend_signature is not None
+            and signature != self.previous_chemical_blend_signature
+        ):
+            self.blend_ID += 1
+        self.previous_chemical_blend_signature = signature
+        return self.blend_ID
 
     def select_automatic_blend_option(self):
         options = []
@@ -1750,7 +1820,15 @@ class CaseModeller:
         source_column = "source_id" if "source_id" in data.columns else "source"
         if source_column not in data.columns:
             return set()
-        return set(str(value) for value in data[source_column].dropna() if str(value))
+        if "parent_stockpile" in data.columns:
+            values = data["parent_stockpile"].where(
+                data["parent_stockpile"].notna()
+                & data["parent_stockpile"].astype(str).str.strip().ne(""),
+                data[source_column],
+            )
+        else:
+            values = data[source_column]
+        return set(str(value) for value in values.dropna() if str(value))
 
     def stockpile_source_ids_from_transactions(self, transactions):
         stockpile_ids = set()
@@ -1763,7 +1841,11 @@ class CaseModeller:
                 actual_tonnes = 0
             if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
                 continue
-            source_id = transaction.get("source_id") or transaction.get("source")
+            source_id = (
+                transaction.get("parent_stockpile")
+                or transaction.get("source_id")
+                or transaction.get("source")
+            )
             if source_id:
                 stockpile_ids.add(str(source_id))
         return stockpile_ids
@@ -2233,12 +2315,16 @@ class CaseModeller:
                     **two_wp_active_blend_fields,
                     "source": transaction["source"],
                     "source_id": transaction.get("source_id", transaction["source"]),
+                    "parent_stockpile": transaction.get("parent_stockpile", ""),
                     "source_type": transaction.get("source_type", ""),
                     "estimated_delivery_datetime": transaction.get("estimated_delivery_datetime", ""),
                     "source_blend_ratio": round(transaction["equipment_rate_output"] / result["crusher_rate_output"], 2) if result["crusher_rate_output"] != 0 else 0,
-                    "source_opening_balance": self.total_AMT_stockpile_balances[transaction["source_id"]] if transaction.get("source_id") in self.total_AMT_stockpile_balances else transaction["opening_balance"],
+                    # AMT transactions are reported at active-chunk level.
+                    # The solver opening balance is therefore the correct
+                    # comparable balance for every source type.
+                    "source_opening_balance": transaction["opening_balance"],
                     "source_actual_tonnes": transaction["actual_tonnes"],
-                    "source_closing_balance": (self.total_AMT_stockpile_balances[transaction["source_id"]] if transaction.get("source_id") in self.total_AMT_stockpile_balances else transaction["opening_balance"]) - transaction["actual_tonnes"],
+                    "source_closing_balance": transaction["opening_balance"] - transaction["actual_tonnes"],
                     "source_grade_fe": transaction["grade_fe"],
                     "source_grade_si": transaction["grade_si"],
                     "source_grade_al": transaction["grade_al"],

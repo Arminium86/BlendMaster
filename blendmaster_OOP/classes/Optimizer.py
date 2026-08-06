@@ -1650,7 +1650,12 @@ class Optimizer:
             transactions = []
             for i, event in enumerate(event_pool):
                 if result.x[i] >= 0:
-                    source_id = event.stockpile if event.is_stockpile else event.grade_block
+                    parent_stockpile = event.stockpile if event.is_stockpile else None
+                    source_id = (
+                        (event.source_name or parent_stockpile)
+                        if event.is_amt else
+                        (event.stockpile if event.is_stockpile else event.grade_block)
+                    )
                     source_name = event.source_name or source_id
                     reported_source_properties = (
                         scale_additive_source_properties(
@@ -1680,6 +1685,13 @@ class Optimizer:
                     transaction = {
                             "source": source_name,
                             "source_id": source_id,
+                            "parent_stockpile": parent_stockpile,
+                            # BalanceTracker owns AMT balances by footprint;
+                            # reports and solver outputs identify the active
+                            # chunk as the source.
+                            "balance_tracker_source_id": (
+                                parent_stockpile if event.is_amt else source_id
+                            ),
                             "source_type": event.type,
                             "estimated_delivery_datetime": (
                                 event.delivered_datetime if event.is_grade_block else ""
