@@ -2654,10 +2654,13 @@ class DrawAMTStockpile:
         weighted_grades = {}
         weighted_streams = None
         stream_properties = {}
+        mapped_properties = {}
         accumulated_tonnes = 0.0
         property_mass = defaultdict(float)
         property_tonnes = defaultdict(float)
         property_coverage_tonnes = defaultdict(float)
+        warning_coverage_tonnes = defaultdict(float)
+        warning_coverage_observed = set()
         additive_properties = set()
         lineage_keys = set()
         lineage_matched_final_wmt = 0.0
@@ -2683,6 +2686,14 @@ class DrawAMTStockpile:
             coverage = property_payload.get("coverage", {}) if isinstance(
                 property_payload, dict
             ) else {}
+            for property_name, raw_fraction in coverage.items():
+                fraction = self.to_float(raw_fraction, None)
+                if fraction is None:
+                    continue
+                name = canonical_property_key(property_name)
+                fraction = min(max(fraction, 0.0), 1.0)
+                warning_coverage_tonnes[name] += row_tonnes * fraction
+                warning_coverage_observed.add(name)
             canonical_values = {
                 canonical_property_key(name): raw
                 for name, raw in values.items()
@@ -2692,19 +2703,32 @@ class DrawAMTStockpile:
                 for name, raw in canonical_values.items()
                 if (value := self.to_float(raw, None)) is not None
             }
+            row_mapped_properties = {
+                canonical_property_key(name): value
+                for name, raw in dict(row.get("defined_fields") or {}).items()
+                if (value := self.to_float(raw, None)) is not None
+            }
             weighted_streams = weighted_merge_grade_streams(
                 weighted_streams,
                 accumulated_tonnes,
                 row.get("grade_streams"),
                 row_tonnes,
-                stream_properties,
-                row_properties,
+                mapped_properties,
+                row_mapped_properties,
                 vars(self).get("source_property_weights", {}),
             )
             stream_properties = merge_source_properties(
                 stream_properties,
                 accumulated_tonnes,
                 row_properties,
+                row_tonnes,
+                vars(self).get("source_property_kinds", {}),
+                vars(self).get("source_property_weights", {}),
+            )
+            mapped_properties = merge_source_properties(
+                mapped_properties,
+                accumulated_tonnes,
+                row_mapped_properties,
                 row_tonnes,
                 vars(self).get("source_property_kinds", {}),
                 vars(self).get("source_property_weights", {}),
@@ -2771,7 +2795,11 @@ class DrawAMTStockpile:
             if isinstance(row_warnings, str):
                 row_warnings = [row_warnings]
             grade_stream_warnings.extend(
-                str(warning) for warning in row_warnings if str(warning)
+                str(warning) for warning in row_warnings
+                if str(warning) and not re.match(
+                    r"^PROD[123]\s+.*(?:covers|is unavailable)",
+                    str(warning), re.IGNORECASE,
+                )
             )
             accumulated_tonnes += row_tonnes
 
@@ -2794,31 +2822,42 @@ class DrawAMTStockpile:
         # ROM WMT is the physical opening balance of this chunk.  Never carry
         # a footprint-level mapped ROM WMT into a chunk: it would provide a
         # false scaling reference for every other additive property.
-        for quantity_field in ("source_wmt", "modelled_rom_wmt"):
-            modelled_properties["values"][quantity_field] = total_tonnes
-            modelled_properties["coverage"][quantity_field] = (
-                1.0 if total_tonnes > 0 else 0.0
-            )
+        modelled_properties["values"]["source_wmt"] = total_tonnes
+        modelled_properties["coverage"]["source_wmt"] = (
+            1.0 if total_tonnes > 0 else 0.0
+        )
         # Canonical weighted-average fields are the authoritative chunk values.
         weighted_streams = reweight_grade_streams_from_properties(
-            weighted_streams, modelled_properties["values"]
+            weighted_streams, mapped_properties
         )
         product_coverage_parts = []
+        product_coverage_warnings = []
         for product in (1, 2):
             values = []
+            incomplete = False
             for suffix, label in (
                 ("fe", "Fe"), ("sio2", "SiO₂"), ("al2o3", "Al₂O₃"),
                 ("p", "P"), ("mn", "Mn"),
             ):
                 key = f"prod{product}_{suffix}"
-                if key in modelled_properties["coverage"]:
-                    values.append(
-                        f"{label} {modelled_properties['coverage'][key] * 100.0:.2f}%"
+                if key in warning_coverage_observed:
+                    fraction = (
+                        warning_coverage_tonnes[key] / total_tonnes
+                        if total_tonnes > 0 else 0.0
                     )
+                    values.append(f"{label} {fraction * 100.0:.2f}%")
+                    incomplete = incomplete or fraction < 0.99999999
             if values:
                 product_coverage_parts.append(
                     f"PROD{product}: " + ", ".join(values)
                 )
+                if incomplete:
+                    product_coverage_warnings.append(
+                        f"Chunk PROD{product} coverage by final WMT: "
+                        + ", ".join(values)
+                        + "; modelled grades use only covered lineage tonnes."
+                    )
+        grade_stream_warnings.extend(product_coverage_warnings)
         lineage_coverage_pct = (
             lineage_matched_final_wmt / total_tonnes * 100.0
             if total_tonnes > 0 else None
@@ -2885,6 +2924,11 @@ class DrawAMTStockpile:
             ),
             "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
             "grade_streams": weighted_streams,
+            "defined_fields": {
+                name: mapped_properties.get(name)
+                for name in vars(self).get("source_property_kinds", {})
+            },
+            "source_properties": dict(mapped_properties),
             "grade_block_count": len(lineage_keys),
             "lineage_coverage_pct": lineage_coverage_pct,
             "lineage_unmatched_wmt": max(
@@ -3153,6 +3197,77 @@ class DrawAMTStockpile:
         if isinstance(member_hexes, list):
             return member_hexes
         return []
+
+    def rebuild_saved_chunk_records(self, rows):
+        """Re-aggregate saved chunks from their current member-hex records.
+
+        Map Fields is applied at hex granularity.  A previously generated
+        chunk therefore becomes stale when mappings or field definitions are
+        changed unless its property snapshot is rebuilt.  Preserve the saved
+        membership/sequence while refreshing every additive, weighted-average
+        and grade-stream value from the current AMT database rows.
+        """
+        result = []
+        refreshed = 0
+        data = getattr(self, "data", None)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return list(rows or []), refreshed
+
+        for entry in rows or []:
+            if not isinstance(entry, dict):
+                result.append(entry)
+                continue
+            footprint = str(entry.get("footprint") or "").strip()
+            member_hexes = self.member_hexes_from_entry(entry)
+            if not footprint or not member_hexes:
+                result.append(dict(entry))
+                continue
+
+            member_keys = {str(value).strip() for value in member_hexes}
+            selected = data[
+                (data["footprint"].astype(str) == footprint)
+                & (data["hex"].astype(str).isin(member_keys))
+            ].copy()
+            if selected.empty:
+                result.append(dict(entry))
+                continue
+
+            selected["balance"] = pd.to_numeric(
+                selected["balance"], errors="coerce"
+            ).fillna(0.0)
+            selected["_positive_balance"] = selected["balance"].map(
+                self.positive_tonnes
+            )
+            selected = selected[selected["_positive_balance"] > 0].copy()
+            if selected.empty:
+                result.append(dict(entry))
+                continue
+            for grade in (
+                "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"
+            ):
+                if grade in selected:
+                    selected[grade] = pd.to_numeric(
+                        selected[grade], errors="coerce"
+                    ).fillna(0.0)
+                else:
+                    selected[grade] = 0.0
+
+            sequence = int(self.to_float(entry.get("sequence"), 1) or 1)
+            chunk_size = self.to_float(
+                entry.get("chunk_size"),
+                sum(selected["_positive_balance"]),
+            )
+            rebuilt = self.build_chunk_row(
+                footprint,
+                sequence,
+                selected.to_dict("records"),
+                chunk_size,
+            )
+            merged = dict(entry)
+            merged.update(rebuilt)
+            result.append(merged)
+            refreshed += 1
+        return result, refreshed
 
     def dig_path_from_selected_points(self, footprint):
         selected_chunks = [

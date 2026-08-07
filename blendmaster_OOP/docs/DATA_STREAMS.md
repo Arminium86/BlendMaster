@@ -115,12 +115,55 @@ BlendMaster field name. Older projects migrate their former APS mappings and
 receive explicit compatibility mappings for the established inventory and AMT
 stream inputs.
 
+An empty mapping is strict: a raw field with the same spelling cannot flow to
+Database View, the balance tracker, custom constraints, or the solver as that
+BlendMaster field. The exceptions are explicit calculated/system outputs:
+`source_wmt` is the internal physical balance; adjusted grades are calculated
+from mapped modelled grades and historical factors; APS payload WMT is supplied
+by the schedule transaction. `modelled_rom_wmt` may be synchronized to that
+physical balance after it has been mapped; missing product/custom quantity
+fields never fall back to physical ROM tonnes.
+
+Database View may still display fallback provenance so a setup gap is visible
+before running. In the current strict setup contract, however, optimisation and
+manual planning require the exact selected Optimiser Grade Stream for every
+analyte. An unbranded value in that same stream may serve any brand; falling to
+a lower stream or legacy grade is rejected with the source and analytes named.
+
 The Available Source Fields list is intentionally limited to grade fields and
 additive quantity fields (WMT, DMT or tonnes). Coordinates, timestamps,
 reconciliation metadata and other operational columns are not mappable.
 Lineage and coverage metrics also stay out of Map Fields: BlendMaster carries
 them automatically as audit metadata and exposes them through Database View's
 coverage-field option.
+Cloudbreak lump/fines fields use only the Product 1-qualified form in this list
+(for example, `modelled_prod1_fines_fe`). Short compatibility aliases such as
+`modelled_fines_fe` remain readable in older saved mappings but are hidden when
+the qualified field is available.
+
+For AMT hexes, the browser keeps the native AMT assays (`FE`, `SIO2`, `AL2O3`,
+`P`, `MN`) and one explicit flattened `MODELLED_*` field for every available
+grade-block-lineage assay. The equivalent nested aliases (`grade_block_fe`,
+`prod1_fe`, `feed_loi_total`, and corresponding fields for every other assay)
+are hidden. Canonical downstream fields such as `insitu_fe`,
+`modelled_rom_fe` and `modelled_product_fe` are also hidden because they are
+mapping/calculation outputs, not source inputs. Existing saved mappings to a
+hidden alias remain valid.
+
+The AMT source browser always exposes the supported grade-block-lineage
+additive schema: Product 1/2/3 WMT and DMT, Product 1 lump/fines WMT and DMT,
+Product 1/2 minus-1-mm WMT and DMT, and ore-type WMT and DMT. These are per-hex
+modelled masses. They remain visible but blank when the selected lineage has no
+valid value, making the gap traceable in Map Fields and Database View instead
+of making the field itself disappear.
+
+Spatial-reconciliation ledger quantities such as `RAW_WMT`,
+`SPATIALLY_CORRECTED_WMT`, `LEDGER_ADJUSTMENT_WMT` and
+`FINAL_STOCKPILE_WMT` are audit metadata and are intentionally hidden from Map
+Fields. `FINAL_STOCKPILE_WMT` is the whole-footprint total repeated on every
+hex; it must never be mapped as an additive hex property. The authoritative
+per-hex insitu/ROM quantity is `feed_wmt` (displayed as **Insitu / ROM WMT**),
+which is sourced from the reconciled per-hex `FINAL_WMT`.
 
 AMT mappings apply independently to each imported **hex** before chunks are
 formed. The AMT source list includes lineage-derived per-hex fields, including
@@ -139,7 +182,8 @@ and APS. They default to the established raw assay fields during migration but
 remain explicit and user-editable like other source mappings.
 
 `adjusted_rom_*` and `adjusted_product_*` are deliberately absent from Map
-Fields. They are calculated fields: adjusted ROM is modelled ROM multiplied by
+Fields—both from the canonical mapping targets and the Available Source Fields
+browser. They are calculated fields: adjusted ROM is modelled ROM multiplied by
 historical blend recon, and adjusted product is modelled product multiplied by
 historical regression recon (or adjusted ROM for dry plants).
 Compatibility seeding runs once. Clearing a suggested mapping is therefore a
@@ -487,8 +531,9 @@ provides AMT internal blend or upgrade factors. Modelled product grades can feed
 the product stream, while lineage identities, physical properties and coverage
 remain diagnostic/model-input provenance. A
 positive hex with incomplete lineage is actionable and is recorded in the
-`warnings` field. Partial coverage of the active product channel is also
-warned: the displayed modelled grade is based on covered lineage tonnes, while
+`warnings` field. For generated chunks, repeated per-hex product messages are
+replaced by one WMT-weighted coverage summary per product channel. Partial
+coverage of the active product channel is warned: the displayed modelled grade is based on covered lineage tonnes, while
 the coverage field quantifies the excluded share. During chunk/source
 aggregation, product mass without a valid grade is excluded from that grade's
 weighted average rather than nullifying the complete stream. The corresponding
@@ -538,7 +583,7 @@ because they show the exact effective vector after fallback.
 | Pale yellow `fallback_...` cell | A fallback **was used** for that brand/analyte. The cell contains the requested and substituted stream/brand; hover to see the full text. | Review whether the substitution is acceptable. It is not itself a missing required cell. |
 | Blank `fallback_...` cell with the normal background | No fallback was required. | None; this is the preferred state. |
 | Blank pale red/pink `grade_...` or `selected_...` cell | No value is stored/resolved for that exact field. | Check it when it belongs to the selected stream and active brand. It can be expected for streams or brands that do not apply to the source. |
-| `warnings` | Consolidated source-calculation, reconciliation and per-analyte fallback messages for the source. | Review any message that affects the active brand or selected stream. |
+| `warnings` | Consolidated source-calculation and reconciliation messages. AMT product coverage is summarized for the whole chunk, and analytes that use the same fallback route are grouped into one brand-level fallback message. | Review any message that affects the active brand or selected stream. |
 
 The UI does not colour an empty fallback cell yellow. A yellow cell always has
 fallback provenance, although its text can be easier to read from the tooltip.
@@ -611,14 +656,19 @@ Other additive fields, including ROM DMT, product mass, ore-type tonnes and
 ultrafines tonnes, therefore retain their mapped ratios and deplete in
 proportion to actual ROM WMT.
 
-Custom-constraint report fields have three distinct levels. A
-`source_*_coefficient` is the expression value per source WMT used by the
-linear solver. A `source_*_contribution` is that coefficient multiplied by the
-source's actual selected WMT. The unqualified `numerator` and `denominator`
-are whole-blend totals (and are consequently repeated on each row of the same
-blend); `actual_ratio` is their ratio. Thus, for a denominator of
-`modelled_rom_wmt`, each source coefficient is normally 1.0,
-each source denominator contribution is its actual depleted ROM WMT, and the
-blend denominator is the sum of all source contributions. It should not be
-expected to equal one row's `source_property_modelled_rom_wmt` unless the
-blend uses only that source.
+Custom constraints are whole-steady-state rules. Additive expressions sum the
+proportionally depleted field across selected sources. Weighted-average
+expressions use the additive Weight Field declared in Define Fields across the
+selected sources. A literal `1` is the scalar one, not selected ROM tonnes.
+Thus `quantity_a / quantity_b` is `sum(quantity_a) / sum(quantity_b)`, while
+`quantity_a / 1` is simply `sum(quantity_a)`. Missing mapped values or missing
+weighted-average dependencies stop optimisation instead of falling back.
+
+In reports, unqualified `numerator`, `denominator` and `actual_ratio` are the
+whole-blend aggregates repeated on each row. For additive sides, a source
+coefficient is contribution per physical source WMT and source contribution is
+the selected additive amount. For weighted-average sides, the coefficient is
+the source value and contribution is its weighted mass; the aggregate divides
+the summed weighted mass by the summed selected declared weight. Scalar sides
+have blank source coefficients, zero source contributions and their literal in
+the unqualified aggregate column.

@@ -505,6 +505,8 @@ def inventory_grade_streams(
     brands: Iterable[str],
     historical_factors: Any,
     opf: Any,
+    *,
+    strict_mappings: bool = False,
 ):
     """Build all streams for an inventory stockpile.
 
@@ -514,24 +516,28 @@ def inventory_grade_streams(
     inventory product.
     """
     brands = configured_brands(brands) or [UNBRANDED]
-    insitu = {a: _row_value(row, f"grade_{a}", f"{a}_insitu", f"insitu_{a}") for a in ANALYTES}
+    insitu = {a: _row_value(row, f"insitu_{a}") for a in ANALYTES}
     modelled_rom = {
         a: _row_value(row, f"modelled_rom_{a}") for a in ANALYTES
     }
     slot = internal_product_slot(opf)
     product = {
-        a: _row_value(row, f"{slot}_{a}", f"{a}_{slot}", f"grade_{slot}_{a}") if slot else None
-        for a in ANALYTES
+        a: _row_value(row, f"modelled_product_{a}") for a in ANALYTES
     }
-    # Preserve legacy data when new Snowflake fields have not been populated.
-    for a in ANALYTES:
-        if insitu[a] is None:
-            insitu[a] = legacy_vector(row)[a]
-        if modelled_rom[a] is None:
-            modelled_rom[a] = insitu[a]
-        mapped_product = _row_value(row, f"modelled_product_{a}")
-        if mapped_product is not None:
-            product[a] = mapped_product
+    if not strict_mappings:
+        legacy = legacy_vector(row)
+        for analyte in ANALYTES:
+            if insitu[analyte] is None:
+                insitu[analyte] = legacy[analyte]
+            if modelled_rom[analyte] is None:
+                modelled_rom[analyte] = insitu[analyte]
+            if product[analyte] is None and slot:
+                product[analyte] = _row_value(
+                    row,
+                    f"{slot}_{analyte}",
+                    f"{analyte}_{slot}",
+                    f"grade_{slot}_{analyte}",
+                )
 
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
@@ -572,68 +578,48 @@ def amt_grade_streams(
     brands: Iterable[str],
     historical_factors: Any,
     opf: Any,
+    *,
+    strict_mappings: bool = False,
 ):
     """Build AMT streams from insitu grades and grade-block lineage products.
 
-    ``lineage_source`` is expected to carry ``MODELLED_PROD1_<analyte>`` and/or
-    ``MODELLED_PROD2_<analyte>`` fields calculated from the grade blocks that
-    remain in the hex.  Legacy PROD1/PROD2 field spellings remain accepted so
-    saved projects can still be interpreted, but no inventory-derived blend or
-    upgrade factor is calculated here.
+    ``lineage_source`` must carry the canonical fields produced by Map Fields.
+    Raw lineage columns never bypass an empty mapping. No inventory-derived
+    blend or upgrade factor is calculated here.
     """
     brands = configured_brands(brands) or [UNBRANDED]
-    insitu = legacy_vector(insitu_source)
+    insitu = (
+        {
+            analyte: _row_value(insitu_source, f"insitu_{analyte}")
+            for analyte in ANALYTES
+        }
+        if strict_mappings else legacy_vector(insitu_source)
+    )
     slot = amt_modelled_product_slot(opf)
     lineage_source = lineage_source if isinstance(lineage_source, Mapping) else {}
-
-    def nested_product_value(analyte: str) -> Optional[float]:
-        if not slot:
-            return None
-        source_analyte = {"si": "sio2", "al": "al2o3"}.get(
-            analyte, analyte
-        )
-        for key in (
-            f"modelled_{slot}",
-            f"MODELLED_{slot.upper()}",
-            slot,
-            slot.upper(),
-        ):
-            values = lineage_source.get(key)
-            if isinstance(values, Mapping):
-                value = _row_value(
-                    values,
-                    source_analyte,
-                    analyte,
-                    f"grade_{source_analyte}",
-                    f"grade_{analyte}",
-                )
-                if value is not None:
-                    return value
-        return _row_value(
-            lineage_source,
-            f"modelled_{slot}_{source_analyte}",
-            f"modelled_{slot}_{analyte}",
-            f"{slot}_{source_analyte}",
-            f"{slot}_{analyte}",
-            f"{source_analyte}_{slot}",
-            f"{analyte}_{slot}",
-            f"grade_{slot}_{source_analyte}",
-            f"grade_{slot}_{analyte}",
-        )
 
     modelled_rom = {
         analyte: _row_value(lineage_source, f"modelled_rom_{analyte}")
         for analyte in ANALYTES
     }
-    for analyte in ANALYTES:
-        if modelled_rom[analyte] is None:
-            modelled_rom[analyte] = insitu[analyte]
-    modelled_product = {}
-    for analyte in ANALYTES:
-        mapped = _row_value(lineage_source, f"modelled_product_{analyte}")
-        modelled_product[analyte] = (
-            mapped if mapped is not None else nested_product_value(analyte)
-        )
+    modelled_product = {
+        analyte: _row_value(lineage_source, f"modelled_product_{analyte}")
+        for analyte in ANALYTES
+    }
+    if not strict_mappings:
+        source_names = {"si": "sio2", "al": "al2o3"}
+        for analyte in ANALYTES:
+            if modelled_rom[analyte] is None:
+                modelled_rom[analyte] = insitu[analyte]
+            if modelled_product[analyte] is None and slot:
+                source_analyte = source_names.get(analyte, analyte)
+                modelled_product[analyte] = _row_value(
+                    lineage_source,
+                    f"modelled_{slot}_{source_analyte}",
+                    f"modelled_{slot}_{analyte}",
+                    f"{slot}_{source_analyte}",
+                    f"{slot}_{analyte}",
+                )
     result = empty_streams()
     result["insitu"][UNBRANDED] = insitu
     # Historical blend reconciliation now forms the only AMT ROM adjustment.

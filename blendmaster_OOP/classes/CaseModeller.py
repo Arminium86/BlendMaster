@@ -416,9 +416,11 @@ class CaseModeller:
 
         data = selected_results.copy()
         if "product_build_source_tonnes" not in data:
-            # Existing reports and callers use the historical physical ROM
-            # quantity.  Keep them readable while new runs provide the
-            # explicit product-build stream.
+            if self.solver_config.get("strict_mapped_fields", False):
+                raise ValueError(
+                    "Optimiser result is missing product_build_source_tonnes; "
+                    "the product build cannot fall back to physical ROM tonnes."
+                )
             data["product_build_source_tonnes"] = data.get(
                 "source_actual_tonnes", 0
             )
@@ -1643,14 +1645,17 @@ class CaseModeller:
         for event in capacity_sources:
             properties = getattr(event, "source_properties", {}) or {}
             try:
-                physical = float(event.balance or 0)
-                crusher_tonnes = float(properties.get(crusher_stream) or physical)
-                product_tonnes = float(properties.get(product_stream) or physical)
+                crusher_raw = properties.get(crusher_stream)
+                product_raw = properties.get(product_stream)
+                if crusher_raw is None or product_raw is None:
+                    continue
+                crusher_tonnes = float(crusher_raw)
+                product_tonnes = float(product_raw)
             except (TypeError, ValueError):
                 continue
             if crusher_tonnes > Optimizer.SOLUTION_TOLERANCE:
                 ratios.append(max(product_tonnes, 0.0) / crusher_tonnes)
-        ratio = max(ratios) if ratios else 1.0
+        ratio = max(ratios) if ratios else 0.0
         try:
             return max(float(crusher_rate), 0.0) * ratio
         except (TypeError, ValueError):
@@ -2491,8 +2496,7 @@ class CaseModeller:
         data["source_actual_tonnes"] = pd.to_numeric(data.get("source_actual_tonnes"), errors="coerce").fillna(0)
         data["crusher_actual_tonnes"] = pd.to_numeric(data.get("crusher_actual_tonnes"), errors="coerce").fillna(0)
         data["product_build_source_tonnes"] = pd.to_numeric(
-            data.get("product_build_source_tonnes", data["source_actual_tonnes"]),
-            errors="coerce",
+            data.get("product_build_source_tonnes"), errors="coerce",
         ).fillna(0)
         data = data[
             (data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)

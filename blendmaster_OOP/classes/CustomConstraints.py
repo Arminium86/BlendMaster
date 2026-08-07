@@ -679,32 +679,371 @@ def source_properties_from_mapping(record) -> dict:
 
 
 def custom_constraint_coefficients(event_pool, definition):
-    numerator = SafeNumericExpression(definition.get("numerator"))
-    denominator = SafeNumericExpression(definition.get("denominator") or "1")
-    numerator_values = []
-    denominator_values = []
-    for event in event_pool:
-        source_name = getattr(event, "source_name", None) or getattr(
-            event, "stockpile", None
-        ) or getattr(event, "grade_block", None) or "source"
+    """Compatibility wrapper returning the compiled linear ratio terms."""
+    compiled = compile_event_custom_constraint(event_pool, definition)
+    return compiled["numerator_values"], compiled["denominator_values"]
+
+
+def _declared_property_kind(name, property_kinds):
+    return {
+        canonical_property_key(key): str(value).strip().lower()
+        for key, value in dict(property_kinds or {}).items()
+    }.get(canonical_property_key(name))
+
+
+def _compiled_expression_side(
+    sources,
+    expression_text,
+    *,
+    fields_for_source,
+    properties_for_source,
+    balance_for_source,
+    kinds_for_source,
+    weights_for_source,
+    source_name,
+    constraint_name,
+):
+    expression = SafeNumericExpression(expression_text)
+    canonical_names = {
+        canonical_property_key(name) for name in expression.names
+    }
+
+    # ``one`` is retained for old saved projects, but is a scalar constant --
+    # it is not repeated once for every selected physical tonne.
+    if not canonical_names or canonical_names <= {"one"}:
         try:
-            numerator_values.append(numerator.evaluate(event_constraint_fields(event)))
-            denominator_value = denominator.evaluate(event_constraint_fields(event))
+            constant = expression.evaluate({"one": 1.0})
         except CustomConstraintError as exc:
             raise CustomConstraintError(
-                f"{definition.get('name') or definition.get('key')}: {source_name}: {exc}"
+                f"{constraint_name}: {exc}"
             ) from exc
-        if denominator_value < 0:
-            raise CustomConstraintError(
-                f"{definition.get('name') or definition.get('key')}: {source_name}: "
-                "denominator expression must be non-negative."
+        return {
+            "kind": "constant",
+            "constant": constant,
+            "expression_values": [constant for _ in sources],
+            "weight_values": [0.0 for _ in sources],
+            "linear_values": [0.0 for _ in sources],
+            "weight_field": None,
+        }
+
+    has_additive = False
+    intensive_weight_fields = set()
+    for source in sources:
+        kinds = kinds_for_source(source)
+        weights = {
+            canonical_property_key(key): canonical_property_key(value)
+            for key, value in dict(weights_for_source(source) or {}).items()
+            if canonical_property_key(key) and canonical_property_key(value)
+        }
+        for name in canonical_names:
+            if name in BUILTIN_CONSTRAINT_FIELDS:
+                if name in {"source_balance"}:
+                    has_additive = True
+                else:
+                    intensive_weight_fields.add("__physical_source_wmt__")
+                continue
+            kind = source_property_kind(name, kinds)
+            if kind == "additive":
+                has_additive = True
+                continue
+            if kind == "runtime":
+                raise CustomConstraintError(
+                    f"{constraint_name}: field '{name}' is runtime metadata, "
+                    "not an additive or weighted-average Define Fields value."
+                )
+            weight_field = weights.get(name)
+            if _declared_property_kind(name, kinds) == "weighted_average" and not weight_field:
+                raise CustomConstraintError(
+                    f"{constraint_name}: weighted-average field '{name}' has no "
+                    "declared additive weight field."
+                )
+            intensive_weight_fields.add(
+                weight_field or "__physical_source_wmt__"
             )
-        denominator_values.append(denominator_value)
-    if not any(value > 1e-12 for value in denominator_values):
+
+    expression_values = []
+    for source in sources:
+        try:
+            expression_values.append(
+                expression.evaluate(fields_for_source(source))
+            )
+        except CustomConstraintError as exc:
+            raise CustomConstraintError(
+                f"{constraint_name}: {source_name(source)}: {exc}"
+            ) from exc
+
+    if has_additive:
+        # Additive expressions are already expressed per physical source WMT
+        # by constraint_property_fields(). Multiplying by the selected
+        # physical WMT therefore gives the selected additive contribution.
+        return {
+            "kind": "sum",
+            "constant": 0.0,
+            "expression_values": expression_values,
+            "weight_values": [1.0 for _ in sources],
+            "linear_values": expression_values,
+            "weight_field": None,
+        }
+
+    if len(intensive_weight_fields) != 1:
+        fields = ", ".join(sorted(intensive_weight_fields))
         raise CustomConstraintError(
-            f"{definition.get('name') or definition.get('key')}: denominator is zero for every available source."
+            f"{constraint_name}: weighted-average fields in expression "
+            f"'{expression.expression}' do not share one weight field ({fields})."
         )
-    return numerator_values, denominator_values
+    weight_field = next(iter(intensive_weight_fields))
+    weight_values = []
+    for source in sources:
+        balance = float(balance_for_source(source) or 0.0)
+        if balance <= 1e-12:
+            weight_values.append(0.0)
+            continue
+        if weight_field == "__physical_source_wmt__":
+            weight_values.append(1.0)
+            continue
+        properties = {
+            canonical_property_key(key): value
+            for key, value in dict(properties_for_source(source) or {}).items()
+        }
+        if weight_field not in properties:
+            raise CustomConstraintError(
+                f"{constraint_name}: {source_name(source)}: additive weight "
+                f"field '{weight_field}' is unavailable."
+            )
+        try:
+            weight = float(properties[weight_field])
+        except (TypeError, ValueError) as exc:
+            raise CustomConstraintError(
+                f"{constraint_name}: {source_name(source)}: additive weight "
+                f"field '{weight_field}' is not numeric."
+            ) from exc
+        if not math.isfinite(weight) or weight < 0:
+            raise CustomConstraintError(
+                f"{constraint_name}: {source_name(source)}: additive weight "
+                f"field '{weight_field}' must be finite and non-negative."
+            )
+        weight_values.append(weight / balance)
+    return {
+        "kind": "weighted_average",
+        "constant": 0.0,
+        "expression_values": expression_values,
+        "weight_values": weight_values,
+        "linear_values": [
+            value * weight
+            for value, weight in zip(expression_values, weight_values)
+        ],
+        "weight_field": weight_field,
+    }
+
+
+def _combine_compiled_sides(numerator, denominator, constraint_name):
+    numerator_kind = numerator["kind"]
+    denominator_kind = denominator["kind"]
+    zeroes = [0.0 for _ in numerator["linear_values"]]
+    numerator_constant = 0.0
+    denominator_constant = 0.0
+
+    if numerator_kind == "constant" and denominator_kind == "constant":
+        numerator_values = zeroes
+        denominator_values = zeroes
+        numerator_constant = numerator["constant"]
+        denominator_constant = denominator["constant"]
+    elif denominator_kind == "constant":
+        if numerator_kind == "weighted_average":
+            numerator_values = numerator["linear_values"]
+            denominator_values = [
+                denominator["constant"] * value
+                for value in numerator["weight_values"]
+            ]
+        else:
+            numerator_values = numerator["linear_values"]
+            denominator_values = zeroes
+            denominator_constant = denominator["constant"]
+    elif numerator_kind == "constant":
+        if denominator_kind == "weighted_average":
+            numerator_values = [
+                numerator["constant"] * value
+                for value in denominator["weight_values"]
+            ]
+            denominator_values = denominator["linear_values"]
+        else:
+            numerator_values = zeroes
+            denominator_values = denominator["linear_values"]
+            numerator_constant = numerator["constant"]
+    elif numerator_kind == "sum" and denominator_kind == "sum":
+        numerator_values = numerator["linear_values"]
+        denominator_values = denominator["linear_values"]
+    elif (
+        numerator_kind == "weighted_average"
+        and denominator_kind == "weighted_average"
+        and numerator["weight_field"] == denominator["weight_field"]
+    ):
+        # The common weighted-average denominator cancels.
+        numerator_values = numerator["linear_values"]
+        denominator_values = denominator["linear_values"]
+    else:
+        raise CustomConstraintError(
+            f"{constraint_name}: a ratio between a summed additive expression "
+            "and a weighted-average expression is nonlinear and cannot be "
+            "passed to the linear solver. Use an additive weighted-mass field "
+            "or a constant on the other side."
+        )
+
+    if denominator_constant < 0 or any(value < -1e-12 for value in denominator_values):
+        raise CustomConstraintError(
+            f"{constraint_name}: denominator must be non-negative."
+        )
+    if denominator_constant <= 1e-12 and not any(
+        value > 1e-12 for value in denominator_values
+    ):
+        raise CustomConstraintError(
+            f"{constraint_name}: denominator is zero for every available source."
+        )
+    return {
+        "numerator_values": numerator_values,
+        "denominator_values": denominator_values,
+        "numerator_constant": numerator_constant,
+        "denominator_constant": denominator_constant,
+    }
+
+
+def _compile_custom_constraint(
+    sources,
+    definition,
+    *,
+    fields_for_source,
+    properties_for_source,
+    balance_for_source,
+    kinds_for_source,
+    weights_for_source,
+    source_name,
+):
+    sources = list(sources or [])
+    constraint_name = str(
+        definition.get("name") or definition.get("key") or "Custom constraint"
+    )
+    common = {
+        "sources": sources,
+        "fields_for_source": fields_for_source,
+        "properties_for_source": properties_for_source,
+        "balance_for_source": balance_for_source,
+        "kinds_for_source": kinds_for_source,
+        "weights_for_source": weights_for_source,
+        "source_name": source_name,
+        "constraint_name": constraint_name,
+    }
+    numerator = _compiled_expression_side(
+        expression_text=definition.get("numerator"), **common
+    )
+    denominator = _compiled_expression_side(
+        expression_text=definition.get("denominator") or "1", **common
+    )
+    compiled = _combine_compiled_sides(
+        numerator, denominator, constraint_name
+    )
+    compiled.update({
+        "definition": definition,
+        "numerator_side": numerator,
+        "denominator_side": denominator,
+    })
+    return compiled
+
+
+def compile_event_custom_constraint(event_pool, definition):
+    return _compile_custom_constraint(
+        event_pool,
+        definition,
+        fields_for_source=event_constraint_fields,
+        properties_for_source=lambda event: getattr(
+            event, "source_properties", None
+        ),
+        balance_for_source=lambda event: getattr(event, "balance", None),
+        kinds_for_source=lambda event: getattr(
+            event, "source_property_kinds", None
+        ),
+        weights_for_source=lambda event: getattr(
+            event, "source_property_weights", None
+        ),
+        source_name=lambda event: (
+            getattr(event, "source_name", None)
+            or getattr(event, "stockpile", None)
+            or getattr(event, "grade_block", None)
+            or "source"
+        ),
+    )
+
+
+def compile_mapping_custom_constraint(
+    source_rows, definition, property_kinds=None, property_weights=None
+):
+    return _compile_custom_constraint(
+        source_rows,
+        definition,
+        fields_for_source=lambda row: mapping_constraint_fields(
+            row, property_kinds
+        ),
+        properties_for_source=lambda row: row.get("source_properties") or {},
+        balance_for_source=lambda row: row.get(
+            "constraint_source_balance",
+            row.get("source_opening_balance", row.get("balance")),
+        ),
+        kinds_for_source=lambda row: property_kinds
+        or row.get("source_property_kinds"),
+        weights_for_source=lambda row: property_weights
+        or row.get("source_property_weights"),
+        source_name=lambda row: row.get("source") or row.get("source_id")
+        or "source",
+    )
+
+
+def custom_constraint_aggregate_totals(compiled, selected_quantities):
+    quantities = list(selected_quantities or [])
+
+    def aggregate(side):
+        if side["kind"] == "constant":
+            return side["constant"]
+        if side["kind"] == "sum":
+            return sum(
+                value * quantity
+                for value, quantity in zip(
+                    side["linear_values"], quantities
+                )
+            )
+        weighted_mass = sum(
+            value * quantity
+            for value, quantity in zip(side["linear_values"], quantities)
+        )
+        selected_weight = sum(
+            value * quantity
+            for value, quantity in zip(side["weight_values"], quantities)
+        )
+        return (
+            weighted_mass / selected_weight
+            if selected_weight > 1e-12 else None
+        )
+
+    return aggregate(compiled["numerator_side"]), aggregate(
+        compiled["denominator_side"]
+    )
+
+
+def custom_constraint_source_report_values(compiled, index, quantity):
+    result = []
+    for side_name in ("numerator_side", "denominator_side"):
+        side = compiled[side_name]
+        if side["kind"] == "constant":
+            result.extend((None, 0.0))
+        elif side["kind"] == "weighted_average":
+            result.extend((
+                side["expression_values"][index],
+                side["linear_values"][index] * quantity,
+            ))
+        else:
+            result.extend((
+                side["linear_values"][index],
+                side["linear_values"][index] * quantity,
+            ))
+    return tuple(result)
 
 
 def constraint_report_fields(definition, numerator_total, denominator_total, minimum=None, maximum=None):
@@ -716,13 +1055,15 @@ def constraint_report_fields(definition, numerator_total, denominator_total, min
             definition.get("numerator") or ""
         ),
         f"{prefix}_denominator_expression": str(
-            definition.get("denominator") or "one"
+            definition.get("denominator") or "1"
         ),
         f"{prefix}_numerator": numerator_total,
         f"{prefix}_denominator": denominator_total,
         f"{prefix}_actual_ratio": (
             numerator_total / denominator_total
-            if abs(denominator_total) > 1e-12 else None
+            if numerator_total is not None
+            and denominator_total is not None
+            and abs(denominator_total) > 1e-12 else None
         ),
         f"{prefix}_target_min": minimum,
         f"{prefix}_target_max": maximum,

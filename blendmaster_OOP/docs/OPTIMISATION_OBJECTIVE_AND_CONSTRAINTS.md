@@ -199,9 +199,9 @@ Payload arrival does **not** create a new steady state. Payloads whose delivery
 time falls inside the existing steady-state window become candidates for that
 window.
 
-## Configuring custom ratio constraints
+## Configuring custom constraints
 
-Solver Configuration contains a **Custom Ratio Constraints** table with
+Solver Configuration contains a **Custom Constraints** table with
 **Add Constraint...**, **Edit...** and **Delete** actions. A definition has a
 stable name, a numerator expression and a denominator expression. The two
 expression fields are editable, type-to-search lists: select a field directly
@@ -235,23 +235,12 @@ CC OPF02 inventory `PROD3` physical properties are exposed as canonical
 `prod2_*` fields, matching the logical Product 2 channel used by EXPIT and AMT.
 The raw inventory names remain available for audit.
 
-The field selector advertises the canonical fields checked **Use in
-Optimisation** on Define Fields. This is the explicit solver/report contract;
-an optional property is not exposed merely because it happens to exist on one
-raw source. Availability is still validated source by source before solving,
-so appearing in the selector does not guarantee that every source has a mapped
-value. The following built-in fields are always offered:
-
-| Field | Per-source value |
-|---|---|
-| `one` | `1.0`; use this as the denominator for a tonne-weighted average or as the numerator/denominator basis for a source-share ratio. |
-| `is_direct_tip`, `is_grade_block` | `1.0` for a direct-tip grade block, otherwise `0.0`. |
-| `is_stockpile` | `1.0` for an inventory or AMT stockpile source, otherwise `0.0`. |
-| `is_amt` | `1.0` for an AMT chunk, otherwise `0.0`. |
-| `is_inventory` | `1.0` for a non-AMT inventory stockpile, otherwise `0.0`. |
-| `source_balance` | Source balance available when the event was created. |
-| `selected_fe`, `selected_si`, `selected_al`, `selected_p`, `selected_mn` | The active brand's effective selected grade after data-stream fallback. |
-| `grade_fe`, `grade_si`, `grade_al`, `grade_p`, `grade_mn` | Aliases of the same effective optimiser grades. |
+The field selector advertises only canonical additive and weighted-average
+fields checked **Use in Optimisation** on Define Fields. Runtime flags,
+duplicated selected-grade aliases and raw source metadata are not offered.
+Enter the numeric literal `1` when a scalar denominator is required.
+Availability is still validated source by source before solving, so appearing
+in the selector does not guarantee that every source has a mapped value.
 
 Weighted-average properties—grades, percentages, ratios, moisture, yields,
 recovery, ultrafines and density—are exposed directly under their canonical
@@ -270,11 +259,18 @@ Max. Definitions and Calendar bounds are stored in projects using a stable key,
 so constraints with the same display labels in different table sections do not
 collide.
 
-Every expression is checked again against every source available to a solve.
+Every expression and every declared weight dependency is checked again against
+every source available to a solve.
 Preparation stops with the constraint and source named when a referenced field
 is missing, non-numeric or non-finite, or when an expression divides by zero.
-The denominator must be non-negative for every source and positive for at least
-one available source. Missing data is never silently replaced with zero.
+The effective denominator must be non-negative and capable of being positive.
+Missing data is never silently replaced with zero: a missing mapping, weighted
+field or additive weight stops preparation/optimisation with the constraint and
+source identified.
+
+The same strict rule applies to optimiser grades. An unbranded value in the
+requested stream may serve any brand, but a missing requested stream cannot
+fall to a lower or legacy stream during optimisation or manual planning.
 
 At run preparation BlendMaster carries the canonical properties checked **Use
 in Optimisation**, plus the automatically checked additive weight of every
@@ -378,23 +374,32 @@ between the Calendar minimum and maximum.
 - When Direct Tip is disabled, the effective direct-tip ratio is zero and
   grade-block sources are removed.
 
-### 9. Custom ratio constraints
+### 9. Custom constraints
 
-For selected tonnes `x(s)`, per-source numerator expression `N(s)` and
-per-source denominator expression `D(s)`, BlendMaster constrains:
+Each side is aggregated across all sources selected in the steady state:
+
+- an **Additive** expression is summed using the proportionally depleted value
+  from every selected source;
+- a **Weighted Average** expression is averaged using its declared additive
+  Define Fields weight across every selected source; and
+- a numeric literal is one scalar constant, not a value repeated for every
+  selected source tonne.
+
+The constrained value is `aggregate(numerator) / aggregate(denominator)`:
 
 ```text
-custom ratio = sum over sources [x(s) * N(s)]
-               / sum over sources [x(s) * D(s)]
+quantity_1 / quantity_2 = sum(quantity_1) / sum(quantity_2)
+quantity_1 / 1          = sum(quantity_1)
+product_fe / 1          = sum(product_fe * product_dmt) / sum(product_dmt)
 ```
 
-This is a ratio of tonne-weighted totals, not an arithmetic average of each
-source's `N(s) / D(s)`. Operations inside an expression—such as
-`field_a * field_b`—are evaluated once for each source, producing a constant
-coefficient before the linear optimisation is built. Min and Max are enforced
-by cross-multiplying the non-negative denominator, so the resulting rules
-remain linear hard constraints. A definition with both Calendar bounds blank
-is calculated and reported but does not restrict the blend.
+Operations inside an expression are evaluated for each source before the
+appropriate sum or weighted average. Min and Max are hard constraints on the
+whole selected steady-state blend, never independent per-source tests. Ratios
+between a summed side and a weighted-average side are nonlinear and are
+rejected; use an additive weighted-mass field or a constant for the other side.
+A definition with both Calendar bounds blank is calculated and reported but
+does not restrict the blend.
 
 ### 10. Minimum and maximum stockpile count
 
@@ -511,19 +516,25 @@ per-source coefficients used to calculate it. A constraint whose stable key is
 | `custom_constraint_<key>_name` | User-facing constraint name. |
 | `custom_constraint_<key>_numerator_expression` | Saved numerator expression. |
 | `custom_constraint_<key>_denominator_expression` | Saved denominator expression. |
-| `custom_constraint_<key>_numerator` | `sum[x(s) * N(s)]` for the steady state. |
-| `custom_constraint_<key>_denominator` | `sum[x(s) * D(s)]` for the steady state. |
+| `custom_constraint_<key>_numerator` | Whole-blend aggregate of the numerator expression: sum, declared weighted average, or scalar constant. |
+| `custom_constraint_<key>_denominator` | Whole-blend aggregate of the denominator expression: sum, declared weighted average, or scalar constant. |
 | `custom_constraint_<key>_actual_ratio` | Numerator total divided by denominator total. |
 | `custom_constraint_<key>_target_min` | Calendar minimum used for the steady state, or blank. |
 | `custom_constraint_<key>_target_max` | Calendar maximum used for the steady state, or blank. |
-| `custom_constraint_<key>_source_numerator` | `N(s)` coefficient for this report source row. |
-| `custom_constraint_<key>_source_denominator` | `D(s)` coefficient for this report source row. |
+| `custom_constraint_<key>_source_numerator_coefficient` | For an additive side, contribution per physical source WMT; for a weighted-average side, the source expression value; blank for a scalar side. |
+| `custom_constraint_<key>_source_denominator_coefficient` | Same source-level interpretation for the denominator side; blank for a scalar side. |
+| `custom_constraint_<key>_source_numerator_contribution` | Selected additive contribution, or weighted mass (`value × selected declared weight`) for a weighted-average side; zero for a scalar. |
+| `custom_constraint_<key>_source_denominator_contribution` | Same source-level contribution for the denominator side; zero for a scalar. |
 
 The optimised report database adds these columns dynamically, so new named
-constraints do not require a schema migration. When payloads are consolidated
+constraints do not require a schema migration. The whole-blend numerator,
+denominator, ratio and targets are repeated on each source row so any row is
+self-describing; the `source_*` fields are specific to that row. When payloads are consolidated
 to a grouped source row, their source coefficients are weighted by the reported
-source tonnes. These fields make the reported ratio independently
-reconstructable from the source rows.
+source tonnes. Additive aggregates are the sum of source contributions.
+Weighted-average aggregates divide summed weighted-mass contributions by the
+summed selected declared weight. Scalar aggregates are shown only in the
+unqualified whole-blend column.
 
 Each imported/modelled property referenced by an enabled expression also
 creates a numeric `source_property_<canonical_field>` column. The name is the
@@ -547,7 +558,7 @@ Common causes include:
 - grade ranges cannot meet crusher or product-build targets;
 - the stockpile-only grade rule is stricter than the available stockpiles allow;
 - direct-tip minimum and maximum ratios conflict with available sources;
-- a custom ratio has contradictory bounds, no positive denominator, missing
+- a custom constraint has contradictory bounds, no positive denominator, missing
   source properties, or cannot be satisfied by the available blend;
 - Min Stockpiles, Max Stockpiles and Minimum Contribution Ratio are
   incompatible;

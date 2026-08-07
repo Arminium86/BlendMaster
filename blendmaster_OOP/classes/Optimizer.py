@@ -37,9 +37,11 @@ from classes.EventData import EventData
 from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
 from classes.CustomConstraints import (
     CustomConstraintError,
+    compile_event_custom_constraint,
     constraint_key,
+    custom_constraint_aggregate_totals,
     constraint_report_fields,
-    custom_constraint_coefficients,
+    custom_constraint_source_report_values,
     filter_source_properties,
     scale_additive_source_properties,
     source_property_balance_report_fields,
@@ -496,26 +498,50 @@ class Optimizer:
             except (TypeError, ValueError):
                 return default
 
-        def stream_tonnes(event, stream_name, fallback):
-            """Return a mapped additive tonne stream for one source."""
-            value = safe_float(
+        def stream_tonnes(event, stream_name):
+            """Return an explicitly mapped additive stream, or ``None``."""
+            return safe_float(
                 (getattr(event, "source_properties", {}) or {}).get(stream_name),
                 None,
             )
-            # Legacy APS/direct-tip rows often do not carry the canonical
-            # additive field.  Treat a missing/zero value as un-mapped and
-            # preserve their physical ROM quantity.
-            return value if value is not None and value > Optimizer.SOLUTION_TOLERANCE else fallback
 
         target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
         selected_data_stream = str(
             solver_config.get("selected_data_stream") or DEFAULT_STREAM
         ).strip().lower()
+        strict_mapped_fields = bool(
+            solver_config.get("strict_mapped_fields", False)
+        )
         # Grade compliance and objectives consume the single stream selected
-        # for this run. Resolution is per analyte so incomplete upstream data
-        # falls back without discarding otherwise valid grades.
+        # for this run. Current mapped projects require that exact stream;
+        # unbranded values in that stream remain valid for every brand, but a
+        # lower-stream/legacy substitution is a setup error.
         for event in event_pool:
-            apply_selected_stream(event, selected_data_stream, target_product_brand)
+            warnings = apply_selected_stream(
+                event, selected_data_stream, target_product_brand
+            )
+            invalid = [
+                warning for warning in warnings
+                if warning.get("used_stream") != selected_data_stream
+            ]
+            if strict_mapped_fields and invalid:
+                source_name = (
+                    getattr(event, "source_name", None)
+                    or getattr(event, "stockpile", None)
+                    or getattr(event, "grade_block", None)
+                    or "source"
+                )
+                analytes = ", ".join(
+                    str(warning.get("analyte") or "").upper()
+                    for warning in invalid
+                )
+                raise ValueError(
+                    f"{source_name}: optimiser grade stream "
+                    f"'{selected_data_stream}' is not mapped/calculated for "
+                    f"{analytes}. Fix Define Fields/Map Fields or select a "
+                    "different optimiser grade stream; stream fallback is "
+                    "disabled for optimisation."
+                )
         crusher_tonnes_stream = str(
             solver_config.get("crusher_tonnes_stream") or "modelled_rom_wmt"
         )
@@ -525,24 +551,51 @@ class Optimizer:
         product_build_tonnes_stream = str(
             solver_config.get("product_build_tonnes_stream") or "modelled_product_wmt"
         )
-        # Coefficients are source-stream tonnes per physical ROM tonne.  A
-        # missing mapping deliberately falls back to physical ROM tonnes for
-        # backwards-compatible projects.
+        # Coefficients are source-stream tonnes per physical ROM tonne. Missing
+        # is materially different from zero: zero is a valid mapped quantity;
+        # missing means the source cannot be used where that quantity is
+        # required. In the current strict mapping contract, product/custom
+        # quantities are never substituted with physical ROM. The non-strict
+        # branch below exists only for pre-Define-Fields callers/tests.
         physical_tonnes = [max(safe_float(event.balance), 0.0) for event in event_pool]
-        crusher_coefficients = [
-            stream_tonnes(event, crusher_tonnes_stream, physical) / physical
-            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+        def capacity_stream_tonnes(event, stream_name, physical):
+            value = stream_tonnes(event, stream_name)
+            if (
+                value is None
+                and stream_name in {
+                    "modelled_rom_wmt", "modelled_product_wmt"
+                }
+                and not strict_mapped_fields
+            ):
+                return physical
+            return value
+
+        crusher_stream_tonnes = [
+            capacity_stream_tonnes(event, crusher_tonnes_stream, physical)
             for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        reclaimer_stream_tonnes = [
+            capacity_stream_tonnes(event, reclaimer_tonnes_stream, physical)
+            for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        product_build_stream_tonnes = [
+            capacity_stream_tonnes(event, product_build_tonnes_stream, physical)
+            for event, physical in zip(event_pool, physical_tonnes)
+        ]
+        crusher_coefficients = [
+            max(value, 0.0) / physical
+            if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for value, physical in zip(crusher_stream_tonnes, physical_tonnes)
         ]
         reclaimer_coefficients = [
-            stream_tonnes(event, reclaimer_tonnes_stream, physical) / physical
-            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
-            for event, physical in zip(event_pool, physical_tonnes)
+            max(value, 0.0) / physical
+            if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for value, physical in zip(reclaimer_stream_tonnes, physical_tonnes)
         ]
         product_build_coefficients = [
-            stream_tonnes(event, product_build_tonnes_stream, physical) / physical
-            if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
-            for event, physical in zip(event_pool, physical_tonnes)
+            max(value, 0.0) / physical
+            if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+            for value, physical in zip(product_build_stream_tonnes, physical_tonnes)
         ]
         source_property_weights = {
             str(name).strip().lower(): str(weight).strip().lower()
@@ -564,12 +617,20 @@ class Optimizer:
             for event, physical in zip(event_pool, physical_tonnes):
                 grade_field = f"{used_grade_stream(event, analyte)}_{analyte}"
                 weight_field = source_property_weights.get(grade_field)
-                weight_tonnes = stream_tonnes(
-                    event, weight_field, physical
-                ) if weight_field else physical
+                weight_tonnes = (
+                    stream_tonnes(event, weight_field)
+                    if weight_field else physical
+                )
+                if (
+                    weight_tonnes is None
+                    and weight_field == "modelled_rom_wmt"
+                    and not strict_mapped_fields
+                ):
+                    weight_tonnes = physical
                 coefficients.append(
-                    weight_tonnes / physical
-                    if physical > Optimizer.SOLUTION_TOLERANCE else 0.0
+                    max(weight_tonnes, 0.0) / physical
+                    if weight_tonnes is not None
+                    and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
                 )
             grade_weight_coefficients[analyte] = coefficients
 
@@ -577,11 +638,23 @@ class Optimizer:
         # is converted from the selected reclaimer stream back to that physical
         # basis for each source independently.
         bounds = []
-        for event, coefficient in zip(event_pool, reclaimer_coefficients):
+        product_build_required = bool(solver_config.get("target_product_build"))
+        for index, (event, coefficient) in enumerate(
+            zip(event_pool, reclaimer_coefficients)
+        ):
             reclaim_capacity = max(safe_float(event.rate), 0.0) * steady_state_duration
+            mappings_available = (
+                crusher_stream_tonnes[index] is not None
+                and reclaimer_stream_tonnes[index] is not None
+                and (
+                    not product_build_required
+                    or product_build_stream_tonnes[index] is not None
+                )
+            )
             physical_capacity = (
                 reclaim_capacity / coefficient
-                if coefficient > Optimizer.SOLUTION_TOLERANCE else 0.0
+                if mappings_available
+                and coefficient > Optimizer.SOLUTION_TOLERANCE else 0.0
             )
             bounds.append((0, min(max(safe_float(event.balance), 0.0), physical_capacity)))
         brand_guidance_mode = solver_config.get("brand_guidance_mode", "ignore")
@@ -1208,17 +1281,20 @@ class Optimizer:
             A_ub_min_feed_ratio = [[stockpile_coef if i in stockpile_indices else grade_block_coef for i in range(len(event_pool))]]
             b_ub_min_feed_ratio = [0]
 
-        # User-defined ratios use the same linear form as Direct Tip Ratio:
-        #   sum(x * numerator) / sum(x * denominator) between min and max.
-        # Arithmetic inside each expression is evaluated once per source, so
-        # cross-multiplication remains a linear constraint in selected tonnes.
+        # Custom constraints aggregate the selected steady-state blend. An
+        # additive side is summed, a weighted-average side uses its declared
+        # Define Fields weight, and a literal is a scalar constant.
         A_ub_custom_constraints = []
         b_ub_custom_constraints = []
         compiled_custom_constraints = []
         for definition in period_crusher_target.get("custom_constraints", []) or []:
-            numerator_values, denominator_values = (
-                custom_constraint_coefficients(event_pool, definition)
+            compiled = compile_event_custom_constraint(
+                event_pool, definition
             )
+            numerator_values = compiled["numerator_values"]
+            denominator_values = compiled["denominator_values"]
+            numerator_constant = compiled["numerator_constant"]
+            denominator_constant = compiled["denominator_constant"]
             minimum = definition.get("minimum")
             maximum = definition.get("maximum")
             minimum = (
@@ -1238,7 +1314,7 @@ class Optimizer:
                     -denominator for denominator in denominator_values
                 ])
                 b_ub_custom_constraints.append(
-                    -Optimizer.SOLUTION_TOLERANCE
+                    denominator_constant - Optimizer.SOLUTION_TOLERANCE
                 )
             if minimum is not None:
                 A_ub_custom_constraints.append([
@@ -1247,7 +1323,9 @@ class Optimizer:
                         numerator_values, denominator_values
                     )
                 ])
-                b_ub_custom_constraints.append(0.0)
+                b_ub_custom_constraints.append(
+                    numerator_constant - minimum * denominator_constant
+                )
             if maximum is not None:
                 A_ub_custom_constraints.append([
                     numerator - maximum * denominator
@@ -1255,14 +1333,14 @@ class Optimizer:
                         numerator_values, denominator_values
                     )
                 ])
-                b_ub_custom_constraints.append(0.0)
-            compiled_custom_constraints.append({
-                "definition": definition,
-                "numerator_values": numerator_values,
-                "denominator_values": denominator_values,
+                b_ub_custom_constraints.append(
+                    maximum * denominator_constant - numerator_constant
+                )
+            compiled.update({
                 "minimum": minimum,
                 "maximum": maximum,
             })
+            compiled_custom_constraints.append(compiled)
 
         # Step 5: Maximum quantities for each source
         # Generate a list of indicies for each unique source
@@ -1618,17 +1696,8 @@ class Optimizer:
             custom_constraint_fields = {}
             custom_constraint_source_fields = []
             for compiled in compiled_custom_constraints:
-                numerator_total = sum(
-                    value * result.x[index]
-                    for index, value in enumerate(
-                        compiled["numerator_values"]
-                    )
-                )
-                denominator_total = sum(
-                    value * result.x[index]
-                    for index, value in enumerate(
-                        compiled["denominator_values"]
-                    )
+                numerator_total, denominator_total = (
+                    custom_constraint_aggregate_totals(compiled, result.x)
                 )
                 custom_constraint_fields.update(constraint_report_fields(
                     compiled["definition"],
@@ -1643,8 +1712,7 @@ class Optimizer:
                 )
                 custom_constraint_source_fields.append((
                     key,
-                    compiled["numerator_values"],
-                    compiled["denominator_values"],
+                    compiled,
                 ))
 
             transactions = []
@@ -1737,9 +1805,15 @@ class Optimizer:
                             if steady_state_duration != 0
                             else 0,
                         }
-                    for key, numerator_values, denominator_values in custom_constraint_source_fields:
-                        numerator_coefficient = numerator_values[i]
-                        denominator_coefficient = denominator_values[i]
+                    for key, compiled in custom_constraint_source_fields:
+                        (
+                            numerator_coefficient,
+                            numerator_contribution,
+                            denominator_coefficient,
+                            denominator_contribution,
+                        ) = custom_constraint_source_report_values(
+                            compiled, i, result.x[i]
+                        )
                         transaction[
                             f"custom_constraint_{key}_source_numerator_coefficient"
                         ] = numerator_coefficient
@@ -1748,10 +1822,10 @@ class Optimizer:
                         ] = denominator_coefficient
                         transaction[
                             f"custom_constraint_{key}_source_numerator_contribution"
-                        ] = numerator_coefficient * result.x[i]
+                        ] = numerator_contribution
                         transaction[
                             f"custom_constraint_{key}_source_denominator_contribution"
-                        ] = denominator_coefficient * result.x[i]
+                        ] = denominator_contribution
                     transactions.append(transaction)
 
             return {
@@ -2007,9 +2081,11 @@ class Optimizer:
                 "available_max": None,
             }
             try:
-                numerator_values, denominator_values = (
-                    custom_constraint_coefficients(event_pool, definition)
+                compiled = compile_event_custom_constraint(
+                    event_pool, definition
                 )
+                numerator_values = compiled["numerator_values"]
+                denominator_values = compiled["denominator_values"]
             except CustomConstraintError as error:
                 diagnostic["error"] = str(error)
                 likely_causes.append(str(error))
@@ -2021,11 +2097,17 @@ class Optimizer:
                 for index, bound in enumerate(bounds)
                 if safe_float(bound[1]) > Optimizer.SOLUTION_TOLERANCE
             ]
+            has_scalar_term = (
+                abs(compiled["numerator_constant"])
+                > Optimizer.SOLUTION_TOLERANCE
+                or abs(compiled["denominator_constant"])
+                > Optimizer.SOLUTION_TOLERANCE
+            )
             source_ratios = [
                 numerator / denominator
                 for numerator, denominator in active_coefficients
                 if denominator > Optimizer.SOLUTION_TOLERANCE
-            ]
+            ] if not has_scalar_term else []
             nonzero_zero_denominator = any(
                 denominator <= Optimizer.SOLUTION_TOLERANCE
                 and abs(numerator) > Optimizer.SOLUTION_TOLERANCE
@@ -2056,6 +2138,11 @@ class Optimizer:
                         f"the available source-coefficient range "
                         f"({available_min:g} to {available_max:g})."
                     )
+            elif has_scalar_term:
+                diagnostic["range_note"] = (
+                    "The constraint contains a scalar constant; its available "
+                    "range depends on the selected steady-state quantities."
+                )
             elif not source_ratios:
                 likely_causes.append(
                     f"Custom ratio '{name}' has no positive denominator "

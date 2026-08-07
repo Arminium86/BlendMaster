@@ -58,7 +58,6 @@ from classes.GradeStreams import (
     weighted_merge_grade_streams,
 )
 from classes.CustomConstraints import (
-    BUILTIN_CONSTRAINT_FIELDS,
     CustomConstraintError,
     SafeNumericExpression,
     canonical_property_key,
@@ -2377,21 +2376,24 @@ class UserInputs(QMainWindow):
         low_fe_layout.addStretch()
         self.solver_config_layout.addLayout(low_fe_layout)
 
-        custom_constraints_label = QLabel("Custom Ratio Constraints")
+        custom_constraints_label = QLabel("Custom Constraints")
         custom_constraints_label.setStyleSheet(
             "font-weight: bold; margin-top: 12px;"
         )
         custom_constraints_label.setToolTip(
-            "Each constraint is calculated as the tonne-weighted sum of its "
-            "numerator expression divided by the tonne-weighted sum of its "
-            "denominator expression. Period-specific bounds are entered in "
-            "Calendar."
+            "Each constraint applies to the whole selected steady-state blend. "
+            "Additive fields sum; weighted-average fields use their declared "
+            "Define Fields weight; numeric literals remain scalar constants. "
+            "Period-specific bounds are entered in Calendar."
         )
         self.solver_config_layout.addWidget(custom_constraints_label)
 
         custom_help = QLabel(
-            "Create named ratios from source fields. Expressions support field "
-            "names, numbers, parentheses, and +, -, *, /."
+            "Create named ratios from additive or weighted-average Define Fields "
+            "that have Use in Optimisation checked. Expressions support field "
+            "names, numbers, parentheses, and +, -, *, /. Reports include the "
+            "blend totals and each source's coefficient and contribution so the "
+            "result can be reconstructed."
         )
         custom_help.setWordWrap(True)
         self.solver_config_layout.addWidget(custom_help)
@@ -3152,22 +3154,8 @@ class UserInputs(QMainWindow):
         return input_field
 
     def custom_constraint_available_fields(self):
-        fields = set(BUILTIN_CONSTRAINT_FIELDS)
         definitions = vars(self).get("field_definitions")
-        if definitions is not None:
-            fields.update(optimization_field_names(definitions))
-        elif self.database_view_is_current():
-            records = list(vars(self).get("database_view_rows", []) or [])
-            for record in records:
-                available = constraint_property_fields(
-                    source_properties_from_mapping(record),
-                    record.get("tonnes", record.get("balance")),
-                )
-                fields.update(
-                    key for key in available
-                    if not key.startswith("selected_")
-                )
-        return sorted(fields)
+        return sorted(optimization_field_names(definitions))
 
     def populate_custom_constraint_table(self):
         if not hasattr(self, "custom_constraint_table"):
@@ -3208,7 +3196,7 @@ class UserInputs(QMainWindow):
         if row < 0 or row >= len(self.custom_constraint_definitions):
             QMessageBox.information(
                 self,
-                "Custom Ratio Constraints",
+                "Custom Constraints",
                 "Select a constraint to edit.",
             )
             return
@@ -3245,7 +3233,7 @@ class UserInputs(QMainWindow):
         if not self.database_view_is_current():
             QMessageBox.information(
                 self,
-                "Custom Ratio Constraints",
+                "Custom Constraints",
                 "Refresh Database View successfully before adding or editing "
                 "a custom constraint.",
             )
@@ -3258,7 +3246,7 @@ class UserInputs(QMainWindow):
         fields = self.custom_constraint_available_fields()
         dialog = QDialog(self)
         dialog.setWindowTitle(
-            "Edit Custom Ratio Constraint" if current else "Add Custom Ratio Constraint"
+            "Edit Custom Constraint" if current else "Add Custom Constraint"
         )
         dialog.resize(650, 230)
         layout = QVBoxLayout(dialog)
@@ -3268,7 +3256,7 @@ class UserInputs(QMainWindow):
             fields, current.get("numerator")
         )
         denominator_input = self.custom_constraint_expression_combo(
-            fields, current.get("denominator") or "one"
+            fields, current.get("denominator") or "1"
         )
         form.addRow("Name:", name_input)
         form.addRow("Numerator:", numerator_input)
@@ -3276,7 +3264,11 @@ class UserInputs(QMainWindow):
         layout.addLayout(form)
         hint = QLabel(
             "Calendar will add Min and Max rows for this constraint. Leave a "
-            "Calendar bound blank when that side should not be enforced."
+            "Calendar bound blank when that side should not be enforced. "
+            "Additive expressions sum across selected sources; weighted-average "
+            "expressions use their declared weight; entering 1 is a scalar one. "
+            "Reports repeat the whole-blend numerator, denominator and ratio on "
+            "each source row and retain source audit contributions."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -3292,7 +3284,7 @@ class UserInputs(QMainWindow):
         def save_definition():
             name = name_input.text().strip()
             numerator = numerator_input.currentText().strip()
-            denominator = denominator_input.currentText().strip() or "one"
+            denominator = denominator_input.currentText().strip() or "1"
             if not name:
                 QMessageBox.warning(dialog, "Invalid Constraint", "Name cannot be blank.")
                 return
@@ -3424,6 +3416,7 @@ class UserInputs(QMainWindow):
             "rehandle_cycle_time_penalty_enabled": False,
             "haulage_cost_per_hour": 5.0,
             "custom_constraints": [],
+            "strict_mapped_fields": True,
         }
         incoming = solver_config if solver_config is not None else self.solver_config
         if not incoming:
@@ -3456,7 +3449,7 @@ class UserInputs(QMainWindow):
         except CustomConstraintError as error:
             self.custom_constraint_normalization_warning = str(error)
             raise ValueError(
-                "Invalid saved custom ratio constraint: " + str(error)
+                "Invalid saved custom constraint: " + str(error)
             ) from error
         definitions = normalize_field_definitions(
             vars(self).get("field_definitions")
@@ -3800,7 +3793,6 @@ class UserInputs(QMainWindow):
             )
             if opening_wmt is not None:
                 record["source_wmt"] = opening_wmt
-                record["modelled_rom_wmt"] = opening_wmt
             rom_by_brand = normalized_streams.setdefault("modelled_rom", {})
             unbranded_rom = rom_by_brand.get("*")
             if not isinstance(unbranded_rom, dict):
@@ -3841,13 +3833,17 @@ class UserInputs(QMainWindow):
         defined_values = record.get("defined_fields") or {}
         if isinstance(defined_values, dict):
             for key, value in defined_values.items():
-                record.setdefault(key, value)
+                record[key] = value
         numeric_properties = source_properties_from_mapping(record)
         for definition in normalize_field_definitions(
             vars(self).get("field_definitions")
         ):
             name = definition["name"]
-            value = record.get(name, numeric_properties.get(name))
+            value = (
+                defined_values.get(name)
+                if isinstance(defined_values, dict) and name in defined_values
+                else record.get(name, numeric_properties.get(name))
+            )
             if value is None:
                 for stream in STREAMS:
                     prefix = f"{stream}_"
@@ -3872,7 +3868,7 @@ class UserInputs(QMainWindow):
                     break
             record[name] = value
 
-        fallback_messages = []
+        fallback_groups = {}
         for brand in configured_brands(self.product_brand_labels_choice):
             brand_key = "".join(
                 character.lower() if character.isalnum() else "_"
@@ -3896,22 +3892,35 @@ class UserInputs(QMainWindow):
                         f" -> {warning['used_stream']}[{warning['used_brand']}]"
                     )
                     record[f"fallback_{brand_key}_{analyte}"] = provenance
-                    fallback_messages.append(f"{brand}/{analyte}: {provenance}")
+                    route = (
+                        brand,
+                        warning["requested_stream"],
+                        warning["requested_brand"],
+                        warning["used_stream"],
+                        warning["used_brand"],
+                    )
+                    fallback_groups.setdefault(route, []).append(analyte)
                 else:
                     record[f"fallback_{brand_key}_{analyte}"] = ""
 
         if isinstance(source_warnings, str):
             source_warnings = [source_warnings]
         warnings = [str(value) for value in (source_warnings or []) if str(value)]
-        warnings.extend(fallback_messages)
+        analyte_labels = {
+            "fe": "Fe", "si": "Si", "al": "Al", "p": "P", "mn": "Mn"
+        }
+        for route, analytes in fallback_groups.items():
+            brand, requested_stream, requested_brand, used_stream, used_brand = route
+            warnings.append(
+                f"{brand} fallback for "
+                + ", ".join(analyte_labels.get(value, value) for value in analytes)
+                + f": {requested_stream}[{requested_brand}] -> "
+                + f"{used_stream}[{used_brand}]"
+            )
         record["warnings"] = "; ".join(dict.fromkeys(warnings))
-        # The field registry and the grade-stream payload describe the same
-        # five grade vectors.  Database View presents the latter
-        # under one canonical ``grade_<stream>_*`` family rather than also
-        # exposing misleading aliases such as ``modelled_product_fe``.
-        for stream in STREAMS:
-            for analyte in ANALYTES:
-                record.pop(f"{stream}_{analyte}", None)
+        # Database View now presents the exact Define Fields schema. Preserve
+        # the canonical stream keys populated above; raw ``grade_*`` aliases
+        # remain in the record only as hidden compatibility/audit data.
         return record
 
     @staticmethod
@@ -4082,6 +4091,10 @@ class UserInputs(QMainWindow):
                             "cb_split_warning": chunk.get(
                                 "cb_split_warning", ""
                             ),
+                            "defined_fields": chunk.get("defined_fields", {}),
+                            "source_properties": chunk.get(
+                                "source_properties", {}
+                            ),
                             "matched_inventory_stockpile": provenance.get(
                                 "AMT_INVENTORY_STOCKPILE",
                                 provenance.get(
@@ -4122,6 +4135,10 @@ class UserInputs(QMainWindow):
                     "parent_stockpile": stockpile_name,
                     "build_or_chunk": attributes.get("build", ""),
                     "tonnes": numeric(attributes.get("balance")) or 0.0,
+                    "defined_fields": attributes.get("defined_fields", {}),
+                    "source_properties": attributes.get(
+                        "source_properties", {}
+                    ),
                     **inventory_audit,
                 },
                 attributes.get("grade_streams")
@@ -5199,7 +5216,10 @@ class UserInputs(QMainWindow):
             "Weighted-average fields must use an additive weight field defined in "
             "a higher row. Fields selected for optimisation are available to custom "
             "constraints and written to solver reports; their additive weight fields "
-            "are selected automatically. Selected grades always flow."
+            "are selected automatically. The optimiser's selected grade vector and "
+            "configured crusher, reclaimer and product-build quantity fields always "
+            "flow because they are compulsory runtime inputs, regardless of a grade "
+            "row's checkbox."
         )
         help_text.setWordWrap(True)
         help_text.setStyleSheet("color: #607080;")
@@ -5652,7 +5672,7 @@ class UserInputs(QMainWindow):
                     fields.update(self.distinct_aps_csv_headers(path))
                 except (OSError, csv.Error):
                     pass
-        return standardize_available_mapping_fields(fields)
+        return standardize_available_mapping_fields(fields, family)
 
     @staticmethod
     def user_facing_field_label(field):
@@ -5708,14 +5728,70 @@ class UserInputs(QMainWindow):
         schema_version = int(
             vars(self).get("field_mapping_schema_version", 0) or 0
         )
-        if schema_version >= 2:
+        if schema_version >= 3:
             return
         mappings = normalize_field_mappings(
             getattr(self, "field_mappings", None)
         )
         analyte_raw = {"fe": "FE", "si": "SIO2", "al": "AL2O3", "p": "P", "mn": "MN"}
+
+        def add_required_quantity_mappings(values):
+            """Prepopulate required physical fields without hiding Map Fields."""
+            values = list(values)
+            existing = {
+                (row["source_family"], row["target_field"])
+                for row in normalize_field_mappings(values)
+            }
+            inventory_product = internal_product_slot(
+                vars(self).get("opf_input_choice")
+            )
+            amt_product = amt_modelled_product_slot(
+                vars(self).get("opf_input_choice")
+            )
+            for family, product_slot in (
+                ("inventory", inventory_product),
+                ("amt", amt_product),
+            ):
+                defaults = {
+                    "modelled_rom_wmt": "feed_wmt",
+                    "modelled_rom_dmt": "feed_dmt",
+                }
+                if product_slot:
+                    if family == "inventory":
+                        product_sources = {
+                            "modelled_product_wmt": f"{product_slot}_wmt",
+                            "modelled_product_dmt": f"{product_slot}_dmt",
+                        }
+                    else:
+                        product_sources = {
+                            "modelled_product_wmt": (
+                                f"MODELLED_{product_slot.upper()}_WMT"
+                            ),
+                            "modelled_product_dmt": (
+                                f"MODELLED_{product_slot.upper()}_DMT"
+                            ),
+                        }
+                    defaults.update(product_sources)
+                for target, source in defaults.items():
+                    if (family, target) in existing:
+                        continue
+                    values.append({
+                        "source_family": family,
+                        "brand": "",
+                        "target_field": target,
+                        "source_field": source,
+                    })
+                    existing.add((family, target))
+            return values
+
+        if schema_version == 2:
+            self.field_mappings = normalize_field_mappings(
+                add_required_quantity_mappings(mappings)
+            )
+            self.field_mapping_schema_version = 3
+            return
         if schema_version == 1:
-            # Version 2 adds the newly explicit required insitu fields only.
+            # Version 2 added the newly explicit required insitu fields.
             # Do not recreate any older mapping the user deliberately cleared.
             for family in ("inventory", "amt"):
                 for analyte, raw_name in analyte_raw.items():
@@ -5733,8 +5809,10 @@ class UserInputs(QMainWindow):
                     "target_field": f"insitu_{analyte}",
                     "source_field": f"Mining.grades_{analyte}",
                 })
-            self.field_mappings = normalize_field_mappings(mappings)
-            self.field_mapping_schema_version = 2
+            self.field_mappings = normalize_field_mappings(
+                add_required_quantity_mappings(mappings)
+            )
+            self.field_mapping_schema_version = 3
             return
         inventory_product = internal_product_slot(getattr(self, "opf_input_choice", None))
         amt_product = amt_modelled_product_slot(getattr(self, "opf_input_choice", None))
@@ -5799,8 +5877,10 @@ class UserInputs(QMainWindow):
                 "target_field": f"insitu_{analyte}",
                 "source_field": f"Mining.grades_{analyte}",
             })
-        self.field_mappings = normalize_field_mappings(mappings)
-        self.field_mapping_schema_version = 2
+        self.field_mappings = normalize_field_mappings(
+            add_required_quantity_mappings(mappings)
+        )
+        self.field_mapping_schema_version = 3
 
     def apply_canonical_field_mappings(self):
         """Attach canonical fields to Inventory and AMT records before streams."""
@@ -5824,8 +5904,10 @@ class UserInputs(QMainWindow):
                     record, definitions, self.field_mappings, "inventory"
                 )
                 record["defined_fields"] = canonical
-                properties = dict(record.get("source_properties") or {})
-                properties.update({key: value for key, value in canonical.items() if value is not None})
+                properties = {
+                    key: value for key, value in canonical.items()
+                    if value is not None
+                }
                 record["source_properties"] = properties
                 record.update({key: value for key, value in canonical.items() if value is not None})
         for rows in (self.AMT_stockpile_data or {}).values():
@@ -5841,8 +5923,10 @@ class UserInputs(QMainWindow):
                     record, definitions, self.field_mappings, "amt"
                 )
                 record["defined_fields"] = canonical
-                properties = dict(record.get("source_properties") or {})
-                properties.update({key: value for key, value in canonical.items() if value is not None})
+                properties = {
+                    key: value for key, value in canonical.items()
+                    if value is not None
+                }
                 record["source_properties"] = properties
                 record.update({key: value for key, value in canonical.items() if value is not None})
 
@@ -5857,11 +5941,12 @@ class UserInputs(QMainWindow):
         self.aps_source_property_field_mappings = (
             normalise_aps_source_property_mappings(properties)
         )
-        draw_amt = getattr(self, "draw_AMT_map", None)
+        draw_amt = vars(self).get("draw_AMT_map")
         if draw_amt is not None:
             draw_amt.source_property_kinds = {
                 row["name"]: row["kind"] for row in definitions
             }
+            draw_amt.source_property_weights = field_weight_map(definitions)
 
     def sync_canonical_grade_fields(self, record, streams):
         """Project calculated streams onto the canonical audit/property keys."""
@@ -6828,6 +6913,7 @@ class UserInputs(QMainWindow):
                 self.product_brand_labels_choice,
                 self.historical_recon_factors,
                 self.opf_input_choice,
+                strict_mappings=True,
             )
             row["GRADE_STREAMS"] = streams
             row["grade_streams"] = streams
@@ -14002,26 +14088,36 @@ class UserInputs(QMainWindow):
                     key: value for key, value in canonical.items()
                     if value is not None
                 })
-                source_properties = dict(row.get("source_properties") or {})
-                source_properties.update({
+                source_properties = {
                     key: value for key, value in canonical.items()
                     if value is not None
-                })
+                }
                 row["source_properties"] = source_properties
                 cb_split_warning = self.apply_cb_split_to_amt_row(row)
-                insitu = {
-                    "insitu_fe": row.get("insitu_fe", row.get("FE")),
-                    "insitu_si": row.get("insitu_si", row.get("SIO2")),
-                    "insitu_al": row.get("insitu_al", row.get("AL2O3")),
-                    "insitu_p": row.get("insitu_p", row.get("P")),
-                    "insitu_mn": row.get("insitu_mn", row.get("MN")),
-                }
+                strict_mappings = bool(
+                    vars(self).get("field_definitions") is not None
+                    or vars(self).get("field_mapping_schema_version", 0) >= 3
+                )
+                insitu = (
+                    {
+                        f"insitu_{analyte}": row.get(f"insitu_{analyte}")
+                        for analyte in ANALYTES
+                    }
+                    if strict_mappings else {
+                        "grade_fe": row.get("FE"),
+                        "grade_si": row.get("SIO2"),
+                        "grade_al": row.get("AL2O3"),
+                        "grade_p": row.get("P"),
+                        "grade_mn": row.get("MN"),
+                    }
+                )
                 streams = amt_grade_streams(
                     insitu,
                     row,
                     self.product_brand_labels_choice,
                     self.historical_recon_factors,
                     self.opf_input_choice,
+                    strict_mappings=strict_mappings,
                 )
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
@@ -14092,10 +14188,12 @@ class UserInputs(QMainWindow):
         if draw_AMT_map is None:
             return
 
+        # Canonical mappings are persisted at hex granularity. Fetch those
+        # rows before rebuilding any already-generated chunk snapshots.
+        draw_AMT_map.data = draw_AMT_map.fetch_data()
         self.reconcile_saved_AMT_chunk_grade_streams()
         draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
         draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table or [])
-        draw_AMT_map.data = draw_AMT_map.fetch_data()
         draw_AMT_map.unique_footprints = draw_AMT_map.get_unique_footprints()
         draw_AMT_map.clean_up_hex_sequence_table()
         draw_AMT_map.update_sequence_counter()
@@ -14202,10 +14300,24 @@ class UserInputs(QMainWindow):
                 refreshed += 1
             return result
 
-        self.hex_sequence_table = reconcile_rows(
+        draw_amt = vars(self).get("draw_AMT_map")
+
+        def rebuild_and_reconcile(rows):
+            nonlocal refreshed
+            rebuilt_rows = rows or []
+            if draw_amt is not None and hasattr(
+                draw_amt, "rebuild_saved_chunk_records"
+            ):
+                rebuilt_rows, rebuilt_count = (
+                    draw_amt.rebuild_saved_chunk_records(rebuilt_rows)
+                )
+                refreshed += rebuilt_count
+            return reconcile_rows(rebuilt_rows)
+
+        self.hex_sequence_table = rebuild_and_reconcile(
             getattr(self, "hex_sequence_table", [])
         )
-        self.hex_sequence_table_argument = reconcile_rows(
+        self.hex_sequence_table_argument = rebuild_and_reconcile(
             getattr(self, "hex_sequence_table_argument", [])
         )
         return refreshed
@@ -14339,7 +14451,7 @@ class UserInputs(QMainWindow):
         ]
         if custom_constraints:
             self.calendar_rows.append((
-                "  Custom Ratio Constraints",
+                "  Custom Constraints",
                 [False] * period_count,
                 "blue",
                 [""] * period_count,

@@ -68,6 +68,34 @@ APS_SOURCE_PROPERTY_FIELDS = tuple(
     field for _group, field, _label in APS_SOURCE_PROPERTY_CATALOGUE
 )
 
+# Additive properties that the AMT grade-block lineage model can expose at
+# hex level.  Discovery must not depend on the currently selected stockpiles
+# having a non-null value: users still need to map the stable field and see a
+# traceable blank when lineage coverage is unavailable.
+AMT_MODELLED_ADDITIVE_FIELDS = (
+    "feed_dmt",
+    *(
+        f"oretype_{ore_type}_{basis}"
+        for ore_type in ORE_TYPES
+        for basis in ("wmt", "dmt")
+    ),
+    *(
+        f"prod{product}_{basis}"
+        for product in (1, 2, 3)
+        for basis in ("wmt", "dmt")
+    ),
+    *(
+        f"prod{product}_minus_1mm_{basis}"
+        for product in (1, 2)
+        for basis in ("wmt", "dmt")
+    ),
+    *(
+        f"prod1_{size}_{basis}"
+        for size in ("fines", "lump")
+        for basis in ("wmt", "dmt")
+    ),
+)
+
 
 def normalise_aps_source_property_mappings(value=None):
     """Return canonical-property -> exact APS header mappings.

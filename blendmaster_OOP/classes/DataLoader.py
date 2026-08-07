@@ -64,8 +64,21 @@ class DataLoader:
                     ) or {}).get("opf"),
                 ),
             }
+        # Only canonical mapping output may reach the solver. Raw inventory,
+        # lineage and APS columns remain visible for audit but cannot bypass an
+        # empty Map Fields cell merely because their names happen to match.
+        has_canonical_contract = (
+            "defined_fields" in record or "source_properties" in record
+        )
+        canonical = dict(record.get("defined_fields") or {})
+        canonical.update(dict(record.get("source_properties") or {}))
+        if not has_canonical_contract:
+            # Read-only compatibility for legacy/project records that predate
+            # Define/Map Fields. Current setup paths always carry the explicit
+            # canonical markers, including when every mapping is blank.
+            canonical = source_properties_from_mapping(record)
         return filter_source_properties(
-            source_properties_from_mapping(record),
+            source_properties_from_mapping({"source_properties": canonical}),
             self.required_source_property_keys,
         )
 

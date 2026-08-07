@@ -15,7 +15,10 @@ from collections.abc import Mapping
 
 from classes.CustomConstraints import canonical_property_key, source_property_kind
 from classes.GradeStreams import ANALYTES, UNBRANDED, normalise_brand
-from classes.SourcePropertyMappings import APS_SOURCE_PROPERTY_CATALOGUE
+from classes.SourcePropertyMappings import (
+    AMT_MODELLED_ADDITIVE_FIELDS,
+    APS_SOURCE_PROPERTY_CATALOGUE,
+)
 
 
 FIELD_KINDS = ("additive", "weighted_average")
@@ -40,19 +43,33 @@ _ROM_DMT_ALIASES = {
     "balancedmt", "source_dmt", "modelled_feed_dmt", "modelled_rom_dmt",
 }
 
+# Per-hex reconciliation diagnostics are valuable audit metadata, but they are
+# not material properties that can safely supply a Define Fields mapping.  In
+# particular, the *_STOCKPILE_WMT values are footprint totals repeated on every
+# hex and would be multiplied by the hex count if treated as additive masses.
+_AMT_RECONCILIATION_QUANTITY_FIELDS = {
+    "final_stockpile_wmt",
+    "inventory_balance_wmt",
+    "ledger_adjustment_wmt",
+    "raw_positive_stockpile_wmt",
+    "raw_stockpile_wmt",
+    "raw_wmt",
+    "spatial_adjustment_wmt",
+    "spatial_deficit_filled_wmt",
+    "spatial_deficit_wmt",
+    "spatial_donor_wmt",
+    "spatial_unresolved_wmt",
+    "spatially_corrected_stockpile_wmt",
+    "spatially_corrected_wmt",
+    "unattributed_movement_wmt",
+}
 
-def is_mappable_source_field(value) -> bool:
-    """Return whether a raw field is a grade or additive tonnes quantity."""
+
+def is_grade_source_field(value) -> bool:
+    """Return whether a raw field represents an assay/grade value."""
     raw = str(value or "").strip()
     name = canonical_property_key(raw)
     if not name:
-        return False
-    if (
-        "internal_recon" in name
-        or name.startswith(("internal_blend_recon_", "internal_upgrade_"))
-        or "coverage" in name
-        or "lineage" in name
-    ):
         return False
     if (
         name in _ROM_WMT_ALIASES | _ROM_DMT_ALIASES
@@ -60,7 +77,7 @@ def is_mappable_source_field(value) -> bool:
         or "wettonnes" in name
         or "drytonnes" in name
     ):
-        return True
+        return False
     tokens = [token for token in re.split(r"[^a-z0-9]+", raw.lower()) if token]
     return bool(
         name in _GRADE_TOKENS
@@ -73,8 +90,33 @@ def is_mappable_source_field(value) -> bool:
     )
 
 
-def standardize_available_mapping_fields(values):
-    """Filter mapping discovery and collapse duplicate physical ROM aliases."""
+def is_mappable_source_field(value) -> bool:
+    """Return whether a raw field is a grade or additive tonnes quantity."""
+    raw = str(value or "").strip()
+    name = canonical_property_key(raw)
+    if not name:
+        return False
+    if (
+        "internal_recon" in name
+        or name.startswith(("internal_blend_recon_", "internal_upgrade_"))
+        or re.search(r"(?:^|_)adjusted_(?:rom|product)_", name)
+        or "coverage" in name
+        or "lineage" in name
+    ):
+        return False
+    if (
+        name in _ROM_WMT_ALIASES | _ROM_DMT_ALIASES
+        or name.endswith(("_wmt", "_dmt", "_tonnes"))
+        or "wettonnes" in name
+        or "drytonnes" in name
+    ):
+        return True
+    return is_grade_source_field(raw)
+
+
+def standardize_available_mapping_fields(values, source_family=None):
+    """Filter mapping discovery and collapse compatibility aliases."""
+    family = str(source_family or "").strip().lower()
     fields = {
         str(value).strip() for value in (values or [])
         if is_mappable_source_field(value)
@@ -91,6 +133,85 @@ def standardize_available_mapping_fields(values):
         fields -= {
             field for field in fields
             if canonical_property_key(field) in _ROM_DMT_ALIASES
+        }
+    # Cloudbreak Product 1 lump/fines data historically had both qualified
+    # (prod1_fines_fe) and short (fines_fe) names. The MODELLED_* AMT audit
+    # columns repeat the same pattern. Show only the Product 1-qualified field
+    # whenever both exist; saved mappings to the short alias remain readable.
+    available_keys = {
+        canonical_property_key(field) for field in fields
+    }
+    duplicate_size_aliases = set()
+    for field in fields:
+        name = canonical_property_key(field)
+        match = re.match(r"^(modelled_)?(fines|lump)_(.+)$", name)
+        if not match:
+            continue
+        prefix, size, suffix = match.groups()
+        qualified = f"{prefix or ''}prod1_{size}_{suffix}"
+        if qualified in available_keys:
+            duplicate_size_aliases.add(field)
+    fields -= duplicate_size_aliases
+
+    if family in {"inventory", "amt"}:
+        # Canonical Define Fields outputs are attached to source records after
+        # mapping/calculation. They are downstream results, not raw inputs, and
+        # must not loop back into Available Source Fields.
+        canonical_outputs = set()
+        for field in fields:
+            name = canonical_property_key(field)
+            candidate = name[6:] if name.startswith("grade_") else name
+            if (
+                candidate in {
+                    "modelled_product_wmt", "modelled_product_dmt",
+                }
+                or (
+                    is_grade_source_field(candidate)
+                    and candidate.startswith((
+                        "insitu_", "modelled_rom_", "modelled_product_",
+                    ))
+                )
+            ):
+                canonical_outputs.add(field)
+        fields -= canonical_outputs
+
+    if family == "amt":
+        fields -= {
+            field for field in fields
+            if canonical_property_key(field)
+            in _AMT_RECONCILIATION_QUANTITY_FIELDS
+        }
+        # Keep the supported additive contract visible for older projects and
+        # sparse selections whose saved/current AMT rows do not contain a
+        # populated value for every grade-block-lineage property.
+        fields.update({"feed_wmt", "feed_dmt"})
+        fields.update({
+            f"MODELLED_{property_name.upper()}"
+            for property_name in AMT_MODELLED_ADDITIVE_FIELDS
+            if property_name not in {"feed_wmt", "feed_dmt"}
+        })
+        # The AMT lineage payload exposes each derived grade twice: a nested
+        # canonical property (prod1_fe/prod1_wmt) and a flattened audit column
+        # (MODELLED_PROD1_FE/MODELLED_PROD1_WMT). Keep the explicit MODELLED_*
+        # source for both weighted-average and additive properties.
+        by_key = {}
+        for field in sorted(fields, key=lambda item: item.lower()):
+            key = canonical_property_key(field)
+            current = by_key.get(key)
+            priority = (
+                0 if str(field).startswith("MODELLED_") else
+                1 if str(field).isupper() else 2
+            )
+            if current is None or priority < current[0]:
+                by_key[key] = (priority, field)
+        fields = {item[1] for item in by_key.values()}
+        available_keys = {canonical_property_key(field) for field in fields}
+        fields -= {
+            field for field in fields
+            if (
+                not canonical_property_key(field).startswith("modelled_")
+                and f"modelled_{canonical_property_key(field)}" in available_keys
+            )
         }
     return sorted(fields, key=lambda field: field.lower())
 
@@ -484,9 +605,10 @@ def apply_field_mappings(
                         alias, raw_by_canonical.get(canonical_property_key(alias))
                     )
         else:
-            # Exact-name fallback is a migration aid, not a hidden alias: it
-            # lets canonical data already produced by BlendMaster survive.
-            value = raw_fields.get(target, raw_by_canonical.get(target))
+            # An empty Map Fields cell is an explicit empty mapping.  Do not
+            # let a same-named raw/cached column silently bypass that contract.
+            # Calculated fields are populated later by the grade-stream layer.
+            value = None
         result[target] = _number(value)
     # Internal balance tracking still consumes source_wmt, but it is derived
     # from the one user-facing ROM WMT field and is never separately mapped.

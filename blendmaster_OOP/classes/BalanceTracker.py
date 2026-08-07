@@ -126,8 +126,19 @@ class BalanceTracker:
                             active_balance / parent_scope_wmt,
                             self.source_property_kinds,
                         )
+                    has_canonical_chunk = (
+                        "source_properties" in active_chunk
+                        or "defined_fields" in active_chunk
+                    )
+                    chunk_source = (
+                        {"source_properties": active_chunk.get(
+                            "source_properties",
+                            active_chunk.get("defined_fields", {}),
+                        )}
+                        if has_canonical_chunk else active_chunk
+                    )
                     chunk_properties = filter_source_properties(
-                        source_properties_from_mapping(active_chunk),
+                        source_properties_from_mapping(chunk_source),
                         self.required_source_property_keys,
                     )
                     properties = {
@@ -178,13 +189,12 @@ class BalanceTracker:
             ), 0.0)
         except (TypeError, ValueError):
             current_balance = 0.0
-        for key in ("source_wmt", "modelled_rom_wmt"):
-            if (
-                self.required_source_property_keys is None
-                or key in self.required_source_property_keys
-                or key in result
-            ):
-                result[key] = current_balance
+        # source_wmt is the internal physical balance and is always present.
+        # modelled_rom_wmt is synchronized only when Map Fields supplied it;
+        # an empty required mapping must remain empty and block its consumers.
+        result["source_wmt"] = current_balance
+        if "modelled_rom_wmt" in result:
+            result["modelled_rom_wmt"] = current_balance
         return result
         
     def update_balances(self, filtered_decision_point_results_to_user_choice: DataFrame, expit_payload_transactions: DataFrame, steady_state_start_time, steady_state_end_time, steady_state_tracker):
@@ -549,8 +559,18 @@ class BalanceTracker:
             ):
                 self.source_properties[name] = partially_depleted_properties
             else:
+                has_canonical_chunk = (
+                    "source_properties" in next_hex
+                    or "defined_fields" in next_hex
+                )
+                chunk_source = (
+                    {"source_properties": next_hex.get(
+                        "source_properties", next_hex.get("defined_fields", {})
+                    )}
+                    if has_canonical_chunk else next_hex
+                )
                 self.source_properties[name] = source_properties_from_mapping(
-                    next_hex
+                    chunk_source
                 )
                 self.source_properties[name] = filter_source_properties(
                     self.source_properties[name],

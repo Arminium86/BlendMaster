@@ -777,6 +777,51 @@ class OpeningStockpileInventories:
                     ON  gradeblock.MINE_CODE = keys.MINE_CODE
                     AND gradeblock.LOCATION_NO = keys.LOCATION_NO
             ),
+            HISTORICAL_GRADE_BLOCK_STREAM_ROWS AS (
+                SELECT
+                    UPPER(TRIM(gradeblock.GRADEBLOCK)) AS FULL_NAME_WITH_SITE,
+                    LOWER(TRIM(gradeblock.STREAM)) AS STREAM,
+                    gradeblock.DESIGNED_WMT,
+                    CASE
+                        WHEN LEFT(LOWER(TRIM(gradeblock.STREAM)), 4) = 'prod'
+                            THEN gradeblock.DESIGNED_DMT
+                               * gradeblock.DRY_YIELD
+                        ELSE gradeblock.DESIGNED_DMT
+                    END AS STREAM_DMT
+                FROM GRADE_CONTROL_NAME_CANDIDATES candidates
+                INNER JOIN AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_GRADE_BLOCKS gradeblock
+                    ON UPPER(TRIM(gradeblock.GRADEBLOCK))
+                     = candidates.GRADE_BLOCK_NAME
+                WHERE LOWER(TRIM(gradeblock.STREAM)) IN (
+                    'i', 'rom', 'prod1', 'prod2', 'prod3'
+                )
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY
+                        UPPER(TRIM(gradeblock.GRADEBLOCK)),
+                        LOWER(TRIM(gradeblock.STREAM))
+                    ORDER BY gradeblock.MODIFIED_ON DESC NULLS LAST
+                ) = 1
+            ),
+            HISTORICAL_GRADE_BLOCK_TONNES AS (
+                SELECT
+                    FULL_NAME_WITH_SITE,
+                    COALESCE(
+                        MAX(IFF(STREAM = 'rom', DESIGNED_WMT, NULL)),
+                        MAX(IFF(STREAM = 'i', DESIGNED_WMT, NULL))
+                    ) AS FEED_WMT,
+                    COALESCE(
+                        MAX(IFF(STREAM = 'rom', STREAM_DMT, NULL)),
+                        MAX(IFF(STREAM = 'i', STREAM_DMT, NULL))
+                    ) AS FEED_DMT,
+                    MAX(IFF(STREAM = 'prod1', DESIGNED_WMT, NULL)) AS PROD1_WMT,
+                    MAX(IFF(STREAM = 'prod1', STREAM_DMT, NULL)) AS PROD1_DMT,
+                    MAX(IFF(STREAM = 'prod2', DESIGNED_WMT, NULL)) AS PROD2_WMT,
+                    MAX(IFF(STREAM = 'prod2', STREAM_DMT, NULL)) AS PROD2_DMT,
+                    MAX(IFF(STREAM = 'prod3', DESIGNED_WMT, NULL)) AS PROD3_WMT,
+                    MAX(IFF(STREAM = 'prod3', STREAM_DMT, NULL)) AS PROD3_DMT
+                FROM HISTORICAL_GRADE_BLOCK_STREAM_ROWS
+                GROUP BY FULL_NAME_WITH_SITE
+            ),
             INBOUND_ENRICHED AS (
                 SELECT
                     inbound.*,
@@ -801,6 +846,11 @@ class OpeningStockpileInventories:
                     AND truck.DUMPEDDATETIME = inbound.MOVEMENT_DATETIME
                 LEFT JOIN GRADE_CONTROL_BLOCKS gradeblock
                     ON UPPER(TRIM(gradeblock.FULL_NAME_WITH_SITE)) IN (
+                        UPPER(TRIM(expit.SOURCE_FMS)),
+                        UPPER(TRIM(truck.GRADE_BLOCK))
+                    )
+                LEFT JOIN HISTORICAL_GRADE_BLOCK_TONNES gradeblock_history
+                    ON gradeblock_history.FULL_NAME_WITH_SITE IN (
                         UPPER(TRIM(expit.SOURCE_FMS)),
                         UPPER(TRIM(truck.GRADE_BLOCK))
                     )

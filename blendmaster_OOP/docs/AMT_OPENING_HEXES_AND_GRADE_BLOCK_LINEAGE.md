@@ -12,7 +12,7 @@ reconciliation remain separate, brand-aware adjustment layers.
 
 ## Snowflake data used
 
-The opening operation uses six Snowflake objects:
+The opening operation uses seven Snowflake objects:
 
 | Snowflake object | Purpose | Principal columns |
 | --- | --- | --- |
@@ -22,6 +22,7 @@ The opening operation uses six Snowflake objects:
 | `AA_OPERATIONS_MANAGEMENT.SLN_AMT.AMT_STOCKPILE_HEX_TRUCK_LIST` | Link inbound dumps to a grade-block name and provide truck-list chemical properties and `ROM_MATS`. | `LOCATION_NAME`, `HEX`, `DUMPEDDATETIME`, `TRUCK_WMT`, `GRADE_BLOCK`, `ROM_MATS`, `GBI`, chemical-grade columns, `LAST_UPDATE` |
 | `AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS` | Link the same inbound trip to its numeric grade-block ID and modelled feed/product properties. | `INTERNAL_ID`, `SOURCE_GRADEBLOCK_ID`, `SOURCE_FMS`, `WMT_REPORTING`, `TRANSACTION_DATETIME`, feed properties, `PROD1_*`, `PROD2_*`, `IS_DELETED`, `DISCRIMINATOR` |
 | `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS` | Supply explicit Product 1/2/3 WMT/DMT, Product 1 lump/fines tonnes, minus-1-mm and CB split properties for the resolved inbound grade block. | grade-block name components used to form `FULL_NAME_WITH_SITE`, `GB_WET_TONNES`, `PROD<n>_TONNES_WET`, `PROD<n>_TONNES_DRY`, `PROD1_FINES_TONNES_*`, `PROD1_LUMP_TONNES_*`, `PROD1_MINUS1MM_PCT`, `PROD1_FINES_*`, `PROD1_LUMP_*` |
+| `AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_GRADE_BLOCKS` | Supply explicit feed and Product 1/2/3 tonnes for historical grade blocks no longer present in the current Grade Control model table. Product-stream `DESIGNED_WMT` is the product WMT; its `DESIGNED_DMT` remains pre-yield feed dry mass, so BlendMaster applies the stored `DRY_YIELD` to obtain product DMT. | `GRADEBLOCK`, `STREAM`, `DESIGNED_WMT`, `DESIGNED_DMT`, `DRY_YIELD`, `MODIFIED_ON` |
 
 `AMT_STOCKPILE_HEX_MAP_AS_BUILD` is not required by this opening calculation.
 The exact build is selected from inventory and the hex universe comes from AMT

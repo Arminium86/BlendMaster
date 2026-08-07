@@ -12,6 +12,8 @@ import json
 import math
 from collections import defaultdict
 
+from classes.SourcePropertyMappings import AMT_MODELLED_ADDITIVE_FIELDS
+
 
 TRUCK_PROPERTY_COLUMNS = {
     "GRADE_BLOCK_GBI": "truck.GBI",
@@ -174,12 +176,35 @@ def property_object_sql():
 
 
 def direct_product_tonnage_select_sql():
-    """Allocate whole-grade-block product tonnes to an inbound AMT movement."""
+    """Allocate whole-grade-block product tonnes to an inbound AMT movement.
+
+    ``STG_GRADECONTROL.GRADE_BLOCKS`` does not retain every historical block.
+    The Inventory grade-block stream view is therefore an explicit-tonnage
+    fallback for feed and whole-product masses; lump/fines still come only
+    from the detailed Grade Control model because the stream view does not
+    expose those component tonnes.
+    """
+    historical_fields = {
+        "FEED_DMT",
+        *(f"PROD{product}_{basis}" for product in (1, 2, 3)
+          for basis in ("WMT", "DMT")),
+    }
+
+    def source_expression(alias, source):
+        if alias in historical_fields:
+            return f"COALESCE({source}, gradeblock_history.{alias})"
+        return source
+
+    denominator = (
+        "COALESCE(gradeblock.GB_WET_TONNES, "
+        "gradeblock_history.FEED_WMT)"
+    )
     return ",\n                    ".join(
         (
-            "IFF(gradeblock.GB_WET_TONNES > 0 "
-            f"AND {source} IS NOT NULL, "
-            f"{source} * inbound.WMT / gradeblock.GB_WET_TONNES, NULL) "
+            f"IFF({denominator} > 0 "
+            f"AND {source_expression(alias, source)} IS NOT NULL, "
+            f"{source_expression(alias, source)} * inbound.WMT / "
+            f"{denominator}, NULL) "
             f"AS DIRECT_{alias}"
         )
         for alias, source in DIRECT_LINEAGE_TONNE_COLUMNS.items()
@@ -511,6 +536,19 @@ def align_amt_grade_block_lineage(rows):
             row[f"{column_name}_COVERAGE_PCT"] = (
                 coverage * 100.0 if coverage is not None else None
             )
+
+        # Preserve the stable AMT additive schema even when none of the
+        # selected hex lineage currently has a populated value. Map Fields must
+        # still expose supported product, split, ultrafines and ore-type masses;
+        # unavailable mappings then remain visibly blank instead of vanishing.
+        for property_name in AMT_MODELLED_ADDITIVE_FIELDS:
+            if property_name in modelled_properties:
+                continue
+            modelled_properties[property_name] = None
+            property_coverage[property_name] = None
+            column_name = f"MODELLED_{property_name.upper()}"
+            row[column_name] = None
+            row[f"{column_name}_COVERAGE_PCT"] = None
 
         # Canonical physical-field aliases are shared with inventory sources.
         # Keep the PROD1-qualified names as the source of truth and retain the

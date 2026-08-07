@@ -113,9 +113,22 @@ class ProductBuildProgress:
             if column not in result.columns:
                 result[column] = None
 
+        # Reports written before quantity-stream support have no explicit
+        # product-build quantity. Preserve their historical readability only;
+        # current reports always carry the column and a present zero remains
+        # zero rather than falling back to ROM/crusher tonnes.
+        if (
+            "product_build_source_tonnes" not in result.columns
+            and "source_actual_tonnes" in result.columns
+        ):
+            result["product_build_source_tonnes"] = result[
+                "source_actual_tonnes"
+            ]
+
         builds = cls.normalize_builds(product_build_settings)
         required = {
             "crusher_actual_tonnes",
+            "product_build_source_tonnes",
             *(
                 f"source_grade_{grade}"
                 for grade in cls.GRADES
@@ -174,10 +187,6 @@ class ProductBuildProgress:
                 ).fillna(0).sum(),
                 0.0,
             )
-            if product_tonnes <= 0:
-                product_tonnes = cls._number(
-                    state_rows.iloc[0].get("crusher_actual_tonnes"), 0.0
-                )
             remaining_before = max(
                 build["target_tonnes"] - opening_tonnes, 0.0
             )
@@ -195,7 +204,7 @@ class ProductBuildProgress:
                         row.get(f"selected_grade_weight_{grade}_tonnes"),
                         cls._number(
                             row.get("product_build_source_tonnes"),
-                            cls._number(row.get("source_actual_tonnes"), 0.0),
+                            0.0,
                         ),
                     ) * allocation_fraction
                     grade_weights[grade] += weight

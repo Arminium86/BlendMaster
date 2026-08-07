@@ -22,13 +22,14 @@ from classes.GradeStreams import (
 )
 from classes.CustomConstraints import (
     CustomConstraintError,
-    SafeNumericExpression,
+    compile_mapping_custom_constraint,
     constraint_key,
+    custom_constraint_aggregate_totals,
     constraint_report_fields,
+    custom_constraint_source_report_values,
     custom_constraint_property_keys,
     expand_required_property_keys,
     filter_source_properties,
-    mapping_constraint_fields,
     merge_source_properties,
     normalize_custom_constraints,
     scale_additive_source_properties,
@@ -119,6 +120,9 @@ class ManualBlendPlanner:
         solver_config = self.calendar_inputs.get("solver_config") or {}
         self.custom_constraints = normalize_custom_constraints(
             solver_config.get("custom_constraints")
+        )
+        self.strict_mapped_fields = bool(
+            solver_config.get("strict_mapped_fields", False)
         )
         self.required_source_property_keys = (
             custom_constraint_property_keys(self.custom_constraints)
@@ -739,7 +743,9 @@ class ManualBlendPlanner:
             return str(calendar_brands.get(period_name) or "").strip().upper()
         return ""
 
-    def _selected_source_fields(self, streams, brand, fallback=None):
+    def _selected_source_fields(
+        self, streams, brand, fallback=None, source_name="source"
+    ):
         streams = normalise_grade_streams(streams, fallback or {})
         selected, warnings = resolve_grade_vector(
             streams,
@@ -747,6 +753,22 @@ class ManualBlendPlanner:
             brand,
             fallback or {},
         )
+        invalid = [
+            warning for warning in warnings
+            if warning.get("used_stream") != self.selected_data_stream
+        ]
+        if self.strict_mapped_fields and invalid:
+            analytes = ", ".join(
+                str(warning.get("analyte") or "").upper()
+                for warning in invalid
+            )
+            raise ManualBlendPlanningError(
+                f"{source_name}: optimiser grade stream "
+                f"'{self.selected_data_stream}' is "
+                f"not mapped/calculated for {analytes}. Fix Define Fields/Map "
+                "Fields or select a different optimiser grade stream; stream "
+                "fallback is disabled for manual planning."
+            )
         return {
             **{
                 f"source_grade_{grade}": selected[grade]
@@ -813,48 +835,48 @@ class ManualBlendPlanner:
         for definition in self.custom_constraints:
             if not definition.get("enabled", True):
                 continue
-            numerator_expression = SafeNumericExpression(
-                definition.get("numerator")
-            )
-            denominator_expression = SafeNumericExpression(
-                definition.get("denominator") or "one"
-            )
-            numerator_total = 0.0
-            denominator_total = 0.0
             key = constraint_key(
                 definition.get("key") or definition.get("name")
             )
-            for source_row in source_rows:
-                try:
-                    fields = mapping_constraint_fields(
-                        source_row, self.source_property_kinds
-                    )
-                    numerator = numerator_expression.evaluate(fields)
-                    denominator = denominator_expression.evaluate(fields)
-                except CustomConstraintError as error:
-                    raise ManualBlendPlanningError(
-                        f"{definition['name']}: {source_row.get('source')}: {error}"
-                    ) from error
-                if denominator < 0:
-                    raise ManualBlendPlanningError(
-                        f"{definition['name']}: {source_row.get('source')}: "
-                        "denominator expression must be non-negative."
-                    )
-                tonnes = self._number(source_row.get("source_actual_tonnes"))
-                numerator_total += numerator * tonnes
-                denominator_total += denominator * tonnes
+            try:
+                compiled = compile_mapping_custom_constraint(
+                    source_rows,
+                    definition,
+                    self.source_property_kinds,
+                    self.source_property_weights,
+                )
+            except CustomConstraintError as error:
+                raise ManualBlendPlanningError(str(error)) from error
+            quantities = [
+                self._number(row.get("source_actual_tonnes"))
+                for row in source_rows
+            ]
+            numerator_total, denominator_total = (
+                custom_constraint_aggregate_totals(compiled, quantities)
+            )
+            for index, (source_row, tonnes) in enumerate(
+                zip(source_rows, quantities)
+            ):
+                (
+                    numerator_coefficient,
+                    numerator_contribution,
+                    denominator_coefficient,
+                    denominator_contribution,
+                ) = custom_constraint_source_report_values(
+                    compiled, index, tonnes
+                )
                 source_row[
                     f"custom_constraint_{key}_source_numerator_coefficient"
-                ] = numerator
+                ] = numerator_coefficient
                 source_row[
                     f"custom_constraint_{key}_source_denominator_coefficient"
-                ] = denominator
+                ] = denominator_coefficient
                 source_row[
                     f"custom_constraint_{key}_source_numerator_contribution"
-                ] = numerator * tonnes
+                ] = numerator_contribution
                 source_row[
                     f"custom_constraint_{key}_source_denominator_contribution"
-                ] = denominator * tonnes
+                ] = denominator_contribution
             minimum, maximum = self._custom_constraint_bounds(
                 definition, period
             )
@@ -977,7 +999,7 @@ class ManualBlendPlanner:
                 }
                 source_row.update(
                     self._selected_source_fields(
-                        source_streams, active_brand, legacy
+                        source_streams, active_brand, legacy, source
                     )
                 )
                 source_rows.append(source_row)
@@ -1020,6 +1042,7 @@ class ManualBlendPlanner:
                         f"grade_{grade}": candidate[f"grade_{grade}"]
                         for grade in self.GRADES
                     },
+                    source,
                 ))
                 source_rows.append(source_row)
 
@@ -1029,12 +1052,31 @@ class ManualBlendPlanner:
             for row in source_rows:
                 physical = self._number(row.get("source_actual_tonnes"))
                 properties = row.get("source_properties") or {}
-                def mapped_tonnes(stream):
-                    value = self._number(properties.get(stream), 0.0)
-                    return value if value > 1e-9 else physical
+                def mapped_tonnes(stream, *, required=True):
+                    raw_value = properties.get(stream)
+                    if raw_value is None:
+                        if (
+                            stream in {
+                                "modelled_rom_wmt", "modelled_product_wmt"
+                            }
+                            and not getattr(self, "solver_config", {}).get(
+                                "strict_mapped_fields", False
+                            )
+                        ):
+                            return physical
+                        if not required:
+                            return 0.0
+                        raise ManualBlendPlanningError(
+                            f"{row.get('source') or row.get('source_id')}: "
+                            f"required quantity field '{stream}' is unmapped."
+                        )
+                    return max(self._number(raw_value), 0.0)
                 row["crusher_source_tonnes"] = mapped_tonnes(self.crusher_tonnes_stream)
                 row["reclaimer_source_tonnes"] = mapped_tonnes(self.reclaimer_tonnes_stream)
-                row["product_build_source_tonnes"] = mapped_tonnes(self.product_build_tonnes_stream)
+                row["product_build_source_tonnes"] = mapped_tonnes(
+                    self.product_build_tonnes_stream,
+                    required=bool(self.product_build_settings),
+                )
                 row["reclaimer_tonnes_stream"] = self.reclaimer_tonnes_stream
                 row["crusher_tonnes_stream"] = self.crusher_tonnes_stream
                 row["product_build_tonnes_stream"] = self.product_build_tonnes_stream
