@@ -1381,7 +1381,9 @@ class UserInputs(QMainWindow):
             "aps_active_blend_guidance", "aps_destination_guidance",
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
-            "AMT_data_request_signature", "AMT_chunk_settings",
+            "AMT_data_request_signature", "AMT_enrichment_signature",
+            "data_stream_input_cache_signature", "data_stream_input_cache_result",
+            "AMT_chunk_settings",
             "hex_sequence_table", "hex_sequence_table_argument",
             "database_view_selected_columns", "database_view_known_columns",
             "database_view_show_coverage_fields",
@@ -1409,7 +1411,12 @@ class UserInputs(QMainWindow):
         ]
         state = {"scenario_id": self.active_scenario_id, "calendar_inputs": calendar_inputs}
         for field in fields:
-            state[field] = copy.deepcopy(getattr(self, field, None))
+            value = getattr(self, field, None)
+            # The active scenario owns the current AMT payload and scenario
+            # activation deep-copies it before use. Sharing that active payload
+            # here avoids copying hundreds of raw and derived columns merely to
+            # move between setup pages.
+            state[field] = value if field == "AMT_stockpile_data" else copy.deepcopy(value)
         state["database_path"] = self.scenario_database_path(self.active_scenario_id)
         state["decision_table_snapshot"] = self.capture_table_snapshot(
             getattr(self, "decision_table", None)
@@ -1701,6 +1708,17 @@ class UserInputs(QMainWindow):
             self.AMT_data_request_signature = str(
                 state.get("AMT_data_request_signature") or ""
             )
+            self.AMT_enrichment_signature = str(
+                state.get("AMT_enrichment_signature") or ""
+            )
+            self.data_stream_input_cache_signature = str(
+                state.get("data_stream_input_cache_signature") or ""
+            )
+            self.data_stream_input_cache_result = copy.deepcopy(
+                state.get("data_stream_input_cache_result") or {}
+            )
+            self.data_stream_input_request_inflight = ""
+            self._available_mapping_fields_cache = {}
             self.AMT_chunk_settings = copy.deepcopy(state.get("AMT_chunk_settings") or {})
             self.hex_sequence_table = copy.deepcopy(state.get("hex_sequence_table") or [])
             self.hex_sequence_table_argument = copy.deepcopy(
@@ -5888,6 +5906,35 @@ class UserInputs(QMainWindow):
         self.refresh_map_available_fields()
 
     def available_mapping_fields(self, family):
+        family = str(family or "").strip().lower()
+        cache = getattr(self, "_available_mapping_fields_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._available_mapping_fields_cache = cache
+        if family == "amt":
+            source_signature = str(
+                getattr(self, "AMT_data_request_signature", "") or ""
+            )
+        elif family == "inventory":
+            source = self.updated_stockpile_data or self.stockpile_data or {}
+            source_signature = json.dumps(
+                sorted(str(key) for key in source), separators=(",", ":")
+            )
+        elif family == "aps":
+            path = self.current_24hr_aps_path()
+            try:
+                source_signature = json.dumps(
+                    [path, os.path.getmtime(path), os.path.getsize(path)],
+                    default=str,
+                )
+            except OSError:
+                source_signature = str(path or "")
+        else:
+            source_signature = ""
+        cache_key = (family, source_signature)
+        if cache_key in cache:
+            return list(cache[cache_key])
+
         fields = set()
         if family == "inventory":
             source = self.updated_stockpile_data or self.stockpile_data or {}
@@ -5905,7 +5952,9 @@ class UserInputs(QMainWindow):
                     fields.update(self.distinct_aps_csv_headers(path))
                 except (OSError, csv.Error):
                     pass
-        return standardize_available_mapping_fields(fields, family)
+        available = standardize_available_mapping_fields(fields, family)
+        cache[cache_key] = tuple(available)
+        return available
 
     @staticmethod
     def user_facing_field_label(field):
@@ -6218,19 +6267,9 @@ class UserInputs(QMainWindow):
         self.capture_map_fields_table()
         self.apply_canonical_field_mappings()
         self.apply_grade_streams_to_inventory()
-        if self.AMT_stockpile_data:
-            self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
-                {
-                    name: values
-                    for name, values in (self.updated_stockpile_data or {}).items()
-                    if values.get("amt", False)
-                },
-                self.AMT_stockpile_data,
-            )
-            self.opening_stockpile_inventories.save_AMT_to_database(
-                self.AMT_stockpile_data
-            )
-            self.refresh_AMT_map_data_from_database()
+        # AMT mappings are held in memory here. Data Streams owns the next
+        # reconciliation-dependent enrichment and persists the completed hex
+        # snapshot once, avoiding an intermediate full-table rewrite.
         self.set_page_enabled(self.data_streams_tab_index, True)
         self.save_active_scenario_state()
         self.show_page(self.data_streams_tab_index, force=True)
@@ -6893,6 +6932,26 @@ class UserInputs(QMainWindow):
             or DEFAULT_PLANNING_CATEGORIES["rom"]
         ).strip()
 
+    def data_stream_input_request_signature(self):
+        """Identify the Snowflake inputs that determine recon and 2WP data."""
+        payload = {
+            "start_time": self.start_time_choice,
+            "mine": self.mine_input_choice,
+            "opf": self.opf_input_choice,
+            "brands": configured_brands(self.product_brand_labels_choice),
+            "crushers": sorted(
+                str(value) for value in (self.selected_site_crushers or [])
+            ),
+            "crusher_ratio": self.crusher_contribution_ratio_choice,
+            "planning_period_count": self.planning_period_count(),
+            "planning_category": self.selected_planning_category(),
+            "auto_load_2wp": bool(self.auto_load_2wp_targets_choice),
+            "group_2wp_by_brand": bool(
+                self.group_2wp_build_targets_by_brand_choice
+            ),
+        }
+        return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
     def schedule_data_stream_refresh(self, *_args):
         if (
             not getattr(self, "stockpile_data", None)
@@ -6920,12 +6979,32 @@ class UserInputs(QMainWindow):
             "rom": self.rom_planning_category_input.text(),
             "product": self.product_planning_category_input.text(),
         })
+        request_signature = self.data_stream_input_request_signature()
+        cached_result = getattr(self, "data_stream_input_cache_result", None)
+        if (
+            str(getattr(self, "data_stream_input_cache_signature", "") or "")
+            == request_signature
+            and isinstance(cached_result, dict)
+            and cached_result
+        ):
+            self.finish_data_stream_inputs(copy.deepcopy(cached_result))
+            return
+        if (
+            str(getattr(self, "data_stream_input_request_inflight", "") or "")
+            == request_signature
+        ):
+            return
+        self.data_stream_input_request_inflight = request_signature
         self.data_streams_submit_button.setEnabled(False)
         self.run_background_task(
             "Calculating OPF blend and regression reconciliation factors...",
             self.fetch_data_stream_inputs,
-            self.finish_data_stream_inputs,
-            self.handle_data_stream_inputs_error,
+            lambda result: self.finish_cached_data_stream_inputs(
+                request_signature, result
+            ),
+            lambda error_message: self.handle_data_stream_inputs_error(
+                error_message, request_signature
+            ),
         )
 
     def fetch_data_stream_inputs(self):
@@ -6976,8 +7055,20 @@ class UserInputs(QMainWindow):
             "target_errors": target_errors,
         }
 
+    def finish_cached_data_stream_inputs(self, request_signature, result):
+        if (
+            str(getattr(self, "data_stream_input_request_inflight", "") or "")
+            == str(request_signature or "")
+        ):
+            self.data_stream_input_request_inflight = ""
+        if self.data_stream_input_request_signature() != request_signature:
+            return
+        self.data_stream_input_cache_signature = str(request_signature or "")
+        self.data_stream_input_cache_result = copy.deepcopy(result or {})
+        self.finish_data_stream_inputs(copy.deepcopy(result or {}))
+
     def finish_data_stream_inputs(self, result):
-        self.historical_recon_factors = result.get("factors", {})
+        self.historical_recon_factors = copy.deepcopy(result.get("factors", {}))
         for (brand, factor_type, analyte), effective in getattr(
             self, "data_stream_effective_overrides", {}
         ).items():
@@ -6988,9 +7079,13 @@ class UserInputs(QMainWindow):
             )
             if value_record and not value_record.get("locked") and numeric(effective) not in (None, 0):
                 value_record["effective"] = float(effective)
-        self.historical_recon_warnings = result.get("warnings", [])
-        self.data_stream_pending_build_targets = result.get("build_targets", {})
-        self.data_stream_target_errors = result.get("target_errors", {})
+        self.historical_recon_warnings = copy.deepcopy(result.get("warnings", []))
+        self.data_stream_pending_build_targets = copy.deepcopy(
+            result.get("build_targets", {})
+        )
+        self.data_stream_target_errors = copy.deepcopy(
+            result.get("target_errors", {})
+        )
         self.populate_recon_factor_table()
         display_warnings = list(self.historical_recon_warnings)
         display_warnings.extend(self.aps_grade_mapping_warnings())
@@ -7008,18 +7103,33 @@ class UserInputs(QMainWindow):
             self.handle_data_streams_submit()
             QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
 
-    def handle_data_stream_inputs_error(self, error_message):
+    def handle_data_stream_inputs_error(self, error_message, request_signature=None):
+        if (
+            not request_signature
+            or str(getattr(self, "data_stream_input_request_inflight", "") or "")
+            == str(request_signature)
+        ):
+            self.data_stream_input_request_inflight = ""
+        if (
+            request_signature
+            and self.data_stream_input_request_signature() != request_signature
+        ):
+            return
         factors, warnings = self.data_stream_reconciliation.default_factors(
             self.opf_input_choice,
             self.product_brand_labels_choice,
             f"Data Streams setup failed; factors defaulted to 1.0. {error_message}",
         )
-        self.finish_data_stream_inputs({
+        result = {
             "factors": factors,
             "warnings": warnings,
             "build_targets": {},
             "target_errors": {},
-        })
+        }
+        if request_signature:
+            self.data_stream_input_cache_signature = str(request_signature)
+            self.data_stream_input_cache_result = copy.deepcopy(result)
+        self.finish_data_stream_inputs(result)
 
     def apply_cb_split_to_inventory_row(self, row):
         """Attach canonical CB PROD1 split properties to one inventory row."""
@@ -7238,38 +7348,26 @@ class UserInputs(QMainWindow):
         self.reconcile_saved_AMT_chunk_grade_streams()
         self.apply_canonical_field_mappings()
         self.apply_grade_streams_to_inventory()
-        if self.AMT_stockpile_data:
-            self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
-                {
-                    name: values
-                    for name, values in (self.updated_stockpile_data or {}).items()
-                    if values.get("amt", False)
-                },
-                self.AMT_stockpile_data,
-            )
-            self.opening_stockpile_inventories.save_AMT_to_database(
-                self.AMT_stockpile_data
-            )
-            self.refresh_AMT_map_data_from_database()
-        if self.data_stream_pending_build_targets:
-            self.register_submitted_site_scenarios(self.data_stream_pending_build_targets)
-        else:
-            self.save_active_scenario_state()
-        # Scenario registration clears/initialises the scenario database, so
-        # persist the auditable factors and enriched opening inventory after it.
-        self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
-        if self.AMT_stockpile_data:
-            self.opening_stockpile_inventories.save_AMT_to_database(
-                self.AMT_stockpile_data
-            )
-            self.refresh_AMT_map_data_from_database()
-        self.data_stream_reconciliation.save_to_database(
-            self.opf_input_choice,
-            self.start_time_choice,
-            self.historical_recon_factors,
-            self.historical_recon_warnings,
+        registering_scenarios = bool(self.data_stream_pending_build_targets)
+        self.refresh_AMT_enrichment_if_needed(
+            persist=not registering_scenarios,
+            refresh_map=not registering_scenarios,
         )
-        self.save_active_scenario_state()
+        if registering_scenarios:
+            # Registration clears and then seeds the scenario database.  The
+            # seed is the sole inventory/AMT/reconciliation write on this path.
+            self.register_submitted_site_scenarios(self.data_stream_pending_build_targets)
+            if self.AMT_stockpile_data:
+                self.refresh_AMT_map_data_from_database()
+        else:
+            self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
+            self.data_stream_reconciliation.save_to_database(
+                self.opf_input_choice,
+                self.start_time_choice,
+                self.historical_recon_factors,
+                self.historical_recon_warnings,
+            )
+            self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
         # The field schema remains editable after Data Streams. It is common
         # to return to the raw sources while auditing recon factors.
@@ -9624,12 +9722,18 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data = None
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
+        self.AMT_data_request_signature = ""
+        self.AMT_enrichment_signature = ""
+        self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = {}
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
         self.data_stream_source_warnings = {}
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}
+        self.data_stream_input_cache_signature = ""
+        self.data_stream_input_cache_result = {}
+        self.data_stream_input_request_inflight = ""
         self.hex_sequence_table = []
         self.hex_sequence_table_argument = []
         self.calendar_inputs = {}
@@ -13978,6 +14082,68 @@ class UserInputs(QMainWindow):
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
+    def AMT_enrichment_request_signature(self):
+        """Identify inputs that change mapped or reconciled AMT hex values."""
+        payload = {
+            "opening_snapshot": str(
+                getattr(self, "AMT_data_request_signature", "") or ""
+            ),
+            "field_definitions": normalize_field_definitions(
+                getattr(self, "field_definitions", None)
+            ),
+            "field_mappings": normalize_field_mappings(
+                getattr(self, "field_mappings", None)
+            ),
+            "historical_recon_factors": getattr(
+                self, "historical_recon_factors", {}
+            ) or {},
+            "opf": str(getattr(self, "opf_input_choice", "") or ""),
+            "brands": configured_brands(
+                getattr(self, "product_brand_labels_choice", "")
+            ),
+            "cb_lump_fines_mode": str(
+                getattr(self, "cb_lump_fines_mode", "derived") or "derived"
+            ),
+            "cb_lump_percentage": numeric(
+                getattr(self, "cb_lump_percentage", 50.0)
+            ),
+        }
+        return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+    def selected_AMT_data_source(self):
+        return {
+            name: values
+            for name, values in (getattr(self, "updated_stockpile_data", {}) or {}).items()
+            if values.get("amt", False)
+        }
+
+    def refresh_AMT_enrichment_if_needed(
+        self, data_source=None, force=False, persist=True, refresh_map=True
+    ):
+        """Rebuild and persist AMT hex fields only when their inputs changed."""
+        if not getattr(self, "AMT_stockpile_data", None):
+            self.AMT_enrichment_signature = ""
+            return False
+        signature = self.AMT_enrichment_request_signature()
+        if (
+            not force
+            and str(getattr(self, "AMT_enrichment_signature", "") or "")
+            == signature
+        ):
+            return False
+        self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
+            data_source if data_source is not None else self.selected_AMT_data_source(),
+            self.AMT_stockpile_data,
+        )
+        self.AMT_enrichment_signature = signature
+        if persist:
+            self.opening_stockpile_inventories.save_AMT_to_database(
+                self.AMT_stockpile_data
+            )
+        if refresh_map:
+            self.refresh_AMT_map_data_from_database()
+        return True
+
     def set_AMT_cache_status(self, message, warning=False):
         label = getattr(self, "AMT_cache_status_label", None)
         if label is None:
@@ -14036,21 +14202,28 @@ class UserInputs(QMainWindow):
                 self.set_AMT_cache_status(
                     "Restored the saved AMT opening snapshot; Snowflake was not queried."
                 )
-                self.finish_AMT_stockpile_table(data_source, getattr(self, "AMT_stockpile_data", {}))
+                self.finish_AMT_stockpile_table(
+                    data_source,
+                    getattr(self, "AMT_stockpile_data", {}),
+                    reuse_prepared=True,
+                    refresh_prepared_map=True,
+                )
                 return
 
             if (
                 not force_refresh
                 and str(getattr(self, "AMT_data_request_signature", "") or "")
                 == request_signature
-                and self.restore_loaded_AMT_data_to_database(data_source)
+                and self.has_compatible_AMT_data(data_source)
             ):
                 self.set_AMT_cache_status(
                     "Reused the cached AMT opening snapshot because the site, "
                     "timestamp and selected builds are unchanged."
                 )
                 self.finish_AMT_stockpile_table(
-                    data_source, getattr(self, "AMT_stockpile_data", {})
+                    data_source,
+                    getattr(self, "AMT_stockpile_data", {}),
+                    reuse_prepared=True,
                 )
                 return
 
@@ -14078,10 +14251,11 @@ class UserInputs(QMainWindow):
 
         self.opening_stockpile_inventories.clear_AMT_stockpile_database()
         self.AMT_data_request_signature = ""
+        self.AMT_enrichment_signature = ""
         self.set_AMT_cache_status("No AMT stockpiles are selected.")
-        self.finish_AMT_stockpile_table(data_source, {})
+        self.finish_AMT_stockpile_table(data_source, {}, reuse_prepared=True)
 
-    def restore_loaded_AMT_data_to_database(self, data_source):
+    def has_compatible_AMT_data(self, data_source):
         AMT_stockpile_data = getattr(self, "AMT_stockpile_data", {}) or {}
         if not isinstance(AMT_stockpile_data, dict) or not AMT_stockpile_data:
             return False
@@ -14108,13 +14282,22 @@ class UserInputs(QMainWindow):
             ):
                 return False
 
-        self.opening_stockpile_inventories.save_AMT_to_database(AMT_stockpile_data)
+        return True
+
+    def restore_loaded_AMT_data_to_database(self, data_source):
+        if not self.has_compatible_AMT_data(data_source):
+            return False
+        self.opening_stockpile_inventories.save_AMT_to_database(
+            self.AMT_stockpile_data
+        )
         return True
 
     def finish_AMT_stockpile_table_from_fetch(
         self, data_source, AMT_stockpile_data, request_signature=None
     ):
         self.AMT_data_request_signature = str(request_signature or "")
+        self.AMT_enrichment_signature = ""
+        self._available_mapping_fields_cache = {}
         self.set_AMT_cache_status(
             "AMT opening snapshot fetched from Snowflake and cached for this "
             "site, timestamp and build selection."
@@ -14158,14 +14341,19 @@ class UserInputs(QMainWindow):
             )
         self.show_error_popup(message)
 
-    def finish_AMT_stockpile_table(self, data_source, AMT_stockpile_data):
+    def finish_AMT_stockpile_table(
+        self, data_source, AMT_stockpile_data, reuse_prepared=False,
+        refresh_prepared_map=False
+    ):
         headers = self.amt_stockpile_headers()
-        self.AMT_stockpile_data = self.enrich_AMT_grade_streams(
-            data_source, AMT_stockpile_data or {}
-        )
-        self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
+        self.AMT_stockpile_data = AMT_stockpile_data or {}
+        if not reuse_prepared:
+            self.refresh_AMT_enrichment_if_needed(
+                data_source, force=True, persist=True, refresh_map=False
+            )
         self.start_dash_AMT_map_thread()
-        self.refresh_AMT_map_data_from_database()
+        if not reuse_prepared or refresh_prepared_map:
+            self.refresh_AMT_map_data_from_database()
 
         # Set Table Dimensions
         self.AMT_stockpile_table.setRowCount(len(data_source))
@@ -20310,6 +20498,9 @@ class UserInputs(QMainWindow):
                 'AMT_data_request_signature': getattr(
                     self, "AMT_data_request_signature", ""
                 ),
+                'AMT_enrichment_signature': getattr(
+                    self, "AMT_enrichment_signature", ""
+                ),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
                 "database_view_selected_columns": copy.deepcopy(
                     getattr(self, "database_view_selected_columns", None)
@@ -20763,6 +20954,13 @@ class UserInputs(QMainWindow):
         self.AMT_data_request_signature = str(
             loaded_state.get("AMT_data_request_signature") or ""
         )
+        self.AMT_enrichment_signature = str(
+            loaded_state.get("AMT_enrichment_signature") or ""
+        )
+        self.data_stream_input_cache_signature = ""
+        self.data_stream_input_cache_result = {}
+        self.data_stream_input_request_inflight = ""
+        self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
         self.database_view_selected_columns = copy.deepcopy(
             loaded_state.get("database_view_selected_columns")
@@ -20926,6 +21124,9 @@ class UserInputs(QMainWindow):
         self.data_stream_planning_categories = normalise_planning_categories()
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}
+        self.data_stream_input_cache_signature = ""
+        self.data_stream_input_cache_result = {}
+        self.data_stream_input_request_inflight = ""
         self.product_build_settings = []
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
@@ -20989,6 +21190,8 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = {}
         self.AMT_stockpile_data = {}
         self.AMT_data_request_signature = ""
+        self.AMT_enrichment_signature = ""
+        self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = {}
         self.solver_config = {}
         self.min_stockpiles = None

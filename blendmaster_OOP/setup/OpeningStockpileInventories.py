@@ -1444,7 +1444,25 @@ class OpeningStockpileInventories:
         # Clear the table
         cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
 
-        # Insert data into the database
+        # Insert each hex once. Previously every row was inserted and then
+        # immediately updated with its audit payload, doubling SQLite work for
+        # the largest setup table.
+        base_columns = [
+            "footprint", "hex", "balance", "grade_fe", "grade_si",
+            "grade_al", "grade_p", "grade_mn", "lat", "long",
+            "northing", "easting", "last_update", "hex_updated",
+            "grade_streams_json",
+        ]
+        insert_columns = base_columns + [
+            column for column in audit_columns if column not in base_columns
+        ]
+        quoted_columns = ", ".join(f'"{column}"' for column in insert_columns)
+        placeholders = ", ".join("?" for _column in insert_columns)
+        insert_sql = (
+            "INSERT INTO opening_AMT_stockpile_inventories "
+            f"({quoted_columns}) VALUES ({placeholders})"
+        )
+        insert_rows = []
         for key, rows in data_dict.items():
             for row in rows:  # Each key (FOOTPRINT) may now have multiple rows
                 # Map uppercase keys to expected database column names
@@ -1471,33 +1489,23 @@ class OpeningStockpileInventories:
                     print(f"Skipping row with missing footprint: {mapped_row}")
                     continue
 
-                cursor.execute('''
-                INSERT INTO opening_AMT_stockpile_inventories (footprint, hex, balance, grade_fe, grade_si, grade_al, grade_p, grade_mn, lat, long, northing, easting, last_update, hex_updated, grade_streams_json)
-                VALUES (:footprint, :hex, :balance, :grade_fe, :grade_si, :grade_al, :grade_p, :grade_mn, :lat, :long, :northing, :easting, :last_update, :hex_updated, :grade_streams_json)
-                ''', mapped_row)
                 audit_values = amt_audit_by_hex.get(
                     (str(key), str(row.get("HEX") or row.get("hex"))), {}
                 )
-                if audit_values:
-                    audit_values = {
-                        column: (
-                            json.dumps(value, default=str, separators=(",", ":"))
-                            if isinstance(value, (dict, list, tuple)) else value
-                        )
-                        for column, value in audit_values.items()
-                    }
-                    assignments = ", ".join(
-                        f'"{column}" = ?' for column in audit_values
+                audit_values = {
+                    column: (
+                        json.dumps(value, default=str, separators=(",", ":"))
+                        if isinstance(value, (dict, list, tuple)) else value
                     )
-                    cursor.execute(
-                        f'UPDATE opening_AMT_stockpile_inventories '
-                        f'SET {assignments} WHERE footprint = ? AND hex = ?',
-                        [
-                            *audit_values.values(),
-                            mapped_row["footprint"],
-                            mapped_row["hex"],
-                        ],
-                    )
+                    for column, value in audit_values.items()
+                }
+                combined = {**mapped_row, **audit_values}
+                insert_rows.append(tuple(
+                    combined.get(column) for column in insert_columns
+                ))
+
+        if insert_rows:
+            cursor.executemany(insert_sql, insert_rows)
 
         # Commit and close the connection
         conn.commit()
