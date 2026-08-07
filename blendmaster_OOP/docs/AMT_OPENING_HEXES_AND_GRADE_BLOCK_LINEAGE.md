@@ -279,8 +279,8 @@ Additive source properties are derived at final-hex mass rather than treated as
 weighted-average grades:
 
 ```text
-ROM/opening WMT (`feed_wmt`) = FINAL_WMT
-ROM/opening DMT (`feed_dmt`) = direct grade-block dry tonnes x remaining lineage share
+Insitu/ROM WMT (`feed_wmt`) = FINAL_WMT
+Insitu/ROM DMT (`feed_dmt`) = direct grade-block dry tonnes x remaining lineage share
 
 oretype_<type>_wmt = lineage final WMT x ore-type fraction
 oretype_<type>_dmt = lineage feed DMT x ore-type fraction

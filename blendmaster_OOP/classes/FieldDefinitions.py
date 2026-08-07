@@ -28,6 +28,72 @@ STREAM_PREFIXES = (
 )
 CALCULATED_STREAM_PREFIXES = ("adjusted_rom", "adjusted_product")
 
+_GRADE_TOKENS = {
+    "fe", "sio2", "si", "al2o3", "al", "p", "mn", "mgo", "k2o",
+    "tio2", "na2o", "cao", "loi", "s",
+}
+_ROM_WMT_ALIASES = {
+    "balance", "balancewmt", "final_wmt", "tonnes", "source_wmt",
+    "modelled_feed_wmt", "modelled_rom_wmt",
+}
+_ROM_DMT_ALIASES = {
+    "balancedmt", "source_dmt", "modelled_feed_dmt", "modelled_rom_dmt",
+}
+
+
+def is_mappable_source_field(value) -> bool:
+    """Return whether a raw field is a grade or additive tonnes quantity."""
+    raw = str(value or "").strip()
+    name = canonical_property_key(raw)
+    if not name:
+        return False
+    if (
+        "internal_recon" in name
+        or name.startswith(("internal_blend_recon_", "internal_upgrade_"))
+        or "coverage" in name
+        or "lineage" in name
+    ):
+        return False
+    if (
+        name in _ROM_WMT_ALIASES | _ROM_DMT_ALIASES
+        or name.endswith(("_wmt", "_dmt", "_tonnes"))
+        or "wettonnes" in name
+        or "drytonnes" in name
+    ):
+        return True
+    tokens = [token for token in re.split(r"[^a-z0-9]+", raw.lower()) if token]
+    return bool(
+        name in _GRADE_TOKENS
+        or "grade" in name
+        or (tokens and (tokens[0] in _GRADE_TOKENS or tokens[-1] in _GRADE_TOKENS))
+        or "loi" in tokens
+        or (tokens and tokens[-1] == "as")
+        or re.match(r"^(fe|sio2|si|al2o3|al|p|mn)_prod[123]$", name)
+        or re.match(r"^prod[123]_(fe|sio2|si|al2o3|al|p|mn)$", name)
+    )
+
+
+def standardize_available_mapping_fields(values):
+    """Filter mapping discovery and collapse duplicate physical ROM aliases."""
+    fields = {
+        str(value).strip() for value in (values or [])
+        if is_mappable_source_field(value)
+    }
+    canonical_lookup = {
+        canonical_property_key(field): field for field in sorted(fields)
+    }
+    if "feed_wmt" in canonical_lookup:
+        fields -= {
+            field for field in fields
+            if canonical_property_key(field) in _ROM_WMT_ALIASES
+        }
+    if "feed_dmt" in canonical_lookup:
+        fields -= {
+            field for field in fields
+            if canonical_property_key(field) in _ROM_DMT_ALIASES
+        }
+    return sorted(fields, key=lambda field: field.lower())
+
 
 def is_calculated_stream_field(value) -> bool:
     name = canonical_property_key(value)
@@ -56,11 +122,6 @@ def _definition(
 def default_field_definitions():
     """Return the editable default schema in valid dependency order."""
     rows = [
-        _definition(
-            "source_wmt", "additive", required=True,
-            use_in_optimisation=True,
-            description="Opening/source wet tonnes. Mirrors modelled ROM WMT when only one is mapped.",
-        ),
         _definition(
             "modelled_rom_wmt", "additive", required=True,
             use_in_optimisation=True,
@@ -123,7 +184,7 @@ def default_field_definitions():
                 candidate = f"prod{product}_dmt"
                 if candidate in known:
                     return candidate
-        return "source_wmt"
+        return "modelled_rom_wmt"
 
     for name, description in deferred_weighted:
         if name in known:
@@ -153,6 +214,10 @@ def normalize_field_definitions(values=None):
         if not isinstance(raw, Mapping):
             continue
         name = canonical_property_key(raw.get("name"))
+        # source_wmt remains an internal physical-balance alias. The canonical
+        # user schema has one ROM WMT field: modelled_rom_wmt.
+        if name == "source_wmt":
+            continue
         if not name or name in seen:
             continue
         kind = str(raw.get("kind") or "").strip().lower()
@@ -166,6 +231,8 @@ def normalize_field_definitions(values=None):
         weight = canonical_property_key(
             raw.get("weight_field") or template.get("weight_field")
         )
+        if weight == "source_wmt":
+            weight = "modelled_rom_wmt"
         normalized.append(_definition(
             name,
             kind,
@@ -279,7 +346,15 @@ def normalize_field_mappings(values=None):
             continue
         family = str(raw.get("source_family") or "").strip().lower()
         target = canonical_property_key(raw.get("target_field"))
+        if target == "source_wmt":
+            target = "modelled_rom_wmt"
         source_field = str(raw.get("source_field") or "").strip()
+        source_key = canonical_property_key(source_field)
+        if family in {"inventory", "amt"}:
+            if target == "modelled_rom_wmt" and source_key in _ROM_WMT_ALIASES:
+                source_field = "feed_wmt"
+            elif target == "modelled_rom_dmt" and source_key in _ROM_DMT_ALIASES:
+                source_field = "feed_dmt"
         brand = normalise_brand(raw.get("brand"))
         if (
             family not in SOURCE_FAMILIES
@@ -379,9 +454,27 @@ def apply_field_mappings(
             value = raw_fields.get(source_field)
             if value is None:
                 value = raw_by_canonical.get(canonical_property_key(source_field))
+            if value is None and canonical_property_key(source_field) == "feed_wmt":
+                value = next(
+                    (raw_by_canonical[key] for key in (
+                        "balancewmt", "balance", "final_wmt", "tonnes",
+                        "modelled_rom_wmt", "modelled_feed_wmt", "source_wmt",
+                    )
+                     if raw_by_canonical.get(key) is not None),
+                    None,
+                )
+            if value is None and canonical_property_key(source_field) == "feed_dmt":
+                value = next(
+                    (raw_by_canonical[key] for key in (
+                        "balancedmt", "modelled_rom_dmt", "modelled_feed_dmt",
+                        "source_dmt",
+                    )
+                     if raw_by_canonical.get(key) is not None),
+                    None,
+                )
             if value is None:
                 # Map Fields displays a few compatibility raw names with an
-                # explanatory caption, e.g. ``ROM / opening stockpile DMT
+                # explanatory caption, e.g. ``Insitu / ROM DMT
                 # (feed_dmt)``. Older projects persisted that caption instead
                 # of the raw field ID; recover the parenthesised ID here.
                 match = re.search(r"\(([^()]+)\)\s*$", str(source_field))
@@ -395,13 +488,9 @@ def apply_field_mappings(
             # lets canonical data already produced by BlendMaster survive.
             value = raw_fields.get(target, raw_by_canonical.get(target))
         result[target] = _number(value)
-    # The opening source balance and modelled ROM WMT describe the same
-    # material.  Users can map either canonical name once without creating
-    # conflicting copies of the stockpile/hex balance.
-    if result.get("source_wmt") is None:
-        result["source_wmt"] = result.get("modelled_rom_wmt")
-    if result.get("modelled_rom_wmt") is None:
-        result["modelled_rom_wmt"] = result.get("source_wmt")
+    # Internal balance tracking still consumes source_wmt, but it is derived
+    # from the one user-facing ROM WMT field and is never separately mapped.
+    result["source_wmt"] = result.get("modelled_rom_wmt")
     return result
 
 

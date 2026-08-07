@@ -1235,13 +1235,7 @@ class OpeningStockpileInventories:
             easting REAL,
             last_update TEXT,
             hex_updated TEXT,
-            grade_streams_json TEXT,
-            internal_recon_matched INTEGER,
-            internal_recon_inventory_stockpile TEXT,
-            internal_recon_inventory_build TEXT,
-            internal_recon_inventory_transaction_datetime TEXT,
-            internal_recon_match_rule TEXT,
-            internal_recon_warning TEXT
+            grade_streams_json TEXT
         )
         ''')
 
@@ -1295,14 +1289,6 @@ class OpeningStockpileInventories:
                         "AMT_INVENTORY_TRANSACTION_DATETIME"
                     ),
                     "amt_inventory_match_rule": row.get("AMT_INVENTORY_MATCH_RULE"),
-                    "internal_recon_matched": int(bool(row.get("INTERNAL_RECON_MATCHED"))),
-                    "internal_recon_inventory_stockpile": row.get("INTERNAL_RECON_INVENTORY_STOCKPILE"),
-                    "internal_recon_inventory_build": row.get("INTERNAL_RECON_INVENTORY_BUILD"),
-                    "internal_recon_inventory_transaction_datetime": row.get(
-                        "INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME"
-                    ),
-                    "internal_recon_match_rule": row.get("INTERNAL_RECON_MATCH_RULE"),
-                    "internal_recon_warning": row.get("INTERNAL_RECON_WARNING"),
                     "location_name": row.get("LOCATION_NAME"),
                     "inventory_balance_wmt": row.get("INVENTORY_BALANCE_WMT"),
                     "raw_wmt": row.get("RAW_WMT"),
@@ -1356,11 +1342,6 @@ class OpeningStockpileInventories:
             "amt_inventory_build",
             "amt_inventory_transaction_datetime",
             "amt_inventory_match_rule",
-            "internal_recon_inventory_stockpile",
-            "internal_recon_inventory_build",
-            "internal_recon_inventory_transaction_datetime",
-            "internal_recon_match_rule",
-            "internal_recon_warning",
             "location_name",
             "spatial_recon_status",
             "spatial_recon_method",
@@ -1385,7 +1366,7 @@ class OpeningStockpileInventories:
             column_type = (
                 "TEXT" if column in text_audit_columns or column.endswith("_json")
                 else "INTEGER" if column in {
-                    "amt_inventory_matched", "internal_recon_matched", "grade_block_count",
+                    "amt_inventory_matched", "grade_block_count",
                     "lineage_entry_count",
                 }
                 else "REAL"
@@ -1576,23 +1557,7 @@ class OpeningStockpileInventories:
             easting REAL,
             last_update TEXT,
             hex_updated TEXT,
-            grade_streams_json TEXT,
-            internal_recon_matched INTEGER,
-            internal_recon_inventory_stockpile TEXT,
-            internal_recon_inventory_build TEXT,
-            internal_recon_inventory_transaction_datetime TEXT,
-            internal_recon_match_rule TEXT,
-            internal_recon_warning TEXT,
-            internal_blend_recon_fe REAL,
-            internal_blend_recon_si REAL,
-            internal_blend_recon_al REAL,
-            internal_blend_recon_p REAL,
-            internal_blend_recon_mn REAL,
-            internal_upgrade_fe REAL,
-            internal_upgrade_si REAL,
-            internal_upgrade_al REAL,
-            internal_upgrade_p REAL,
-            internal_upgrade_mn REAL
+            grade_streams_json TEXT
         )
         ''')
 
@@ -1601,20 +1566,6 @@ class OpeningStockpileInventories:
         required_columns = {
             "last_update": "TEXT",
             "grade_streams_json": "TEXT",
-            "internal_recon_matched": "INTEGER",
-            "internal_recon_inventory_stockpile": "TEXT",
-            "internal_recon_inventory_build": "TEXT",
-            "internal_recon_inventory_transaction_datetime": "TEXT",
-            "internal_recon_match_rule": "TEXT",
-            "internal_recon_warning": "TEXT",
-            **{
-                f"internal_blend_recon_{analyte}": "REAL"
-                for analyte in ANALYTES
-            },
-            **{
-                f"internal_upgrade_{analyte}": "REAL"
-                for analyte in ANALYTES
-            },
         }
         for column, column_type in required_columns.items():
             if column not in existing_columns:

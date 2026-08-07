@@ -2141,9 +2141,6 @@ class DrawAMTStockpile:
         "amt_inventory_matched", "amt_inventory_stockpile",
         "amt_inventory_build", "amt_inventory_transaction_datetime",
         "amt_inventory_match_rule",
-        "internal_recon_matched", "internal_recon_inventory_stockpile",
-        "internal_recon_inventory_build", "internal_recon_match_rule",
-        "internal_recon_warning", "internal_recon_inventory_transaction_datetime",
     ]
     SELECTED_TABLE_COLUMNS = [
         "footprint", "sequence", "hex", "balance", "grade_fe", "grade_si", "grade_al",
@@ -2272,8 +2269,11 @@ class DrawAMTStockpile:
                     "Matched" if bool(entry.get(
                         "amt_inventory_matched",
                         entry.get("internal_recon_matched"),
-                    )) else "Not matched"
+                    ))
+                    else "Not matched"
                 ),
+                # The internal_recon fallbacks are read-only migration support
+                # for saved projects; generated chunks expose only amt_inventory_*.
                 "matched_inventory_stockpile": entry.get(
                     "amt_inventory_stockpile",
                     entry.get("internal_recon_inventory_stockpile", ""),
@@ -2839,22 +2839,27 @@ class DrawAMTStockpile:
         provenance = {}
         if chunk_rows:
             first_row = chunk_rows[0]
+            legacy_provenance = {
+                "amt_inventory_matched": "internal_recon_matched",
+                "amt_inventory_stockpile": "internal_recon_inventory_stockpile",
+                "amt_inventory_build": "internal_recon_inventory_build",
+                "amt_inventory_transaction_datetime": (
+                    "internal_recon_inventory_transaction_datetime"
+                ),
+                "amt_inventory_match_rule": "internal_recon_match_rule",
+            }
             for key in (
                 "amt_inventory_matched",
                 "amt_inventory_stockpile",
                 "amt_inventory_build",
                 "amt_inventory_transaction_datetime",
                 "amt_inventory_match_rule",
-                "internal_recon_matched",
-                "internal_recon_inventory_stockpile",
-                "internal_recon_inventory_build",
-                "internal_recon_inventory_transaction_datetime",
-                "internal_recon_match_rule",
-                "internal_recon_warning",
                 "cb_split_method",
                 "cb_split_warning",
             ):
-                provenance[key] = first_row.get(key)
+                provenance[key] = first_row.get(
+                    key, first_row.get(legacy_provenance.get(key, ""))
+                )
 
         return {
             "footprint": footprint,

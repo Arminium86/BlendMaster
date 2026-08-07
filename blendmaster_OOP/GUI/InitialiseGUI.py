@@ -92,6 +92,7 @@ from classes.FieldDefinitions import (
     mapping_lookup,
     normalize_field_definitions,
     normalize_field_mappings,
+    standardize_available_mapping_fields,
     optimization_field_names,
     validate_field_definitions,
 )
@@ -3817,6 +3818,14 @@ class UserInputs(QMainWindow):
                     self.product_brand_labels_choice
                 ):
                     rom_by_brand[brand] = copy.deepcopy(unbranded_rom)
+        elif source_type == "aps grade block":
+            # APS payload is the physical ROM WMT available to direct tipping.
+            # It is scheduling data rather than a site-specific Mining.csv
+            # property mapping, so publish it under the same canonical field.
+            opening_wmt = numeric(record.get("tonnes"))
+            if opening_wmt is not None:
+                record["source_wmt"] = opening_wmt
+                record["modelled_rom_wmt"] = opening_wmt
 
         record["selected_stream"] = self.selected_data_stream
         for analyte in ANALYTES:
@@ -4072,13 +4081,6 @@ class UserInputs(QMainWindow):
                             ),
                             "cb_split_warning": chunk.get(
                                 "cb_split_warning", ""
-                            ),
-                            "internal_recon_matched": provenance.get(
-                                "AMT_INVENTORY_MATCHED",
-                                provenance.get(
-                                    "internal_recon_matched",
-                                    provenance.get("INTERNAL_RECON_MATCHED", ""),
-                                ),
                             ),
                             "matched_inventory_stockpile": provenance.get(
                                 "AMT_INVENTORY_STOCKPILE",
@@ -4626,21 +4628,32 @@ class UserInputs(QMainWindow):
     def database_view_is_coverage_field(header):
         return str(header or "").lower().endswith("_coverage_pct")
 
+    @classmethod
+    def database_view_is_automatic_audit_field(cls, header):
+        name = str(header or "").strip().lower()
+        return bool(
+            cls.database_view_is_coverage_field(name)
+            or "lineage" in name
+            or name == "grade_block_count"
+        )
+
     def database_view_all_headers(self, include_coverage=None):
         fixed = [
             "source_type", "source_id", "parent_stockpile",
-            "build_or_chunk", "sequence", "tonnes", "selected_stream",
-            "internal_recon_matched", "matched_inventory_stockpile",
-            "matched_inventory_build", "matched_inventory_time",
-            *[f"grade_{analyte}" for analyte in ANALYTES],
+            "build_or_chunk", "sequence", "selected_stream",
         ]
-        dynamic = sorted({
+        defined = [
+            row["name"] for row in normalize_field_definitions(
+                vars(self).get("field_definitions")
+            )
+        ]
+        audit = sorted({
             key
             for record in self.database_view_rows
             for key in record
-            if key not in fixed and key != "warnings"
+            if self.database_view_is_automatic_audit_field(key)
         })
-        headers = [*fixed, *dynamic, "warnings"]
+        headers = list(dict.fromkeys([*fixed, *defined, *audit, "warnings"]))
         if include_coverage is None:
             include_coverage = bool(
                 getattr(self, "database_view_show_coverage_fields", False)
@@ -4652,21 +4665,18 @@ class UserInputs(QMainWindow):
             ]
         return headers
 
-    @staticmethod
-    def default_database_view_columns(headers):
+    def default_database_view_columns(self, headers):
         identity = {
             "source_type", "source_id", "parent_stockpile",
-            "build_or_chunk", "sequence", "tonnes", "selected_stream",
+            "build_or_chunk", "sequence", "selected_stream",
         }
         return [
             header for header in headers
             if (
                 header in identity
-                or header.startswith("grade_insitu_")
-                or (
-                    header.startswith("selected_")
-                    and header != "selected_stream"
-                )
+                or header in {"modelled_rom_wmt", "modelled_rom_dmt"}
+                or header.startswith("insitu_")
+                or header.startswith(f"{getattr(self, 'selected_data_stream', '')}_")
             )
         ]
 
@@ -5032,17 +5042,12 @@ class UserInputs(QMainWindow):
             table.setHorizontalHeaderItem(column_index, source_header)
 
         for row_index, field in enumerate(fields):
-            field_item = QTableWidgetItem(self.user_facing_field_label(field))
+            # Database View is the canonical BlendMaster schema, not a second
+            # raw-source catalogue. Show Define Fields names verbatim.
+            field_item = QTableWidgetItem(str(field))
             field_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             field_item.setData(Qt.UserRole, field)
-            field_item.setToolTip(
-                (
-                    "Raw source key: " + field + "\n"
-                    "ROM / opening stockpile mass; not actual OPF plant feed."
-                )
-                if field in {"feed_wmt", "feed_dmt"}
-                else field
-            )
+            field_item.setToolTip(str(field))
             field_item.setBackground(QColor("#f1f5f9"))
             table.setItem(row_index, 0, field_item)
             for column_index, descriptor in enumerate(sources, start=1):
@@ -5647,17 +5652,15 @@ class UserInputs(QMainWindow):
                     fields.update(self.distinct_aps_csv_headers(path))
                 except (OSError, csv.Error):
                     pass
-        return sorted(str(field) for field in fields if str(field).strip())
+        return standardize_available_mapping_fields(fields)
 
     @staticmethod
     def user_facing_field_label(field):
         """Clarify raw source aliases without changing persisted mapping keys."""
         raw = str(field or "")
         labels = {
-            "feed_wmt": "ROM / opening stockpile WMT",
-            "feed_dmt": "ROM / opening stockpile DMT",
-            "tonnes": "Insitu / opening source WMT",
-            "source_wmt": "Insitu / source WMT",
+            "feed_wmt": "Insitu / ROM WMT",
+            "feed_dmt": "Insitu / ROM DMT",
         }
         label = labels.get(raw.strip().lower())
         return f"{label} ({raw})" if label else raw
@@ -5738,7 +5741,7 @@ class UserInputs(QMainWindow):
         for family in ("inventory", "amt"):
             mappings.append({
                 "source_family": family, "brand": "",
-                "target_field": "source_wmt",
+                "target_field": "modelled_rom_wmt",
                 "source_field": "BALANCE" if family == "inventory" else "FINAL_WMT",
             })
             for analyte, raw_name in analyte_raw.items():
@@ -13344,7 +13347,8 @@ class UserInputs(QMainWindow):
 
         provenance = rows[0] if rows else {}
         matched_name = str(
-            provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
+            provenance.get("AMT_INVENTORY_STOCKPILE")
+            or provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
             or provenance.get("internal_recon_inventory_stockpile")
             or stockpile_name
         ).strip()
@@ -14043,20 +14047,6 @@ class UserInputs(QMainWindow):
                     inventory_transaction_datetime
                 )
                 row["AMT_INVENTORY_MATCH_RULE"] = match_rule
-                # Retain legacy column names for saved-project/report schema
-                # compatibility. They now describe only the opening inventory
-                # instance match; no internal grade factors are calculated.
-                row["INTERNAL_RECON_MATCHED"] = inventory_matched
-                row["INTERNAL_RECON_INVENTORY_STOCKPILE"] = inventory_name
-                row["INTERNAL_RECON_INVENTORY_BUILD"] = inventory_build
-                row["INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME"] = (
-                    inventory_transaction_datetime
-                )
-                row["INTERNAL_RECON_MATCH_RULE"] = match_rule
-                row["INTERNAL_RECON_WARNING"] = (
-                    "" if inventory_matched
-                    else f"{footprint}: no as-of inventory instance was matched."
-                )
                 lineage_warning = str(row.get("LINEAGE_WARNING") or "").strip()
                 source_warnings = [lineage_warning] if lineage_warning else []
                 if cb_split_warning:

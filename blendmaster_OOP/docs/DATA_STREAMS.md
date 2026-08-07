@@ -81,14 +81,15 @@ and must start with a letter. Each row is one of:
 Required rows cannot be deleted. The default contract includes
 `insitu_<analyte>`, `modelled_rom_<analyte>`, `adjusted_rom_<analyte>`,
 `modelled_product_<analyte>` and `adjusted_product_<analyte>` for the five
-analytes, `source_wmt`, `modelled_product_wmt` and
-`modelled_product_dmt`, plus `modelled_rom_wmt` and `modelled_rom_dmt`.
+analytes, `modelled_rom_wmt`, `modelled_rom_dmt`, `modelled_product_wmt`
+and `modelled_product_dmt`.
 Insitu/modelled/adjusted ROM grades use `modelled_rom_wmt`; modelled/adjusted product
 grades use `modelled_product_dmt`. Map the product fields to the active OPF
-product channel's per-source Product 1/2/3 WMT/DMT. `source_wmt` mirrors
-`modelled_rom_wmt`, because ROM WMT is the opening insitu balance. Required
-fields may be left unmapped; they then remain blank and traceable rather than
-being silently removed from the source schema.
+product channel's per-source Product 1/2/3 WMT/DMT. The internal balance
+tracker derives its physical source WMT from `modelled_rom_wmt`; there is no
+second user-defined or separately mapped `source_wmt` field. Required fields
+may be left unmapped; they then remain blank and traceable rather than being
+silently removed from the source schema.
 
 **Use in Optimisation** is the compute/report gate. Checked properties are
 available in the custom-constraint field picker, carried through build,
@@ -99,8 +100,9 @@ unchecked properties stop at Database View. The five effective selected grades
 are always sent to optimisation independently of this checkbox.
 
 The checkbox does not manufacture a value or mapping. For example,
-`modelled_rom_dmt` must be mapped to the applicable Inventory/AMT `feed_dmt`
-field. If it is checked but unmapped, its report columns are deliberately
+`modelled_rom_dmt` must be mapped to the applicable Inventory/AMT **Insitu /
+ROM DMT** source field (raw compatibility ID `feed_dmt`). If it is checked but
+unmapped, its report columns are deliberately
 present and blank; a custom constraint that requires it cannot obtain a valid
 coefficient. This makes the data gap distinguishable from a genuine zero.
 
@@ -113,11 +115,18 @@ BlendMaster field name. Older projects migrate their former APS mappings and
 receive explicit compatibility mappings for the established inventory and AMT
 stream inputs.
 
+The Available Source Fields list is intentionally limited to grade fields and
+additive quantity fields (WMT, DMT or tonnes). Coordinates, timestamps,
+reconciliation metadata and other operational columns are not mappable.
+Lineage and coverage metrics also stay out of Map Fields: BlendMaster carries
+them automatically as audit metadata and exposes them through Database View's
+coverage-field option.
+
 AMT mappings apply independently to each imported **hex** before chunks are
 formed. The AMT source list includes lineage-derived per-hex fields, including
 `prod1_wmt`, `prod1_dmt`, `prod2_wmt` and `prod2_dmt` where the contributing
 grade blocks supply explicit modelled product tonnes, including Product 3.
-It also includes **ROM / opening stockpile WMT/DMT** (stored raw as
+It also includes **Insitu / ROM WMT/DMT** (stored raw as
 `feed_wmt`/`feed_dmt` for compatibility); map these to
 `modelled_rom_wmt`/`modelled_rom_dmt`. Map the active product channel to
 `modelled_product_wmt` and `modelled_product_dmt`; the product-grade fields
@@ -180,7 +189,7 @@ grade vector used by the optimiser.
 Source properties use the same canonical names for inventory, AMT and APS
 sources. Important additive families are:
 
-- ROM/opening-stockpile WMT and DMT (stored raw as `feed_wmt` and `feed_dmt`);
+- insitu/ROM WMT and DMT (stored raw as `feed_wmt` and `feed_dmt`);
 - `oretype_<type>_wmt` and `oretype_<type>_dmt`, where `<type>` is `bid`,
   `cidl`, `cidm`, `cidu`, `did`, `hc` or `other`;
 - `prod1_wmt` through `prod3_wmt` and their `_dmt` equivalents;
@@ -198,8 +207,8 @@ For inventory stockpiles, the opening query calculates these additive values
 directly from the latest positive build balance at scenario start:
 
 ```text
-ROM/opening WMT (`feed_wmt`) = BALANCEWMT
-ROM/opening DMT (`feed_dmt`) = BALANCEWMT x (1 - insitu moisture)
+Insitu/ROM WMT (`feed_wmt`) = BALANCEWMT
+Insitu/ROM DMT (`feed_dmt`) = BALANCEWMT x (1 - insitu moisture)
 oretype_<type>_wmt = BALANCEWMT x insitu ore-type fraction
 oretype_<type>_dmt = feed_dmt x insitu ore-type fraction
 prod<n>_wmt = BALANCEWMT x Product n wet yield
@@ -332,16 +341,17 @@ The same browser pattern is used for raw Inventory and AMT fields, which become
 available after Stockpile Inventories and the AMT opening fetch. Select a
 mapping cell and either double-click a field or drag it onto that cell. This
 avoids transcription errors in long Snowflake and APS process-stream names.
+Only grade and additive tonnes fields appear in this browser.
 
 The formerly separate APS grade/property tables are represented by the same
 canonical mapping grid. The standard prepopulated catalogue includes:
 
 | Property group | BlendMaster field names |
 | --- | --- |
-| Feed | `feed_dmt`, `feed_moisture` |
+| Insitu / ROM | `modelled_rom_wmt`, `modelled_rom_dmt` |
 | Ore Type | `oretype_<type>_wmt`, `oretype_<type>_dmt` for `bid`, `cidl`, `cidm`, `cidu`, `did`, `hc`, `other` |
-| Product 1/2/3 | `prod<n>_wmt`, `prod<n>_dmt`, `prod<n>_mass_recovery`, `prod<n>_moisture`, `prod<n>_minus_1mm_pct`, `prod<n>_minus_1mm_wmt`, `prod<n>_minus_1mm_dmt` |
-| CB Product 1 Split | `prod1_<size>_yield_pct`, `prod1_<size>_wmt`, `prod1_<size>_dmt`, `prod1_<size>_moisture`, and `prod1_<size>_<assay>` for size `fines` or `lump` and assay `fe`, `sio2`, `al2o3`, `p`, `mn`, `loi_425`, `loi_total`, `s`, `as` |
+| Product 1/2/3 | `prod<n>_wmt`, `prod<n>_dmt`, `prod<n>_minus_1mm_wmt`, `prod<n>_minus_1mm_dmt`, and product grade fields |
+| CB Product 1 Split | `prod1_<size>_wmt`, `prod1_<size>_dmt`, and `prod1_<size>_<assay>` for size `fines` or `lump` and assay `fe`, `sio2`, `al2o3`, `p`, `mn`, `loi_425`, `loi_total`, `s`, `as` |
 
 Mappings store the exact APS header but expose the stable BlendMaster name in
 Database View and constraint expressions. An additive mapped total is prorated
@@ -402,13 +412,14 @@ compact:
 
 - source identity (`source_type`, `source_id`, `parent_stockpile`,
   `build_or_chunk` and AMT `sequence`);
-- available `tonnes` and `selected_stream`;
-- all stored insitu grade fields; and
-- every `selected_<brand>_<analyte>` field, which is the effective grade vector
-  after stream and per-analyte fallback resolution.
+- canonical `modelled_rom_wmt`, `modelled_rom_dmt` and `selected_stream`;
+- all canonical `insitu_<analyte>` fields; and
+- the five canonical grade fields for the optimiser grade stream selected on
+  Data Streams (for example, `adjusted_product_fe`).
 
-Use **Select All** to expose reconciliation, lineage, intermediate streams and
-extended source properties, or **Defaults** to return to the compact view.
+Use **Select All** to expose every canonical field defined in Define Fields,
+plus the automatic lineage audit fields, or **Defaults** to return to the
+compact view.
 Coverage rows are audit fields and are hidden from the checklist by default;
 enable **Show coverage fields (audit / troubleshooting)** to make every
 `*_coverage_pct` row selectable. This switch changes presentation only and is
@@ -428,9 +439,11 @@ controls only: hiding a column does not remove that source from scheduling.
 
 ### Database View field dictionary
 
-The table can contain many field rows because it shows both the values supplied
-to the optimiser and the intermediate values used to derive them. Fields fall
-into four groups.
+The **Field** column uses the exact canonical BlendMaster names from Define
+Fields. Raw Snowflake/APS names, physical aliases such as `source_wmt` and
+`tonnes`, and internal implementation metadata are not displayed as parallel
+rows. The only non-definition data rows are source identity/status and the
+automatic lineage/coverage audit metrics described below.
 
 Displayed sum quantities (tonnes, WMT and counts) are rounded to whole units.
 Displayed weighted-average grades, modelled properties and coverage values are
@@ -446,27 +459,17 @@ full precision.
 | `parent_stockpile` | The stockpile footprint that owns an inventory source or AMT chunk. | APS grade blocks do not have a parent stockpile. |
 | `build_or_chunk` | Inventory build name for an inventory source; chunk/hex identifier for an AMT source. | APS grade blocks and the AMT no-chunks warning source. |
 | `sequence` | AMT reclaim sequence number. | Inventory stockpiles and APS grade blocks. |
-| `tonnes` | Selected inventory balance, selected AMT chunk balance, or the sum of APS payload tonnes for that grade block inside the planning horizon. | A valid scheduling source should not be blank. The AMT no-chunks warning source intentionally shows zero. |
+| `modelled_rom_wmt` | Canonical insitu/ROM wet-tonne balance: selected inventory balance, selected AMT chunk balance, or the APS grade-block quantity inside the planning horizon. | Blank when this required field has not been mapped or derived. |
+| `modelled_rom_dmt` | Canonical insitu/ROM dry-tonne balance. | Blank when this required field has not been mapped or derived. |
 
 APS payloads are consolidated into one grade-block source column. Its grades are
 independently tonne-weighted per analyte, so a missing analyte does not prevent
 the available analytes from being shown.
 
-#### AMT opening and grade-block lineage
+#### AMT grade-block lineage audit
 
 | Field | Meaning | When a blank is expected |
 | --- | --- | --- |
-| `internal_recon_matched` | Legacy field name indicating that the AMT footprint was matched to an inventory build/balance. It does not mean internal blend or upgrade factors were used. | All inventory and APS sources. |
-| `matched_inventory_stockpile` | Inventory stockpile used to identify the AMT footprint instance and authoritative total. | All non-AMT sources, or an unmatched AMT source. |
-| `matched_inventory_build` | Exact inventory build used as the AMT `LOCATION_NAME`. | All non-AMT sources, or an unmatched AMT source. |
-| `matched_inventory_time` | Timestamp of the authoritative inventory balance at or before scenario start. | All non-AMT sources, or an unmatched AMT source. |
-| `raw_wmt` | Signed inbound-minus-outbound AMT balance before spatial correction. | Non-AMT sources. |
-| `spatially_corrected_wmt` | Nonnegative balance after directional deficit allocation. | Non-AMT sources. |
-| `spatial_adjustment_wmt` | Change caused by transferring AMT overdraw to nearby positive donor hexes. | Non-AMT sources. |
-| `ledger_adjustment_wmt` | Final proportional change required to match inventory `BALANCEWMT`. | Non-AMT sources. |
-| `geometry_quarantine_count` | Number of AMT hexes in the chunk whose remote or missing coordinate was excluded from spatial path generation. | Non-AMT sources, or zero when all chunk hexes are positioned normally. |
-| `geometry_quarantine_wmt` | WMT retained through non-spatial chunk allocation after coordinate quarantine. | Non-AMT sources, or zero when no coordinate was quarantined. |
-| `geometry_quarantine_hexes` | Comma-separated IDs of the quarantined hexes assigned to the chunk. | Non-AMT sources, or a normal AMT chunk. |
 | `lineage_entry_count` | Number of lineage records, including an unmatched record when present. | Non-AMT sources. |
 | `lineage_inbound_wmt` | Inbound WMT represented by grade-block lineage for the hex. | Non-AMT sources, or an AMT hex with no inbound lineage. |
 | `lineage_matched_wmt` | Lineage WMT attributed through EXPIT or the AMT truck list. | Non-AMT sources. |
@@ -476,15 +479,13 @@ the available analytes from being shown.
 | `lineage_unmatched_final_wmt` | Final WMT represented by the unmatched lineage share. | Non-AMT sources; zero is preferred for AMT. |
 | `lineage_coverage_pct` | Percentage of lineage inbound WMT attributed through EXPIT or the AMT truck list. | Non-AMT sources or a hex with no inbound lineage. |
 | `grade_block_count` | Number of distinct resolved grade-block identities contributing to the hex, excluding `UNMATCHED`. | Non-AMT sources. |
-| `<property>` | Canonical grade-block-lineage-weighted physical property, using the same name as its Inventory/APS counterpart; examples include `oretype_bid_wmt` and `prod1_minus_1mm_wmt`. Database View does not add a second `modelled_` prefix. | Non-AMT sources, or when no contributing lineage supplies that property. |
+| `<property>` | Canonical grade-block-lineage-weighted physical property, shown only when the same name exists in Define Fields; examples include `oretype_bid_wmt` and `prod1_minus_1mm_wmt`. | Non-AMT sources, an unmapped source family, or when no contributing lineage supplies that property. |
 | `<property>_coverage_pct` | Percentage of final hex tonnes supporting the corresponding property. Hidden by default; enable the coverage checkbox in **Choose Fields...** for audit/troubleshooting. | Non-AMT sources or a zero-tonne hex. |
-| `cb_split_method` | Whether the CB split was grade-block-derived, unavailable, calculated with a back-calculated lump grade, or calculated with the equal-grade fallback. | Non-CB sources. |
-| `cb_split_warning` | Warning produced by the optional calculated CB split, including unavailable independent fines assays or a negative back-calculated lump assay. | Blank for a complete derived split or a calculated split requiring no warning. |
 
 The inventory match now selects the correct build and total; it no longer
 provides AMT internal blend or upgrade factors. Modelled product grades can feed
-the product stream, while lineage identities, physical properties, match
-coverage and spatial adjustments remain diagnostic/model-input provenance. A
+the product stream, while lineage identities, physical properties and coverage
+remain diagnostic/model-input provenance. A
 positive hex with incomplete lineage is actionable and is recorded in the
 `warnings` field. Partial coverage of the active product channel is also
 warned: the displayed modelled grade is based on covered lineage tonnes, while
@@ -503,20 +504,18 @@ means SiO2 and `al` means Al2O3.
 
 | Field pattern | Meaning | Required by the optimiser? |
 | --- | --- | --- |
-| `grade_<analyte>` | Raw/legacy source grade retained as the final per-analyte fallback and as an audit reference. It normally corresponds to the original insitu/source grade. | Only used when the requested stream and all upstream stream fallbacks are unavailable for that analyte. |
-| `grade_<stream>_<analyte>` | Stored unbranded grade for one of `insitu`, `modelled_rom`, `adjusted_rom`, `modelled_product`, or `adjusted_product`. | It is an intermediate/audit value unless it resolves the selected stream for the active brand. |
-| `grade_<stream>_<brand>_<analyte>` | Stored brand-specific grade stream. Brand names are lower-cased and non-alphanumeric characters become underscores; for example, brand `CCFB` produces `grade_adjusted_product_ccfb_fe`. | It is an intermediate/audit value unless that brand and stream are selected. |
+| `insitu_<analyte>` | Canonical insitu/source grade. | It is available to optimisation when selected as the optimiser grade stream. |
+| `modelled_rom_<analyte>` | Canonical modelled ROM grade. | It is available to optimisation when selected as the optimiser grade stream. |
+| `adjusted_rom_<analyte>` | Modelled ROM grade after historical blend reconciliation. | It is available to optimisation when selected as the optimiser grade stream. |
+| `modelled_product_<analyte>` | Canonical modelled product grade. | It is available to optimisation when selected as the optimiser grade stream. |
+| `adjusted_product_<analyte>` | Modelled product grade after historical regression reconciliation. | It is available to optimisation when selected as the optimiser grade stream. |
 | `selected_stream` | The single stream selected on Data Streams for this run. | Yes; it controls which stored vector is requested. |
-| `selected_<brand>_<analyte>` | The effective grade resolved for that brand and analyte after applying the fallback chain. These are the clearest Database View representation of the grades that scheduling will use when that brand is active. | Yes, for the brand being produced. |
-| `fallback_<brand>_<analyte>` | Provenance of a fallback, for example `adjusted_product[CCFB] -> adjusted_rom[CCFB]`. A blank means the requested stream/brand value was available and no fallback was needed. | No. This is audit information explaining how the corresponding `selected_...` value was obtained. |
 
-Inventory and AMT modelled ROM is physically unbranded. Database View retains
-that source vector as `grade_modelled_rom_<analyte>` and also publishes an
-identical `grade_modelled_rom_<brand>_<analyte>` copy for every configured
-brand. APS modelled ROM uses the same branded field names, but each brand can
-contain a distinct value from its mapped APS header. Historical blend
-reconciliation is applied only when producing branded adjusted ROM; it never
-changes modelled ROM.
+Inventory and AMT modelled ROM is physically unbranded, while APS can map a
+different ROM input for each brand. Brand resolution remains part of the grade
+stream data behind the canonical row. Database View deliberately avoids
+publishing additional raw `grade_*` aliases alongside the five canonical grade
+families, so one meaning has one visible field name.
 
 When an older project contains saved AMT chunks, BlendMaster preserves each
 chunk's membership, sequence, tonnes and modelled grades, then refreshes the
@@ -602,9 +601,10 @@ For each active additive field, reports expose the full transaction audit:
 - `source_property_<field>`: the amount consumed by the transaction,
   proportionally depleted against ROM WMT.
 
-`source_wmt` and `modelled_rom_wmt` are canonical ROM WMT and are synchronized
-to the balance tracker at source initialization, after builds, after ordinary
-reclaims and whenever the active AMT chunk changes. If restored properties are
+`modelled_rom_wmt` is the single user-facing canonical insitu/ROM WMT. The
+balance tracker derives its internal physical source balance from this field
+at source initialization, after builds, after ordinary reclaims and whenever
+the active AMT chunk changes. If restored properties are
 at a different mass scale from the active source/chunk balance, BlendMaster
 first rescales every additive property by `active balance / saved ROM WMT`.
 Other additive fields, including ROM DMT, product mass, ore-type tonnes and
