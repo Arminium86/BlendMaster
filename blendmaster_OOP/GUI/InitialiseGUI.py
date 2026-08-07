@@ -101,6 +101,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
+AMT_OPENING_CACHE_VERSION = 1
 
 SITE_OPF_OPTIONS = {
     "CC": ["CC OPF01", "CC OPF02"],
@@ -1380,7 +1381,8 @@ class UserInputs(QMainWindow):
             "aps_active_blend_guidance", "aps_destination_guidance",
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
-            "AMT_chunk_settings", "hex_sequence_table", "hex_sequence_table_argument",
+            "AMT_data_request_signature", "AMT_chunk_settings",
+            "hex_sequence_table", "hex_sequence_table_argument",
             "database_view_selected_columns", "database_view_known_columns",
             "database_view_show_coverage_fields",
             "database_view_selected_sources", "database_view_known_sources",
@@ -1696,6 +1698,9 @@ class UserInputs(QMainWindow):
             self.updated_stockpile_data = copy.deepcopy(state.get("updated_stockpile_data"))
             self.updated_stockpile_data_keys = (self.updated_stockpile_data or {}).keys()
             self.AMT_stockpile_data = copy.deepcopy(state.get("AMT_stockpile_data") or {})
+            self.AMT_data_request_signature = str(
+                state.get("AMT_data_request_signature") or ""
+            )
             self.AMT_chunk_settings = copy.deepcopy(state.get("AMT_chunk_settings") or {})
             self.hex_sequence_table = copy.deepcopy(state.get("hex_sequence_table") or [])
             self.hex_sequence_table_argument = copy.deepcopy(
@@ -13862,12 +13867,16 @@ class UserInputs(QMainWindow):
             "AMT_map_view",
             "AMT_map_frame",
             "AMT_stockpile_tab_vertical_layout",
+            "AMT_cache_status_label",
+            "refresh_AMT_data_button",
             "load_AMT_button",
             "submit_AMT_button",
         )
         if all(getattr(self, name, None) is not None for name in required_widgets):
             self.AMT_map_frame.show()
             self.AMT_map_view.show()
+            self.AMT_cache_status_label.show()
+            self.refresh_AMT_data_button.show()
             self.load_AMT_button.show()
             self.submit_AMT_button.show()
             self.setup_AMT_stockpile_table_first_call = False
@@ -13890,7 +13899,26 @@ class UserInputs(QMainWindow):
         self.AMT_stockpile_tab_vertical_layout = QVBoxLayout()
         self.AMT_stockpile_tab_vertical_layout.setContentsMargins(0, 0, 0, 0)
         self.AMT_stockpile_tab_vertical_layout.setSpacing(8)
+        self.AMT_cache_status_label = QLabel(
+            "AMT opening data has not been prepared for this selection."
+        )
+        self.AMT_cache_status_label.setWordWrap(True)
+        self.AMT_cache_status_label.setStyleSheet("color: #607080;")
+        self.AMT_stockpile_tab_vertical_layout.addWidget(
+            self.AMT_cache_status_label
+        )
         self.AMT_stockpile_tab_vertical_layout.addWidget(self.AMT_map_frame)
+
+        self.refresh_AMT_data_button = QPushButton(
+            "Refresh AMT Data from Snowflake"
+        )
+        self.refresh_AMT_data_button.setObjectName("refreshAMTDataButton")
+        self.refresh_AMT_data_button.setToolTip(
+            "Ignore the cached opening snapshot and rerun the AMT Snowflake query."
+        )
+        self.refresh_AMT_data_button.clicked.connect(
+            self.refresh_AMT_data_from_snowflake
+        )
 
         self.load_AMT_button = QPushButton("Load or Update AMT Map")
         self.load_AMT_button.setObjectName("loadAMTMapButton")
@@ -13906,6 +13934,7 @@ class UserInputs(QMainWindow):
 
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addWidget(self.refresh_AMT_data_button)
         button_layout.addWidget(self.load_AMT_button)
         button_layout.addWidget(self.submit_AMT_button)
         button_layout.addStretch()
@@ -13917,7 +13946,62 @@ class UserInputs(QMainWindow):
         )
         self.setup_AMT_stockpile_table_first_call = False
 
-    def setup_AMT_stockpile_table(self):
+    @staticmethod
+    def AMT_opening_timestamp_key(value):
+        """Return a stable cache key for a scenario opening timestamp."""
+        if isinstance(value, pd.Timestamp):
+            value = value.to_pydatetime()
+        if isinstance(value, datetime):
+            return value.isoformat(timespec="microseconds")
+        return str(value or "").strip()
+
+    def AMT_opening_request_signature(self, data_source):
+        """Identify the Snowflake inputs that determine an AMT snapshot."""
+        selections = []
+        for stockpile_name, attributes in sorted(
+            (data_source or {}).items(), key=lambda item: str(item[0]).upper()
+        ):
+            attributes = attributes or {}
+            selections.append({
+                "footprint": str(stockpile_name or "").strip().upper(),
+                "build": str(attributes.get("build") or "").strip().upper(),
+            })
+        payload = {
+            "cache_version": AMT_OPENING_CACHE_VERSION,
+            "hub": str(getattr(self, "hub_input_choice", None) or "").strip().upper(),
+            "mine": str(getattr(self, "mine_input_choice", None) or "").strip().upper(),
+            "opf": str(getattr(self, "opf_input_choice", None) or "").strip().upper(),
+            "start_time": self.AMT_opening_timestamp_key(
+                getattr(self, "start_time_choice", None)
+            ),
+            "selections": selections,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def set_AMT_cache_status(self, message, warning=False):
+        label = getattr(self, "AMT_cache_status_label", None)
+        if label is None:
+            return
+        label.setText(str(message or ""))
+        label.setStyleSheet(
+            "color: #92400e;" if warning else "color: #607080;"
+        )
+
+    def refresh_AMT_data_from_snowflake(self, _checked=False):
+        selected_rows = getattr(self, "updated_stockpile_data", None) or {}
+        if not any(
+            isinstance(attributes, dict) and attributes.get("amt", False)
+            for attributes in selected_rows.values()
+        ):
+            QMessageBox.information(
+                self,
+                "BlendMaster",
+                "No AMT stockpiles are selected for refresh.",
+            )
+            return
+        self.setup_AMT_stockpile_table(force_refresh=True)
+
+    def setup_AMT_stockpile_table(self, force_refresh=False):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
 
         # The project-load path may complete synchronously from saved AMT
@@ -13941,17 +14025,43 @@ class UserInputs(QMainWindow):
         }
 
         builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
+        request_signature = self.AMT_opening_request_signature(data_source)
 
         if data_source:
             if (
                 getattr(self, "project_load_restore_in_progress", False)
                 and self.restore_loaded_AMT_data_to_database(data_source)
             ):
+                self.AMT_data_request_signature = request_signature
+                self.set_AMT_cache_status(
+                    "Restored the saved AMT opening snapshot; Snowflake was not queried."
+                )
                 self.finish_AMT_stockpile_table(data_source, getattr(self, "AMT_stockpile_data", {}))
+                return
+
+            if (
+                not force_refresh
+                and str(getattr(self, "AMT_data_request_signature", "") or "")
+                == request_signature
+                and self.restore_loaded_AMT_data_to_database(data_source)
+            ):
+                self.set_AMT_cache_status(
+                    "Reused the cached AMT opening snapshot because the site, "
+                    "timestamp and selected builds are unchanged."
+                )
+                self.finish_AMT_stockpile_table(
+                    data_source, getattr(self, "AMT_stockpile_data", {})
+                )
                 return
 
             if getattr(self, "project_load_restore_in_progress", False):
                 self.project_load_waiting_for_AMT = True
+
+            self.set_AMT_cache_status(
+                "Refreshing the AMT opening snapshot from Snowflake..."
+                if force_refresh else
+                "Fetching the AMT opening snapshot from Snowflake..."
+            )
 
             self.run_background_task(
                 "Fetching AMT stockpile data from Snowflake...",
@@ -13959,12 +14069,16 @@ class UserInputs(QMainWindow):
                     builds,
                     self.start_time_choice,
                 ),
-                lambda AMT_stockpile_data: self.finish_AMT_stockpile_table_from_fetch(data_source, AMT_stockpile_data),
+                lambda AMT_stockpile_data: self.finish_AMT_stockpile_table_from_fetch(
+                    data_source, AMT_stockpile_data, request_signature
+                ),
                 self.handle_AMT_stockpile_fetch_error,
             )
             return
 
         self.opening_stockpile_inventories.clear_AMT_stockpile_database()
+        self.AMT_data_request_signature = ""
+        self.set_AMT_cache_status("No AMT stockpiles are selected.")
         self.finish_AMT_stockpile_table(data_source, {})
 
     def restore_loaded_AMT_data_to_database(self, data_source):
@@ -13997,7 +14111,14 @@ class UserInputs(QMainWindow):
         self.opening_stockpile_inventories.save_AMT_to_database(AMT_stockpile_data)
         return True
 
-    def finish_AMT_stockpile_table_from_fetch(self, data_source, AMT_stockpile_data):
+    def finish_AMT_stockpile_table_from_fetch(
+        self, data_source, AMT_stockpile_data, request_signature=None
+    ):
+        self.AMT_data_request_signature = str(request_signature or "")
+        self.set_AMT_cache_status(
+            "AMT opening snapshot fetched from Snowflake and cached for this "
+            "site, timestamp and build selection."
+        )
         self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data)
 
         if hasattr(self, "map_fields_available_list"):
@@ -14020,6 +14141,11 @@ class UserInputs(QMainWindow):
         if getattr(self, "agent_workflow_active", False):
             self.stop_agent_workflow_apply(f"Agent workflow stopped while fetching AMT stockpile data: {error_message}")
         self.project_load_restore_in_progress = False
+        self.set_AMT_cache_status(
+            "AMT Snowflake refresh failed; any previous cached snapshot has "
+            "been retained.",
+            warning=True,
+        )
         if project_load_failed:
             self.finish_project_load_ui(success=False)
         message = str(error_message or "")
@@ -20181,6 +20307,9 @@ class UserInputs(QMainWindow):
                 'hex_sequence_table': self.hex_sequence_table,
                 'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
                 'AMT_stockpile_data': getattr(self, "AMT_stockpile_data", {}),
+                'AMT_data_request_signature': getattr(
+                    self, "AMT_data_request_signature", ""
+                ),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
                 "database_view_selected_columns": copy.deepcopy(
                     getattr(self, "database_view_selected_columns", None)
@@ -20631,6 +20760,9 @@ class UserInputs(QMainWindow):
         self.reconcile_saved_AMT_chunk_grade_streams()
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
         self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
+        self.AMT_data_request_signature = str(
+            loaded_state.get("AMT_data_request_signature") or ""
+        )
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
         self.database_view_selected_columns = copy.deepcopy(
             loaded_state.get("database_view_selected_columns")
@@ -20856,6 +20988,7 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table_argument = []
         self.stockpile_data_AMT_column = {}
         self.AMT_stockpile_data = {}
+        self.AMT_data_request_signature = ""
         self.AMT_chunk_settings = {}
         self.solver_config = {}
         self.min_stockpiles = None
