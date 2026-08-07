@@ -173,6 +173,18 @@ class OptimisedToManualPlan:
         data["_source_name"] = (
             data["source"].astype(str).str.strip().str.upper()
         )
+        # Optimised reports identify AMT rows at chunk level so report balances
+        # align with the decision-point source. Manual inventory, however, is
+        # deliberately indexed by footprint and consumes its chunks in order.
+        # Convert stockpile rows back to that parent identity before building
+        # manual definitions; grade blocks continue to use their source ID.
+        if "parent_stockpile" in data.columns:
+            parent = (
+                data["parent_stockpile"].fillna("").astype(str)
+                .str.strip().str.upper()
+            )
+            stockpile_parent = data["_source_type"].eq("stockpile") & parent.ne("")
+            data.loc[stockpile_parent, "_source_name"] = parent[stockpile_parent]
         states = []
         pattern_ids = {}
         direct_tip_rows = []

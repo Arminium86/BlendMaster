@@ -2,6 +2,7 @@ import sqlite3
 import json
 import pandas as pd
 import random
+from classes.ReportColumns import balance_triplet_columns
 import requests, time, traceback
 import dash
 from dash import dcc, html, Input, Output, dash_table, Dash, State, callback_context
@@ -1342,6 +1343,8 @@ class DrawGanttChart:
         self.db_path = db_path
         self.port = port
         self.plan_id = "Primary"
+        self.report_selected_columns = None
+        self.report_column_aliases = {}
         self.stockpile_pastel_palette = [
             "#A8D5BA",  # pale green
             "#F6C28B",  # pale orange
@@ -1359,6 +1362,13 @@ class DrawGanttChart:
         random.shuffle(self.stockpile_pastel_palette)
         self.app = dash.Dash(__name__)
         self.setup_layout()
+
+    def set_report_configuration(self, selected_columns=None, aliases=None):
+        """Update the detailed report without coupling it to chart fields."""
+        self.report_selected_columns = (
+            list(selected_columns) if selected_columns is not None else None
+        )
+        self.report_column_aliases = dict(aliases or {})
 
     def set_plan_id(self, plan_id):
         self.plan_id = str(plan_id or "Primary").strip() or "Primary"
@@ -1567,7 +1577,7 @@ class DrawGanttChart:
             "selected_grade_stream": "Selected Grade Stream",
             "selected_grade_brand": "Selected Grade Brand",
         }
-        report_columns = list(self.fetch_data().columns)
+        report_columns = balance_triplet_columns(self.fetch_data().columns)
         source_grade_columns = [
             column for column in report_columns
             if column.startswith("source_grade_")
@@ -1615,6 +1625,8 @@ class DrawGanttChart:
                 if column not in excluded_detail_columns
             ],
         ]))
+        self.default_property_table_columns = list(self.property_table_columns)
+        self.default_column_aliases = dict(column_aliases)
         self.app.layout = html.Div(
             style={
                 'display': 'flex',
@@ -1774,7 +1786,8 @@ class DrawGanttChart:
                             hidden_columns=["lane"],  # Hide the lane column
                         )
                     ]
-                )
+                ),
+                dcc.Interval(id="property-table-refresh", interval=750, n_intervals=0),
             ]
         )
 
@@ -1907,25 +1920,45 @@ class DrawGanttChart:
 
         @self.app.callback(
             dash.dependencies.Output("property-table", "data"),
-            dash.dependencies.Input("gantt-chart", "clickData")
+            dash.dependencies.Output("property-table", "columns"),
+            dash.dependencies.Input("gantt-chart", "clickData"),
+            dash.dependencies.Input("property-table-refresh", "n_intervals"),
         )
-        def update_property_table(click_data):
+        def update_property_table(click_data, _refresh_count):
             """
             Update the property table based on Gantt chart selection.
             """
             data = self.fetch_data()
             if data.empty:
-                return []
+                return [], []
             data = self.prepare_gantt_data(data)
             if data.empty:
-                return []
+                return [], []
             
-            # Select only the property table columns
+            if click_data and "points" in click_data and "lane" in data.columns:
+                clicked_lane = click_data["points"][0]["y"]
+                data = data[data["lane"] == clicked_lane].copy()
+
+            # Select only the user-configured report columns after applying the
+            # click filter; lane and blend_ID do not need to remain visible.
+            configured = self.report_selected_columns
+            candidate_columns = (
+                configured if configured is not None
+                else self.default_property_table_columns
+            )
             visible_columns = [
-                column for column in self.property_table_columns
+                column for column in balance_triplet_columns(candidate_columns)
                 if column in data.columns
             ]
             data = data[visible_columns].copy()
+            aliases = {
+                **self.default_column_aliases,
+                **self.report_column_aliases,
+            }
+            table_columns = [
+                {"name": aliases.get(column, column), "id": column}
+                for column in visible_columns
+            ]
             
             def additive_column(column):
                 key = str(column or "").strip().lower()
@@ -1961,13 +1994,7 @@ class DrawGanttChart:
             
             data = data.drop_duplicates()
 
-            if click_data and "points" in click_data:
-                clicked_lane = click_data['points'][0]['y']  # Match lane (y-axis value) to blend_ID
-                clicked_blend_id = data.loc[data['lane'] == clicked_lane, 'blend_ID'].iloc[0]
-                filtered_data = data[data['blend_ID'] == clicked_blend_id].copy()
-                return filtered_data.to_dict("records")
-            
-            return data.to_dict("records")
+            return data.to_dict("records"), table_columns
 
     def run_app(self):
         """

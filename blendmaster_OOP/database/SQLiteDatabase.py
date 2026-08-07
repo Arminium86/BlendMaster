@@ -7,6 +7,7 @@ from classes.MaterialDestinationPlan import MaterialDestinationPlan
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.GradeStreams import ANALYTES, STREAMS
+from classes.ReportColumns import order_balance_triplets
 from database.DatabaseContext import get_database_path
 
 class DatabaseManager:
@@ -140,7 +141,7 @@ class DatabaseManager:
                 frame[column] = frame[column].map(
                     DatabaseManager._sqlite_plan_result_value
                 )
-        return frame
+        return order_balance_triplets(frame)
 
     @staticmethod
     def _sqlite_plan_result_value(value):
@@ -192,6 +193,7 @@ class DatabaseManager:
                 ],
                 ignore_index=True,
             )
+            combined = order_balance_triplets(combined)
             combined.to_sql(
                 table_name,
                 connection,
@@ -426,18 +428,17 @@ class DatabaseManager:
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['end_datetime'] = pd.to_datetime(results['end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        cursor.execute("PRAGMA table_info(optimised_blend_report)")
-        report_columns = [row[1] for row in cursor.fetchall()]
-        results_to_write = results.reindex(
-            columns=[
-                column for column in report_columns
-                if column in results.columns
-            ]
-        )
+        # The result frame is authoritative. Keeping only columns present in
+        # the legacy CREATE TABLE schema silently dropped newer audit fields
+        # such as parent_stockpile. Replacing from the complete ordered frame
+        # preserves every runtime property and its stable report order.
+        results_to_write = order_balance_triplets(results)
+        # Replace here so SQLite's physical schema follows the same stable
+        # opening/quantity/closing order exposed by every report UI.
         results_to_write.to_sql(
             "optimised_blend_report",
             conn,
-            if_exists="append",
+            if_exists="replace",
             index=False,
         )
 
@@ -472,6 +473,7 @@ class DatabaseManager:
 
         connection = sqlite3.connect(database_name)
         try:
+            results = order_balance_triplets(results)
             results.to_sql(
                 "manual_blend_report",
                 connection,
@@ -494,6 +496,7 @@ class DatabaseManager:
             for column in results.columns:
                 if pd.api.types.is_datetime64_any_dtype(results[column]):
                     results[column] = pd.to_datetime(results[column]).dt.strftime("%Y-%m-%d %H:%M:%S")
+            results = order_balance_triplets(results)
             results.to_sql("product_build_report", conn, if_exists="replace", index=False)
             conn.commit()
         finally:
@@ -757,6 +760,7 @@ class DatabaseManager:
                         lambda value: json.dumps(value, default=str)
                         if isinstance(value, (dict, list, tuple, set)) else value
                     )
+            data = order_balance_triplets(data)
             data.to_sql("build_report", conn, if_exists="replace", index=False)
             conn.commit()
         finally:

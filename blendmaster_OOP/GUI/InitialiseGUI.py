@@ -24,6 +24,7 @@ from classes.ManualBlendPlanner import (
     ManualBlendPlanningError,
 )
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
+from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
@@ -1385,6 +1386,10 @@ class UserInputs(QMainWindow):
             "database_view_selected_sources", "database_view_known_sources",
             "optimisation_snapshot_selected_columns",
             "optimisation_snapshot_known_columns",
+            "optimisation_detail_selected_columns",
+            "optimisation_detail_column_aliases",
+            "manual_blend_plan_selected_columns",
+            "manual_blend_plan_column_aliases",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
@@ -1712,6 +1717,18 @@ class UserInputs(QMainWindow):
             )
             self.optimisation_snapshot_known_columns = copy.deepcopy(
                 state.get("optimisation_snapshot_known_columns")
+            )
+            self.optimisation_detail_selected_columns = copy.deepcopy(
+                state.get("optimisation_detail_selected_columns")
+            )
+            self.optimisation_detail_column_aliases = copy.deepcopy(
+                state.get("optimisation_detail_column_aliases") or {}
+            )
+            self.manual_blend_plan_selected_columns = copy.deepcopy(
+                state.get("manual_blend_plan_selected_columns")
+            )
+            self.manual_blend_plan_column_aliases = copy.deepcopy(
+                state.get("manual_blend_plan_column_aliases") or {}
             )
             self.database_view_rows = []
             self.database_view_expit_payload_transactions = None
@@ -15632,6 +15649,8 @@ class UserInputs(QMainWindow):
         self.results_layout.addWidget(self.optimisation_plan_preview)
         self.optimisation_snapshot_selected_columns = None
         self.optimisation_snapshot_known_columns = None
+        self.optimisation_detail_selected_columns = None
+        self.optimisation_detail_column_aliases = {}
 
         # Create a QFrame
         self.top_frame = QFrame()
@@ -15667,6 +15686,13 @@ class UserInputs(QMainWindow):
             self.choose_optimisation_snapshot_columns
         )
         controls_layout.addWidget(self.optimisation_snapshot_fields_button)
+        self.optimisation_detail_fields_button = QPushButton(
+            "Configure Detail Report..."
+        )
+        self.optimisation_detail_fields_button.clicked.connect(
+            self.choose_optimisation_detail_columns
+        )
+        controls_layout.addWidget(self.optimisation_detail_fields_button)
         controls_layout.addStretch()
         self.results_layout.addLayout(controls_layout)
 
@@ -15750,6 +15776,10 @@ class UserInputs(QMainWindow):
         chart = getattr(self, "draw_gantt_chart", None)
         if chart is not None:
             chart.set_plan_id(plan_id)
+            chart.set_report_configuration(
+                getattr(self, "optimisation_detail_selected_columns", None),
+                getattr(self, "optimisation_detail_column_aliases", {}),
+            )
         report = self.fetch_optimised_blend_report(plan_id)
         self.populate_optimisation_plan_preview(report)
 
@@ -15820,7 +15850,7 @@ class UserInputs(QMainWindow):
                 if replacement in available:
                     continue
             result.append(column)
-        return result
+        return balance_triplet_columns(result)
 
     def optimisation_snapshot_is_additive_field(self, column):
         key = canonical_property_key(column)
@@ -15945,6 +15975,97 @@ class UserInputs(QMainWindow):
         ] or self.default_optimisation_snapshot_columns(columns)
         self.optimisation_snapshot_known_columns = list(columns)
         self.populate_optimisation_plan_preview(report)
+        self.save_active_scenario_state()
+
+    def configure_report_columns_dialog(
+        self, title, columns, selected_columns, aliases, defaults=None
+    ):
+        columns = balance_triplet_columns(columns)
+        selected = set(selected_columns if selected_columns is not None else (defaults or columns))
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(820, 680)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            "Select fields and optionally enter the column label shown on the UI. "
+            "Stored database field names are not changed."
+        ))
+        table = QTableWidget(len(columns), 3)
+        table.setHorizontalHeaderLabels(["Show", "Field", "UI Alias"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        for row, column in enumerate(columns):
+            show_item = QTableWidgetItem()
+            show_item.setFlags(show_item.flags() | Qt.ItemIsUserCheckable)
+            show_item.setCheckState(Qt.Checked if column in selected else Qt.Unchecked)
+            field_item = QTableWidgetItem(str(column))
+            field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
+            alias_item = QTableWidgetItem(str((aliases or {}).get(column, "")))
+            table.setItem(row, 0, show_item)
+            table.setItem(row, 1, field_item)
+            table.setItem(row, 2, alias_item)
+        layout.addWidget(table)
+        buttons = QHBoxLayout()
+        defaults_button = QPushButton("Defaults")
+        select_all_button = QPushButton("Select All")
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        buttons.addWidget(defaults_button)
+        buttons.addWidget(select_all_button)
+        buttons.addStretch()
+        buttons.addWidget(apply_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+        def set_checked(chosen):
+            chosen = set(chosen)
+            for row, column in enumerate(columns):
+                table.item(row, 0).setCheckState(
+                    Qt.Checked if column in chosen else Qt.Unchecked
+                )
+
+        defaults_button.clicked.connect(lambda: set_checked(defaults or columns))
+        select_all_button.clicked.connect(lambda: set_checked(columns))
+        apply_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        chosen = [
+            column for row, column in enumerate(columns)
+            if table.item(row, 0).checkState() == Qt.Checked
+        ]
+        chosen_aliases = {
+            column: table.item(row, 2).text().strip()
+            for row, column in enumerate(columns)
+            if table.item(row, 2).text().strip()
+        }
+        return chosen or list(defaults or columns), chosen_aliases
+
+    def choose_optimisation_detail_columns(self):
+        report = self.fetch_optimised_blend_report(
+            self.selected_optimisation_plan_id()
+        )
+        columns = self.optimisation_snapshot_available_columns(report)
+        if not columns:
+            QMessageBox.information(
+                self, "Optimised Blend Sequence",
+                "Run or load an optimisation plan before configuring the report.",
+            )
+            return
+        result = self.configure_report_columns_dialog(
+            "Optimised Blend Sequence Detail Report",
+            columns,
+            getattr(self, "optimisation_detail_selected_columns", None),
+            getattr(self, "optimisation_detail_column_aliases", {}),
+            defaults=self.default_optimisation_snapshot_columns(columns),
+        )
+        if result is None:
+            return
+        self.optimisation_detail_selected_columns, self.optimisation_detail_column_aliases = result
+        chart = getattr(self, "draw_gantt_chart", None)
+        if chart is not None:
+            chart.set_report_configuration(*result)
         self.save_active_scenario_state()
 
     def load_AMT_map(self):
@@ -16072,7 +16193,36 @@ class UserInputs(QMainWindow):
             "Reports",
             position=2,
         )
-        self.sqlite_reports_layout = QVBoxLayout(self.sqlite_reports_tab)
+        root_layout = QVBoxLayout(self.sqlite_reports_tab)
+        self.reports_child_tabs = QTabWidget()
+        root_layout.addWidget(self.reports_child_tabs)
+
+        database_reports_page = QWidget()
+        self.sqlite_reports_layout = QVBoxLayout(database_reports_page)
+        self.reports_child_tabs.addTab(database_reports_page, "Database Reports")
+
+        self.blend_plan_page = QWidget()
+        blend_plan_layout = QVBoxLayout(self.blend_plan_page)
+        blend_plan_controls = QHBoxLayout()
+        blend_plan_controls.addWidget(QLabel("Manual Blend Plan"))
+        self.manual_blend_plan_fields_button = QPushButton(
+            "Configure Report Columns..."
+        )
+        self.manual_blend_plan_fields_button.clicked.connect(
+            self.choose_manual_blend_plan_columns
+        )
+        blend_plan_controls.addWidget(self.manual_blend_plan_fields_button)
+        blend_plan_controls.addStretch()
+        blend_plan_layout.addLayout(blend_plan_controls)
+        self.blend_plan_gantt_view = CustomWebEngineView()
+        self.blend_plan_gantt_view.setMinimumHeight(360)
+        blend_plan_layout.addWidget(self.blend_plan_gantt_view, stretch=2)
+        self.manual_blend_plan_table = CustomTableWidget()
+        self.manual_blend_plan_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        blend_plan_layout.addWidget(self.manual_blend_plan_table, stretch=1)
+        self.manual_blend_plan_selected_columns = None
+        self.manual_blend_plan_column_aliases = {}
+        self.reports_child_tabs.addTab(self.blend_plan_page, "Blend Plan")
 
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Report Table:"))
@@ -16153,6 +16303,71 @@ class UserInputs(QMainWindow):
                 self.default_sqlite_report_query(selected_table)
             )
         self.execute_sqlite_report_query()
+        self.refresh_manual_blend_plan_report()
+
+    def fetch_manual_blend_plan_report(self):
+        connection = sqlite3.connect(get_database_path())
+        try:
+            return pd.read_sql("SELECT * FROM manual_blend_report", connection)
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
+        finally:
+            connection.close()
+
+    def refresh_manual_blend_plan_report(self):
+        table = getattr(self, "manual_blend_plan_table", None)
+        if table is None:
+            return
+        report = order_balance_triplets(self.fetch_manual_blend_plan_report())
+        available = self.optimisation_snapshot_available_columns(report)
+        selected = getattr(self, "manual_blend_plan_selected_columns", None)
+        if selected is None:
+            selected = self.default_optimisation_snapshot_columns(available)
+            self.manual_blend_plan_selected_columns = list(selected)
+        columns = balance_triplet_columns([
+            column for column in selected if column in available
+        ])
+        aliases = getattr(self, "manual_blend_plan_column_aliases", {}) or {}
+        table.clearContents()
+        table.setRowCount(min(len(report), 500))
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels([
+            aliases.get(column, column) for column in columns
+        ])
+        for row_index, (_, row) in enumerate(report.head(500).iterrows()):
+            for column_index, column in enumerate(columns):
+                table.setItem(
+                    row_index,
+                    column_index,
+                    QTableWidgetItem(self.format_optimisation_snapshot_value(
+                        column, row.get(column)
+                    )),
+                )
+        table.resizeColumnsToContents()
+        if hasattr(self, "blend_plan_gantt_view"):
+            self.blend_plan_gantt_view.setUrl(QUrl("http://localhost:8052"))
+
+    def choose_manual_blend_plan_columns(self):
+        report = self.fetch_manual_blend_plan_report()
+        columns = self.optimisation_snapshot_available_columns(report)
+        if not columns:
+            QMessageBox.information(
+                self, "Blend Plan",
+                "Submit or load a manual blend plan before configuring the report.",
+            )
+            return
+        result = self.configure_report_columns_dialog(
+            "Manual Blend Plan Report",
+            columns,
+            getattr(self, "manual_blend_plan_selected_columns", None),
+            getattr(self, "manual_blend_plan_column_aliases", {}),
+            defaults=self.default_optimisation_snapshot_columns(columns),
+        )
+        if result is None:
+            return
+        self.manual_blend_plan_selected_columns, self.manual_blend_plan_column_aliases = result
+        self.refresh_manual_blend_plan_report()
+        self.save_active_scenario_state()
 
     @staticmethod
     def default_sqlite_report_query(table_name):
@@ -16460,6 +16675,10 @@ class UserInputs(QMainWindow):
             self.draw_gantt_chart.db_path = db_path
         else:
             self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
+            self.draw_gantt_chart.set_report_configuration(
+                getattr(self, "optimisation_detail_selected_columns", None),
+                getattr(self, "optimisation_detail_column_aliases", {}),
+            )
             self.dash_thread_gantt = threading.Thread(
                 target=self.draw_gantt_chart.run_app,
                 daemon=True,
@@ -19983,6 +20202,18 @@ class UserInputs(QMainWindow):
         )
         self.optimisation_snapshot_known_columns = copy.deepcopy(
             loaded_state.get("optimisation_snapshot_known_columns")
+        )
+        self.optimisation_detail_selected_columns = copy.deepcopy(
+            loaded_state.get("optimisation_detail_selected_columns")
+        )
+        self.optimisation_detail_column_aliases = copy.deepcopy(
+            loaded_state.get("optimisation_detail_column_aliases") or {}
+        )
+        self.manual_blend_plan_selected_columns = copy.deepcopy(
+            loaded_state.get("manual_blend_plan_selected_columns")
+        )
+        self.manual_blend_plan_column_aliases = copy.deepcopy(
+            loaded_state.get("manual_blend_plan_column_aliases") or {}
         )
         self.database_view_rows = []
         self.database_view_expit_payload_transactions = None

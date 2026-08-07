@@ -74,8 +74,29 @@ class BalanceTracker:
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
         self.balance_copy = self.balance.copy()
         for name in self.source_properties:
+            properties = self.source_properties[name]
+            try:
+                property_scope_wmt = float(
+                    properties.get("source_wmt", properties.get("modelled_rom_wmt", 0))
+                    or 0
+                )
+                tracked_wmt = max(float(self.balance_copy.get(name, 0) or 0), 0.0)
+            except (TypeError, ValueError):
+                property_scope_wmt = 0.0
+                tracked_wmt = 0.0
+            # Legacy/project inputs can still carry footprint-level additive
+            # properties on a chunk-level source. Normalize that scope once at
+            # tracker construction. Current chunk rows already have matching
+            # source_wmt and therefore are left untouched; later depletion is
+            # handled transaction by transaction by update/process methods.
+            if property_scope_wmt > 0 and abs(property_scope_wmt - tracked_wmt) > 1e-7:
+                properties = scale_additive_source_properties(
+                    properties,
+                    tracked_wmt / property_scope_wmt,
+                    self.source_property_kinds,
+                )
             self.source_properties[name] = self._synchronise_rom_wmt_properties(
-                name, self.source_properties[name], self.balance_copy.get(name)
+                name, properties, self.balance_copy.get(name)
             )
         self.build_report = [] # Store transactions that meet the condition
         self.direct_tipped_tonnes_by_payload = {}
