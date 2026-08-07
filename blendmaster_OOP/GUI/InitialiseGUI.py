@@ -11960,8 +11960,14 @@ class UserInputs(QMainWindow):
             loaded_state["file_path_24hr_choice"] = loaded_state["file_path_choice"]
         if loaded_state.get("solver_config") is None:
             loaded_state["solver_config"] = {}
-        if loaded_state.get("time_mode_choice") is None:
-            loaded_state["time_mode_choice"] = 2 if loaded_state.get("start_time_choice") else 1
+        # "Now" is resolved to a concrete timestamp when Site Configuration
+        # is submitted and that instant is what the project saves. On load it
+        # must become an explicit Set Time; leaving the selector on Now would
+        # make the restored timestamp look inactive and a later submit would
+        # replace it with the current clock time.
+        loaded_state["time_mode_choice"] = (
+            2 if loaded_state.get("start_time_choice") else 1
+        )
         if loaded_state.get("expit_mode_choice") is None:
             loaded_state["expit_mode_choice"] = 1
         if loaded_state.get("blend_mode_choice") is None:

@@ -1285,7 +1285,8 @@ class OpeningStockpileInventories:
             easting REAL,
             last_update TEXT,
             hex_updated TEXT,
-            grade_streams_json TEXT
+            grade_streams_json TEXT,
+            defined_fields_json TEXT
         )
         ''')
 
@@ -1295,6 +1296,11 @@ class OpeningStockpileInventories:
             cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
         if "grade_streams_json" not in existing_columns:
             cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN grade_streams_json TEXT")
+        if "defined_fields_json" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE opening_AMT_stockpile_inventories "
+                "ADD COLUMN defined_fields_json TEXT"
+            )
         amt_audit_by_hex = {}
         for footprint, rows in (data_dict or {}).items():
             for row in rows or []:
@@ -1380,6 +1386,14 @@ class OpeningStockpileInventories:
                     ),
                     "cb_split_method": row.get("CB_SPLIT_METHOD"),
                     "cb_split_warning": row.get("CB_SPLIT_WARNING"),
+                    # Keep the exact Map Fields result separate from the
+                    # broader lineage/modelled-property payload.  In
+                    # particular, explicit nulls must survive the SQLite
+                    # round trip so strict mapping can distinguish an
+                    # unmapped field from an automatically derived property.
+                    "defined_fields_json": dict(
+                        row.get("defined_fields") or {}
+                    ),
                     **modelled_audit,
                     "modelled_properties_json": property_payload,
                     **flatten_grade_streams(
@@ -1398,6 +1412,7 @@ class OpeningStockpileInventories:
             "grade_block_lineage_json",
             "lineage_warning",
             "grade_stream_warnings_json",
+            "defined_fields_json",
             "modelled_properties_json",
             "modelled_rom_mats",
             "modelled_dominant_ore_type",

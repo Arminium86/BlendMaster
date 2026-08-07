@@ -2125,6 +2125,7 @@ class DrawAMTStockpile:
     AMT_COLUMNS = [
         "footprint", "hex", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn",
         "lat", "long", "northing", "easting", "last_update", "hex_updated", "grade_streams_json",
+        "defined_fields_json",
         "raw_wmt", "spatially_corrected_wmt", "spatial_adjustment_wmt",
         "ledger_adjustment_wmt", "spatial_deficit_wmt", "spatial_donor_wmt",
         "spatial_unresolved_wmt", "raw_stockpile_wmt", "raw_positive_stockpile_wmt",
@@ -3330,6 +3331,10 @@ class DrawAMTStockpile:
                 data["grade_streams"] = data["grade_streams_json"].map(
                     lambda value: decode_json(value, dict)
                 )
+            if "defined_fields_json" in data.columns:
+                data["defined_fields"] = data[
+                    "defined_fields_json"
+                ].map(lambda value: decode_json(value, dict) or {})
             if "modelled_properties_json" in data.columns:
                 data["modelled_properties"] = data[
                     "modelled_properties_json"
