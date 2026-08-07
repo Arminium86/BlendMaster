@@ -26,7 +26,6 @@ from classes.GradeStreams import (
     format_grade_stream_vector,
     normalise_grade_streams,
     reweight_grade_streams_from_properties,
-    weighted_merge_grade_streams,
 )
 from classes.AMTChunking import (
     DEFAULT_AMT_RECLAIM_RATE_TPH,
@@ -35,7 +34,6 @@ from classes.AMTChunking import (
 )
 from classes.CustomConstraints import (
     canonical_property_key,
-    merge_source_properties,
     source_property_kind,
 )
 
@@ -2653,10 +2651,15 @@ class DrawAMTStockpile:
         member_hexes = [row["hex"] for row in chunk_rows if row.get("hex") is not None]
         chunk_id = f"{footprint}_CHUNK_{sequence:03d}"
         weighted_grades = {}
-        weighted_streams = None
-        stream_properties = {}
+        weighted_streams = {stream: {} for stream in STREAMS}
+        stream_grade_mass = defaultdict(float)
+        stream_grade_weight = defaultdict(float)
+        stream_brands = defaultdict(set)
+        mapped_additive_mass = defaultdict(float)
+        mapped_intensive_mass = defaultdict(float)
+        mapped_intensive_weight = defaultdict(float)
+        mapped_coverage_tonnes = defaultdict(float)
         mapped_properties = {}
-        accumulated_tonnes = 0.0
         property_mass = defaultdict(float)
         property_tonnes = defaultdict(float)
         property_coverage_tonnes = defaultdict(float)
@@ -2669,6 +2672,14 @@ class DrawAMTStockpile:
         geometry_quarantine_rows = [
             row for row in chunk_rows if row.get("_geometry_quarantine_reason")
         ]
+        declared_kinds = dict(vars(self).get("source_property_kinds", {}) or {})
+        declared_weights = {
+            canonical_property_key(name): canonical_property_key(weight)
+            for name, weight in dict(
+                vars(self).get("source_property_weights", {}) or {}
+            ).items()
+            if canonical_property_key(name) and canonical_property_key(weight)
+        }
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             if total_tonnes > 0:
@@ -2699,41 +2710,62 @@ class DrawAMTStockpile:
                 canonical_property_key(name): raw
                 for name, raw in values.items()
             }
-            row_properties = {
-                name: value
-                for name, raw in canonical_values.items()
-                if (value := self.to_float(raw, None)) is not None
-            }
             row_mapped_properties = {
                 canonical_property_key(name): value
                 for name, raw in dict(row.get("defined_fields") or {}).items()
                 if (value := self.to_float(raw, None)) is not None
             }
-            weighted_streams = weighted_merge_grade_streams(
-                weighted_streams,
-                accumulated_tonnes,
-                row.get("grade_streams"),
-                row_tonnes,
-                mapped_properties,
-                row_mapped_properties,
-                vars(self).get("source_property_weights", {}),
-            )
-            stream_properties = merge_source_properties(
-                stream_properties,
-                accumulated_tonnes,
-                row_properties,
-                row_tonnes,
-                vars(self).get("source_property_kinds", {}),
-                vars(self).get("source_property_weights", {}),
-            )
-            mapped_properties = merge_source_properties(
-                mapped_properties,
-                accumulated_tonnes,
-                row_mapped_properties,
-                row_tonnes,
-                vars(self).get("source_property_kinds", {}),
-                vars(self).get("source_property_weights", {}),
-            )
+
+            # A chunk may legitimately contain a small number of hexes whose
+            # lineage lacks one mapped property.  Retain the mass and grades
+            # supplied by covered hexes instead of allowing one missing value
+            # to erase the field for the entire chunk.  The independent
+            # coverage calculation below keeps the missing share explicit.
+            for property_name, value in row_mapped_properties.items():
+                kind = source_property_kind(property_name, declared_kinds)
+                if kind == "runtime":
+                    continue
+                if kind == "additive":
+                    mapped_additive_mass[property_name] += value
+                    mapped_coverage_tonnes[property_name] += row_tonnes
+                    continue
+                weight_name = declared_weights.get(property_name)
+                weight = (
+                    row_mapped_properties.get(weight_name)
+                    if weight_name else row_tonnes
+                )
+                if weight is None or weight <= 0:
+                    continue
+                mapped_intensive_mass[property_name] += value * weight
+                mapped_intensive_weight[property_name] += weight
+                mapped_coverage_tonnes[property_name] += row_tonnes
+
+            # Grade streams need their own per-stream/per-brand denominators.
+            # Reusing the total additive field as an intermediate denominator
+            # would dilute a grade when the weight exists but that grade does
+            # not.  Accumulate only valid grade/weight pairs instead.
+            row_streams = normalise_grade_streams(row.get("grade_streams"))
+            for stream, brand_map in row_streams.items():
+                for brand, grade_vector in (brand_map or {}).items():
+                    stream_brands[stream].add(brand)
+                    for analyte in ANALYTES:
+                        grade = self.to_float(
+                            (grade_vector or {}).get(analyte), None
+                        )
+                        if grade is None:
+                            continue
+                        weight_name = declared_weights.get(
+                            f"{stream}_{analyte}"
+                        )
+                        weight = (
+                            row_mapped_properties.get(weight_name)
+                            if weight_name else row_tonnes
+                        )
+                        if weight is None or weight <= 0:
+                            continue
+                        key = (stream, brand, analyte)
+                        stream_grade_mass[key] += grade * weight
+                        stream_grade_weight[key] += weight
             for property_name, raw_value in values.items():
                 value = self.to_float(raw_value, None)
                 covered_fraction = self.to_float(
@@ -2802,7 +2834,23 @@ class DrawAMTStockpile:
                     str(warning), re.IGNORECASE,
                 )
             )
-            accumulated_tonnes += row_tonnes
+        mapped_properties.update(mapped_additive_mass)
+        mapped_properties.update({
+            name: mapped_intensive_mass[name] / weight
+            for name, weight in mapped_intensive_weight.items()
+            if weight > 0
+        })
+        for stream in STREAMS:
+            for brand in stream_brands.get(stream, set()):
+                weighted_streams[stream][brand] = {
+                    analyte: (
+                        stream_grade_mass[(stream, brand, analyte)]
+                        / stream_grade_weight[(stream, brand, analyte)]
+                        if stream_grade_weight[(stream, brand, analyte)] > 0
+                        else None
+                    )
+                    for analyte in ANALYTES
+                }
 
         modelled_properties = {
             "values": {
@@ -2820,6 +2868,12 @@ class DrawAMTStockpile:
                 if total_tonnes > 0
             },
         }
+        for name, value in mapped_properties.items():
+            modelled_properties["values"][name] = value
+            modelled_properties["coverage"][name] = (
+                min(mapped_coverage_tonnes.get(name, 0.0) / total_tonnes, 1.0)
+                if total_tonnes > 0 else 0.0
+            )
         # ROM WMT is the physical opening balance of this chunk.  Never carry
         # a footprint-level mapped ROM WMT into a chunk: it would provide a
         # false scaling reference for every other additive property.
@@ -2859,6 +2913,22 @@ class DrawAMTStockpile:
                         + "; modelled grades use only covered lineage tonnes."
                     )
         grade_stream_warnings.extend(product_coverage_warnings)
+        partial_mapped_fields = []
+        for name in sorted(mapped_properties):
+            coverage_fraction = (
+                min(mapped_coverage_tonnes.get(name, 0.0) / total_tonnes, 1.0)
+                if total_tonnes > 0 else 0.0
+            )
+            if 0 < coverage_fraction < 0.99999999:
+                partial_mapped_fields.append(
+                    f"{name} {coverage_fraction * 100.0:.2f}%"
+                )
+        if partial_mapped_fields:
+            grade_stream_warnings.append(
+                "Mapped chunk fields use available hex values only: "
+                + ", ".join(partial_mapped_fields)
+                + "."
+            )
         lineage_coverage_pct = (
             lineage_matched_final_wmt / total_tonnes * 100.0
             if total_tonnes > 0 else None

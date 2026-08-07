@@ -5249,17 +5249,118 @@ class UserInputs(QMainWindow):
         delete_button = QPushButton("Delete Selected")
         up_button = QPushButton("Move Up")
         down_button = QPushButton("Move Down")
+        import_button = QPushButton("Import Fields...")
+        export_button = QPushButton("Export Fields...")
         submit_button = QPushButton("Submit")
         add_button.clicked.connect(self.add_defined_field)
         delete_button.clicked.connect(self.delete_defined_field)
         up_button.clicked.connect(lambda: self.move_defined_field(-1))
         down_button.clicked.connect(lambda: self.move_defined_field(1))
+        import_button.clicked.connect(self.import_field_definitions)
+        export_button.clicked.connect(self.export_field_definitions)
         submit_button.clicked.connect(self.handle_define_fields_submit)
-        for button in (add_button, delete_button, up_button, down_button, submit_button):
+        for button in (add_button, delete_button, up_button, down_button):
             buttons.addWidget(button)
         buttons.addStretch()
+        buttons.addWidget(import_button)
+        buttons.addWidget(export_button)
+        buttons.addWidget(submit_button)
         layout.addLayout(buttons)
         self.populate_define_fields_table()
+
+    @staticmethod
+    def field_definition_exchange_payload(values):
+        """Return the portable JSON contract for Define Fields."""
+        return {
+            "format": "blendmaster_field_definitions",
+            "version": 1,
+            "field_definitions": validate_field_definitions(values),
+        }
+
+    @staticmethod
+    def field_definitions_from_exchange_payload(payload):
+        """Validate a list or a versioned Define Fields JSON payload."""
+        if isinstance(payload, dict):
+            format_name = str(payload.get("format") or "").strip()
+            if format_name and format_name != "blendmaster_field_definitions":
+                raise ValueError(
+                    "This JSON file is not a BlendMaster field-definitions export."
+                )
+            values = payload.get("field_definitions")
+        else:
+            values = payload
+        if not isinstance(values, list):
+            raise ValueError(
+                "The import must contain a 'field_definitions' list."
+            )
+        return validate_field_definitions(values)
+
+    def export_field_definitions(self):
+        try:
+            definitions = self.capture_define_fields_table()
+            payload = self.field_definition_exchange_payload(definitions)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Export Fields", str(exc))
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export BlendMaster Fields",
+            "blendmaster_fields.json",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+        try:
+            with open(file_path, "w", encoding="utf-8") as output_file:
+                json.dump(payload, output_file, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Export Fields", f"Unable to export fields: {exc}"
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Fields",
+            f"Exported {len(definitions)} field definitions to:\n{file_path}",
+        )
+
+    def import_field_definitions(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import BlendMaster Fields",
+            "",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as input_file:
+                payload = json.load(input_file)
+            definitions = self.field_definitions_from_exchange_payload(payload)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self, "Import Fields", f"Unable to import fields: {exc}"
+            )
+            return
+
+        self.field_definitions = definitions
+        targets = {row["name"] for row in definitions}
+        self.field_mappings = [
+            mapping
+            for mapping in normalize_field_mappings(self.field_mappings)
+            if mapping["target_field"] in targets
+        ]
+        self.populate_define_fields_table()
+        self.populate_map_fields_table()
+        self.refresh_map_available_fields()
+        self.save_active_scenario_state()
+        QMessageBox.information(
+            self,
+            "Import Fields",
+            f"Imported {len(definitions)} field definitions. Review them, then Submit.",
+        )
 
     def field_definition_row(self, row):
         name_item = self.define_fields_table.item(row, 0)
@@ -5542,8 +5643,14 @@ class UserInputs(QMainWindow):
         layout.addLayout(mapping_area, stretch=1)
 
         submit_row = QHBoxLayout()
+        import_button = QPushButton("Import Mappings...")
+        export_button = QPushButton("Export Mappings...")
         submit_button = QPushButton("Submit")
+        import_button.clicked.connect(self.import_field_mappings)
+        export_button.clicked.connect(self.export_field_mappings)
         submit_button.clicked.connect(self.handle_map_fields_submit)
+        submit_row.addWidget(import_button)
+        submit_row.addWidget(export_button)
         submit_row.addWidget(submit_button)
         submit_row.addStretch()
         layout.addLayout(submit_row)
@@ -5564,6 +5671,127 @@ class UserInputs(QMainWindow):
         self.refresh_map_field_brands()
         self.populate_map_fields_table()
         self.refresh_map_available_fields()
+
+    @staticmethod
+    def field_mapping_exchange_payload(values):
+        """Return the portable JSON contract for Map Fields."""
+        return {
+            "format": "blendmaster_field_mappings",
+            "version": 1,
+            "field_mapping_schema_version": 3,
+            "field_mappings": normalize_field_mappings(values),
+        }
+
+    @staticmethod
+    def field_mappings_from_exchange_payload(payload, definitions):
+        """Validate a list or a versioned Map Fields JSON payload."""
+        if isinstance(payload, dict):
+            format_name = str(payload.get("format") or "").strip()
+            if format_name and format_name != "blendmaster_field_mappings":
+                raise ValueError(
+                    "This JSON file is not a BlendMaster field-mappings export."
+                )
+            values = payload.get("field_mappings")
+        else:
+            values = payload
+        if not isinstance(values, list):
+            raise ValueError("The import must contain a 'field_mappings' list.")
+
+        targets = {
+            row["name"] for row in normalize_field_definitions(definitions)
+            if not is_calculated_stream_field(row["name"])
+        }
+        result = []
+        seen = set()
+        for index, raw_mapping in enumerate(values, start=1):
+            if not isinstance(raw_mapping, dict):
+                raise ValueError(f"Mapping row {index} is not an object.")
+            if not str(raw_mapping.get("source_field") or "").strip():
+                raise ValueError(f"Mapping row {index} has no source field.")
+            normalized = normalize_field_mappings([raw_mapping])
+            if len(normalized) != 1:
+                raise ValueError(
+                    f"Mapping row {index} has an invalid source family or target field."
+                )
+            mapping = normalized[0]
+            if mapping["target_field"] not in targets:
+                raise ValueError(
+                    f"Mapping row {index} targets unknown field "
+                    f"'{mapping['target_field']}'. Import its field definition first."
+                )
+            key = (
+                mapping["source_family"], mapping.get("brand", ""),
+                mapping["target_field"],
+            )
+            if key in seen:
+                raise ValueError(
+                    f"Mapping row {index} duplicates "
+                    f"{mapping['source_family']} / {mapping.get('brand') or 'unbranded'} "
+                    f"/ {mapping['target_field']}."
+                )
+            seen.add(key)
+            result.append(mapping)
+        return result
+
+    def export_field_mappings(self):
+        self.capture_map_fields_table()
+        mappings = normalize_field_mappings(self.field_mappings)
+        payload = self.field_mapping_exchange_payload(mappings)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export BlendMaster Field Mappings",
+            "blendmaster_field_mappings.json",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+        try:
+            with open(file_path, "w", encoding="utf-8") as output_file:
+                json.dump(payload, output_file, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Export Mappings", f"Unable to export mappings: {exc}"
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Mappings",
+            f"Exported {len(mappings)} field mappings to:\n{file_path}",
+        )
+
+    def import_field_mappings(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import BlendMaster Field Mappings",
+            "",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as input_file:
+                payload = json.load(input_file)
+            mappings = self.field_mappings_from_exchange_payload(
+                payload, self.field_definitions
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self, "Import Mappings", f"Unable to import mappings: {exc}"
+            )
+            return
+
+        self.field_mappings = mappings
+        self.field_mapping_schema_version = 3
+        self.populate_map_fields_table()
+        self.refresh_map_available_fields()
+        self.save_active_scenario_state()
+        QMessageBox.information(
+            self,
+            "Import Mappings",
+            f"Imported {len(mappings)} field mappings. Review them, then Submit.",
+        )
 
     def refresh_map_field_brands(self):
         if not hasattr(self, "map_fields_brand"):
