@@ -1345,6 +1345,8 @@ class DrawGanttChart:
         self.plan_id = "Primary"
         self.report_selected_columns = None
         self.report_column_aliases = {}
+        self.report_column_widths = {}
+        self.report_wrap_text = True
         self.stockpile_pastel_palette = [
             "#A8D5BA",  # pale green
             "#F6C28B",  # pale orange
@@ -1363,12 +1365,23 @@ class DrawGanttChart:
         self.app = dash.Dash(__name__)
         self.setup_layout()
 
-    def set_report_configuration(self, selected_columns=None, aliases=None):
+    def set_report_configuration(
+        self, selected_columns=None, aliases=None, widths=None, wrap_text=True
+    ):
         """Update the detailed report without coupling it to chart fields."""
         self.report_selected_columns = (
             list(selected_columns) if selected_columns is not None else None
         )
         self.report_column_aliases = dict(aliases or {})
+        self.report_column_widths = {}
+        for column, width in dict(widths or {}).items():
+            try:
+                self.report_column_widths[str(column)] = max(
+                    50, min(800, int(float(width)))
+                )
+            except (TypeError, ValueError):
+                continue
+        self.report_wrap_text = bool(wrap_text)
 
     def set_plan_id(self, plan_id):
         self.plan_id = str(plan_id or "Primary").strip() or "Primary"
@@ -1553,45 +1566,11 @@ class DrawGanttChart:
         """
         Set up the Dash layout.
         """
-        # Define column aliases
-        column_aliases = {
-            "start_datetime": "Start Time",
-            "end_datetime": "End Time",
-            "blend_ID": "Blend ID",
-            "lane": "Lane",
-            "steady_state_number": "Steady State",
-            "steady_state_duration": "Duration (hrs)",
-            "stockpile_component": "Stockpile Mix",
-            "source_agg": "Sources",
-            "source_blend_ratio_agg": "Blend Ratios",
-            "actual_direct_tip_ratio": "Actual Direct Tip Ratio",
-            "crusher_actual_tonnes": "Crusher Tonnes",
-            "crusher_rate_output": "Crusher Rate",
-            "crusher_actual_grade_fe": "Actual Crusher Grade Fe",
-            "crusher_actual_grade_si": "Actual Crusher Grade Si",
-            "crusher_actual_grade_al": "Actual Crusher Grade Al",
-            "crusher_actual_grade_p": "Actual Crusher Grade P",
-            "crusher_actual_grade_mn": "Actual Crusher Grade Mn",
-            "source": "Source Transaction",
-            "source_type": "Source Type",
-            "selected_grade_stream": "Selected Grade Stream",
-            "selected_grade_brand": "Selected Grade Brand",
-        }
         report_columns = balance_triplet_columns(self.fetch_data().columns)
         source_grade_columns = [
             column for column in report_columns
             if column.startswith("source_grade_")
         ]
-        for column in source_grade_columns:
-            selected_analyte = column.removeprefix("source_grade_")
-            if selected_analyte in {"fe", "si", "al", "p", "mn"}:
-                column_aliases[column] = (
-                    f"Selected Stream {selected_analyte.title()}"
-                )
-            else:
-                column_aliases[column] = (
-                    selected_analyte.replace("_", " ").title()
-                )
         # Keep the familiar summary fields first, then retain the complete
         # report snapshot below the Gantt.  The latter is especially useful
         # for auditing source streams, custom constraints and product builds;
@@ -1626,7 +1605,9 @@ class DrawGanttChart:
             ],
         ]))
         self.default_property_table_columns = list(self.property_table_columns)
-        self.default_column_aliases = dict(column_aliases)
+        # Detailed reports expose canonical database field names. Any friendly
+        # labels are explicit user aliases configured from the desktop UI.
+        self.default_column_aliases = {}
         self.app.layout = html.Div(
             style={
                 'display': 'flex',
@@ -1698,7 +1679,7 @@ class DrawGanttChart:
                     },
                     children=[
                         html.Div(
-                            "Steady-State Details",
+                            "Blend Snapshot",
                             style={
                                 'fontSize': '15px',
                                 'fontWeight': '750',
@@ -1709,7 +1690,7 @@ class DrawGanttChart:
                         dash_table.DataTable(
                             id="property-table",
                             columns=[
-                                {"name": column_aliases.get(col, col), "id": col}  
+                                {"name": col, "id": col}
                                 for col in self.property_table_columns
                             ],
                             data=[],  # Initially empty
@@ -1921,6 +1902,8 @@ class DrawGanttChart:
         @self.app.callback(
             dash.dependencies.Output("property-table", "data"),
             dash.dependencies.Output("property-table", "columns"),
+            dash.dependencies.Output("property-table", "style_cell_conditional"),
+            dash.dependencies.Output("property-table", "style_header"),
             dash.dependencies.Input("gantt-chart", "clickData"),
             dash.dependencies.Input("property-table-refresh", "n_intervals"),
         )
@@ -1930,10 +1913,10 @@ class DrawGanttChart:
             """
             data = self.fetch_data()
             if data.empty:
-                return [], []
+                return [], [], [], {}
             data = self.prepare_gantt_data(data)
             if data.empty:
-                return [], []
+                return [], [], [], {}
             
             if click_data and "points" in click_data and "lane" in data.columns:
                 clicked_lane = click_data["points"][0]["y"]
@@ -1951,14 +1934,41 @@ class DrawGanttChart:
                 if column in data.columns
             ]
             data = data[visible_columns].copy()
-            aliases = {
-                **self.default_column_aliases,
-                **self.report_column_aliases,
-            }
+            aliases = self.report_column_aliases
             table_columns = [
                 {"name": aliases.get(column, column), "id": column}
                 for column in visible_columns
             ]
+            wrapping = bool(self.report_wrap_text)
+            header_style = {
+                "fontWeight": "bold",
+                "textAlign": "center",
+                "fontFamily": "Segoe UI, Arial, sans-serif",
+                "fontSize": "12px",
+                "whiteSpace": "normal" if wrapping else "nowrap",
+                "wordBreak": "break-word" if wrapping else "normal",
+                "height": "auto" if wrapping else "32px",
+                "lineHeight": "1.2",
+                "padding": "8px",
+                "overflow": "hidden",
+                "textOverflow": "clip" if wrapping else "ellipsis",
+                "backgroundColor": "#f1f5f9",
+                "color": "#0f172a",
+                "border": "1px solid #dbe4ee",
+            }
+            cell_styles = []
+            for column in visible_columns:
+                width = int(self.report_column_widths.get(column, 150))
+                cell_styles.append({
+                    "if": {"column_id": column},
+                    "minWidth": f"{width}px",
+                    "width": f"{width}px",
+                    "maxWidth": f"{width}px",
+                    "whiteSpace": "normal" if wrapping else "nowrap",
+                    "height": "auto" if wrapping else "28px",
+                    "overflow": "visible" if wrapping else "hidden",
+                    "textOverflow": "clip" if wrapping else "ellipsis",
+                })
             
             def additive_column(column):
                 key = str(column or "").strip().lower()
@@ -1994,7 +2004,10 @@ class DrawGanttChart:
             
             data = data.drop_duplicates()
 
-            return data.to_dict("records"), table_columns
+            return (
+                data.to_dict("records"), table_columns,
+                cell_styles, header_style,
+            )
 
     def run_app(self):
         """

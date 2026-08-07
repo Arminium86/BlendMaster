@@ -72,9 +72,68 @@ class BalanceTracker:
             for item in stockpiles + grade_blocks
         }
         self.is_amt = {item.name: item.is_AMT for item in stockpiles}
+        self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
         self.balance_copy = self.balance.copy()
         for name in self.source_properties:
             properties = self.source_properties[name]
+            if self.is_amt.get(name, False):
+                # The optimiser reports and depletes AMT sources at chunk level.
+                # Initialise every first-state value from that same active chunk;
+                # using the parent footprint here made steady state 0 carry parent
+                # properties under a chunk source_id until the first reclaim.
+                name_key = self.normalized_stockpile_name(name)
+                active_chunk = next(iter(sorted(
+                    (
+                        entry for entry in self.hex_sequence_table
+                        if self.normalized_stockpile_name(
+                            entry.get("footprint", "")
+                        ) == name_key
+                        and max(float(entry.get("balance", 0) or 0), 0) > 0
+                    ),
+                    key=lambda entry: entry.get("sequence", float("inf")),
+                )), None)
+                if active_chunk is not None:
+                    active_balance = max(
+                        float(active_chunk.get("balance", 0) or 0), 0
+                    )
+                    self.balance_copy[name] = active_balance
+                    for analyte in ("fe", "si", "al", "p", "mn"):
+                        grade_map = getattr(self, f"grade_{analyte}")
+                        grade_map[name] = self._numeric_grade(
+                            active_chunk.get(f"grade_{analyte}"),
+                            grade_map.get(name, 0),
+                        )
+                    self.grade_streams[name] = normalise_grade_streams(
+                        active_chunk.get("grade_streams"), active_chunk
+                    )
+                    # Retain a proportionally scoped parent value only when the
+                    # chunk does not expose that field at all. Explicit chunk
+                    # values, including zero, are authoritative and must never
+                    # be replaced by a parent fallback.
+                    parent_properties = dict(properties or {})
+                    try:
+                        parent_scope_wmt = float(
+                            parent_properties.get(
+                                "source_wmt",
+                                parent_properties.get("modelled_rom_wmt", 0),
+                            ) or 0
+                        )
+                    except (TypeError, ValueError):
+                        parent_scope_wmt = 0.0
+                    if parent_scope_wmt > 0:
+                        parent_properties = scale_additive_source_properties(
+                            parent_properties,
+                            active_balance / parent_scope_wmt,
+                            self.source_property_kinds,
+                        )
+                    chunk_properties = filter_source_properties(
+                        source_properties_from_mapping(active_chunk),
+                        self.required_source_property_keys,
+                    )
+                    properties = {
+                        **parent_properties,
+                        **chunk_properties,
+                    }
             try:
                 property_scope_wmt = float(
                     properties.get("source_wmt", properties.get("modelled_rom_wmt", 0))
@@ -100,7 +159,6 @@ class BalanceTracker:
             )
         self.build_report = [] # Store transactions that meet the condition
         self.direct_tipped_tonnes_by_payload = {}
-        self.hex_sequence_table = copy.deepcopy(hex_sequence_table)
         self.total_AMT_stockpile_balances = {}
         self.populate_total_AMT_stockpile_balances()
 

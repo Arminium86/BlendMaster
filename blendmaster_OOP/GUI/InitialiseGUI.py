@@ -1388,8 +1388,12 @@ class UserInputs(QMainWindow):
             "optimisation_snapshot_known_columns",
             "optimisation_detail_selected_columns",
             "optimisation_detail_column_aliases",
+            "optimisation_detail_column_widths",
+            "optimisation_detail_wrap_text",
             "manual_blend_plan_selected_columns",
             "manual_blend_plan_column_aliases",
+            "manual_blend_plan_column_widths",
+            "manual_blend_plan_wrap_text",
             "solver_config", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
@@ -1724,11 +1728,23 @@ class UserInputs(QMainWindow):
             self.optimisation_detail_column_aliases = copy.deepcopy(
                 state.get("optimisation_detail_column_aliases") or {}
             )
+            self.optimisation_detail_column_widths = copy.deepcopy(
+                state.get("optimisation_detail_column_widths") or {}
+            )
+            self.optimisation_detail_wrap_text = bool(
+                state.get("optimisation_detail_wrap_text", True)
+            )
             self.manual_blend_plan_selected_columns = copy.deepcopy(
                 state.get("manual_blend_plan_selected_columns")
             )
             self.manual_blend_plan_column_aliases = copy.deepcopy(
                 state.get("manual_blend_plan_column_aliases") or {}
+            )
+            self.manual_blend_plan_column_widths = copy.deepcopy(
+                state.get("manual_blend_plan_column_widths") or {}
+            )
+            self.manual_blend_plan_wrap_text = bool(
+                state.get("manual_blend_plan_wrap_text", True)
             )
             self.database_view_rows = []
             self.database_view_expit_payload_transactions = None
@@ -15651,6 +15667,8 @@ class UserInputs(QMainWindow):
         self.optimisation_snapshot_known_columns = None
         self.optimisation_detail_selected_columns = None
         self.optimisation_detail_column_aliases = {}
+        self.optimisation_detail_column_widths = {}
+        self.optimisation_detail_wrap_text = True
 
         # Create a QFrame
         self.top_frame = QFrame()
@@ -15779,6 +15797,8 @@ class UserInputs(QMainWindow):
             chart.set_report_configuration(
                 getattr(self, "optimisation_detail_selected_columns", None),
                 getattr(self, "optimisation_detail_column_aliases", {}),
+                getattr(self, "optimisation_detail_column_widths", {}),
+                getattr(self, "optimisation_detail_wrap_text", True),
             )
         report = self.fetch_optimised_blend_report(plan_id)
         self.populate_optimisation_plan_preview(report)
@@ -15978,23 +15998,40 @@ class UserInputs(QMainWindow):
         self.save_active_scenario_state()
 
     def configure_report_columns_dialog(
-        self, title, columns, selected_columns, aliases, defaults=None
+        self, title, columns, selected_columns, aliases, widths=None,
+        wrap_text=True, defaults=None
     ):
-        columns = balance_triplet_columns(columns)
-        selected = set(selected_columns if selected_columns is not None else (defaults or columns))
+        schema_columns = balance_triplet_columns(columns)
+        selected_order = [
+            column for column in (selected_columns or [])
+            if column in schema_columns
+        ]
+        columns = balance_triplet_columns([
+            *selected_order,
+            *[column for column in schema_columns if column not in selected_order],
+        ])
+        selected = set(
+            selected_columns if selected_columns is not None
+            else (defaults or columns)
+        )
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.resize(820, 680)
+        dialog.resize(980, 720)
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(
             "Select fields and optionally enter the column label shown on the UI. "
             "Stored database field names are not changed."
         ))
-        table = QTableWidget(len(columns), 3)
-        table.setHorizontalHeaderLabels(["Show", "Field", "UI Alias"])
+        table = QTableWidget(len(columns), 4)
+        table.setHorizontalHeaderLabels([
+            "Show", "Field", "UI Alias", "Width (px)"
+        ])
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         for row, column in enumerate(columns):
             show_item = QTableWidgetItem()
             show_item.setFlags(show_item.flags() | Qt.ItemIsUserCheckable)
@@ -16002,10 +16039,25 @@ class UserInputs(QMainWindow):
             field_item = QTableWidgetItem(str(column))
             field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
             alias_item = QTableWidgetItem(str((aliases or {}).get(column, "")))
+            width_item = QTableWidgetItem(str(
+                int((widths or {}).get(column, 150) or 150)
+            ))
             table.setItem(row, 0, show_item)
             table.setItem(row, 1, field_item)
             table.setItem(row, 2, alias_item)
+            table.setItem(row, 3, width_item)
         layout.addWidget(table)
+        display_controls = QHBoxLayout()
+        move_up_button = QPushButton("Move Up")
+        move_down_button = QPushButton("Move Down")
+        wrap_checkbox = QCheckBox("Wrap header and cell text")
+        wrap_checkbox.setChecked(bool(wrap_text))
+        display_controls.addWidget(move_up_button)
+        display_controls.addWidget(move_down_button)
+        display_controls.addSpacing(20)
+        display_controls.addWidget(wrap_checkbox)
+        display_controls.addStretch()
+        layout.addLayout(display_controls)
         buttons = QHBoxLayout()
         defaults_button = QPushButton("Defaults")
         select_all_button = QPushButton("Select All")
@@ -16018,9 +16070,27 @@ class UserInputs(QMainWindow):
         buttons.addWidget(cancel_button)
         layout.addLayout(buttons)
 
+        def move_row(offset):
+            row = table.currentRow()
+            destination = row + offset
+            if row < 0 or destination < 0 or destination >= table.rowCount():
+                return
+            items = [table.takeItem(row, column) for column in range(4)]
+            other = [
+                table.takeItem(destination, column) for column in range(4)
+            ]
+            for column in range(4):
+                table.setItem(row, column, other[column])
+                table.setItem(destination, column, items[column])
+            table.selectRow(destination)
+
+        move_up_button.clicked.connect(lambda: move_row(-1))
+        move_down_button.clicked.connect(lambda: move_row(1))
+
         def set_checked(chosen):
             chosen = set(chosen)
-            for row, column in enumerate(columns):
+            for row in range(table.rowCount()):
+                column = table.item(row, 1).text()
                 table.item(row, 0).setCheckState(
                     Qt.Checked if column in chosen else Qt.Unchecked
                 )
@@ -16031,16 +16101,27 @@ class UserInputs(QMainWindow):
         cancel_button.clicked.connect(dialog.reject)
         if dialog.exec_() != QDialog.Accepted:
             return None
-        chosen = [
-            column for row, column in enumerate(columns)
-            if table.item(row, 0).checkState() == Qt.Checked
-        ]
-        chosen_aliases = {
-            column: table.item(row, 2).text().strip()
-            for row, column in enumerate(columns)
-            if table.item(row, 2).text().strip()
-        }
-        return chosen or list(defaults or columns), chosen_aliases
+        chosen = []
+        chosen_aliases = {}
+        chosen_widths = {}
+        for row in range(table.rowCount()):
+            column = table.item(row, 1).text()
+            if table.item(row, 0).checkState() == Qt.Checked:
+                chosen.append(column)
+            alias = table.item(row, 2).text().strip()
+            if alias:
+                chosen_aliases[column] = alias
+            try:
+                width = int(float(table.item(row, 3).text().strip()))
+            except (TypeError, ValueError):
+                width = 150
+            chosen_widths[column] = max(50, min(800, width))
+        return (
+            balance_triplet_columns(chosen or list(defaults or columns)),
+            chosen_aliases,
+            chosen_widths,
+            wrap_checkbox.isChecked(),
+        )
 
     def choose_optimisation_detail_columns(self):
         report = self.fetch_optimised_blend_report(
@@ -16058,11 +16139,18 @@ class UserInputs(QMainWindow):
             columns,
             getattr(self, "optimisation_detail_selected_columns", None),
             getattr(self, "optimisation_detail_column_aliases", {}),
+            getattr(self, "optimisation_detail_column_widths", {}),
+            getattr(self, "optimisation_detail_wrap_text", True),
             defaults=self.default_optimisation_snapshot_columns(columns),
         )
         if result is None:
             return
-        self.optimisation_detail_selected_columns, self.optimisation_detail_column_aliases = result
+        (
+            self.optimisation_detail_selected_columns,
+            self.optimisation_detail_column_aliases,
+            self.optimisation_detail_column_widths,
+            self.optimisation_detail_wrap_text,
+        ) = result
         chart = getattr(self, "draw_gantt_chart", None)
         if chart is not None:
             chart.set_report_configuration(*result)
@@ -16222,6 +16310,8 @@ class UserInputs(QMainWindow):
         blend_plan_layout.addWidget(self.manual_blend_plan_table, stretch=1)
         self.manual_blend_plan_selected_columns = None
         self.manual_blend_plan_column_aliases = {}
+        self.manual_blend_plan_column_widths = {}
+        self.manual_blend_plan_wrap_text = True
         self.reports_child_tabs.addTab(self.blend_plan_page, "Blend Plan")
 
         controls_layout = QHBoxLayout()
@@ -16328,12 +16418,20 @@ class UserInputs(QMainWindow):
             column for column in selected if column in available
         ])
         aliases = getattr(self, "manual_blend_plan_column_aliases", {}) or {}
+        widths = getattr(self, "manual_blend_plan_column_widths", {}) or {}
+        wrap_text = bool(getattr(self, "manual_blend_plan_wrap_text", True))
         table.clearContents()
         table.setRowCount(min(len(report), 500))
         table.setColumnCount(len(columns))
-        table.setHorizontalHeaderLabels([
-            aliases.get(column, column) for column in columns
-        ])
+        header_labels = [aliases.get(column, column) for column in columns]
+        if wrap_text:
+            header_labels = [
+                str(label).replace("_", "_\u200b") for label in header_labels
+            ]
+        table.setHorizontalHeaderLabels(header_labels)
+        table.setWordWrap(wrap_text)
+        table.setTextElideMode(Qt.ElideNone if wrap_text else Qt.ElideRight)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         for row_index, (_, row) in enumerate(report.head(500).iterrows()):
             for column_index, column in enumerate(columns):
                 table.setItem(
@@ -16344,6 +16442,13 @@ class UserInputs(QMainWindow):
                     )),
                 )
         table.resizeColumnsToContents()
+        for column_index, column in enumerate(columns):
+            configured_width = max(
+                50, min(800, int(widths.get(column, 150) or 150))
+            )
+            table.setColumnWidth(column_index, configured_width)
+        if wrap_text:
+            table.resizeRowsToContents()
         if hasattr(self, "blend_plan_gantt_view"):
             self.blend_plan_gantt_view.setUrl(QUrl("http://localhost:8052"))
 
@@ -16361,11 +16466,18 @@ class UserInputs(QMainWindow):
             columns,
             getattr(self, "manual_blend_plan_selected_columns", None),
             getattr(self, "manual_blend_plan_column_aliases", {}),
+            getattr(self, "manual_blend_plan_column_widths", {}),
+            getattr(self, "manual_blend_plan_wrap_text", True),
             defaults=self.default_optimisation_snapshot_columns(columns),
         )
         if result is None:
             return
-        self.manual_blend_plan_selected_columns, self.manual_blend_plan_column_aliases = result
+        (
+            self.manual_blend_plan_selected_columns,
+            self.manual_blend_plan_column_aliases,
+            self.manual_blend_plan_column_widths,
+            self.manual_blend_plan_wrap_text,
+        ) = result
         self.refresh_manual_blend_plan_report()
         self.save_active_scenario_state()
 
@@ -16678,6 +16790,8 @@ class UserInputs(QMainWindow):
             self.draw_gantt_chart.set_report_configuration(
                 getattr(self, "optimisation_detail_selected_columns", None),
                 getattr(self, "optimisation_detail_column_aliases", {}),
+                getattr(self, "optimisation_detail_column_widths", {}),
+                getattr(self, "optimisation_detail_wrap_text", True),
             )
             self.dash_thread_gantt = threading.Thread(
                 target=self.draw_gantt_chart.run_app,
@@ -20209,11 +20323,23 @@ class UserInputs(QMainWindow):
         self.optimisation_detail_column_aliases = copy.deepcopy(
             loaded_state.get("optimisation_detail_column_aliases") or {}
         )
+        self.optimisation_detail_column_widths = copy.deepcopy(
+            loaded_state.get("optimisation_detail_column_widths") or {}
+        )
+        self.optimisation_detail_wrap_text = bool(
+            loaded_state.get("optimisation_detail_wrap_text", True)
+        )
         self.manual_blend_plan_selected_columns = copy.deepcopy(
             loaded_state.get("manual_blend_plan_selected_columns")
         )
         self.manual_blend_plan_column_aliases = copy.deepcopy(
             loaded_state.get("manual_blend_plan_column_aliases") or {}
+        )
+        self.manual_blend_plan_column_widths = copy.deepcopy(
+            loaded_state.get("manual_blend_plan_column_widths") or {}
+        )
+        self.manual_blend_plan_wrap_text = bool(
+            loaded_state.get("manual_blend_plan_wrap_text", True)
         )
         self.database_view_rows = []
         self.database_view_expit_payload_transactions = None
