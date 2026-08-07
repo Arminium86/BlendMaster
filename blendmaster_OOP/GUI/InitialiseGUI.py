@@ -14348,9 +14348,12 @@ class UserInputs(QMainWindow):
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_data = AMT_stockpile_data or {}
         if not reuse_prepared:
-            self.refresh_AMT_enrichment_if_needed(
-                data_source, force=True, persist=True, refresh_map=False
-            )
+            if self.AMT_stockpile_data:
+                self.refresh_AMT_enrichment_if_needed(
+                    data_source, force=True, persist=True, refresh_map=False
+                )
+            else:
+                self.opening_stockpile_inventories.clear_AMT_stockpile_database()
         self.start_dash_AMT_map_thread()
         if not reuse_prepared or refresh_prepared_map:
             self.refresh_AMT_map_data_from_database()

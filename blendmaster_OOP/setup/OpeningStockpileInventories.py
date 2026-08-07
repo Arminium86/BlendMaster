@@ -597,7 +597,6 @@ class OpeningStockpileInventories:
         if not requested_builds:
             if conn is not None:
                 conn.close()
-            self.save_AMT_to_database({})
             return {}
 
         if hasattr(start_time, "toPyDateTime"):
@@ -1112,9 +1111,9 @@ class OpeningStockpileInventories:
                         if inventory_matched else "no inventory instance"
                     )
 
-            # Store results in SQLite database
-            self.save_AMT_to_database(data_dict)
-
+            # Persistence is deliberately owned by the GUI completion path.
+            # It first applies the current canonical mappings and grade-stream
+            # enrichment, then writes the finished snapshot exactly once.
             return data_dict
         
         finally:
