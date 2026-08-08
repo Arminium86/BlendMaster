@@ -5,6 +5,13 @@ from typing import Iterable, Mapping
 PRODUCT_LANE = "product"
 BYPRODUCT_LANES = ("lump", "fines")
 ANALYTES = ("fe", "si", "al", "p", "mn")
+GRADE_FIELD_SUFFIXES = {
+    "fe": "fe",
+    "si": "sio2",
+    "al": "al2o3",
+    "p": "p",
+    "mn": "mn",
+}
 
 
 def default_byproduct_quantity_fields():
@@ -17,7 +24,7 @@ def default_byproduct_quantity_fields():
 def default_byproduct_grade_fields():
     return {
         lane: {
-            analyte: f"prod1_{lane}_{analyte}"
+            analyte: f"prod1_{lane}_{GRADE_FIELD_SUFFIXES[analyte]}"
             for analyte in ANALYTES
         }
         for lane in BYPRODUCT_LANES
@@ -39,13 +46,23 @@ def normalize_byproduct_grade_fields(value):
     normalized = {}
     for lane in BYPRODUCT_LANES:
         lane_source = source.get(lane) if isinstance(source.get(lane), Mapping) else {}
-        normalized[lane] = {
-            analyte: str(
+        normalized[lane] = {}
+        for analyte in ANALYTES:
+            field = str(
                 lane_source.get(analyte) or defaults[lane][analyte]
             ).strip().lower()
-            for analyte in ANALYTES
-        }
+            # Migrate the short chemistry suffixes emitted by the first
+            # by-product implementation to the established source-field
+            # convention used by Define Fields and Snowflake/APS mappings.
+            legacy_default = f"prod1_{lane}_{analyte}"
+            if analyte in {"si", "al"} and field == legacy_default:
+                field = defaults[lane][analyte]
+            normalized[lane][analyte] = field
     return normalized
+
+
+def byproduct_grade_source_field(lane, analyte):
+    return f"prod1_{lane}_{GRADE_FIELD_SUFFIXES[analyte]}"
 
 
 def normalized_build_lane(setting, byproducts_enabled=False):

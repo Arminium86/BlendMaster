@@ -82,6 +82,7 @@ from classes.DataQualityWarnings import format_chunk_quality_warning
 from classes.ProductBuildLanes import (
     ANALYTES as PRODUCT_BUILD_ANALYTES,
     BYPRODUCT_LANES,
+    byproduct_grade_source_field,
     default_byproduct_grade_fields,
     default_byproduct_quantity_fields,
     normalize_byproduct_grade_fields,
@@ -1344,7 +1345,7 @@ class UserInputs(QMainWindow):
             self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
             self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"
             self.product_build_tonnes_stream = self.product_build_tonnes_selector.currentData() or "modelled_product_wmt"
-            self.capture_byproduct_build_settings()
+            self.capture_byproduct_build_settings(validate=False)
             self.data_stream_planning_categories = normalise_planning_categories({
                 "rom": self.rom_planning_category_input.text(),
                 "product": self.product_planning_category_input.text(),
@@ -7133,7 +7134,7 @@ class UserInputs(QMainWindow):
             )
             self.renumber_product_build_rows()
 
-    def capture_byproduct_build_settings(self):
+    def capture_byproduct_build_settings(self, *, validate=True):
         checkbox = getattr(self, "byproducts_enabled_checkbox", None)
         is_cb = self.is_cloudbreak_site()
         self.byproducts_enabled = bool(
@@ -7155,7 +7156,7 @@ class UserInputs(QMainWindow):
                     grade_selector.currentText() if grade_selector is not None else ""
                 ).strip().lower()
 
-        if self.byproducts_enabled:
+        if self.byproducts_enabled and validate:
             definitions = {
                 str(row.get("name") or "").strip().lower(): str(
                     row.get("kind") or ""
@@ -7361,7 +7362,7 @@ class UserInputs(QMainWindow):
         self.update_cb_lump_fines_controls()
         self.apply_canonical_field_mappings()
         self.capture_cb_lump_fines_settings()
-        self.capture_byproduct_build_settings()
+        self.capture_byproduct_build_settings(validate=False)
         overrides = {}
         if self.historical_recon_factors:
             self.capture_recon_factor_table()
@@ -7617,7 +7618,9 @@ class UserInputs(QMainWindow):
             if quantity_value is not None:
                 values[quantity_target] = quantity_value
             for analyte in PRODUCT_BUILD_ANALYTES:
-                grade_value = numeric(values.get(f"prod1_{lane}_{analyte}"))
+                grade_value = numeric(values.get(
+                    byproduct_grade_source_field(lane, analyte)
+                ))
                 if grade_value is not None:
                     values[grades[lane][analyte]] = grade_value
         return values
