@@ -176,8 +176,12 @@ def calculate_cb_lump_fines(
 
     for assay in CB_SPLIT_ASSAYS:
         aliases = _TOTAL_GRADE_ALIASES[assay]
+        stream_analyte = {
+            "sio2": "si",
+            "al2o3": "al",
+        }.get(assay, assay)
         total_grade = _number(
-            head_grades.get(assay)
+            head_grades.get(assay, head_grades.get(stream_analyte))
         )
         if total_grade is None:
             total_grade = _first_number(properties, *(
@@ -191,7 +195,9 @@ def calculate_cb_lump_fines(
         ))
         if total_grade is None:
             continue
-        fines_grade = _number(fines_grades.get(assay))
+        fines_grade = _number(
+            fines_grades.get(assay, fines_grades.get(stream_analyte))
+        )
         if fines_grade is None:
             fines_grade = _first_number(
                 properties,
@@ -214,7 +220,10 @@ def calculate_cb_lump_fines(
                 raise ValueError(
                     "Cloudbreak calculated lump/fines produced an invalid "
                     f"PROD1 lump {assay} grade ({lump_grade:.6g}). Review "
-                    "the lump percentage and SF reconciliation factors."
+                    "the lump percentage and SF reconciliation factors. "
+                    f"Inputs: head={total_grade:.6g}, "
+                    f"fines={fines_grade:.6g}, lump mass={lump_weight:.6g}, "
+                    f"fines mass={fines_weight:.6g}."
                 )
         else:
             fines_grade = total_grade

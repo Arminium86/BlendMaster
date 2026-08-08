@@ -7873,9 +7873,12 @@ class UserInputs(QMainWindow):
         modelled_by_brand = streams.setdefault("modelled_product", {})
         modelled = dict(modelled_by_brand.get("SF") or {})
         for analyte in ANALYTES:
-            aggregate = numeric(defined.get(f"modelled_product_{analyte}"))
+            # modelled_properties is the freshly aggregated chunk result.
+            # defined_fields may still contain a stockpile/hex-era projection
+            # after a project load, so it must not override the chunk value.
+            aggregate = numeric(values.get(f"modelled_product_{analyte}"))
             if aggregate is None:
-                aggregate = numeric(values.get(f"modelled_product_{analyte}"))
+                aggregate = numeric(defined.get(f"modelled_product_{analyte}"))
             if aggregate is not None:
                 modelled[analyte] = aggregate
         modelled_by_brand["SF"] = modelled
@@ -14105,6 +14108,10 @@ class UserInputs(QMainWindow):
                     # Optional: Store unchecked stockpiles
                     stockpile_name = self.stockpile_table.item(row, 2).text()
                     self.stockpile_data_use_column[stockpile_name] = False
+                    # "Use" owns source participation.  The checkbox signal
+                    # clears AMT visually, but keep the persisted selection in
+                    # sync as well so this footprint cannot reappear later.
+                    self.stockpile_data_AMT_column[stockpile_name] = False
 
                 
         # Update stockpile_data with filtered data
@@ -14118,6 +14125,12 @@ class UserInputs(QMainWindow):
             }
             for key, value in self.updated_stockpile_data.items()
         }
+        selected_amt_footprints = {
+            str(stockpile_name).strip().upper()
+            for stockpile_name, attributes in self.updated_stockpile_data.items()
+            if isinstance(attributes, dict) and attributes.get("amt", False)
+        }
+        self.prune_unselected_amt_state(selected_amt_footprints)
 
         # Route completeness belongs to Stockpile Inventories: this is where
         # the selected stockpile footprint is defined. Do not re-raise this
@@ -14152,6 +14165,70 @@ class UserInputs(QMainWindow):
             self.show_page(self.define_fields_tab_index, force=True)
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
+
+    def prune_unselected_amt_state(self, selected_footprints):
+        """Remove generated AMT state for footprints no longer selected."""
+        selected = {
+            str(footprint).strip().upper()
+            for footprint in (selected_footprints or set())
+            if str(footprint).strip()
+        }
+
+        def record_footprint(record):
+            if not isinstance(record, dict):
+                return ""
+            return str(
+                record.get("footprint")
+                or record.get("FOOTPRINT")
+                or record.get("parent_stockpile")
+                or record.get("PARENT_STOCKPILE")
+                or ""
+            ).strip().upper()
+
+        def retained_records(records):
+            return [
+                record for record in (records or [])
+                if record_footprint(record) in selected
+            ]
+
+        self.hex_sequence_table = retained_records(
+            getattr(self, "hex_sequence_table", [])
+        )
+        self.hex_sequence_table_argument = retained_records(
+            getattr(self, "hex_sequence_table_argument", [])
+        )
+        self.AMT_chunk_settings = {
+            key: value
+            for key, value in (
+                getattr(self, "AMT_chunk_settings", {}) or {}
+            ).items()
+            if str(key).strip().upper() in selected
+        }
+        self.AMT_stockpile_data = {
+            key: value
+            for key, value in (
+                getattr(self, "AMT_stockpile_data", {}) or {}
+            ).items()
+            if str(key).strip().upper() in selected
+        }
+
+        draw_amt = vars(self).get("draw_AMT_map")
+        if draw_amt is not None:
+            draw_amt.selected_points = copy.deepcopy(
+                self.hex_sequence_table
+            )
+            draw_amt.update_chunk_settings(
+                copy.deepcopy(self.AMT_chunk_settings)
+            )
+            if hasattr(draw_amt, "clean_up_hex_sequence_table"):
+                draw_amt.clean_up_hex_sequence_table()
+            if hasattr(draw_amt, "update_sequence_counter"):
+                draw_amt.update_sequence_counter()
+
+        self.total_AMT_stockpile_balances = {}
+        self.database_view_rows = []
+        self.database_view_snapshot_signature = None
+        self.database_view_refresh_pending = True
 
     def set_default_manual_schedule_periods(self):
         if self.default_start_datetime and self.default_end_datetime:
@@ -21920,7 +21997,7 @@ class UserInputs(QMainWindow):
         self.refresh_scenario_selector()
 
         tab_states = loaded_state.get("tab_states", {})
-        self.restore_page_states(tab_states)
+        self.project_load_saved_page_states = self.restore_page_states(tab_states)
 
         # Hydrate these widgets before Site Configuration saves the restored
         # scenario. Otherwise that save reads the empty/default widgets and
@@ -21937,8 +22014,25 @@ class UserInputs(QMainWindow):
 
     def continue_project_load_after_stockpile_setup(self):
         self.project_load_restore_in_progress = False
-        if any((self.stockpile_data_AMT_column or {}).values()):
-            self.store_hex_sequence_table(navigate=False)
+        has_selected_amt = any(
+            (self.stockpile_data_AMT_column or {}).values()
+        )
+        if has_selected_amt:
+            if not self.hex_sequence_table:
+                # A project saved before AMT submission has no scheduling
+                # sources yet.  Loading it must stop at AMT Stockpiles rather
+                # than manufacture calendar inputs and start optimisation.
+                self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+                self.project_load_continuation_pending = False
+                self.finish_project_load_ui(success=True)
+                self.show_page(self.AMT_stockpile_tab_index, force=True)
+                return
+            if not self.store_hex_sequence_table(navigate=False):
+                self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+                self.project_load_continuation_pending = False
+                self.finish_project_load_ui(success=True)
+                self.show_page(self.AMT_stockpile_tab_index, force=True)
+                return
         if self.database_has_saved_optimisation_results(get_database_path()):
             periods = PeriodManager(self.planning_period_count())
             periods.calculate_periods(
@@ -21953,6 +22047,32 @@ class UserInputs(QMainWindow):
             self.save_active_scenario_state()
             self.project_load_continuation_pending = False
             self.finish_project_load_ui(success=True)
+            return
+
+        saved_pages = getattr(self, "project_load_saved_page_states", {}) or {}
+        if not bool(saved_pages.get("calendar", False)):
+            # Preserve an incomplete setup project at its setup checkpoint.
+            # In particular, do not interpret default/empty calendar widgets
+            # as authority to launch a solver run.
+            page_order = (
+                "product_build_settings",
+                "solver_configuration",
+                "database_view",
+                "amt_stockpiles",
+                "guidance_schedules",
+                "data_streams",
+                "map_fields",
+                "define_fields",
+                "stockpile_inventories",
+                "site_configuration",
+            )
+            destination = next(
+                (page for page in page_order if saved_pages.get(page)),
+                "site_configuration",
+            )
+            self.project_load_continuation_pending = False
+            self.finish_project_load_ui(success=True)
+            self.show_page(destination, force=True)
             return
         self.project_load_continuation_pending = True
         self.store_calendar_inputs()
