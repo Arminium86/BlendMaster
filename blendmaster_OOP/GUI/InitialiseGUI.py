@@ -6576,7 +6576,10 @@ class UserInputs(QMainWindow):
             selector.setCompleter(completer)
             return selector
 
-        self.byproducts_enabled_checkbox = QCheckBox("Enable Lump and Fines by-products")
+        self.byproducts_enabled_label = QLabel("Enable By-products:")
+        self.byproducts_enabled_checkbox = QCheckBox(
+            "Enable Lump and Fines by-products"
+        )
         self.byproducts_enabled_checkbox.setChecked(bool(
             getattr(self, "byproducts_enabled", False)
         ))
@@ -6586,7 +6589,10 @@ class UserInputs(QMainWindow):
         self.byproducts_enabled_checkbox.toggled.connect(
             self.schedule_data_stream_refresh
         )
-        selection_layout.addRow("Enable By-products:", self.byproducts_enabled_checkbox)
+        selection_layout.addRow(
+            self.byproducts_enabled_label,
+            self.byproducts_enabled_checkbox,
+        )
 
         saved_quantities = normalize_byproduct_quantity_fields(
             getattr(self, "byproduct_quantity_fields", None)
@@ -7104,19 +7110,22 @@ class UserInputs(QMainWindow):
         self.update_byproduct_build_controls()
 
     def update_byproduct_build_controls(self, *_args):
-        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
-        checkbox = getattr(self, "byproducts_enabled_checkbox", None)
+        is_cb = self.is_cloudbreak_site()
+        label = vars(self).get("byproducts_enabled_label")
+        checkbox = vars(self).get("byproducts_enabled_checkbox")
         enabled = bool(checkbox and checkbox.isChecked() and is_cb)
+        if label is not None:
+            label.setVisible(is_cb)
         if checkbox is not None:
             checkbox.setVisible(is_cb)
             checkbox.setEnabled(is_cb)
-        for widget in getattr(self, "byproduct_build_rows", []):
+        for widget in vars(self).get("byproduct_build_rows", []):
             widget.setVisible(is_cb)
             widget.setEnabled(enabled)
-        product_selector = getattr(self, "product_build_tonnes_selector", None)
+        product_selector = vars(self).get("product_build_tonnes_selector")
         if product_selector is not None:
             product_selector.setEnabled(not enabled)
-        table = getattr(self, "product_build_table", None)
+        table = vars(self).get("product_build_table")
         if table is not None:
             self.byproducts_enabled = enabled
             table.setColumnHidden(
@@ -7126,7 +7135,7 @@ class UserInputs(QMainWindow):
 
     def capture_byproduct_build_settings(self):
         checkbox = getattr(self, "byproducts_enabled_checkbox", None)
-        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
+        is_cb = self.is_cloudbreak_site()
         self.byproducts_enabled = bool(
             checkbox and checkbox.isChecked() and is_cb
         )
@@ -7175,8 +7184,12 @@ class UserInputs(QMainWindow):
         )
         self.byproduct_grade_fields = normalize_byproduct_grade_fields(grades)
 
+    def is_cloudbreak_site(self):
+        mine = str(vars(self).get("mine_input_choice", "") or "").strip().upper()
+        return mine == "CB" or "CLOUDBREAK" in mine
+
     def update_cb_lump_fines_controls(self, *_args):
-        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
+        is_cb = self.is_cloudbreak_site()
         combo = getattr(self, "cb_lump_fines_mode_input", None)
         percentage = getattr(self, "cb_lump_percentage_input", None)
         calculated = bool(
@@ -7340,6 +7353,12 @@ class UserInputs(QMainWindow):
     def prepare_data_streams(self):
         if not self.stockpile_data:
             return
+        # The Data Streams page is constructed before Site Configuration is
+        # submitted. Refresh Cloudbreak-only visibility on every entry so the
+        # checkbox and all explicit Lump/Fines field selectors cannot retain
+        # their initial hidden state.
+        self.update_byproduct_build_controls()
+        self.update_cb_lump_fines_controls()
         self.apply_canonical_field_mappings()
         self.capture_cb_lump_fines_settings()
         self.capture_byproduct_build_settings()
@@ -7517,7 +7536,7 @@ class UserInputs(QMainWindow):
         """Attach canonical CB PROD1 split properties to one inventory row."""
         row = row if isinstance(row, dict) else {}
         state = self.__dict__
-        if str(state.get("mine_input_choice", "") or "").upper() != "CB":
+        if not self.is_cloudbreak_site():
             return ""
         mode = str(state.get("cb_lump_fines_mode", "derived") or "derived")
         if mode != "calculated":
@@ -7628,7 +7647,7 @@ class UserInputs(QMainWindow):
         """Apply the optional user-calculated CB split to one AMT hex."""
         row = row if isinstance(row, dict) else {}
         state = self.__dict__
-        if str(state.get("mine_input_choice", "") or "").upper() != "CB":
+        if not self.is_cloudbreak_site():
             return ""
         mode = str(state.get("cb_lump_fines_mode", "derived") or "derived")
         raw_payload = row.get("MODELLED_PROPERTIES_JSON")
