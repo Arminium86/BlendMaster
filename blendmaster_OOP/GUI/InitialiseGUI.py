@@ -7857,14 +7857,52 @@ class UserInputs(QMainWindow):
         if str(vars(self).get("cb_lump_fines_mode", "derived") or "derived") != "calculated":
             return ""
 
-        source_label = self.cb_split_source_label(chunk, "amt_chunk")
-        head_grades, fines_grades = self.cb_calculated_grade_vectors(
-            chunk, source_label=source_label, source_family="AMT Chunk"
-        )
         payload = copy.deepcopy(chunk.get("modelled_properties") or {})
         values = dict(payload.get("values") or {})
         coverage = dict(payload.get("coverage") or {})
         defined = dict(chunk.get("defined_fields") or {})
+
+        # Chunk aggregation makes canonical modelled_properties authoritative.
+        # A chunk rebuilt after loading a project may not yet have its parallel
+        # grade_streams projection, even though every required aggregate grade
+        # is present.  Repair that projection here before validating the CB
+        # split so a complete chunk is not rejected as missing source data.
+        streams = normalise_grade_streams(
+            chunk.get("grade_streams") or chunk.get("GRADE_STREAMS")
+        )
+        modelled_by_brand = streams.setdefault("modelled_product", {})
+        modelled = dict(modelled_by_brand.get("SF") or {})
+        for analyte in ANALYTES:
+            aggregate = numeric(defined.get(f"modelled_product_{analyte}"))
+            if aggregate is None:
+                aggregate = numeric(values.get(f"modelled_product_{analyte}"))
+            if aggregate is not None:
+                modelled[analyte] = aggregate
+        modelled_by_brand["SF"] = modelled
+
+        regression = {
+            analyte: historical_factor(
+                self.historical_recon_factors,
+                "SF",
+                "regression",
+                analyte,
+            )
+            for analyte in ANALYTES
+        }
+        streams.setdefault("adjusted_product", {})["SF"] = {
+            analyte: (
+                numeric(modelled.get(analyte)) * regression[analyte]
+                if numeric(modelled.get(analyte)) is not None else None
+            )
+            for analyte in ANALYTES
+        }
+        chunk["grade_streams"] = streams
+        chunk["GRADE_STREAMS"] = streams
+
+        source_label = self.cb_split_source_label(chunk, "amt_chunk")
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(
+            chunk, source_label=source_label, source_family="AMT Chunk"
+        )
         product_wmt = numeric(defined.get(
             "modelled_product_wmt", values.get("modelled_product_wmt")
         ))
