@@ -7533,7 +7533,44 @@ class UserInputs(QMainWindow):
             self.data_stream_input_cache_result = copy.deepcopy(result)
         self.finish_data_stream_inputs(result)
 
-    def apply_cb_split_to_inventory_row(self, row):
+    @staticmethod
+    def cb_split_source_label(row, source_family="source", source_name=None):
+        """Return an actionable identity for CB split validation messages."""
+        row = row if isinstance(row, dict) else {}
+
+        def first(*keys):
+            for key in keys:
+                value = row.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return ""
+
+        family = str(source_family or "source").strip().lower()
+        if family == "amt":
+            footprint = first("FOOTPRINT", "footprint") or str(
+                source_name or ""
+            ).strip()
+            build = first("LOCATION_NAME", "location_name")
+            hex_name = first("HEX", "hex")
+            parts = [f"AMT stockpile {footprint or '<unknown>'}"]
+            if build:
+                parts.append(f"build {build}")
+            if hex_name:
+                parts.append(f"hex {hex_name}")
+            return " / ".join(parts)
+
+        name = str(source_name or "").strip() or first(
+            "NAME", "name", "STOCKPILENAME", "stockpilename"
+        )
+        build = first(
+            "BUILD", "build", "STOCKPILEBUILDNAME", "stockpilebuildname"
+        )
+        parts = [f"Inventory stockpile {name or '<unknown>'}"]
+        if build:
+            parts.append(f"build {build}")
+        return " / ".join(parts)
+
+    def apply_cb_split_to_inventory_row(self, row, source_name=None):
         """Attach canonical CB PROD1 split properties to one inventory row."""
         row = row if isinstance(row, dict) else {}
         state = self.__dict__
@@ -7546,25 +7583,38 @@ class UserInputs(QMainWindow):
                 method = "mapped_source_unavailable"
             row["CB_SPLIT_METHOD"] = row["cb_split_method"] = method
             return ""
-        head_grades, fines_grades = self.cb_calculated_grade_vectors(row)
+        source_label = self.cb_split_source_label(
+            row, "inventory", source_name=source_name
+        )
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(
+            row, source_label=source_label, source_family="inventory"
+        )
         defined = dict(row.get("defined_fields") or {})
-        calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
-            row,
-            state.get("cb_lump_percentage", 50.0),
-            product_wmt=defined.get(
-                "modelled_product_wmt", row.get("modelled_product_wmt")
-            ),
-            product_dmt=defined.get(
-                "modelled_product_dmt", row.get("modelled_product_dmt")
-            ),
-            head_grades=head_grades,
-            fines_grades=fines_grades,
-        ))
+        try:
+            calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
+                row,
+                state.get("cb_lump_percentage", 50.0),
+                product_wmt=defined.get(
+                    "modelled_product_wmt", row.get("modelled_product_wmt")
+                ),
+                product_dmt=defined.get(
+                    "modelled_product_dmt", row.get("modelled_product_dmt")
+                ),
+                head_grades=head_grades,
+                fines_grades=fines_grades,
+            ))
+        except ValueError as exc:
+            raise ValueError(f"{source_label}: {exc}") from exc
         self.sync_cb_split_fields(row, calculated)
         return str(calculated.get("cb_split_warning") or "")
 
-    def cb_calculated_grade_vectors(self, row):
+    def cb_calculated_grade_vectors(
+        self, row, source_label=None, source_family="source"
+    ):
         """Return standard-SF head and CBFL-campaign-SF fines grades."""
+        source_label = source_label or self.cb_split_source_label(
+            row, source_family
+        )
         streams = normalise_grade_streams(
             (row or {}).get("grade_streams")
             or (row or {}).get("GRADE_STREAMS")
@@ -7573,17 +7623,64 @@ class UserInputs(QMainWindow):
         adjusted_by_brand = streams.get("adjusted_product", {}) or {}
         modelled = modelled_by_brand.get("SF") or {}
         head = adjusted_by_brand.get("SF") or {}
-        missing = [
+        missing_modelled = [
             analyte for analyte in ANALYTES
             if numeric(modelled.get(analyte)) is None
-            or numeric(head.get(analyte)) is None
         ]
-        if missing:
+        if missing_modelled:
+            source_family_key = (
+                "amt"
+                if str(source_family or "").strip().lower() in {"amt", "amt hex"}
+                else "inventory"
+            )
+            mapping_label = (
+                "AMT Hex"
+                if source_family_key == "amt"
+                else str(source_family or "source").title()
+            )
+            mappings = mapping_lookup(
+                vars(self).get("field_mappings"), source_family_key
+            )
+            target_fields = [
+                f"modelled_product_{analyte}"
+                for analyte in missing_modelled
+            ]
+            unmapped = [
+                target for target in target_fields
+                if not str(mappings.get(target) or "").strip()
+            ]
+            if unmapped:
+                detail = (
+                    "is missing required Map Fields mapping(s): "
+                    + ", ".join(unmapped)
+                    + f". Add the {mapping_label} mapping(s) in Map Fields."
+                )
+            else:
+                detail = (
+                    "has no value in mapped source field(s): "
+                    + ", ".join(
+                        f"{target} <- {mappings[target]}"
+                        for target in target_fields
+                    )
+                    + ". The mappings exist, but this source row has no "
+                    "underlying product-grade data."
+                )
             raise ValueError(
-                "Cloudbreak calculated lump/fines requires mapped modelled "
-                "product grades and standard SF reconciliation for "
-                + ", ".join(value.upper() for value in missing)
-                + "."
+                f"{source_label} {detail}"
+            )
+        missing_adjusted = [
+            analyte for analyte in ANALYTES
+            if numeric(head.get(analyte)) is None
+        ]
+        if missing_adjusted:
+            raise ValueError(
+                f"{source_label} has mapped modelled-product grades, but "
+                "adjusted_product[SF] could not be calculated for: "
+                + ", ".join(
+                    f"adjusted_product_{analyte}"
+                    for analyte in missing_adjusted
+                )
+                + ". Check the standard SF regression reconciliation values."
             )
         special = DataStreamReconciliation.CB_CAMPAIGN_FACTOR
         fines = {
@@ -7671,20 +7768,26 @@ class UserInputs(QMainWindow):
             row["CB_SPLIT_WARNING"] = ""
             return ""
 
-        head_grades, fines_grades = self.cb_calculated_grade_vectors(row)
+        source_label = self.cb_split_source_label(row, "amt")
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(
+            row, source_label=source_label, source_family="AMT Hex"
+        )
         defined = dict(row.get("defined_fields") or {})
-        calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
-            {**values, **defined},
-            state.get("cb_lump_percentage", 50.0),
-            product_wmt=defined.get(
-                "modelled_product_wmt", row.get("modelled_product_wmt")
-            ),
-            product_dmt=defined.get(
-                "modelled_product_dmt", row.get("modelled_product_dmt")
-            ),
-            head_grades=head_grades,
-            fines_grades=fines_grades,
-        ))
+        try:
+            calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
+                {**values, **defined},
+                state.get("cb_lump_percentage", 50.0),
+                product_wmt=defined.get(
+                    "modelled_product_wmt", row.get("modelled_product_wmt")
+                ),
+                product_dmt=defined.get(
+                    "modelled_product_dmt", row.get("modelled_product_dmt")
+                ),
+                head_grades=head_grades,
+                fines_grades=fines_grades,
+            ))
+        except ValueError as exc:
+            raise ValueError(f"{source_label}: {exc}") from exc
         field_names = {
             definition["name"]
             for definition in normalize_field_definitions(
@@ -7755,7 +7858,23 @@ class UserInputs(QMainWindow):
             self.aps_grade_mapping_warnings()
         )
         self.data_stream_source_warnings = {}
-        for name, row in (self.stockpile_data or {}).items():
+
+        selected_rows = getattr(self, "updated_stockpile_data", {}) or {}
+        selected_keys = {
+            str(name).strip().upper() for name in selected_rows
+        }
+        selected_inventory_keys = {
+            str(name).strip().upper()
+            for name, attributes in selected_rows.items()
+            if not bool(
+                (attributes or {}).get(
+                    "amt", (attributes or {}).get("AMT", False)
+                )
+            )
+        }
+
+        def enrich_row(name, row, apply_calculated_split=False):
+            """Build streams while validating CB split only for run sources."""
             row.update(inventory_product_property_aliases(
                 row, self.opf_input_choice
             ))
@@ -7770,13 +7889,33 @@ class UserInputs(QMainWindow):
             row["grade_streams"] = streams
             self.sync_canonical_grade_fields(row, streams)
             warnings = self.inventory_stream_warnings(name, row)
-            cb_warning = self.apply_cb_split_to_inventory_row(row)
-            if cb_warning:
-                warnings.append(f"{name}: {cb_warning}")
+            if apply_calculated_split:
+                cb_warning = self.apply_cb_split_to_inventory_row(
+                    row, source_name=name
+                )
+                if cb_warning:
+                    warnings.append(f"{name}: {cb_warning}")
             row["GRADE_STREAM_WARNINGS"] = warnings
             row["grade_stream_warnings"] = warnings
-            if warnings:
+            if warnings and str(name).strip().upper() in selected_keys:
                 self.data_stream_source_warnings[name] = warnings
+
+        # The fetched inventory contains every stockpile at the site. Keep its
+        # audit streams current, but never let an unselected row block a run.
+        for name, row in (self.stockpile_data or {}).items():
+            enrich_row(
+                name,
+                row,
+                apply_calculated_split=(
+                    str(name).strip().upper() in selected_inventory_keys
+                ),
+            )
+
+        # Selected rows are independent copies created on Stockpile Inventories
+        # submission and are the records passed downstream. Enrich them too.
+        for name, row in selected_rows.items():
+            is_amt = bool((row or {}).get("amt", (row or {}).get("AMT", False)))
+            enrich_row(name, row, apply_calculated_split=not is_amt)
 
     def aps_grade_mapping_warnings(self):
         """Summarise missing APS fields without flooding Decision Point logs."""
