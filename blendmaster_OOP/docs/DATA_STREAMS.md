@@ -310,9 +310,12 @@ which APS has already calculated.
   inventory split returned by Snowflake and derives each AMT hex split from
   its grade-block lineage. APS sources use the fields mapped on Map Fields.
 - **Calculate from user lump percentage** replaces the inventory and AMT split
-  using the entered **CB Lump Percentage (%)**. This is useful when the
-  grade-block-derived split is unavailable or the scenario needs a controlled
-  assumption.
+  using the entered **CB Lump Percentage (%)**. Inventory stockpiles are
+  calculated at stockpile level. AMT hexes are first consolidated using their
+  valid mapped mass and grade pairs; the split is then calculated once for each
+  submitted AMT chunk, after **AMT Stockpiles** and before **Database View**.
+  This avoids rejecting an entire source because an individual member hex has
+  incomplete lineage while retaining the chunk-level coverage warning.
 
 For user lump fraction `L` and fines fraction `F = 1 - L`:
 
@@ -337,7 +340,9 @@ Glump  = (Ghead x total product mass - Gfines x fines mass) / lump mass
 The calculation prefers Product 1 DMT and uses Product 1 WMT only when DMT is
 unavailable. It never splits insitu/ROM tonnes. Missing mapped product mass,
 missing required product grades, or a negative/out-of-range back-calculated
-lump grade blocks Data Streams submission and identifies the invalid analyte.
+lump grade blocks submission and identifies the invalid stockpile or AMT chunk
+and analyte. Inventory validation occurs in Data Streams; AMT validation occurs
+when AMT Stockpiles is submitted.
 
 When **Enable Lump and Fines by-products** is selected, Data Streams also
 requires explicit canonical fields for the Lump/Fines quantities and the five

@@ -7099,15 +7099,26 @@ class UserInputs(QMainWindow):
         grades = normalize_byproduct_grade_fields(
             getattr(self, "byproduct_grade_fields", None)
         )
+        def restore_selector(selector, value):
+            value = str(value or "").strip()
+            if not value:
+                selector.setCurrentText("")
+                return
+            if selector.findText(value, Qt.MatchFixedString) < 0:
+                # A loaded project can reference a user-defined field that was
+                # not present when the Data Streams page was first constructed.
+                selector.addItem(value)
+            selector.setCurrentText(value)
+
         for lane, selector in getattr(
             self, "byproduct_quantity_selectors", {}
         ).items():
-            selector.setCurrentText(quantities[lane])
+            restore_selector(selector, quantities[lane])
         for lane, selectors in getattr(
             self, "byproduct_grade_selectors", {}
         ).items():
             for analyte, selector in selectors.items():
-                selector.setCurrentText(grades[lane][analyte])
+                restore_selector(selector, grades[lane][analyte])
         self.update_byproduct_build_controls()
 
     def update_byproduct_build_controls(self, *_args):
@@ -7546,17 +7557,23 @@ class UserInputs(QMainWindow):
             return ""
 
         family = str(source_family or "source").strip().lower()
-        if family == "amt":
+        if family in {"amt", "amt hex", "amt_chunk", "amt chunk"}:
             footprint = first("FOOTPRINT", "footprint") or str(
                 source_name or ""
             ).strip()
-            build = first("LOCATION_NAME", "location_name")
+            build = first(
+                "LOCATION_NAME", "location_name",
+                "AMT_INVENTORY_BUILD", "amt_inventory_build",
+            )
             hex_name = first("HEX", "hex")
             parts = [f"AMT stockpile {footprint or '<unknown>'}"]
             if build:
                 parts.append(f"build {build}")
             if hex_name:
-                parts.append(f"hex {hex_name}")
+                identifier = (
+                    "chunk" if family in {"amt_chunk", "amt chunk"} else "hex"
+                )
+                parts.append(f"{identifier} {hex_name}")
             return " / ".join(parts)
 
         name = str(source_name or "").strip() or first(
@@ -7630,7 +7647,8 @@ class UserInputs(QMainWindow):
         if missing_modelled:
             source_family_key = (
                 "amt"
-                if str(source_family or "").strip().lower() in {"amt", "amt hex"}
+                if str(source_family or "").strip().lower()
+                in {"amt", "amt hex", "amt chunk"}
                 else "inventory"
             )
             mapping_label = (
@@ -7830,6 +7848,120 @@ class UserInputs(QMainWindow):
         row["CB_SPLIT_WARNING"] = str(calculated.get("cb_split_warning") or "")
         self.sync_cb_split_fields(row, calculated)
         return row["CB_SPLIT_WARNING"]
+
+    def apply_cb_split_to_amt_chunk(self, chunk):
+        """Apply calculated CB lump/fines after member hexes are aggregated."""
+        chunk = chunk if isinstance(chunk, dict) else {}
+        if not self.is_cloudbreak_site():
+            return ""
+        if str(vars(self).get("cb_lump_fines_mode", "derived") or "derived") != "calculated":
+            return ""
+
+        source_label = self.cb_split_source_label(chunk, "amt_chunk")
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(
+            chunk, source_label=source_label, source_family="AMT Chunk"
+        )
+        payload = copy.deepcopy(chunk.get("modelled_properties") or {})
+        values = dict(payload.get("values") or {})
+        coverage = dict(payload.get("coverage") or {})
+        defined = dict(chunk.get("defined_fields") or {})
+        product_wmt = numeric(defined.get(
+            "modelled_product_wmt", values.get("modelled_product_wmt")
+        ))
+        product_dmt = numeric(defined.get(
+            "modelled_product_dmt", values.get("modelled_product_dmt")
+        ))
+        try:
+            calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
+                {**chunk, **values, **defined},
+                vars(self).get("cb_lump_percentage", 50.0),
+                product_wmt=product_wmt,
+                product_dmt=product_dmt,
+                head_grades=head_grades,
+                fines_grades=fines_grades,
+            ))
+        except ValueError as exc:
+            raise ValueError(f"{source_label}: {exc}") from exc
+
+        quantity_fields = normalize_byproduct_quantity_fields(
+            vars(self).get("byproduct_quantity_fields")
+        )
+        grade_fields = normalize_byproduct_grade_fields(
+            vars(self).get("byproduct_grade_fields")
+        )
+        calculated_targets = set(quantity_fields.values())
+        calculated_targets.update(
+            field
+            for lane_fields in grade_fields.values()
+            for field in lane_fields.values()
+        )
+        field_names = {
+            definition["name"]
+            for definition in normalize_field_definitions(
+                vars(self).get("field_definitions")
+            )
+        }
+
+        def input_coverage(field_name):
+            if field_name.endswith("_dmt"):
+                return numeric(coverage.get("modelled_product_dmt"))
+            if field_name.endswith("_wmt"):
+                return numeric(coverage.get("modelled_product_wmt"))
+            suffix_map = {"sio2": "si", "al2o3": "al"}
+            analyte = next(
+                (
+                    suffix_map.get(suffix, suffix)
+                    for suffix in (
+                        "sio2", "al2o3", "fe", "si", "al", "p", "mn"
+                    )
+                    if field_name.endswith("_" + suffix)
+                ),
+                None,
+            )
+            return (
+                numeric(coverage.get(f"modelled_product_{analyte}"))
+                if analyte else None
+            )
+
+        for key, value in calculated.items():
+            numeric_value = numeric(value)
+            if numeric_value is None:
+                continue
+            if key.startswith(("prod1_", "lump_", "fines_")) or key in field_names:
+                values[key] = numeric_value
+            if key in calculated_targets:
+                coverage[key] = input_coverage(key)
+
+        payload["values"] = values
+        payload["coverage"] = coverage
+        chunk["modelled_properties"] = payload
+        self.sync_cb_split_fields(chunk, calculated)
+        chunk["cb_split_method"] = str(calculated.get("cb_split_method") or "")
+        chunk["CB_SPLIT_METHOD"] = chunk["cb_split_method"]
+        warning = str(calculated.get("cb_split_warning") or "")
+        chunk["cb_split_warning"] = warning
+        chunk["CB_SPLIT_WARNING"] = warning
+
+        quality = dict(chunk.get("data_quality") or {})
+        mapped_coverage = dict(quality.get("mapped_field_coverage_pct") or {})
+        for field_name in calculated_targets:
+            fraction = numeric(coverage.get(field_name))
+            if fraction is not None:
+                mapped_coverage[field_name] = fraction * 100.0
+        quality["mapped_field_coverage_pct"] = mapped_coverage
+        chunk["data_quality"] = quality
+        if warning:
+            warnings = list(chunk.get("grade_stream_warnings") or [])
+            warnings.append(warning)
+            chunk["grade_stream_warnings"] = list(dict.fromkeys(warnings))
+        return warning
+
+    def apply_cb_split_to_amt_chunks(self, chunks):
+        """Calculate CB by-products for every submitted AMT scheduling chunk."""
+        for chunk in chunks or []:
+            if isinstance(chunk, dict):
+                self.apply_cb_split_to_amt_chunk(chunk)
+        return chunks
 
     def apply_grade_streams_to_inventory(self):
         source_prefixes = tuple(
@@ -10474,6 +10606,7 @@ class UserInputs(QMainWindow):
             self.populate_aps_grade_mapping_table()
             self.populate_aps_source_property_mapping_table()
             self.load_cb_lump_fines_settings()
+            self.load_byproduct_build_settings()
             self.populate_recon_factor_table()
         if self.haul_cycle_file_path_choice:
             self.refresh_haul_cycle_routes(show_errors=True)
@@ -10508,6 +10641,10 @@ class UserInputs(QMainWindow):
         self.ensure_field_mapping_migration()
         self.populate_map_fields_table()
         self.load_cb_lump_fines_settings()
+        # Data Streams is created once at application start.  A project load
+        # replaces the saved by-product state afterwards, so explicitly
+        # rehydrate its checkbox and its quantity/grade selectors here.
+        self.load_byproduct_build_settings()
         self.refresh_map_available_fields()
         self.populate_recon_factor_table()
         self.set_page_enabled(
@@ -15350,7 +15487,21 @@ class UserInputs(QMainWindow):
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
                 self.sync_canonical_grade_fields(row, streams)
-                cb_split_warning = self.apply_cb_split_to_amt_row(row)
+                if (
+                    self.is_cloudbreak_site()
+                    and str(vars(self).get(
+                        "cb_lump_fines_mode", "derived"
+                    ) or "derived") == "calculated"
+                ):
+                    # Calculated CB by-products are intentionally deferred until
+                    # member hexes have been aggregated into scheduling chunks.
+                    # This preserves partial-lineage weighting and validates the
+                    # source at the same granularity used by the optimiser.
+                    row["CB_SPLIT_METHOD"] = "calculated_at_amt_chunk_submission"
+                    row["CB_SPLIT_WARNING"] = ""
+                    cb_split_warning = ""
+                else:
+                    cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 inventory_name = str(row.get("FOOTPRINT") or footprint or "")
                 inventory_build = str(row.get("LOCATION_NAME") or "")
                 inventory_transaction_datetime = str(
@@ -15573,6 +15724,13 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
 
         if not any(not isinstance(item, dict) for item in self.hex_sequence_table):
+            try:
+                # AMT calculated by-products belong to the scheduling source,
+                # which is the submitted chunk rather than each underlying hex.
+                self.apply_cb_split_to_amt_chunks(self.hex_sequence_table)
+            except ValueError as exc:
+                QMessageBox.warning(self, "AMT Stockpiles", str(exc))
+                return False
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
@@ -15581,8 +15739,10 @@ class UserInputs(QMainWindow):
             self.database_view_refresh_pending = True
             if navigate:
                 self.open_database_view()
+            return True
         else:
             QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
+            return False
     
     def populate_total_AMT_stockpile_balances(self):
         # Extract unique footprints from the hex sequence table
