@@ -4255,6 +4255,21 @@ class UserInputs(QMainWindow):
                         str(item.get("hex") or item.get("chunk_id") or ""),
                     ),
                 ):
+                    lineage_audit = self.database_view_chunk_lineage_audit(
+                        chunk,
+                        footprint_rows,
+                        single_chunk=(len(chunks) == 1),
+                    )
+                    chunk_quality = copy.deepcopy(
+                        chunk.get("data_quality") or {}
+                    )
+                    if (
+                        chunk_quality.get("lineage_coverage_pct") is None
+                        and lineage_audit.get("lineage_coverage_pct") is not None
+                    ):
+                        chunk_quality["lineage_coverage_pct"] = (
+                            lineage_audit["lineage_coverage_pct"]
+                        )
                     chunk_id = (
                         chunk.get("hex")
                         or chunk.get("chunk_id")
@@ -4283,12 +4298,20 @@ class UserInputs(QMainWindow):
                             "tonnes": numeric(
                                 chunk.get("balance", chunk.get("tonnes"))
                             ) or 0.0,
-                            "grade_block_count": chunk.get("grade_block_count"),
-                            "lineage_coverage_pct": chunk.get(
-                                "lineage_coverage_pct"
+                            "grade_block_count": (
+                                chunk.get("grade_block_count")
+                                if chunk.get("grade_block_count") is not None
+                                else lineage_audit.get("grade_block_count")
                             ),
-                            "lineage_unmatched_wmt": chunk.get(
-                                "lineage_unmatched_wmt"
+                            "lineage_coverage_pct": (
+                                chunk.get("lineage_coverage_pct")
+                                if chunk.get("lineage_coverage_pct") is not None
+                                else lineage_audit.get("lineage_coverage_pct")
+                            ),
+                            "lineage_unmatched_wmt": (
+                                chunk.get("lineage_unmatched_wmt")
+                                if chunk.get("lineage_unmatched_wmt") is not None
+                                else lineage_audit.get("lineage_unmatched_wmt")
                             ),
                             "raw_wmt": chunk.get("raw_wmt"),
                             "spatially_corrected_wmt": chunk.get(
@@ -4315,9 +4338,7 @@ class UserInputs(QMainWindow):
                             "cb_split_warning": chunk.get(
                                 "cb_split_warning", ""
                             ),
-                            "data_quality": copy.deepcopy(
-                                chunk.get("data_quality") or {}
-                            ),
+                            "data_quality": chunk_quality,
                             "defined_fields": chunk.get("defined_fields", {}),
                             "source_properties": chunk.get(
                                 "source_properties", {}
@@ -4376,6 +4397,94 @@ class UserInputs(QMainWindow):
                 or [],
             ))
         return records
+
+    @staticmethod
+    def database_view_chunk_lineage_audit(
+        chunk, footprint_rows, *, single_chunk=False
+    ):
+        """Recover chunk lineage audit values from its member AMT hexes."""
+        chunk = chunk if isinstance(chunk, dict) else {}
+        member_hexes = chunk.get("member_hexes")
+        if isinstance(member_hexes, str):
+            member_hexes = {
+                value.strip() for value in member_hexes.split(",")
+                if value.strip()
+            }
+        elif isinstance(member_hexes, (list, tuple, set)):
+            member_hexes = {
+                str(value).strip() for value in member_hexes
+                if str(value).strip()
+            }
+        else:
+            member_hexes = set()
+
+        rows = []
+        for row in footprint_rows or []:
+            if not isinstance(row, dict):
+                continue
+            hex_id = str(row.get("HEX", row.get("hex", "")) or "").strip()
+            if member_hexes and hex_id not in member_hexes:
+                continue
+            if not member_hexes and not single_chunk:
+                continue
+            rows.append(row)
+        if not rows:
+            return {}
+
+        lineage_keys = set()
+        total_wmt = 0.0
+        matched_wmt = 0.0
+        for row in rows:
+            tonnes = numeric(
+                row.get(
+                    "FINAL_WMT",
+                    row.get("final_wmt", row.get("BALANCE", row.get("balance"))),
+                )
+            )
+            tonnes = max(tonnes or 0.0, 0.0)
+            total_wmt += tonnes
+
+            lineage = row.get("GRADE_BLOCK_LINEAGE", row.get("grade_block_lineage"))
+            if lineage is None:
+                lineage = row.get(
+                    "GRADE_BLOCK_LINEAGE_JSON",
+                    row.get("grade_block_lineage_json"),
+                )
+            if isinstance(lineage, str):
+                try:
+                    lineage = json.loads(lineage)
+                except (TypeError, ValueError):
+                    lineage = []
+            for contribution in lineage if isinstance(lineage, list) else []:
+                key = str((contribution or {}).get("lineage_key") or "")
+                if key and key.upper() != "UNMATCHED":
+                    lineage_keys.add(key)
+
+            matched = numeric(row.get(
+                "LINEAGE_MATCHED_FINAL_WMT",
+                row.get("lineage_matched_final_wmt"),
+            ))
+            if matched is None:
+                coverage = numeric(row.get(
+                    "LINEAGE_COVERAGE_PCT",
+                    row.get("lineage_coverage_pct"),
+                ))
+                matched = (
+                    tonnes * min(max(coverage, 0.0), 100.0) / 100.0
+                    if coverage is not None else 0.0
+                )
+            matched_wmt += min(max(matched, 0.0), tonnes)
+
+        if total_wmt <= 0:
+            return {}
+        unmatched_wmt = max(total_wmt - matched_wmt, 0.0)
+        if unmatched_wmt < 1e-6:
+            unmatched_wmt = 0.0
+        return {
+            "grade_block_count": len(lineage_keys),
+            "lineage_coverage_pct": matched_wmt / total_wmt * 100.0,
+            "lineage_unmatched_wmt": unmatched_wmt,
+        }
 
     def database_view_grade_block_rows(self, transactions):
         """Consolidate APS payload movements to one tonnes/grades row per block."""
@@ -7906,12 +8015,15 @@ class UserInputs(QMainWindow):
         head_grades, fines_grades = self.cb_calculated_grade_vectors(
             chunk, source_label=source_label, source_family="AMT Chunk"
         )
-        product_wmt = numeric(defined.get(
-            "modelled_product_wmt", values.get("modelled_product_wmt")
-        ))
-        product_dmt = numeric(defined.get(
-            "modelled_product_dmt", values.get("modelled_product_dmt")
-        ))
+        # As with the product grades above, the post-aggregation payload is
+        # authoritative.  A rebuilt chunk can retain an older mapped value in
+        # defined_fields, which must not change the requested percentage split.
+        product_wmt = numeric(values.get("modelled_product_wmt"))
+        if product_wmt is None:
+            product_wmt = numeric(defined.get("modelled_product_wmt"))
+        product_dmt = numeric(values.get("modelled_product_dmt"))
+        if product_dmt is None:
+            product_dmt = numeric(defined.get("modelled_product_dmt"))
         try:
             calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
                 {**chunk, **values, **defined},
@@ -15815,6 +15927,22 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table_argument = rebuild_and_reconcile(
             getattr(self, "hex_sequence_table_argument", [])
         )
+
+        # Rebuilding a chunk from its member hexes necessarily restores the
+        # raw/mapped hex lump and fines properties.  In calculated CB mode the
+        # scheduling source is the chunk, so immediately replace those raw
+        # values with the user-percentage split before Database View, solver,
+        # project load, or reports consume the rebuilt snapshot.
+        if (
+            self.is_cloudbreak_site()
+            and str(
+                vars(self).get("cb_lump_fines_mode", "derived") or "derived"
+            ) == "calculated"
+        ):
+            self.apply_cb_split_to_amt_chunks(self.hex_sequence_table)
+            self.apply_cb_split_to_amt_chunks(
+                self.hex_sequence_table_argument
+            )
         return refreshed
 
     def get_AMT_stockpile_data(self, builds):

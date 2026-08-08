@@ -314,6 +314,10 @@ which APS has already calculated.
   calculated at stockpile level. AMT hexes are first consolidated using their
   valid mapped mass and grade pairs; the split is then calculated once for each
   submitted AMT chunk, after **AMT Stockpiles** and before **Database View**.
+  If a chunk is subsequently rebuilt from its member hexes (for example during
+  Database View refresh or project restoration), BlendMaster reapplies this
+  chunk-level calculated split before exposing or scheduling the source; raw
+  hex lump/fines values do not replace the calculated result.
   This avoids rejecting an entire source because an individual member hex has
   incomplete lineage while retaining the chunk-level coverage warning.
 
