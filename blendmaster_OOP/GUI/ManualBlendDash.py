@@ -1242,12 +1242,15 @@ class DrawOptimisedGradeProfiles:
             df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
 
         event_columns = [
-            "product_build_id", "product_build_name", "steady_state_number",
+            "product_build_lane", "product_build_id", "product_build_name",
+            "steady_state_number",
             "steady_state_start_datetime", "steady_state_end_datetime", "blend_ID",
         ]
         for column in event_columns:
             if column not in df.columns:
-                df[column] = ""
+                df[column] = (
+                    "product" if column == "product_build_lane" else ""
+                )
         aggregation = {
             "build_opening_tonnes": "first",
             "build_added_tonnes": "first",
@@ -1263,7 +1266,10 @@ class DrawOptimisedGradeProfiles:
             df.dropna(subset=["steady_state_start_datetime", "steady_state_end_datetime"])
             .groupby(event_columns, dropna=False, as_index=False)
             .agg(aggregation)
-            .sort_values(["steady_state_start_datetime", "product_build_id", "steady_state_end_datetime"])
+            .sort_values([
+                "product_build_lane", "steady_state_start_datetime",
+                "product_build_id", "steady_state_end_datetime",
+            ])
         )
         if "build_added_tonnes" in events.columns:
             events = events[events["build_added_tonnes"] > 0].copy()
@@ -1307,23 +1313,36 @@ class DrawOptimisedGradeProfiles:
             return fallback
 
         build_order = (
-            events.groupby("product_build_id", dropna=False)
+            events.groupby(
+                ["product_build_lane", "product_build_id"],
+                dropna=False,
+            )
             .agg(
                 first_start=("steady_state_start_datetime", "min"),
                 first_end=("steady_state_end_datetime", "min"),
             )
             .reset_index()
-            .sort_values(["first_start", "first_end", "product_build_id"])
+            .sort_values([
+                "product_build_lane", "first_start", "first_end",
+                "product_build_id",
+            ])
         )
 
         records = []
-        previous_end_time = None
-        previous_end_grades = {}
+        previous_end_time_by_lane = {}
+        previous_end_grades_by_lane = {}
 
         for _, build_row in build_order.iterrows():
+            build_lane = str(
+                build_row.get("product_build_lane") or "product"
+            ).strip().lower()
             build_id = build_row["product_build_id"]
             build_events = (
-                events[events["product_build_id"] == build_id]
+                events[
+                    (events["product_build_lane"].astype(str).str.lower()
+                     == build_lane)
+                    & (events["product_build_id"] == build_id)
+                ]
                 .sort_values(["steady_state_start_datetime", "steady_state_end_datetime"])
                 .reset_index(drop=True)
             )
@@ -1333,9 +1352,18 @@ class DrawOptimisedGradeProfiles:
             first_event = build_events.iloc[0]
             last_event = build_events.iloc[-1]
             build_name = str(first_event.get("product_build_name") or f"Build {build_id}")
-            series_name = f"Product Build: {build_name}"
+            lane_label = (
+                build_lane.title()
+                if build_lane in {"lump", "fines"}
+                else "Product"
+            )
+            series_name = f"{lane_label} Build: {build_name}"
             first_start_time = first_event["steady_state_start_datetime"]
             continuity_tolerance = pd.Timedelta(seconds=1)
+            previous_end_time = previous_end_time_by_lane.get(build_lane)
+            previous_end_grades = previous_end_grades_by_lane.get(
+                build_lane, {}
+            )
             use_handoff = False
             if previous_end_time is not None and pd.notna(first_start_time):
                 gap = first_start_time - previous_end_time
@@ -1378,8 +1406,10 @@ class DrawOptimisedGradeProfiles:
                         "target_tonnes": row.get("target_tonnes", 0),
                     })
 
-            previous_end_time = last_event["steady_state_end_datetime"]
-            previous_end_grades = {
+            previous_end_time_by_lane[build_lane] = (
+                last_event["steady_state_end_datetime"]
+            )
+            previous_end_grades_by_lane[build_lane] = {
                 grade_key: last_event.get(f"build_grade_{grade_key}", 0)
                 for grade_key in ["fe", "si", "al", "p", "mn"]
             }

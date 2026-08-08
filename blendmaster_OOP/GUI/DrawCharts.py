@@ -445,7 +445,8 @@ class DrawStockProfiles:
             return []
 
         event_group_columns = [
-            "product_build_id", "product_build_name", "brand", "steady_state_number",
+            "product_build_lane", "product_build_id", "product_build_name",
+            "brand", "steady_state_number",
             "blend_ID", "blend_option", "steady_state_start_datetime", "steady_state_end_datetime",
         ]
         for column in event_group_columns:
@@ -471,7 +472,10 @@ class DrawStockProfiles:
         events = (
             data.groupby(event_group_columns, dropna=False, as_index=False)
             .agg(aggregation)
-            .sort_values(["product_build_id", "steady_state_start_datetime", "steady_state_end_datetime"])
+            .sort_values([
+                "product_build_lane", "product_build_id",
+                "steady_state_start_datetime", "steady_state_end_datetime",
+            ])
         )
         events = events.dropna(subset=["steady_state_start_datetime", "steady_state_end_datetime"])
         if events.empty:
@@ -479,7 +483,14 @@ class DrawStockProfiles:
 
         cards = []
         colors = ["#82C4A2", "#7FB3D5", "#F3B56B", "#B59EDB", "#E68A92", "#8ECAD1"]
-        for build_index, (build_id, build_events) in enumerate(events.groupby("product_build_id", sort=False)):
+        build_groups = events.groupby(
+            ["product_build_lane", "product_build_id"],
+            sort=False,
+            dropna=False,
+        )
+        for build_index, ((build_lane, build_id), build_events) in enumerate(
+            build_groups
+        ):
             build_events = build_events.sort_values("steady_state_start_datetime")
             if build_events.empty:
                 continue
@@ -613,7 +624,12 @@ class DrawStockProfiles:
                     html.Div(
                         children=[
                             html.Span(
-                                "Product Build",
+                                (
+                                    f"{str(build_lane).title()} Build"
+                                    if str(build_lane).strip().lower()
+                                    in {"lump", "fines"}
+                                    else "Product Build"
+                                ),
                                 style={
                                     "backgroundColor": "#0369a1",
                                     "color": "#ffffff",

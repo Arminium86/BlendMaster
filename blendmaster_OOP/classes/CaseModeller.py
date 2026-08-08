@@ -15,6 +15,7 @@ from classes.ProductBuildLanes import (
     lane_source_tonnes_column,
     normalize_byproduct_grade_fields,
     normalize_byproduct_quantity_fields,
+    normalized_build_lane,
 )
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
@@ -2221,6 +2222,51 @@ class CaseModeller:
                     values.sum(min_count=1) if values.notna().any() else None
                 )
 
+            # Product-build quantities are additive across grouped APS
+            # payloads. Lane grades remain intensive and use the exact grade
+            # weight emitted by the optimiser for that lane/analyte.
+            for lane in (PRODUCT_LANE, *BYPRODUCT_LANES):
+                tonnes_column = lane_source_tonnes_column(lane)
+                if tonnes_column not in group.columns:
+                    continue
+                tonnes = pd.to_numeric(
+                    group[tonnes_column], errors="coerce"
+                )
+                record[tonnes_column] = (
+                    tonnes.sum(min_count=1)
+                    if tonnes.notna().any() else None
+                )
+                for grade in ("fe", "si", "al", "p", "mn"):
+                    grade_column = lane_grade_column(lane, grade)
+                    weight_column = lane_grade_weight_column(lane, grade)
+                    if weight_column in group.columns:
+                        weights = pd.to_numeric(
+                            group[weight_column], errors="coerce"
+                        )
+                        record[weight_column] = (
+                            weights.sum(min_count=1)
+                            if weights.notna().any() else None
+                        )
+                    if grade_column not in group.columns:
+                        continue
+                    grades = pd.to_numeric(
+                        group[grade_column], errors="coerce"
+                    )
+                    weights = pd.to_numeric(
+                        group.get(weight_column, group.get(tonnes_column)),
+                        errors="coerce",
+                    )
+                    valid = grades.notna() & weights.notna() & (
+                        weights > Optimizer.SOLUTION_TOLERANCE
+                    )
+                    total_weight = weights[valid].sum()
+                    record[grade_column] = (
+                        (grades[valid] * weights[valid]).sum()
+                        / total_weight
+                        if total_weight > Optimizer.SOLUTION_TOLERANCE
+                        else None
+                    )
+
             grouped_records.append(record)
 
         grouped_rows = pd.DataFrame(grouped_records)
@@ -2557,6 +2603,7 @@ class CaseModeller:
         columns = [
             "product_build_id",
             "product_build_name",
+            "product_build_lane",
             "brand",
             "target_tonnes",
             "build_opening_tonnes",
@@ -2611,9 +2658,6 @@ class CaseModeller:
         data = self.group_grade_block_rows(self.results).copy()
         data["source_actual_tonnes"] = pd.to_numeric(data.get("source_actual_tonnes"), errors="coerce").fillna(0)
         data["crusher_actual_tonnes"] = pd.to_numeric(data.get("crusher_actual_tonnes"), errors="coerce").fillna(0)
-        data["product_build_source_tonnes"] = pd.to_numeric(
-            data.get("product_build_source_tonnes"), errors="coerce",
-        ).fillna(0)
         data = data[
             (data["source_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
             & (data["crusher_actual_tonnes"] > Optimizer.SOLUTION_TOLERANCE)
@@ -2624,128 +2668,176 @@ class CaseModeller:
         data["start_datetime"] = pd.to_datetime(data["start_datetime"], errors="coerce")
         data = data.sort_values(["start_datetime", "steady_state_number", "blend_ID", "source"], kind="stable")
 
-        build_states = [
-            {
-                "tonnes": 0.0,
-                "grade_fe_metal": 0.0,
-                "grade_fe_weight": 0.0,
-                "grade_si_metal": 0.0,
-                "grade_si_weight": 0.0,
-                "grade_al_metal": 0.0,
-                "grade_al_weight": 0.0,
-                "grade_p_metal": 0.0,
-                "grade_p_weight": 0.0,
-                "grade_mn_metal": 0.0,
-                "grade_mn_weight": 0.0,
-            }
-            for _ in self.product_build_settings
-        ]
-        active_build_index = 0
         records = []
         group_keys = ["steady_state_number", "blend_ID", "blend_option"]
 
-        for _, steady_state_group in data.groupby(group_keys, sort=False, dropna=False):
-            if active_build_index >= len(self.product_build_settings):
-                break
-
-            crusher_tonnes = float(steady_state_group["crusher_actual_tonnes"].iloc[0] or 0)
-            product_tonnes = float(steady_state_group["product_build_source_tonnes"].sum() or 0)
-            if product_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+        lanes = (
+            BYPRODUCT_LANES
+            if bool(getattr(self, "byproducts_enabled", False))
+            else (PRODUCT_LANE,)
+        )
+        for lane in lanes:
+            lane_settings = [
+                setting for setting in self.product_build_settings
+                if normalized_build_lane(
+                    setting,
+                    bool(getattr(self, "byproducts_enabled", False)),
+                ) == lane
+            ]
+            tonnes_column = lane_source_tonnes_column(lane)
+            if not lane_settings or tonnes_column not in data.columns:
                 continue
 
-            build_setting = self.product_build_settings[active_build_index]
-            build_state = build_states[active_build_index]
-            build_opening = build_state["tonnes"]
-            build_capacity = build_setting["target_tonnes"] - build_opening
-            if build_capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-                active_build_index += 1
-                continue
+            lane_data = data.copy()
+            lane_data[tonnes_column] = pd.to_numeric(
+                lane_data[tonnes_column], errors="coerce"
+            ).fillna(0)
+            build_states = [
+                {
+                    "tonnes": 0.0,
+                    **{
+                        f"grade_{grade}_{suffix}": 0.0
+                        for grade in ("fe", "si", "al", "p", "mn")
+                        for suffix in ("metal", "weight")
+                    },
+                }
+                for _ in lane_settings
+            ]
+            active_build_index = 0
 
-            allocation_tonnes = min(product_tonnes, build_capacity)
-            allocation_fraction = allocation_tonnes / product_tonnes if product_tonnes else 0
+            for _, steady_state_group in lane_data.groupby(
+                group_keys, sort=False, dropna=False
+            ):
+                if active_build_index >= len(lane_settings):
+                    break
 
-            for _, row in steady_state_group.iterrows():
-                source_tonnes = float(row.get("source_actual_tonnes") or 0)
-                source_to_build = float(row.get("product_build_source_tonnes") or 0) * allocation_fraction
-                for grade in ["fe", "si", "al", "p", "mn"]:
-                    grade_value = float(row.get(f"source_grade_{grade}") or 0)
-                    grade_weight = float(
-                        row.get(f"selected_grade_weight_{grade}_tonnes")
-                        or row.get("product_build_source_tonnes")
-                        or 0
-                    ) * allocation_fraction
-                    build_state[f"grade_{grade}_metal"] += grade_weight * grade_value
-                    build_state[f"grade_{grade}_weight"] += grade_weight
-
-                records.append({
-                    "product_build_id": build_setting["build_id"],
-                    "product_build_name": build_setting["build_name"],
-                    "brand": build_setting["brand"],
-                    "target_tonnes": build_setting["target_tonnes"],
-                    "build_opening_tonnes": build_opening,
-                    "build_added_tonnes": allocation_tonnes,
-                    "build_closing_tonnes": min(build_opening + allocation_tonnes, build_setting["target_tonnes"]),
-                    "build_complete": build_opening + allocation_tonnes >= build_setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE,
-                    "build_on_spec": False,
-                    "build_grade_fe": 0,
-                    "build_grade_si": 0,
-                    "build_grade_al": 0,
-                    "build_grade_p": 0,
-                    "build_grade_mn": 0,
-                    "steady_state_number": row.get("steady_state_number"),
-                    "steady_state_start_datetime": row.get("start_datetime"),
-                    "steady_state_end_datetime": row.get("end_datetime"),
-                    "steady_state_duration": row.get("steady_state_duration"),
-                    "period": row.get("period"),
-                    "blend_ID": row.get("blend_ID"),
-                    "blend_option": row.get("blend_option"),
-                    "source": row.get("source"),
-                    "source_id": row.get("source_id", row.get("source")),
-                    "source_type": row.get("source_type", ""),
-                    "source_blend_ratio": row.get("source_blend_ratio"),
-                    "source_actual_tonnes": source_tonnes,
-                    "source_actual_tonnes_to_build": source_to_build,
-                    "source_grade_fe": row.get("source_grade_fe"),
-                    "source_grade_si": row.get("source_grade_si"),
-                    "source_grade_al": row.get("source_grade_al"),
-                    "source_grade_p": row.get("source_grade_p"),
-                    "source_grade_mn": row.get("source_grade_mn"),
-                    "crusher_actual_tonnes": crusher_tonnes,
-                    "crusher_rate_output": row.get("crusher_rate_output"),
-                    "crusher_actual_grade_fe": row.get("crusher_actual_grade_fe"),
-                    "crusher_actual_grade_si": row.get("crusher_actual_grade_si"),
-                    "crusher_actual_grade_al": row.get("crusher_actual_grade_al"),
-                    "crusher_actual_grade_p": row.get("crusher_actual_grade_p"),
-                    "crusher_actual_grade_mn": row.get("crusher_actual_grade_mn"),
-                    "target_fe_min": build_setting["target_fe_min"],
-                    "target_fe_max": build_setting["target_fe_max"],
-                    "target_si_min": build_setting["target_si_min"],
-                    "target_si_max": build_setting["target_si_max"],
-                    "target_al_min": build_setting["target_al_min"],
-                    "target_al_max": build_setting["target_al_max"],
-                    "target_p_min": build_setting["target_p_min"],
-                    "target_p_max": build_setting["target_p_max"],
-                    "target_mn_min": build_setting["target_mn_min"],
-                    "target_mn_max": build_setting["target_mn_max"],
-                })
-
-            build_state["tonnes"] += allocation_tonnes
-            build_complete = build_state["tonnes"] >= build_setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE
-            build_on_spec = self.product_build_grade_on_spec(build_state, build_setting) if build_complete else False
-            build_grades = {
-                f"build_grade_{grade}": (
-                    build_state[f"grade_{grade}_metal"] / build_state[f"grade_{grade}_weight"]
-                    if build_state[f"grade_{grade}_weight"] > Optimizer.SOLUTION_TOLERANCE
-                    else 0
+                product_tonnes = float(
+                    steady_state_group[tonnes_column].sum() or 0
                 )
-                for grade in ["fe", "si", "al", "p", "mn"]
-            }
-            for record in records[-len(steady_state_group):]:
-                if record["product_build_id"] == build_setting["build_id"]:
+                if product_tonnes <= Optimizer.SOLUTION_TOLERANCE:
+                    continue
+
+                build_setting = lane_settings[active_build_index]
+                build_state = build_states[active_build_index]
+                build_opening = build_state["tonnes"]
+                build_capacity = (
+                    build_setting["target_tonnes"] - build_opening
+                )
+                if build_capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
+                    active_build_index += 1
+                    continue
+
+                allocation_tonnes = min(product_tonnes, build_capacity)
+                allocation_fraction = allocation_tonnes / product_tonnes
+                lane_record_start = len(records)
+                crusher_tonnes = float(
+                    steady_state_group["crusher_actual_tonnes"].iloc[0] or 0
+                )
+
+                for _, row in steady_state_group.iterrows():
+                    source_tonnes = float(
+                        row.get("source_actual_tonnes") or 0
+                    )
+                    source_to_build = float(
+                        row.get(tonnes_column) or 0
+                    ) * allocation_fraction
+                    source_grades = {}
+                    for grade in ("fe", "si", "al", "p", "mn"):
+                        grade_column = lane_grade_column(lane, grade)
+                        weight_column = lane_grade_weight_column(lane, grade)
+                        grade_value = float(row.get(grade_column) or 0)
+                        raw_weight = row.get(weight_column)
+                        grade_weight = float(
+                            row.get(tonnes_column) or 0
+                            if pd.isna(raw_weight) or raw_weight is None
+                            else raw_weight
+                        ) * allocation_fraction
+                        build_state[f"grade_{grade}_metal"] += (
+                            grade_weight * grade_value
+                        )
+                        build_state[f"grade_{grade}_weight"] += grade_weight
+                        source_grades[f"source_grade_{grade}"] = grade_value
+
+                    records.append({
+                        "product_build_id": build_setting["build_id"],
+                        "product_build_name": build_setting["build_name"],
+                        "product_build_lane": lane,
+                        "brand": build_setting["brand"],
+                        "target_tonnes": build_setting["target_tonnes"],
+                        "build_opening_tonnes": build_opening,
+                        "build_added_tonnes": allocation_tonnes,
+                        "build_closing_tonnes": min(
+                            build_opening + allocation_tonnes,
+                            build_setting["target_tonnes"],
+                        ),
+                        "build_complete": (
+                            build_opening + allocation_tonnes
+                            >= build_setting["target_tonnes"]
+                            - self.PRODUCT_BUILD_TONNES_TOLERANCE
+                        ),
+                        "build_on_spec": False,
+                        **{
+                            f"build_grade_{grade}": 0
+                            for grade in ("fe", "si", "al", "p", "mn")
+                        },
+                        "steady_state_number": row.get("steady_state_number"),
+                        "steady_state_start_datetime": row.get("start_datetime"),
+                        "steady_state_end_datetime": row.get("end_datetime"),
+                        "steady_state_duration": row.get("steady_state_duration"),
+                        "period": row.get("period"),
+                        "blend_ID": row.get("blend_ID"),
+                        "blend_option": row.get("blend_option"),
+                        "source": row.get("source"),
+                        "source_id": row.get("source_id", row.get("source")),
+                        "source_type": row.get("source_type", ""),
+                        "source_blend_ratio": row.get("source_blend_ratio"),
+                        "source_actual_tonnes": source_tonnes,
+                        "source_actual_tonnes_to_build": source_to_build,
+                        **source_grades,
+                        "crusher_actual_tonnes": crusher_tonnes,
+                        "crusher_rate_output": row.get("crusher_rate_output"),
+                        **{
+                            f"crusher_actual_grade_{grade}": row.get(
+                                f"crusher_actual_grade_{grade}"
+                            )
+                            for grade in ("fe", "si", "al", "p", "mn")
+                        },
+                        **{
+                            f"target_{grade}_{bound}": build_setting[
+                                f"target_{grade}_{bound}"
+                            ]
+                            for grade in ("fe", "si", "al", "p", "mn")
+                            for bound in ("min", "max")
+                        },
+                    })
+
+                build_state["tonnes"] += allocation_tonnes
+                build_complete = (
+                    build_state["tonnes"]
+                    >= build_setting["target_tonnes"]
+                    - self.PRODUCT_BUILD_TONNES_TOLERANCE
+                )
+                build_on_spec = (
+                    self.product_build_grade_on_spec(
+                        build_state, build_setting
+                    )
+                    if build_complete else False
+                )
+                build_grades = {
+                    f"build_grade_{grade}": (
+                        build_state[f"grade_{grade}_metal"]
+                        / build_state[f"grade_{grade}_weight"]
+                        if build_state[f"grade_{grade}_weight"]
+                        > Optimizer.SOLUTION_TOLERANCE
+                        else 0
+                    )
+                    for grade in ("fe", "si", "al", "p", "mn")
+                }
+                for record in records[lane_record_start:]:
                     record.update(build_grades)
                     record["build_on_spec"] = build_on_spec
-            if build_complete:
-                active_build_index += 1
+                if build_complete:
+                    active_build_index += 1
 
         return pd.DataFrame(records, columns=columns)
 
