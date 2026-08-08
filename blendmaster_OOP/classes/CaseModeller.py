@@ -2460,6 +2460,16 @@ class CaseModeller:
                         for key, value in transaction.items()
                         if str(key).startswith("source_property_")
                     },
+                    # Product-build lane quantities, grades and grade weights
+                    # are calculated on the optimiser transaction.  Preserve
+                    # them on the decision-point rows because the selected
+                    # rows are also the authoritative input to the runtime
+                    # build-balance tracker.
+                    **{
+                        key: value
+                        for key, value in transaction.items()
+                        if str(key).startswith("product_build_")
+                    },
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],
                     "equipment_rate_output": transaction["equipment_rate_output"],
