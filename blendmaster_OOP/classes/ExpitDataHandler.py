@@ -1553,15 +1553,67 @@ class ExpitDataHandler:
             ]
             if column in self.data.columns
         ]
+        grade_targets_by_column = {
+            f"Mining.grades_{analyte}": {f"insitu_{analyte}"}
+            for analyte in ("fe", "si", "al", "mn", "p")
+        }
+        for stream, canonical_stream in (
+            ("rom", "modelled_rom"),
+            ("product", "modelled_product"),
+        ):
+            for brand_fields in (
+                self.grade_field_mappings.get(stream, {}) or {}
+            ).values():
+                for analyte, column in (brand_fields or {}).items():
+                    if column:
+                        grade_targets_by_column.setdefault(column, set()).add(
+                            f"{canonical_stream}_{analyte}"
+                        )
+
+        def configured_weight_values(target_fields, fallback):
+            weight_fields = {
+                canonical_property_key(
+                    self.source_property_weights.get(target, "")
+                )
+                for target in target_fields
+                if self.source_property_weights.get(target)
+            }
+            weight_fields.discard("")
+            weight_columns = {
+                self.source_property_field_mappings.get(field, "")
+                for field in weight_fields
+                if self.source_property_field_mappings.get(field)
+            }
+            if len(weight_columns) > 1:
+                raise ValueError(
+                    "APS fields mapped to more than one BlendMaster weighted-"
+                    "average field must use a common additive weight. "
+                    f"Targets: {', '.join(sorted(target_fields))}."
+                )
+            if weight_columns:
+                column = next(iter(weight_columns))
+                if column not in self.data.columns:
+                    raise ValueError(
+                        f"APS configured weight field header '{column}' was not found."
+                    )
+                return pd.to_numeric(
+                    self.data[column], errors="coerce"
+                ).fillna(0.0)
+            return fallback
+
         weighted_grade_columns = {}
         weighted_grade_frames = []
+        mining_wet_tonnes = pd.to_numeric(
+            self.data["Mining.wetTonnes"], errors="coerce"
+        ).fillna(0)
         for index, column in enumerate(grade_columns):
             numerator = f"__grade_mass_{index}"
             denominator = f"__grade_tonnes_{index}"
             numeric_grades = pd.to_numeric(self.data[column], errors="coerce")
-            numeric_tonnes = pd.to_numeric(
-                self.data["Mining.wetTonnes"], errors="coerce"
-            ).fillna(0)
+            numeric_tonnes = configured_weight_values(
+                grade_targets_by_column.get(column, set()),
+                mining_wet_tonnes,
+            )
             valid_tonnes = numeric_tonnes.where(numeric_grades.notna(), 0.0)
             weighted_grade_frames.extend([
                 (numeric_grades.fillna(0.0) * valid_tonnes).rename(numerator),
@@ -1588,13 +1640,18 @@ class ExpitDataHandler:
             )
         weighted_property_columns = {}
         weighted_property_frames = []
-        numeric_tonnes = pd.to_numeric(
-            self.data["Mining.wetTonnes"], errors="coerce"
-        ).fillna(0)
+        property_keys_by_column = {
+            column: canonical_property_key(key)
+            for column, key in property_columns_with_keys
+        }
         for index, column in enumerate(intensive_property_columns):
             numerator = f"__property_mass_{index}"
             denominator = f"__property_tonnes_{index}"
             numeric_values = pd.to_numeric(self.data[column], errors="coerce")
+            numeric_tonnes = configured_weight_values(
+                {property_keys_by_column.get(column, "")},
+                mining_wet_tonnes,
+            )
             valid_tonnes = numeric_tonnes.where(numeric_values.notna(), 0.0)
             weighted_property_frames.extend([
                 (numeric_values.fillna(0.0) * valid_tonnes).rename(numerator),

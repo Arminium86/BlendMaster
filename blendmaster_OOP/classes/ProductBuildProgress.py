@@ -4,39 +4,41 @@ from typing import Iterable, Mapping, Optional
 
 import pandas as pd
 
+from classes.ProductBuildLanes import (
+    BYPRODUCT_LANES,
+    PRODUCT_LANE,
+    lane_grade_column,
+    lane_grade_weight_column,
+    lane_source_tonnes_column,
+)
+
+
+_PRODUCT_BUILD_GRADES = ("fe", "si", "al", "p", "mn")
+_PRODUCT_BUILD_BASE_SUFFIXES = [
+    "id", "name", "brand", "target_tonnes", "opening_tonnes",
+    "added_tonnes", "closing_tonnes", "remaining_tonnes", "complete",
+    "current_on_spec", "complete_on_spec",
+    *[f"grade_{grade}" for grade in _PRODUCT_BUILD_GRADES],
+    *[
+        f"target_{grade}_{bound}"
+        for grade in _PRODUCT_BUILD_GRADES for bound in ("min", "max")
+    ],
+]
+
 
 class ProductBuildProgress:
     """Annotate source-level blend rows with cumulative product-build state."""
 
-    GRADES = ("fe", "si", "al", "p", "mn")
+    GRADES = _PRODUCT_BUILD_GRADES
     TOLERANCE = 0.1
+    BASE_SUFFIXES = _PRODUCT_BUILD_BASE_SUFFIXES
     COLUMNS = [
-        "product_build_id",
-        "product_build_name",
-        "product_build_brand",
-        "product_build_target_tonnes",
-        "product_build_opening_tonnes",
-        "product_build_added_tonnes",
-        "product_build_closing_tonnes",
-        "product_build_remaining_tonnes",
-        "product_build_complete",
-        "product_build_current_on_spec",
-        "product_build_complete_on_spec",
-        "product_build_grade_fe",
-        "product_build_grade_si",
-        "product_build_grade_al",
-        "product_build_grade_p",
-        "product_build_grade_mn",
-        "product_build_target_fe_min",
-        "product_build_target_fe_max",
-        "product_build_target_si_min",
-        "product_build_target_si_max",
-        "product_build_target_al_min",
-        "product_build_target_al_max",
-        "product_build_target_p_min",
-        "product_build_target_p_max",
-        "product_build_target_mn_min",
-        "product_build_target_mn_max",
+        *[f"product_build_{suffix}" for suffix in _PRODUCT_BUILD_BASE_SUFFIXES],
+        *[
+            f"product_build_{lane}_{suffix}"
+            for lane in BYPRODUCT_LANES
+            for suffix in _PRODUCT_BUILD_BASE_SUFFIXES
+        ],
     ]
 
     @staticmethod
@@ -70,6 +72,9 @@ class ProductBuildProgress:
                     setting.get("build_name") or f"Build {index + 1}"
                 ),
                 "brand": str(setting.get("brand") or "").strip().upper(),
+                "byproduct": str(
+                    setting.get("byproduct") or ""
+                ).strip().lower(),
                 "target_tonnes": target_tonnes,
             }
             for grade in cls.GRADES:
@@ -103,6 +108,7 @@ class ProductBuildProgress:
         cls,
         report,
         product_build_settings: Optional[Iterable[Mapping]],
+        byproducts_enabled=None,
     ):
         result = (
             report.copy()
@@ -126,11 +132,37 @@ class ProductBuildProgress:
             ]
 
         builds = cls.normalize_builds(product_build_settings)
+        if byproducts_enabled is None:
+            byproducts_enabled = any(
+                build.get("byproduct") in BYPRODUCT_LANES for build in builds
+            )
+        if byproducts_enabled:
+            for lane in BYPRODUCT_LANES:
+                lane_builds = [
+                    build for build in builds if build.get("byproduct") == lane
+                ]
+                result = cls._annotate_lane(
+                    result,
+                    lane_builds,
+                    lane=lane,
+                    prefix=f"product_build_{lane}",
+                )
+            return result
+        return cls._annotate_lane(
+            result,
+            builds,
+            lane=PRODUCT_LANE,
+            prefix="product_build",
+        )
+
+    @classmethod
+    def _annotate_lane(cls, result, builds, *, lane, prefix):
+        tonnes_column = lane_source_tonnes_column(lane)
         required = {
             "crusher_actual_tonnes",
-            "product_build_source_tonnes",
+            tonnes_column,
             *(
-                f"source_grade_{grade}"
+                lane_grade_column(lane, grade)
                 for grade in cls.GRADES
             ),
         }
@@ -182,7 +214,7 @@ class ProductBuildProgress:
             opening_tonnes = build_tonnes
             product_tonnes = cls._number(
                 pd.to_numeric(
-                    state_rows.get("product_build_source_tonnes", pd.Series()),
+                    state_rows.get(tonnes_column, pd.Series()),
                     errors="coerce",
                 ).fillna(0).sum(),
                 0.0,
@@ -201,15 +233,15 @@ class ProductBuildProgress:
             for grade in cls.GRADES:
                 for _, row in state_rows.iterrows():
                     weight = cls._number(
-                        row.get(f"selected_grade_weight_{grade}_tonnes"),
+                        row.get(lane_grade_weight_column(lane, grade)),
                         cls._number(
-                            row.get("product_build_source_tonnes"),
+                            row.get(tonnes_column),
                             0.0,
                         ),
                     ) * allocation_fraction
                     grade_weights[grade] += weight
                     grade_metal[grade] += weight * cls._number(
-                        row.get(f"source_grade_{grade}"), 0.0
+                        row.get(lane_grade_column(lane, grade)), 0.0
                     )
 
             build_tonnes = min(
@@ -224,29 +256,29 @@ class ProductBuildProgress:
                 build_tonnes, grade_metal, build, grade_weights
             )
             values = {
-                "product_build_id": build["build_id"],
-                "product_build_name": build["build_name"],
-                "product_build_brand": build["brand"],
-                "product_build_target_tonnes": build["target_tonnes"],
-                "product_build_opening_tonnes": opening_tonnes,
-                "product_build_added_tonnes": added_tonnes,
-                "product_build_closing_tonnes": build_tonnes,
-                "product_build_remaining_tonnes": remaining_tonnes,
-                "product_build_complete": complete,
-                "product_build_current_on_spec": current_on_spec,
-                "product_build_complete_on_spec": (
+                f"{prefix}_id": build["build_id"],
+                f"{prefix}_name": build["build_name"],
+                f"{prefix}_brand": build["brand"],
+                f"{prefix}_target_tonnes": build["target_tonnes"],
+                f"{prefix}_opening_tonnes": opening_tonnes,
+                f"{prefix}_added_tonnes": added_tonnes,
+                f"{prefix}_closing_tonnes": build_tonnes,
+                f"{prefix}_remaining_tonnes": remaining_tonnes,
+                f"{prefix}_complete": complete,
+                f"{prefix}_current_on_spec": current_on_spec,
+                f"{prefix}_complete_on_spec": (
                     current_on_spec if complete else None
                 ),
             }
             for grade in cls.GRADES:
-                values[f"product_build_grade_{grade}"] = (
+                values[f"{prefix}_grade_{grade}"] = (
                     grade_metal[grade] / grade_weights[grade]
                     if grade_weights[grade] > 0 else 0.0
                 )
-                values[f"product_build_target_{grade}_min"] = (
+                values[f"{prefix}_target_{grade}_min"] = (
                     build[f"target_{grade}_min"]
                 )
-                values[f"product_build_target_{grade}_max"] = (
+                values[f"{prefix}_target_{grade}_max"] = (
                     build[f"target_{grade}_max"]
                 )
 

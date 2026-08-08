@@ -2,7 +2,8 @@
 
 The grade-block-derived mode is assembled by ``AMTGradeBlockLineage``.  This
 module implements the optional Data Streams user-calculated mode without any
-UI dependency so inventory, AMT and APS sources can use the same formulas.
+UI dependency so inventory stockpiles and AMT hexes use the same formulas.
+APS sources retain their authoritative mapped lump/fines values.
 """
 
 from __future__ import annotations
@@ -60,16 +61,24 @@ def calculate_cb_lump_fines(
     properties: Mapping,
     lump_percentage,
     *,
+    product_wmt=None,
+    product_dmt=None,
+    head_grades=None,
+    fines_grades=None,
     source_wmt=None,
     source_dmt=None,
 ):
     """Return canonical calculated CB lump/fines fields and provenance.
 
-    Source WMT/DMT is split directly by the user lump percentage. Existing
-    fines grades are retained and lump grades are back-calculated so their
-    weighted combination equals the total PROD1 grade. When an independent
-    fines grade is unavailable, both sizes inherit the total PROD1 grade; this
-    is the only determinate, mass-conserving fallback.
+    Total product WMT/DMT is split directly by the user lump percentage.
+    ``head_grades`` is the standard-SF-adjusted total product and
+    ``fines_grades`` is adjusted with the dedicated CBSF-on-CBFL-campaign
+    factor. Lump grades are back-calculated so the two by-products recombine
+    to the adjusted head grade. DMT is preferred for that mass balance and WMT
+    is used only when DMT is unavailable.
+
+    ``source_wmt`` and ``source_dmt`` remain compatibility aliases for older
+    callers; new code must provide product tonnes explicitly.
     """
     properties = {
         str(key).strip().lower(): value
@@ -77,14 +86,35 @@ def calculate_cb_lump_fines(
     }
     lump_fraction = normalise_lump_fraction(lump_percentage)
     fines_fraction = 1.0 - lump_fraction
-    source_wmt = _number(source_wmt)
-    if source_wmt is None:
-        source_wmt = _first_number(
-            properties, "feed_wmt", "source_wmt", "balance", "tonnes"
+    head_grades = {
+        str(key).strip().lower(): value
+        for key, value in dict(head_grades or {}).items()
+    }
+    fines_grades = {
+        str(key).strip().lower(): value
+        for key, value in dict(fines_grades or {}).items()
+    }
+    product_wmt = _number(product_wmt)
+    if product_wmt is None:
+        product_wmt = _first_number(
+            properties,
+            "modelled_product_wmt", "prod1_wmt", "product_wmt",
         )
-    source_dmt = _number(source_dmt)
-    if source_dmt is None:
-        source_dmt = _first_number(properties, "feed_dmt", "source_dmt")
+    if product_wmt is None:
+        product_wmt = _number(source_wmt)
+    product_dmt = _number(product_dmt)
+    if product_dmt is None:
+        product_dmt = _first_number(
+            properties,
+            "modelled_product_dmt", "prod1_dmt", "product_dmt",
+        )
+    if product_dmt is None:
+        product_dmt = _number(source_dmt)
+    if product_wmt is None and product_dmt is None:
+        raise ValueError(
+            "Cloudbreak calculated lump/fines requires mapped total product "
+            "WMT or DMT."
+        )
 
     result = dict(properties)
     result.update({
@@ -94,21 +124,21 @@ def calculate_cb_lump_fines(
         "fines_yield_pct": fines_fraction,
         "cb_lump_fraction_input": lump_fraction,
     })
-    if source_wmt is not None:
+    if product_wmt is not None:
         result.update({
-            "prod1_wmt": source_wmt,
-            "prod1_lump_wmt": source_wmt * lump_fraction,
-            "prod1_fines_wmt": source_wmt * fines_fraction,
-            "lump_wmt": source_wmt * lump_fraction,
-            "fines_wmt": source_wmt * fines_fraction,
+            "prod1_wmt": product_wmt,
+            "prod1_lump_wmt": product_wmt * lump_fraction,
+            "prod1_fines_wmt": product_wmt * fines_fraction,
+            "lump_wmt": product_wmt * lump_fraction,
+            "fines_wmt": product_wmt * fines_fraction,
         })
-    if source_dmt is not None:
+    if product_dmt is not None:
         result.update({
-            "prod1_dmt": source_dmt,
-            "prod1_lump_dmt": source_dmt * lump_fraction,
-            "prod1_fines_dmt": source_dmt * fines_fraction,
-            "lump_dmt": source_dmt * lump_fraction,
-            "fines_dmt": source_dmt * fines_fraction,
+            "prod1_dmt": product_dmt,
+            "prod1_lump_dmt": product_dmt * lump_fraction,
+            "prod1_fines_dmt": product_dmt * fines_fraction,
+            "lump_dmt": product_dmt * lump_fraction,
+            "fines_dmt": product_dmt * fines_fraction,
         })
 
     minus_1mm_pct = _first_number(
@@ -125,13 +155,13 @@ def calculate_cb_lump_fines(
         )
         if 0.0 <= minus_1mm_fraction <= 1.0:
             result["prod1_minus_1mm_pct"] = minus_1mm_pct
-            if source_wmt is not None:
+            if product_wmt is not None:
                 result["prod1_minus_1mm_wmt"] = (
-                    source_wmt * minus_1mm_fraction
+                    product_wmt * minus_1mm_fraction
                 )
-            if source_dmt is not None:
+            if product_dmt is not None:
                 result["prod1_minus_1mm_dmt"] = (
-                    source_dmt * minus_1mm_fraction
+                    product_dmt * minus_1mm_fraction
                 )
 
     used_back_calculation = False
@@ -146,7 +176,11 @@ def calculate_cb_lump_fines(
 
     for assay in CB_SPLIT_ASSAYS:
         aliases = _TOTAL_GRADE_ALIASES[assay]
-        total_grade = _first_number(properties, *(
+        total_grade = _number(
+            head_grades.get(assay)
+        )
+        if total_grade is None:
+            total_grade = _first_number(properties, *(
             key
             for alias in aliases
             for key in (
@@ -157,12 +191,14 @@ def calculate_cb_lump_fines(
         ))
         if total_grade is None:
             continue
-        fines_grade = _first_number(
-            properties,
-            f"prod1_fines_{assay}",
-            f"fines_{assay}",
-            f"modelled_prod1_fines_{assay}",
-        )
+        fines_grade = _number(fines_grades.get(assay))
+        if fines_grade is None:
+            fines_grade = _first_number(
+                properties,
+                f"prod1_fines_{assay}",
+                f"fines_{assay}",
+                f"modelled_prod1_fines_{assay}",
+            )
         if (
             fines_grade is not None
             and lump_weight is not None
@@ -174,10 +210,11 @@ def calculate_cb_lump_fines(
                 total_grade * total_weight - fines_grade * fines_weight
             ) / lump_weight
             used_back_calculation = True
-            if lump_grade < 0:
-                warnings.append(
-                    f"Back-calculated PROD1 lump {assay} is negative "
-                    f"({lump_grade:.6g}); retained to preserve the total grade mass balance."
+            if not 0.0 <= lump_grade <= 100.0:
+                raise ValueError(
+                    "Cloudbreak calculated lump/fines produced an invalid "
+                    f"PROD1 lump {assay} grade ({lump_grade:.6g}). Review "
+                    "the lump percentage and SF reconciliation factors."
                 )
         else:
             fines_grade = total_grade

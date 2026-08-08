@@ -78,6 +78,15 @@ from classes.SourcePropertyMappings import (
     normalise_aps_source_property_mappings,
 )
 from classes.CloudbreakProductSplit import calculate_cb_lump_fines
+from classes.DataQualityWarnings import format_chunk_quality_warning
+from classes.ProductBuildLanes import (
+    ANALYTES as PRODUCT_BUILD_ANALYTES,
+    BYPRODUCT_LANES,
+    default_byproduct_grade_fields,
+    default_byproduct_quantity_fields,
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from classes.FieldDefinitions import (
     FIELD_KINDS,
     SOURCE_FAMILIES,
@@ -1272,6 +1281,13 @@ class UserInputs(QMainWindow):
             "crusher_tonnes_stream": getattr(self, "crusher_tonnes_stream", "modelled_rom_wmt"),
             "reclaimer_tonnes_stream": getattr(self, "reclaimer_tonnes_stream", "modelled_rom_wmt"),
             "product_build_tonnes_stream": getattr(self, "product_build_tonnes_stream", "modelled_product_wmt"),
+            "byproducts_enabled": bool(getattr(self, "byproducts_enabled", False)),
+            "byproduct_quantity_fields": normalize_byproduct_quantity_fields(
+                getattr(self, "byproduct_quantity_fields", None)
+            ),
+            "byproduct_grade_fields": normalize_byproduct_grade_fields(
+                getattr(self, "byproduct_grade_fields", None)
+            ),
             "field_definitions": copy.deepcopy(getattr(
                 self, "field_definitions", default_field_definitions()
             )),
@@ -1328,6 +1344,7 @@ class UserInputs(QMainWindow):
             self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
             self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"
             self.product_build_tonnes_stream = self.product_build_tonnes_selector.currentData() or "modelled_product_wmt"
+            self.capture_byproduct_build_settings()
             self.data_stream_planning_categories = normalise_planning_categories({
                 "rom": self.rom_planning_category_input.text(),
                 "product": self.product_planning_category_input.text(),
@@ -1367,7 +1384,9 @@ class UserInputs(QMainWindow):
             "blend_mode_choice",
             "product_brand_labels_choice", "product_build_settings",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
-            "product_build_tonnes_stream", "field_definitions", "field_mappings",
+            "product_build_tonnes_stream", "byproducts_enabled",
+            "byproduct_quantity_fields", "byproduct_grade_fields",
+            "field_definitions", "field_mappings",
             "field_mapping_schema_version",
             "aps_grade_field_mappings",
             "aps_source_property_field_mappings",
@@ -1616,6 +1635,13 @@ class UserInputs(QMainWindow):
             self.crusher_tonnes_stream = str(state.get("crusher_tonnes_stream") or "modelled_rom_wmt")
             self.reclaimer_tonnes_stream = str(state.get("reclaimer_tonnes_stream") or "modelled_rom_wmt")
             self.product_build_tonnes_stream = str(state.get("product_build_tonnes_stream") or "modelled_product_wmt")
+            self.byproducts_enabled = bool(state.get("byproducts_enabled", False))
+            self.byproduct_quantity_fields = normalize_byproduct_quantity_fields(
+                state.get("byproduct_quantity_fields")
+            )
+            self.byproduct_grade_fields = normalize_byproduct_grade_fields(
+                state.get("byproduct_grade_fields")
+            )
             self.field_definitions = normalize_field_definitions(
                 state.get("field_definitions")
             )
@@ -1906,6 +1932,7 @@ class UserInputs(QMainWindow):
             self.populate_map_fields_table()
             self.refresh_map_available_fields()
             self.load_cb_lump_fines_settings()
+            self.load_byproduct_build_settings()
             self.refresh_aps_grade_field_headers()
             self.populate_recon_factor_table()
             warning_text = "\n".join(self.historical_recon_warnings)
@@ -2778,6 +2805,7 @@ class UserInputs(QMainWindow):
         self.product_build_headers = [
             "Build",
             "Brand",
+            "By-product",
             "Target Tonnes",
             "Fe Min",
             "Fe Max",
@@ -2792,6 +2820,10 @@ class UserInputs(QMainWindow):
         ]
         self.product_build_table.setColumnCount(len(self.product_build_headers))
         self.product_build_table.setHorizontalHeaderLabels(self.product_build_headers)
+        self.product_build_table.setColumnHidden(
+            self.product_build_headers.index("By-product"),
+            not bool(getattr(self, "byproducts_enabled", False)),
+        )
         self.product_build_table.verticalHeader().setVisible(False)
         self.product_build_layout.addWidget(self.product_build_table)
 
@@ -2827,25 +2859,37 @@ class UserInputs(QMainWindow):
             getattr(self, "product_brand_labels_choice", self.default_product_brand_labels())
         )
 
-    def product_build_name_for_row(self, row_idx, brand):
+    def product_build_name_for_row(self, row_idx, brand, byproduct=None):
         brand = str(brand or "").strip().upper()
+        byproduct = str(byproduct or "").strip().lower()
         if not brand:
             return f"Build {row_idx + 1}"
 
         brand_count = 0
+        brand_column = self.product_build_headers.index("Brand")
+        byproduct_column = self.product_build_headers.index("By-product")
         for index in range(row_idx + 1):
             if index == row_idx:
                 row_brand = brand
+                row_byproduct = byproduct
             else:
-                brand_widget = self.product_build_table.cellWidget(index, 1)
+                brand_widget = self.product_build_table.cellWidget(index, brand_column)
                 row_brand = (
                     brand_widget.currentText().strip().upper()
                     if isinstance(brand_widget, QComboBox)
                     else ""
                 )
-            if row_brand == brand:
+                byproduct_widget = self.product_build_table.cellWidget(
+                    index, byproduct_column
+                )
+                row_byproduct = str(
+                    byproduct_widget.currentData()
+                    if isinstance(byproduct_widget, QComboBox) else ""
+                ).strip().lower()
+            if row_brand == brand and row_byproduct == byproduct:
                 brand_count += 1
-        return f"{brand} Build {brand_count}"
+        lane_label = f" {byproduct.title()}" if byproduct else ""
+        return f"{brand}{lane_label} Build {brand_count}"
 
     def set_product_build_count_from_input(self):
         try:
@@ -2867,6 +2911,11 @@ class UserInputs(QMainWindow):
 
     def populate_product_build_table(self):
         settings = getattr(self, "product_build_settings", []) or []
+        if hasattr(self, "product_build_table"):
+            self.product_build_table.setColumnHidden(
+                self.product_build_headers.index("By-product"),
+                not bool(getattr(self, "byproducts_enabled", False)),
+            )
         if hasattr(self, "group_2wp_build_targets_checkbox"):
             self.group_2wp_build_targets_checkbox.setChecked(bool(
                 getattr(
@@ -2892,16 +2941,35 @@ class UserInputs(QMainWindow):
             brand_combo.addItem(selected_brand)
         if selected_brand:
             brand_combo.setCurrentText(selected_brand)
-        self.product_build_table.setCellWidget(row_idx, 1, brand_combo)
+        brand_column = self.product_build_headers.index("Brand")
+        byproduct_column = self.product_build_headers.index("By-product")
+        self.product_build_table.setCellWidget(row_idx, brand_column, brand_combo)
+
+        byproduct_combo = QComboBox()
+        byproduct_combo.addItem("Lump", "lump")
+        byproduct_combo.addItem("Fines", "fines")
+        selected_byproduct = str(setting.get("byproduct") or "").strip().lower()
+        lane_index = byproduct_combo.findData(selected_byproduct)
+        byproduct_combo.setCurrentIndex(lane_index if lane_index >= 0 else 0)
+        self.product_build_table.setCellWidget(
+            row_idx, byproduct_column, byproduct_combo
+        )
 
         brand = brand_combo.currentText().strip().upper()
-        build_name = self.product_build_name_for_row(row_idx, brand)
+        lane = (
+            str(byproduct_combo.currentData() or "").lower()
+            if getattr(self, "byproducts_enabled", False) else ""
+        )
+        build_name = self.product_build_name_for_row(row_idx, brand, lane)
         build_item = QTableWidgetItem(build_name)
         build_item.setFlags(Qt.ItemIsEnabled)
         build_item.setTextAlignment(Qt.AlignCenter)
         self.product_build_table.setItem(row_idx, 0, build_item)
         brand_combo.currentTextChanged.connect(
             lambda _text: self.renumber_product_build_rows()
+        )
+        byproduct_combo.currentIndexChanged.connect(
+            lambda _index: self.renumber_product_build_rows()
         )
 
         defaults = {
@@ -2930,7 +2998,8 @@ class UserInputs(QMainWindow):
             "target_mn_min",
             "target_mn_max",
         ]
-        for col_idx, key in enumerate(keys, start=2):
+        target_column = self.product_build_headers.index("Target Tonnes")
+        for col_idx, key in enumerate(keys, start=target_column):
             value = setting.get(key, defaults[key])
             if key == "target_tonnes":
                 try:
@@ -2978,14 +3047,31 @@ class UserInputs(QMainWindow):
 
         brand_counts = {}
         for row_idx in range(self.product_build_table.rowCount()):
-            brand_widget = self.product_build_table.cellWidget(row_idx, 1)
+            brand_column = self.product_build_headers.index("Brand")
+            byproduct_column = self.product_build_headers.index("By-product")
+            brand_widget = self.product_build_table.cellWidget(row_idx, brand_column)
             brand = brand_widget.currentText().strip().upper() if isinstance(brand_widget, QComboBox) else ""
+            byproduct_widget = self.product_build_table.cellWidget(
+                row_idx, byproduct_column
+            )
+            byproduct = (
+                str(byproduct_widget.currentData() or "").strip().lower()
+                if getattr(self, "byproducts_enabled", False)
+                and isinstance(byproduct_widget, QComboBox)
+                else ""
+            )
             if brand:
-                brand_counts[brand] = brand_counts.get(brand, 0) + 1
-                build_name = f"{brand} Build {brand_counts[brand]}"
+                count_key = (brand, byproduct)
+                brand_counts[count_key] = brand_counts.get(count_key, 0) + 1
+                lane_label = f" {byproduct.title()}" if byproduct else ""
+                build_name = f"{brand}{lane_label} Build {brand_counts[count_key]}"
             else:
                 build_name = f"Build {row_idx + 1}"
-            target_tonnes = parse_number(row_idx, 2, "Target Tonnes")
+            target_tonnes = parse_number(
+                row_idx,
+                self.product_build_headers.index("Target Tonnes"),
+                "Target Tonnes",
+            )
             if target_tonnes is None:
                 return None
             if target_tonnes < 0:
@@ -2998,6 +3084,7 @@ class UserInputs(QMainWindow):
                 "build_id": row_idx + 1,
                 "build_name": build_name,
                 "brand": brand,
+                "byproduct": byproduct,
                 "target_tonnes": target_tonnes,
             }
             for grade_label, (min_key, max_key) in grade_keys.items():
@@ -3018,13 +3105,25 @@ class UserInputs(QMainWindow):
                 setting[min_key] = min_value
                 setting[max_key] = max_value
             settings.append(setting)
+        if getattr(self, "byproducts_enabled", False) and settings:
+            configured_lanes = {setting.get("byproduct") for setting in settings}
+            missing_lanes = [lane.title() for lane in BYPRODUCT_LANES if lane not in configured_lanes]
+            if missing_lanes:
+                if show_errors:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "By-products are enabled, so Product Build Settings must "
+                        f"contain at least one build for: {', '.join(missing_lanes)}.",
+                    )
+                return None
         return settings
 
-    def update_product_build_name_for_row(self, row_idx, brand):
+    def update_product_build_name_for_row(self, row_idx, brand, byproduct=None):
         if not hasattr(self, "product_build_table") or row_idx >= self.product_build_table.rowCount():
             return
         brand = str(brand or "").strip().upper()
-        build_name = self.product_build_name_for_row(row_idx, brand)
+        build_name = self.product_build_name_for_row(row_idx, brand, byproduct)
         item = self.product_build_table.item(row_idx, 0)
         if item is None:
             item = QTableWidgetItem()
@@ -3060,9 +3159,20 @@ class UserInputs(QMainWindow):
         if not hasattr(self, "product_build_table"):
             return
         for row_idx in range(self.product_build_table.rowCount()):
-            brand_widget = self.product_build_table.cellWidget(row_idx, 1)
+            brand_widget = self.product_build_table.cellWidget(
+                row_idx, self.product_build_headers.index("Brand")
+            )
             brand = brand_widget.currentText() if isinstance(brand_widget, QComboBox) else ""
-            self.update_product_build_name_for_row(row_idx, brand)
+            byproduct_widget = self.product_build_table.cellWidget(
+                row_idx, self.product_build_headers.index("By-product")
+            )
+            byproduct = (
+                byproduct_widget.currentData()
+                if getattr(self, "byproducts_enabled", False)
+                and isinstance(byproduct_widget, QComboBox)
+                else ""
+            )
+            self.update_product_build_name_for_row(row_idx, brand, byproduct)
 
     def store_product_build_settings(self, show_errors=True):
         settings = self.read_product_build_settings_from_table(show_errors=show_errors)
@@ -3131,6 +3241,10 @@ class UserInputs(QMainWindow):
                     self, "crusher_contribution_ratio_choice", 1.0
                 ),
                 planning_period_count=self.planning_period_count(),
+                planning_category=self.data_stream_planning_categories.get(
+                    "product", DEFAULT_PLANNING_CATEGORIES["product"]
+                ),
+                byproducts_enabled=bool(getattr(self, "byproducts_enabled", False)),
             )
 
         def success(settings):
@@ -3499,6 +3613,27 @@ class UserInputs(QMainWindow):
             or vars(self).get("product_build_tonnes_stream")
             or "modelled_product_wmt"
         )
+        merged["byproducts_enabled"] = bool(
+            merged.get("byproducts_enabled", vars(self).get("byproducts_enabled", False))
+        )
+        merged["byproduct_quantity_fields"] = normalize_byproduct_quantity_fields(
+            merged.get("byproduct_quantity_fields")
+            or vars(self).get("byproduct_quantity_fields")
+        )
+        merged["byproduct_grade_fields"] = normalize_byproduct_grade_fields(
+            merged.get("byproduct_grade_fields")
+            or vars(self).get("byproduct_grade_fields")
+        )
+        if merged["byproducts_enabled"]:
+            merged["optimisation_source_property_fields"] = sorted(set(
+                merged["optimisation_source_property_fields"]
+                + list(merged["byproduct_quantity_fields"].values())
+                + [
+                    field
+                    for lane_fields in merged["byproduct_grade_fields"].values()
+                    for field in lane_fields.values()
+                ]
+            ))
         return merged
 
     def apply_app_theme(self):
@@ -3932,15 +4067,80 @@ class UserInputs(QMainWindow):
         analyte_labels = {
             "fe": "Fe", "si": "Si", "al": "Al", "p": "P", "mn": "Mn"
         }
+        fallback_summaries = []
         for route, analytes in fallback_groups.items():
             brand, requested_stream, requested_brand, used_stream, used_brand = route
-            warnings.append(
+            fallback_summaries.append(
                 f"{brand} fallback for "
                 + ", ".join(analyte_labels.get(value, value) for value in analytes)
                 + f": {requested_stream}[{requested_brand}] -> "
                 + f"{used_stream}[{used_brand}]"
             )
-        record["warnings"] = "; ".join(dict.fromkeys(warnings))
+        if source_type.startswith("amt chunk"):
+            quality = copy.deepcopy(record.get("data_quality") or {})
+            if not quality:
+                quality = {
+                    "lineage_coverage_pct": record.get("lineage_coverage_pct"),
+                    "mapped_field_coverage_pct": {
+                        name: record.get(f"{name}_coverage_pct")
+                        for name in (
+                            definition["name"]
+                            for definition in normalize_field_definitions(
+                                vars(self).get("field_definitions")
+                            )
+                        )
+                        if record.get(f"{name}_coverage_pct") is not None
+                    },
+                    "geometry_quarantine_count": record.get(
+                        "geometry_quarantine_count"
+                    ),
+                    "geometry_quarantine_hexes": record.get(
+                        "geometry_quarantine_hexes"
+                    ),
+                }
+                product_coverage = {}
+                for warning in warnings:
+                    for product, label, percentage in re.findall(
+                        r"PROD([123])\s+(Fe|SiO₂|Al₂O₃|P|Mn)\s+(\d+(?:\.\d+)?)%",
+                        warning,
+                    ):
+                        product_coverage[
+                            f"PROD{product} {label}"
+                        ] = float(percentage)
+                quality["product_grade_coverage_pct"] = product_coverage
+            opf_value = vars(self).get("opf_input_choice", "")
+            product_slot = amt_modelled_product_slot(opf_value)
+            product_grades_applicable = bool(product_slot) and not is_dry_plant(
+                opf_value
+            )
+            if product_grades_applicable:
+                product_prefix = str(product_slot).upper()
+                labels = {
+                    "fe": "Fe", "si": "SiO₂", "al": "Al₂O₃",
+                    "p": "P", "mn": "Mn",
+                }
+                product_coverage = {
+                    key: value
+                    for key, value in dict(
+                        quality.get("product_grade_coverage_pct") or {}
+                    ).items()
+                    if str(key).upper().startswith(product_prefix + " ")
+                }
+                for label in labels.values():
+                    product_coverage.setdefault(
+                        f"{product_prefix} {label}", None
+                    )
+                quality["product_grade_coverage_pct"] = product_coverage
+            record["warnings"] = format_chunk_quality_warning(
+                quality,
+                fallbacks=fallback_summaries,
+                product_grades_applicable=product_grades_applicable,
+            )
+        else:
+            record["warnings"] = "; ".join(dict.fromkeys([
+                *warnings, *fallback_summaries
+            ]))
+        record.pop("data_quality", None)
         # Database View now presents the exact Define Fields schema. Preserve
         # the canonical stream keys populated above; raw ``grade_*`` aliases
         # remain in the record only as hidden compatibility/audit data.
@@ -4113,6 +4313,9 @@ class UserInputs(QMainWindow):
                             ),
                             "cb_split_warning": chunk.get(
                                 "cb_split_warning", ""
+                            ),
+                            "data_quality": copy.deepcopy(
+                                chunk.get("data_quality") or {}
                             ),
                             "defined_fields": chunk.get("defined_fields", {}),
                             "source_properties": chunk.get(
@@ -6355,6 +6558,69 @@ class UserInputs(QMainWindow):
         selection_layout.addRow("Reclaimer Quantity Field:", self.reclaimer_tonnes_selector)
         selection_layout.addRow("Product Build Quantity Field:", self.product_build_tonnes_selector)
 
+        weighted_average_fields = [
+            str(row.get("name"))
+            for row in (getattr(self, "field_definitions", []) or [])
+            if str(row.get("kind", "")).lower() == "weighted_average"
+            and row.get("name")
+        ]
+
+        def searchable_field_selector(options, current):
+            selector = QComboBox()
+            selector.setEditable(True)
+            selector.addItems(list(dict.fromkeys(options)))
+            selector.setCurrentText(str(current or ""))
+            completer = QCompleter(selector.model(), selector)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            selector.setCompleter(completer)
+            return selector
+
+        self.byproducts_enabled_checkbox = QCheckBox("Enable Lump and Fines by-products")
+        self.byproducts_enabled_checkbox.setChecked(bool(
+            getattr(self, "byproducts_enabled", False)
+        ))
+        self.byproducts_enabled_checkbox.toggled.connect(
+            self.update_byproduct_build_controls
+        )
+        self.byproducts_enabled_checkbox.toggled.connect(
+            self.schedule_data_stream_refresh
+        )
+        selection_layout.addRow("Enable By-products:", self.byproducts_enabled_checkbox)
+
+        saved_quantities = normalize_byproduct_quantity_fields(
+            getattr(self, "byproduct_quantity_fields", None)
+        )
+        saved_grades = normalize_byproduct_grade_fields(
+            getattr(self, "byproduct_grade_fields", None)
+        )
+        self.byproduct_quantity_selectors = {}
+        self.byproduct_grade_selectors = {}
+        self.byproduct_build_rows = []
+        grade_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+        for lane in BYPRODUCT_LANES:
+            lane_label = lane.title()
+            quantity_selector = searchable_field_selector(
+                additive_streams, saved_quantities[lane]
+            )
+            self.byproduct_quantity_selectors[lane] = quantity_selector
+            quantity_label = QLabel(f"{lane_label} Quantity Field:")
+            selection_layout.addRow(quantity_label, quantity_selector)
+            self.byproduct_build_rows.extend([quantity_label, quantity_selector])
+
+            lane_grade_selectors = {}
+            for analyte in PRODUCT_BUILD_ANALYTES:
+                selector = searchable_field_selector(
+                    weighted_average_fields, saved_grades[lane][analyte]
+                )
+                lane_grade_selectors[analyte] = selector
+                label = QLabel(f"{lane_label} Grade Field {grade_labels[analyte]}:")
+                selection_layout.addRow(label, selector)
+                self.byproduct_build_rows.extend([label, selector])
+            self.byproduct_grade_selectors[lane] = lane_grade_selectors
+
+        self.update_byproduct_build_controls()
+
         self.rom_planning_category_input = QLineEdit(
             self.data_stream_planning_categories.get("rom", "OPF Feed")
         )
@@ -6377,7 +6643,7 @@ class UserInputs(QMainWindow):
 
         self.cb_lump_fines_mode_input = QComboBox()
         self.cb_lump_fines_mode_input.addItem(
-            "Derive from grade blocks / mapped APS fields", "derived"
+            "Use mapped / grade-block-derived stockpile fields", "derived"
         )
         self.cb_lump_fines_mode_input.addItem(
             "Calculate from user lump percentage", "calculated"
@@ -6815,6 +7081,100 @@ class UserInputs(QMainWindow):
         percentage.setText(f"{float(getattr(self, 'cb_lump_percentage', 50.0)):g}")
         self.update_cb_lump_fines_controls()
 
+    def load_byproduct_build_settings(self):
+        checkbox = getattr(self, "byproducts_enabled_checkbox", None)
+        if checkbox is None:
+            return
+        checkbox.setChecked(bool(getattr(self, "byproducts_enabled", False)))
+        quantities = normalize_byproduct_quantity_fields(
+            getattr(self, "byproduct_quantity_fields", None)
+        )
+        grades = normalize_byproduct_grade_fields(
+            getattr(self, "byproduct_grade_fields", None)
+        )
+        for lane, selector in getattr(
+            self, "byproduct_quantity_selectors", {}
+        ).items():
+            selector.setCurrentText(quantities[lane])
+        for lane, selectors in getattr(
+            self, "byproduct_grade_selectors", {}
+        ).items():
+            for analyte, selector in selectors.items():
+                selector.setCurrentText(grades[lane][analyte])
+        self.update_byproduct_build_controls()
+
+    def update_byproduct_build_controls(self, *_args):
+        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
+        checkbox = getattr(self, "byproducts_enabled_checkbox", None)
+        enabled = bool(checkbox and checkbox.isChecked() and is_cb)
+        if checkbox is not None:
+            checkbox.setVisible(is_cb)
+            checkbox.setEnabled(is_cb)
+        for widget in getattr(self, "byproduct_build_rows", []):
+            widget.setVisible(is_cb)
+            widget.setEnabled(enabled)
+        product_selector = getattr(self, "product_build_tonnes_selector", None)
+        if product_selector is not None:
+            product_selector.setEnabled(not enabled)
+        table = getattr(self, "product_build_table", None)
+        if table is not None:
+            self.byproducts_enabled = enabled
+            table.setColumnHidden(
+                self.product_build_headers.index("By-product"), not enabled
+            )
+            self.renumber_product_build_rows()
+
+    def capture_byproduct_build_settings(self):
+        checkbox = getattr(self, "byproducts_enabled_checkbox", None)
+        is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
+        self.byproducts_enabled = bool(
+            checkbox and checkbox.isChecked() and is_cb
+        )
+        quantities = {}
+        grades = {}
+        for lane in BYPRODUCT_LANES:
+            selector = getattr(self, "byproduct_quantity_selectors", {}).get(lane)
+            quantities[lane] = str(
+                selector.currentText() if selector is not None else ""
+            ).strip().lower()
+            grades[lane] = {}
+            for analyte in PRODUCT_BUILD_ANALYTES:
+                grade_selector = getattr(
+                    self, "byproduct_grade_selectors", {}
+                ).get(lane, {}).get(analyte)
+                grades[lane][analyte] = str(
+                    grade_selector.currentText() if grade_selector is not None else ""
+                ).strip().lower()
+
+        if self.byproducts_enabled:
+            definitions = {
+                str(row.get("name") or "").strip().lower(): str(
+                    row.get("kind") or ""
+                ).strip().lower()
+                for row in normalize_field_definitions(
+                    getattr(self, "field_definitions", None)
+                )
+            }
+            errors = []
+            for lane in BYPRODUCT_LANES:
+                quantity = quantities[lane]
+                if definitions.get(quantity) != "additive":
+                    errors.append(
+                        f"{lane.title()} Quantity Field must be a defined additive field."
+                    )
+                for analyte in PRODUCT_BUILD_ANALYTES:
+                    field = grades[lane][analyte]
+                    if definitions.get(field) != "weighted_average":
+                        errors.append(
+                            f"{lane.title()} {analyte.upper()} Grade Field must be a defined weighted-average field."
+                        )
+            if errors:
+                raise ValueError("\n".join(errors))
+        self.byproduct_quantity_fields = normalize_byproduct_quantity_fields(
+            quantities
+        )
+        self.byproduct_grade_fields = normalize_byproduct_grade_fields(grades)
+
     def update_cb_lump_fines_controls(self, *_args):
         is_cb = str(getattr(self, "mine_input_choice", "") or "").upper() == "CB"
         combo = getattr(self, "cb_lump_fines_mode_input", None)
@@ -6848,51 +7208,66 @@ class UserInputs(QMainWindow):
     def populate_recon_factor_table(self):
         table = self.recon_factor_table
         factors = self.historical_recon_factors or {}
-        table.setRowCount(len(factors) * 2)
-        row = 0
+        factor_rows = []
         for brand in configured_brands(self.product_brand_labels_choice):
+            record = factors.get(brand, {}) or {}
+            factor_rows.extend([
+                (brand, "blend", "Blend"),
+                (brand, "regression", "Regression"),
+            ])
+            special = DataStreamReconciliation.CB_CAMPAIGN_FACTOR
+            if record.get(special):
+                factor_rows.append((
+                    brand,
+                    special,
+                    "SF - CBFL Campaign Fines",
+                ))
+        table.setRowCount(len(factor_rows))
+        row = 0
+        for brand, factor_type, factor_label in factor_rows:
             record = factors.get(brand, {})
-            for factor_type in ("blend", "regression"):
-                source_by_analyte = record.get("source_brand_by_analyte", {}) or {}
-                source_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
-                source_brand = ", ".join(
-                    f"{source_labels[analyte]} "
-                    f"{(source_by_analyte.get(analyte, {}) or {}).get(factor_type, record.get('source_brand', brand))}"
-                    for analyte in ANALYTES
+            source_by_analyte = record.get("source_brand_by_analyte", {}) or {}
+            source_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+            source_brand = ", ".join(
+                f"{source_labels[analyte]} "
+                f"{(source_by_analyte.get(analyte, {}) or {}).get(factor_type, record.get('source_brand', brand))}"
+                for analyte in ANALYTES
+            )
+            windows = record.get("lookback_days", {}) or {}
+            window_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
+            window_text = ", ".join(
+                f"{window_labels[analyte]} "
+                + (
+                    f"{(windows.get(analyte, {}) or {}).get(factor_type)}d"
+                    if (windows.get(analyte, {}) or {}).get(factor_type)
+                    else "Standard SF fallback"
+                    if factor_type == DataStreamReconciliation.CB_CAMPAIGN_FACTOR
+                    else "Default"
                 )
-                windows = record.get("lookback_days", {}) or {}
-                window_labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
-                window_text = ", ".join(
-                    f"{window_labels[analyte]} "
-                    + (
-                        f"{(windows.get(analyte, {}) or {}).get(factor_type)}d"
-                        if (windows.get(analyte, {}) or {}).get(factor_type)
-                        else "Default"
-                    )
-                    for analyte in ANALYTES
-                )
-                for column, text_value in enumerate(
-                    (brand, factor_type.title(), source_brand, window_text)
-                ):
-                    item = QTableWidgetItem(str(text_value))
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    table.setItem(row, column, item)
-                values = record.get(factor_type, {}) or {}
-                for analyte_index, analyte in enumerate(ANALYTES):
-                    value_record = values.get(analyte, {}) or {}
-                    calculated = float(value_record.get("calculated", 1.0) or 1.0)
-                    effective = float(value_record.get("effective", calculated) or calculated)
-                    calc_item = QTableWidgetItem(f"{calculated:.4f}")
-                    calc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    table.setItem(row, 4 + analyte_index * 2, calc_item)
-                    effective_item = QTableWidgetItem(f"{effective:.4f}")
-                    effective_item.setData(Qt.UserRole, (brand, factor_type, analyte))
-                    locked = bool(value_record.get("locked", False))
-                    if locked:
-                        effective_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                        effective_item.setToolTip("Dry-plant regression is fixed at 1.0.")
-                    table.setItem(row, 5 + analyte_index * 2, effective_item)
-                row += 1
+                for analyte in ANALYTES
+            )
+            for column, text_value in enumerate(
+                (brand, factor_label, source_brand, window_text)
+            ):
+                item = QTableWidgetItem(str(text_value))
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(row, column, item)
+            values = record.get(factor_type, {}) or {}
+            for analyte_index, analyte in enumerate(ANALYTES):
+                value_record = values.get(analyte, {}) or {}
+                calculated = float(value_record.get("calculated", 1.0) or 1.0)
+                effective = float(value_record.get("effective", calculated) or calculated)
+                calc_item = QTableWidgetItem(f"{calculated:.4f}")
+                calc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(row, 4 + analyte_index * 2, calc_item)
+                effective_item = QTableWidgetItem(f"{effective:.4f}")
+                effective_item.setData(Qt.UserRole, (brand, factor_type, analyte))
+                locked = bool(value_record.get("locked", False))
+                if locked:
+                    effective_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    effective_item.setToolTip("Dry-plant regression is fixed at 1.0.")
+                table.setItem(row, 5 + analyte_index * 2, effective_item)
+            row += 1
 
     def capture_recon_factor_table(self):
         for row in range(self.recon_factor_table.rowCount()):
@@ -6949,6 +7324,7 @@ class UserInputs(QMainWindow):
             "group_2wp_by_brand": bool(
                 self.group_2wp_build_targets_by_brand_choice
             ),
+            "byproducts_enabled": bool(getattr(self, "byproducts_enabled", False)),
         }
         return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
 
@@ -6966,11 +7342,16 @@ class UserInputs(QMainWindow):
             return
         self.apply_canonical_field_mappings()
         self.capture_cb_lump_fines_settings()
+        self.capture_byproduct_build_settings()
         overrides = {}
         if self.historical_recon_factors:
             self.capture_recon_factor_table()
             for brand, record in self.historical_recon_factors.items():
-                for factor_type in ("blend", "regression"):
+                for factor_type in (
+                    "blend",
+                    "regression",
+                    DataStreamReconciliation.CB_CAMPAIGN_FACTOR,
+                ):
                     for analyte, factor_record in (record.get(factor_type, {}) or {}).items():
                         overrides[(brand, factor_type, analyte)] = factor_record.get("effective")
         self.data_stream_effective_overrides = overrides
@@ -7042,6 +7423,7 @@ class UserInputs(QMainWindow):
                         crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
                         planning_period_count=self.planning_period_count(),
                         planning_category=planning_category,
+                        byproducts_enabled=bool(getattr(self, "byproducts_enabled", False)),
                     )
                     if self.group_2wp_build_targets_by_brand_choice:
                         targets = self.planning_plan_targets.group_builds_by_brand(targets)
@@ -7139,22 +7521,108 @@ class UserInputs(QMainWindow):
             return ""
         mode = str(state.get("cb_lump_fines_mode", "derived") or "derived")
         if mode != "calculated":
-            method = "grade_block_derived"
+            method = "mapped_source"
             if numeric(row.get("PROD1_LUMP_WMT", row.get("prod1_lump_wmt"))) is None:
-                method = "grade_block_derived_unavailable"
+                method = "mapped_source_unavailable"
             row["CB_SPLIT_METHOD"] = row["cb_split_method"] = method
             return ""
-        calculated = calculate_cb_lump_fines(
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(row)
+        defined = dict(row.get("defined_fields") or {})
+        calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
             row,
             state.get("cb_lump_percentage", 50.0),
-            source_wmt=row.get("BALANCE", row.get("balance")),
-            source_dmt=row.get("FEED_DMT", row.get("feed_dmt")),
+            product_wmt=defined.get(
+                "modelled_product_wmt", row.get("modelled_product_wmt")
+            ),
+            product_dmt=defined.get(
+                "modelled_product_dmt", row.get("modelled_product_dmt")
+            ),
+            head_grades=head_grades,
+            fines_grades=fines_grades,
+        ))
+        self.sync_cb_split_fields(row, calculated)
+        return str(calculated.get("cb_split_warning") or "")
+
+    def cb_calculated_grade_vectors(self, row):
+        """Return standard-SF head and CBFL-campaign-SF fines grades."""
+        streams = normalise_grade_streams(
+            (row or {}).get("grade_streams")
+            or (row or {}).get("GRADE_STREAMS")
         )
+        modelled_by_brand = streams.get("modelled_product", {}) or {}
+        adjusted_by_brand = streams.get("adjusted_product", {}) or {}
+        modelled = modelled_by_brand.get("SF") or {}
+        head = adjusted_by_brand.get("SF") or {}
+        missing = [
+            analyte for analyte in ANALYTES
+            if numeric(modelled.get(analyte)) is None
+            or numeric(head.get(analyte)) is None
+        ]
+        if missing:
+            raise ValueError(
+                "Cloudbreak calculated lump/fines requires mapped modelled "
+                "product grades and standard SF reconciliation for "
+                + ", ".join(value.upper() for value in missing)
+                + "."
+            )
+        special = DataStreamReconciliation.CB_CAMPAIGN_FACTOR
+        fines = {
+            analyte: numeric(modelled[analyte]) * historical_factor(
+                self.historical_recon_factors,
+                "SF",
+                special,
+                analyte,
+            )
+            for analyte in ANALYTES
+        }
+        return (
+            {analyte: numeric(head[analyte]) for analyte in ANALYTES},
+            fines,
+        )
+
+    def cb_split_configured_fields(self, calculated):
+        """Project calculated lane values into the explicit Data Streams fields."""
+        values = dict(calculated or {})
+        quantities = normalize_byproduct_quantity_fields(
+            vars(self).get("byproduct_quantity_fields")
+        )
+        grades = normalize_byproduct_grade_fields(
+            vars(self).get("byproduct_grade_fields")
+        )
+        for lane in BYPRODUCT_LANES:
+            quantity_target = quantities[lane]
+            quantity_basis = "dmt" if quantity_target.endswith("_dmt") else "wmt"
+            quantity_value = numeric(
+                values.get(f"prod1_{lane}_{quantity_basis}")
+            )
+            if quantity_value is not None:
+                values[quantity_target] = quantity_value
+            for analyte in PRODUCT_BUILD_ANALYTES:
+                grade_value = numeric(values.get(f"prod1_{lane}_{analyte}"))
+                if grade_value is not None:
+                    values[grades[lane][analyte]] = grade_value
+        return values
+
+    def sync_cb_split_fields(self, record, calculated):
+        """Publish calculated CB size quantities/grades to canonical fields."""
+        record = record if isinstance(record, dict) else {}
+        defined = dict(record.get("defined_fields") or {})
+        properties = dict(record.get("source_properties") or {})
+        field_names = {
+            row["name"]
+            for row in normalize_field_definitions(
+                vars(self).get("field_definitions")
+            )
+        }
         for key, value in calculated.items():
             if key.startswith(("prod1_", "lump_", "fines_", "cb_")):
-                row[key] = value
-                row[key.upper()] = value
-        return str(calculated.get("cb_split_warning") or "")
+                record[key] = value
+                record[key.upper()] = value
+            if key in field_names and numeric(value) is not None:
+                defined[key] = numeric(value)
+                properties[key] = numeric(value)
+        record["defined_fields"] = defined
+        record["source_properties"] = properties
 
     def apply_cb_split_to_amt_row(self, row):
         """Apply the optional user-calculated CB split to one AMT hex."""
@@ -7174,21 +7642,38 @@ class UserInputs(QMainWindow):
         values = dict(payload.get("values") or {})
         coverage = dict(payload.get("coverage") or {})
         if mode != "calculated":
-            method = "grade_block_derived"
+            method = "mapped_or_grade_block_derived"
             if numeric(values.get("prod1_lump_wmt")) is None:
-                method = "grade_block_derived_unavailable"
+                method = "mapped_or_grade_block_derived_unavailable"
             row["CB_SPLIT_METHOD"] = method
             row["CB_SPLIT_WARNING"] = ""
             return ""
 
-        calculated = calculate_cb_lump_fines(
-            values,
+        head_grades, fines_grades = self.cb_calculated_grade_vectors(row)
+        defined = dict(row.get("defined_fields") or {})
+        calculated = self.cb_split_configured_fields(calculate_cb_lump_fines(
+            {**values, **defined},
             state.get("cb_lump_percentage", 50.0),
-            source_wmt=row.get("FINAL_WMT", row.get("final_wmt")),
-            source_dmt=values.get("feed_dmt"),
-        )
+            product_wmt=defined.get(
+                "modelled_product_wmt", row.get("modelled_product_wmt")
+            ),
+            product_dmt=defined.get(
+                "modelled_product_dmt", row.get("modelled_product_dmt")
+            ),
+            head_grades=head_grades,
+            fines_grades=fines_grades,
+        ))
+        field_names = {
+            definition["name"]
+            for definition in normalize_field_definitions(
+                vars(self).get("field_definitions")
+            )
+        }
         for key, value in calculated.items():
-            if not key.startswith(("prod1_", "lump_", "fines_", "cb_")):
+            if (
+                not key.startswith(("prod1_", "lump_", "fines_", "cb_"))
+                and key not in field_names
+            ):
                 continue
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 values[key] = float(value)
@@ -7218,6 +7703,7 @@ class UserInputs(QMainWindow):
         )
         row["CB_SPLIT_METHOD"] = str(calculated.get("cb_split_method") or "")
         row["CB_SPLIT_WARNING"] = str(calculated.get("cb_split_warning") or "")
+        self.sync_cb_split_fields(row, calculated)
         return row["CB_SPLIT_WARNING"]
 
     def apply_grade_streams_to_inventory(self):
@@ -7341,18 +7827,23 @@ class UserInputs(QMainWindow):
         })
         try:
             self.capture_cb_lump_fines_settings()
+            self.capture_byproduct_build_settings()
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
-        self.capture_recon_factor_table()
-        self.reconcile_saved_AMT_chunk_grade_streams()
-        self.apply_canonical_field_mappings()
-        self.apply_grade_streams_to_inventory()
-        registering_scenarios = bool(self.data_stream_pending_build_targets)
-        self.refresh_AMT_enrichment_if_needed(
-            persist=not registering_scenarios,
-            refresh_map=not registering_scenarios,
-        )
+        try:
+            self.capture_recon_factor_table()
+            self.reconcile_saved_AMT_chunk_grade_streams()
+            self.apply_canonical_field_mappings()
+            self.apply_grade_streams_to_inventory()
+            registering_scenarios = bool(self.data_stream_pending_build_targets)
+            self.refresh_AMT_enrichment_if_needed(
+                persist=not registering_scenarios,
+                refresh_map=not registering_scenarios,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Data Streams", str(exc))
+            return
         if registering_scenarios:
             # Registration clears and then seeds the scenario database.  The
             # seed is the sole inventory/AMT/reconciliation write on this path.
@@ -10859,15 +11350,23 @@ class UserInputs(QMainWindow):
             if not isinstance(setting, dict):
                 continue
             brand = str(first_value(setting, ["brand", "brand_label", "product_brand"], "") or "").strip().upper()
+            byproduct = str(first_value(
+                setting, ["byproduct", "product_lane", "lane"], ""
+            ) or "").strip().lower()
             if brand:
-                brand_counts[brand] = brand_counts.get(brand, 0) + 1
-                default_build_name = f"{brand} Build {brand_counts[brand]}"
+                count_key = (brand, byproduct)
+                brand_counts[count_key] = brand_counts.get(count_key, 0) + 1
+                lane_label = f" {byproduct.title()}" if byproduct else ""
+                default_build_name = f"{brand}{lane_label} Build {brand_counts[count_key]}"
             else:
                 default_build_name = f"Build {index + 1}"
             row = {
                 "build_id": int(first_value(setting, ["build_id", "id", "sequence"], index + 1) or index + 1),
-                "build_name": default_build_name,
+                "build_name": str(first_value(
+                    setting, ["build_name", "name"], default_build_name
+                ) or default_build_name),
                 "brand": brand,
+                "byproduct": byproduct,
                 "target_tonnes": first_value(setting, ["target_tonnes", "tonnes", "target_wmt", "target_quantity"], 0),
             }
             for grade in ["fe", "si", "al", "p", "mn"]:
@@ -12172,6 +12671,15 @@ class UserInputs(QMainWindow):
         )
         loaded_state["product_build_tonnes_stream"] = str(
             loaded_state.get("product_build_tonnes_stream") or "modelled_product_wmt"
+        )
+        loaded_state["byproducts_enabled"] = bool(
+            loaded_state.get("byproducts_enabled", False)
+        )
+        loaded_state["byproduct_quantity_fields"] = normalize_byproduct_quantity_fields(
+            loaded_state.get("byproduct_quantity_fields")
+        )
+        loaded_state["byproduct_grade_fields"] = normalize_byproduct_grade_fields(
+            loaded_state.get("byproduct_grade_fields")
         )
         loaded_state["aps_grade_field_mappings"] = normalise_aps_grade_field_mappings(
             loaded_state.get("aps_grade_field_mappings"),
@@ -14107,6 +14615,15 @@ class UserInputs(QMainWindow):
             "cb_lump_percentage": numeric(
                 getattr(self, "cb_lump_percentage", 50.0)
             ),
+            "byproducts_enabled": bool(
+                getattr(self, "byproducts_enabled", False)
+            ),
+            "byproduct_quantity_fields": normalize_byproduct_quantity_fields(
+                getattr(self, "byproduct_quantity_fields", None)
+            ),
+            "byproduct_grade_fields": normalize_byproduct_grade_fields(
+                getattr(self, "byproduct_grade_fields", None)
+            ),
         }
         return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
 
@@ -14644,7 +15161,6 @@ class UserInputs(QMainWindow):
                     if value is not None
                 }
                 row["source_properties"] = source_properties
-                cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 strict_mappings = bool(
                     vars(self).get("field_definitions") is not None
                     or vars(self).get("field_mapping_schema_version", 0) >= 3
@@ -14673,6 +15189,7 @@ class UserInputs(QMainWindow):
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
                 self.sync_canonical_grade_fields(row, streams)
+                cb_split_warning = self.apply_cb_split_to_amt_row(row)
                 inventory_name = str(row.get("FOOTPRINT") or footprint or "")
                 inventory_build = str(row.get("LOCATION_NAME") or "")
                 inventory_transaction_datetime = str(
@@ -20435,6 +20952,9 @@ class UserInputs(QMainWindow):
                 "crusher_tonnes_stream": self.crusher_tonnes_stream,
                 "reclaimer_tonnes_stream": self.reclaimer_tonnes_stream,
                 "product_build_tonnes_stream": self.product_build_tonnes_stream,
+                "byproducts_enabled": self.byproducts_enabled,
+                "byproduct_quantity_fields": self.byproduct_quantity_fields,
+                "byproduct_grade_fields": self.byproduct_grade_fields,
                 "field_definitions": self.field_definitions,
                 "field_mappings": self.field_mappings,
                 "field_mapping_schema_version": int(getattr(
@@ -20812,6 +21332,13 @@ class UserInputs(QMainWindow):
         self.crusher_tonnes_stream = str(loaded_state.get("crusher_tonnes_stream") or "modelled_rom_wmt")
         self.reclaimer_tonnes_stream = str(loaded_state.get("reclaimer_tonnes_stream") or "modelled_rom_wmt")
         self.product_build_tonnes_stream = str(loaded_state.get("product_build_tonnes_stream") or "modelled_product_wmt")
+        self.byproducts_enabled = bool(loaded_state.get("byproducts_enabled", False))
+        self.byproduct_quantity_fields = normalize_byproduct_quantity_fields(
+            loaded_state.get("byproduct_quantity_fields")
+        )
+        self.byproduct_grade_fields = normalize_byproduct_grade_fields(
+            loaded_state.get("byproduct_grade_fields")
+        )
         self.field_definitions = normalize_field_definitions(
             loaded_state.get("field_definitions")
         )
@@ -21113,6 +21640,9 @@ class UserInputs(QMainWindow):
         self.crusher_tonnes_stream = "modelled_rom_wmt"
         self.reclaimer_tonnes_stream = "modelled_rom_wmt"
         self.product_build_tonnes_stream = "modelled_product_wmt"
+        self.byproducts_enabled = False
+        self.byproduct_quantity_fields = default_byproduct_quantity_fields()
+        self.byproduct_grade_fields = default_byproduct_grade_fields()
         self.field_definitions = default_field_definitions()
         self.field_mappings = []
         self.field_mapping_schema_version = 0

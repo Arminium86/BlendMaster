@@ -633,17 +633,25 @@ def legacy_aps_mappings(definitions, mappings, brands):
             for analyte in ANALYTES
         }
     defined = {row["name"] for row in normalize_field_definitions(definitions)}
+
+    def core_grade_field(target):
+        return any(
+            target == f"{stream}_{analyte}"
+            for stream in STREAM_PREFIXES
+            for analyte in ANALYTES
+        )
+
     for target, source in mapping_lookup(mappings, "aps").items():
-        if target in defined and not any(
-            target.startswith(f"{stream}_") for stream in STREAM_PREFIXES
-        ):
+        if target in defined and not core_grade_field(target):
             property_mappings[target] = source
     # Include brand-only physical fields as the APS importer accepts one raw
     # header per canonical property. Conflicts are left to explicit validation.
     for brand in brands:
         for target, source in mapping_lookup(mappings, "aps", brand).items():
-            if target in defined and target not in property_mappings and not any(
-                target.startswith(f"{stream}_") for stream in STREAM_PREFIXES
+            if (
+                target in defined
+                and target not in property_mappings
+                and not core_grade_field(target)
             ):
                 property_mappings[target] = source
     return grade_mappings, property_mappings

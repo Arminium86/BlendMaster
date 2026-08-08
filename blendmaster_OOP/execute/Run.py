@@ -11,6 +11,10 @@ from classes.CaseModeller import (
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductBuildLanes import (
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
 from classes.GradeStreams import configured_brands, resolve_grade_vector
@@ -315,6 +319,19 @@ class Run:
             "product_build_tonnes_stream": "modelled_product_wmt",
         }.items():
             solver_config[key] = (site_context or {}).get(key) or solver_config.get(key) or default
+        solver_config["byproducts_enabled"] = bool(
+            (site_context or {}).get(
+                "byproducts_enabled", solver_config.get("byproducts_enabled", False)
+            )
+        )
+        solver_config["byproduct_quantity_fields"] = normalize_byproduct_quantity_fields(
+            (site_context or {}).get("byproduct_quantity_fields")
+            or solver_config.get("byproduct_quantity_fields")
+        )
+        solver_config["byproduct_grade_fields"] = normalize_byproduct_grade_fields(
+            (site_context or {}).get("byproduct_grade_fields")
+            or solver_config.get("byproduct_grade_fields")
+        )
         solver_config["configured_product_brands"] = list(
             (site_context or {}).get("product_brands", []) or []
         )
@@ -329,6 +346,16 @@ class Run:
             for row in field_definitions
             if row.get("use_in_optimisation")
         ]
+        if solver_config["byproducts_enabled"]:
+            solver_config["optimisation_source_property_fields"] = sorted(set(
+                solver_config["optimisation_source_property_fields"]
+                + list(solver_config["byproduct_quantity_fields"].values())
+                + [
+                    field
+                    for lane_fields in solver_config["byproduct_grade_fields"].values()
+                    for field in lane_fields.values()
+                ]
+            ))
         solver_config["source_property_kinds"] = {
             str(row["name"]): str(row.get("kind") or "weighted_average")
             for row in field_definitions

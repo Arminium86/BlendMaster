@@ -16,6 +16,10 @@ from classes.CustomConstraints import (
     source_properties_from_mapping,
 )
 from classes.GradeStreams import ANALYTES, STREAMS, inventory_product_property_aliases
+from classes.ProductBuildLanes import (
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from pandas import DataFrame
 
 class DataLoader:
@@ -44,6 +48,18 @@ class DataLoader:
                 "product_build_tonnes_stream": "modelled_product_wmt",
             }.items()
         )
+        if self.solver_config.get("byproducts_enabled", False):
+            quantities = normalize_byproduct_quantity_fields(
+                self.solver_config.get("byproduct_quantity_fields")
+            )
+            grades = normalize_byproduct_grade_fields(
+                self.solver_config.get("byproduct_grade_fields")
+            )
+            self.required_source_property_keys.update(quantities.values())
+            self.required_source_property_keys.update(
+                field for lane_fields in grades.values()
+                for field in lane_fields.values()
+            )
         if selected_stream in STREAMS:
             self.required_source_property_keys.update(
                 f"{selected_stream}_{analyte}" for analyte in ANALYTES

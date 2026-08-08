@@ -6,6 +6,16 @@ from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductBuildLanes import (
+    BYPRODUCT_LANES,
+    PRODUCT_LANE,
+    active_build_indices,
+    lane_grade_column,
+    lane_grade_weight_column,
+    lane_source_tonnes_column,
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
 from classes.CustomConstraints import (
@@ -122,6 +132,9 @@ class CaseModeller:
         self.start_time = periods.get_periods()["preplan_start"]
         self.period_tracker = "preplan"
         self.solver_config = solver_config or {}
+        self.byproducts_enabled = bool(
+            self.solver_config.get("byproducts_enabled", False)
+        )
         constraint_definitions = list(
             self.solver_config.get("custom_constraints") or []
         )
@@ -147,6 +160,18 @@ class CaseModeller:
                 "product_build_tonnes_stream": "modelled_product_wmt",
             }.items()
         )
+        if self.byproducts_enabled:
+            quantities = normalize_byproduct_quantity_fields(
+                self.solver_config.get("byproduct_quantity_fields")
+            )
+            grades = normalize_byproduct_grade_fields(
+                self.solver_config.get("byproduct_grade_fields")
+            )
+            required_source_property_keys.update(quantities.values())
+            required_source_property_keys.update(
+                field for lane_fields in grades.values()
+                for field in lane_fields.values()
+            )
         if selected_stream in STREAMS:
             required_source_property_keys.update(
                 f"{selected_stream}_{analyte}" for analyte in ANALYTES
@@ -220,6 +245,16 @@ class CaseModeller:
         # composition changes.
         self.previous_chemical_blend_signature = None
         self.product_build_settings = self.normalized_product_build_settings(product_build_settings)
+        if self.byproducts_enabled and self.product_build_settings:
+            configured_lanes = {
+                setting.get("byproduct") for setting in self.product_build_settings
+            }
+            missing = [lane for lane in BYPRODUCT_LANES if lane not in configured_lanes]
+            if missing:
+                raise ValueError(
+                    "By-products are enabled but Product Build Settings have no "
+                    f"{', '.join(lane.title() for lane in missing)} build."
+                )
         self.product_build_runtime_states = [
             {
                 "tonnes": 0.0,
@@ -276,6 +311,10 @@ class CaseModeller:
                 "build_id": int(setting.get("build_id") or index + 1),
                 "build_name": build_name,
                 "brand": explicit_brand,
+                "byproduct": (
+                    str(setting.get("byproduct") or "").strip().lower()
+                    if self.byproducts_enabled else ""
+                ),
                 "target_tonnes": target_tonnes,
                 "target_fe_min": float(setting.get("target_fe_min", 0) or 0),
                 "target_fe_max": float(setting.get("target_fe_max", 100) or 100),
@@ -290,12 +329,20 @@ class CaseModeller:
             })
         return normalized
 
-    def current_product_build_index(self):
-        for index, setting in enumerate(self.product_build_settings):
-            state = self.product_build_runtime_states[index]
-            if state["tonnes"] < setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE:
-                return index
-        return None
+    def current_product_build_indices(self):
+        return active_build_indices(
+            self.product_build_settings,
+            self.product_build_runtime_states,
+            bool(getattr(self, "byproducts_enabled", False)),
+        )
+
+    def current_product_build_index(self, lane=None):
+        active = self.current_product_build_indices()
+        if lane is not None:
+            return active.get(str(lane).strip().lower())
+        if PRODUCT_LANE in active:
+            return active[PRODUCT_LANE]
+        return next(iter(active.values()), None)
 
     def current_product_build_setting(self):
         index = self.current_product_build_index()
@@ -412,59 +459,66 @@ class CaseModeller:
 
     def update_product_build_runtime_state(self, selected_results):
         if not self.product_build_settings or selected_results is None or selected_results.empty:
-            return None
+            return [] if self.byproducts_enabled else None
 
-        data = selected_results.copy()
-        if "product_build_source_tonnes" not in data:
-            if self.solver_config.get("strict_mapped_fields", False):
-                raise ValueError(
-                    "Optimiser result is missing product_build_source_tonnes; "
-                    "the product build cannot fall back to physical ROM tonnes."
-                )
-            data["product_build_source_tonnes"] = data.get(
-                "source_actual_tonnes", 0
+        completed = []
+        for lane, build_index in self.current_product_build_indices().items():
+            tonnes_column = lane_source_tonnes_column(lane)
+            data = selected_results.copy()
+            if tonnes_column not in data:
+                if self.solver_config.get("strict_mapped_fields", False):
+                    raise ValueError(
+                        f"Optimiser result is missing {tonnes_column}; the "
+                        f"{lane} product build cannot fall back to physical ROM tonnes."
+                    )
+                data[tonnes_column] = data.get("source_actual_tonnes", 0)
+            data[tonnes_column] = pd.to_numeric(
+                data[tonnes_column], errors="coerce"
+            ).fillna(0)
+            data = data[data[tonnes_column] > Optimizer.SOLUTION_TOLERANCE]
+            if data.empty:
+                continue
+
+            product_tonnes = float(data[tonnes_column].sum() or 0)
+            build_setting = self.product_build_settings[build_index]
+            build_state = self.product_build_runtime_states[build_index]
+            capacity = build_setting["target_tonnes"] - build_state["tonnes"]
+            if capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
+                completed.append(build_index)
+                continue
+
+            allocation_tonnes = min(product_tonnes, capacity)
+            allocation_fraction = (
+                allocation_tonnes / product_tonnes if product_tonnes else 0
             )
-        data["product_build_source_tonnes"] = pd.to_numeric(
-            data["product_build_source_tonnes"], errors="coerce"
-        ).fillna(0)
-        data = data[
-            data["product_build_source_tonnes"] > Optimizer.SOLUTION_TOLERANCE
-        ]
-        if data.empty:
-            return None
-
-        product_tonnes = float(data["product_build_source_tonnes"].sum() or 0)
-        build_index = self.current_product_build_index()
-        if build_index is None:
-            return None
-
-        build_setting = self.product_build_settings[build_index]
-        build_state = self.product_build_runtime_states[build_index]
-        capacity = build_setting["target_tonnes"] - build_state["tonnes"]
-        if capacity <= self.PRODUCT_BUILD_TONNES_TOLERANCE:
-            return build_index
-
-        allocation_tonnes = min(product_tonnes, capacity)
-        allocation_fraction = allocation_tonnes / product_tonnes if product_tonnes else 0
-        for _, row in data.iterrows():
-            for grade in ["fe", "si", "al", "p", "mn"]:
-                grade_value = float(row.get(f"source_grade_{grade}") or 0)
-                grade_weight = float(
-                    row.get(f"selected_grade_weight_{grade}_tonnes")
-                    or row.get("product_build_source_tonnes")
-                    or 0
-                ) * allocation_fraction
-                build_state[f"grade_{grade}_metal"] += grade_weight * grade_value
-                build_state[f"grade_{grade}_weight"] = float(
-                    build_state.get(f"grade_{grade}_weight", build_state.get("tonnes", 0))
-                ) + grade_weight
-        build_state["tonnes"] += allocation_tonnes
-        if (
-            build_state["tonnes"]
-            >= build_setting["target_tonnes"] - self.PRODUCT_BUILD_TONNES_TOLERANCE
-        ):
-            return build_index
-        return None
+            for _, row in data.iterrows():
+                for grade in ["fe", "si", "al", "p", "mn"]:
+                    grade_value = float(
+                        row.get(lane_grade_column(lane, grade)) or 0
+                    )
+                    grade_weight = float(
+                        row.get(lane_grade_weight_column(lane, grade))
+                        or row.get(tonnes_column)
+                        or 0
+                    ) * allocation_fraction
+                    build_state[f"grade_{grade}_metal"] += (
+                        grade_weight * grade_value
+                    )
+                    build_state[f"grade_{grade}_weight"] = float(
+                        build_state.get(
+                            f"grade_{grade}_weight", build_state.get("tonnes", 0)
+                        )
+                    ) + grade_weight
+            build_state["tonnes"] += allocation_tonnes
+            if (
+                build_state["tonnes"]
+                >= build_setting["target_tonnes"]
+                - self.PRODUCT_BUILD_TONNES_TOLERANCE
+            ):
+                completed.append(build_index)
+        if bool(getattr(self, "byproducts_enabled", False)):
+            return completed
+        return completed[0] if completed else None
 
     def product_build_repair_enabled(self):
         return bool(
@@ -574,11 +628,19 @@ class CaseModeller:
             if build_index >= len(runtime_states):
                 continue
 
+            requested_lane = str(
+                self.product_build_settings[build_index].get("byproduct") or ""
+            )
             prior_builds_complete = all(
                 runtime_states[index]["tonnes"]
                 >= self.product_build_settings[index]["target_tonnes"]
                 - self.PRODUCT_BUILD_TONNES_TOLERANCE
                 for index in range(build_index)
+                if (
+                    not self.byproducts_enabled
+                    or str(self.product_build_settings[index].get("byproduct") or "")
+                    == requested_lane
+                )
             )
             requested_build_incomplete = (
                 runtime_states[build_index]["tonnes"]
@@ -604,38 +666,39 @@ class CaseModeller:
         ):
             return
 
-        build_index = self.current_product_build_index()
-        if build_index is None:
-            return
-        build_state = self.product_build_runtime_states[build_index]
-        build_setting = self.product_build_settings[build_index]
-        repair_from_state = self.product_build_repair_from_states.get(build_index)
-        repair_constraint_active = (
-            repair_from_state is not None
-            and self.steady_state_tracker >= repair_from_state
-        )
-        terminal_constraint_active = (
-            build_state["tonnes"] > Optimizer.SOLUTION_TOLERANCE
-            and not self.product_build_grade_on_spec(build_state, build_setting)
-            and Optimizer.product_build_can_complete_in_steady_state(
-                build_setting["target_tonnes"],
-                build_state["tonnes"],
-                self.product_build_capacity_rate(
-                    period_crusher_target.get("crusher_rate", 0.0)
-                ),
-                steady_state_duration,
+        for lane, build_index in self.current_product_build_indices().items():
+            build_state = self.product_build_runtime_states[build_index]
+            build_setting = self.product_build_settings[build_index]
+            repair_from_state = self.product_build_repair_from_states.get(build_index)
+            repair_constraint_active = (
+                repair_from_state is not None
+                and self.steady_state_tracker >= repair_from_state
             )
-        )
-        if not repair_constraint_active and not terminal_constraint_active:
-            return
-
-        self.request_product_build_repair(
-            build_index,
-            "A cumulative build-grade repair constraint was infeasible.",
-        )
+            terminal_constraint_active = (
+                build_state["tonnes"] > Optimizer.SOLUTION_TOLERANCE
+                and not self.product_build_grade_on_spec(build_state, build_setting)
+                and Optimizer.product_build_can_complete_in_steady_state(
+                    build_setting["target_tonnes"],
+                    build_state["tonnes"],
+                    self.product_build_capacity_rate(
+                        period_crusher_target.get("crusher_rate", 0.0),
+                        lane=lane,
+                    ),
+                    steady_state_duration,
+                )
+            )
+            if repair_constraint_active or terminal_constraint_active:
+                self.request_product_build_repair(
+                    build_index,
+                    "A cumulative build-grade repair constraint was infeasible.",
+                )
 
     def validate_completed_product_build(self, build_index):
         if build_index is None or not self.product_build_repair_enabled():
+            return
+        if isinstance(build_index, (list, tuple, set)):
+            for index in build_index:
+                self.validate_completed_product_build(index)
             return
         build_state = self.product_build_runtime_states[build_index]
         build_setting = self.product_build_settings[build_index]
@@ -1530,34 +1593,72 @@ class CaseModeller:
         solver_config = dict(self.solver_config or {})
         solver_config["current_steady_state_datetime"] = self.current_time
         solver_config["enforce_cumulative_product_build_grade"] = False
-        current_product_build_index = self.current_product_build_index()
-        if current_product_build_index is not None:
-            current_product_build = self.product_build_settings[current_product_build_index]
+        current_indices = self.current_product_build_indices()
+        if current_indices:
+            target_builds = {
+                lane: dict(self.product_build_settings[index])
+                for lane, index in current_indices.items()
+            }
+            target_states = {
+                lane: dict(self.product_build_runtime_states[index])
+                for lane, index in current_indices.items()
+            }
+            completion_projection = {
+                lane: self.active_product_build_completes_within_horizon(
+                    index, lane=lane
+                )
+                for lane, index in current_indices.items()
+            }
+            solver_config["target_product_builds"] = target_builds
+            solver_config["target_product_build_states"] = target_states
+            solver_config[
+                "active_product_builds_complete_within_horizon"
+            ] = completion_projection
+            cumulative_repairs = {}
+            hard_repairs = {}
+            for lane, index in current_indices.items():
+                repair_state = getattr(
+                    self, "product_build_repair_from_states", {}
+                ).get(index)
+                hard_state = getattr(
+                    self, "product_build_hard_repair_from_states", {}
+                ).get(index)
+                cumulative_repairs[lane] = (
+                    repair_state is not None
+                    and self.steady_state_tracker >= repair_state
+                )
+                hard_repairs[lane] = (
+                    hard_state is not None
+                    and self.steady_state_tracker >= hard_state
+                )
+            solver_config[
+                "enforce_cumulative_product_build_grades"
+            ] = cumulative_repairs
+            solver_config[
+                "force_product_build_state_grades_on_spec_by_lane"
+            ] = hard_repairs
+            primary_lane = (
+                "lump" if "lump" in current_indices
+                else next(iter(current_indices))
+            )
+            current_product_build_index = current_indices[primary_lane]
+            current_product_build = target_builds[primary_lane]
             solver_config["target_product_brand"] = current_product_build.get("brand", "")
+            # Legacy aliases keep the established one-build path and reports
+            # stable. The optimiser consumes the lane dictionaries above when
+            # by-products are enabled.
             solver_config["target_product_build"] = dict(current_product_build)
             solver_config["target_product_build_state"] = dict(
-                self.product_build_runtime_states[current_product_build_index]
+                target_states[primary_lane]
             )
             solver_config["active_product_build_completes_within_horizon"] = (
-                self.active_product_build_completes_within_horizon(
-                    current_product_build_index
-                )
-            )
-            repair_from_state = getattr(
-                self, "product_build_repair_from_states", {}
-            ).get(
-                current_product_build_index
+                completion_projection[primary_lane]
             )
             solver_config["enforce_cumulative_product_build_grade"] = (
-                repair_from_state is not None
-                and self.steady_state_tracker >= repair_from_state
+                cumulative_repairs[primary_lane]
             )
-            hard_repair_from_state = getattr(
-                self, "product_build_hard_repair_from_states", {}
-            ).get(current_product_build_index)
             solver_config["force_product_build_state_grades_on_spec"] = (
-                hard_repair_from_state is not None
-                and self.steady_state_tracker >= hard_repair_from_state
+                hard_repairs[primary_lane]
             )
         else:
             period_target = (self.crusher_targets or {}).get(self.period_tracker, {}) or {}
@@ -1575,7 +1676,7 @@ class CaseModeller:
         }
         return solver_config
 
-    def active_product_build_completes_within_horizon(self, build_index):
+    def active_product_build_completes_within_horizon(self, build_index, lane=None):
         """Return whether remaining crusher capacity can finish the active build.
 
         This deliberately uses the remaining configured planning horizon, rather
@@ -1613,23 +1714,28 @@ class CaseModeller:
             except (TypeError, ValueError):
                 crusher_rate = 0.0
             remaining_capacity += (
-                self.product_build_capacity_rate(crusher_rate) * hours
+                self.product_build_capacity_rate(crusher_rate, lane=lane) * hours
             )
 
         return remaining_tonnes <= (
             remaining_capacity + self.PRODUCT_BUILD_TONNES_TOLERANCE
         )
 
-    def product_build_capacity_rate(self, crusher_rate):
+    def product_build_capacity_rate(self, crusher_rate, lane=None):
         """Convert configured crusher capacity to an optimistic build rate."""
         crusher_stream = str(
             self.solver_config.get("crusher_tonnes_stream")
             or "modelled_rom_wmt"
         )
-        product_stream = str(
-            self.solver_config.get("product_build_tonnes_stream")
-            or "modelled_product_wmt"
-        )
+        if bool(getattr(self, "byproducts_enabled", False)) and lane in BYPRODUCT_LANES:
+            product_stream = normalize_byproduct_quantity_fields(
+                self.solver_config.get("byproduct_quantity_fields")
+            )[lane]
+        else:
+            product_stream = str(
+                self.solver_config.get("product_build_tonnes_stream")
+                or "modelled_product_wmt"
+            )
         event_pool = getattr(self, "event_pool", None)
         if isinstance(event_pool, EventPoolGenerator):
             capacity_sources = [

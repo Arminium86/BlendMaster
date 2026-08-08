@@ -2887,6 +2887,7 @@ class DrawAMTStockpile:
         )
         product_coverage_parts = []
         product_coverage_warnings = []
+        product_grade_coverage_pct = {}
         for product in (1, 2):
             values = []
             incomplete = False
@@ -2901,6 +2902,9 @@ class DrawAMTStockpile:
                         if total_tonnes > 0 else 0.0
                     )
                     values.append(f"{label} {fraction * 100.0:.2f}%")
+                    product_grade_coverage_pct[
+                        f"PROD{product} {label}"
+                    ] = fraction * 100.0
                     incomplete = incomplete or fraction < 0.99999999
             if values:
                 product_coverage_parts.append(
@@ -2914,11 +2918,13 @@ class DrawAMTStockpile:
                     )
         grade_stream_warnings.extend(product_coverage_warnings)
         partial_mapped_fields = []
+        mapped_field_coverage_pct = {}
         for name in sorted(mapped_properties):
             coverage_fraction = (
                 min(mapped_coverage_tonnes.get(name, 0.0) / total_tonnes, 1.0)
                 if total_tonnes > 0 else 0.0
             )
+            mapped_field_coverage_pct[name] = coverage_fraction * 100.0
             if 0 < coverage_fraction < 0.99999999:
                 partial_mapped_fields.append(
                     f"{name} {coverage_fraction * 100.0:.2f}%"
@@ -3022,6 +3028,16 @@ class DrawAMTStockpile:
             ),
             "modelled_product_coverage": "; ".join(product_coverage_parts),
             "modelled_properties": modelled_properties,
+            "data_quality": {
+                "lineage_coverage_pct": lineage_coverage_pct,
+                "mapped_field_coverage_pct": mapped_field_coverage_pct,
+                "product_grade_coverage_pct": product_grade_coverage_pct,
+                "geometry_quarantine_count": len(geometry_quarantine_rows),
+                "geometry_quarantine_hexes": ",".join(
+                    str(row.get("hex") or "")
+                    for row in geometry_quarantine_rows
+                ),
+            },
             "grade_stream_warnings": list(dict.fromkeys(grade_stream_warnings)),
             "geometry_quarantine_count": len(geometry_quarantine_rows),
             "geometry_quarantine_wmt": sum(

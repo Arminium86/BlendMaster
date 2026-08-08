@@ -139,6 +139,7 @@ class PlanningPlanTargets:
         crusher_contribution_ratio=1.0,
         planning_period_count=3,
         planning_category="OPF Feed",
+        byproducts_enabled=False,
     ):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
@@ -198,6 +199,18 @@ class PlanningPlanTargets:
             & (data["PERIOD_END"] > pd.Timestamp(start_time))
         ].sort_values(["PERIOD_START", "PERIOD_END", "PRODUCT_TYPE"])
 
+        data["PRODUCT_TYPE_KEY"] = (
+            data["PRODUCT_TYPE"].fillna("").astype(str).str.strip().str.upper()
+        )
+        data["CBFL_CAMPAIGN"] = False
+        if str(mine or "").strip().upper() == "CB":
+            campaign_keys = ["OPERATION_KEY", "PERIOD_START", "PERIOD_END"]
+            data["CBFL_CAMPAIGN"] = data.groupby(
+                campaign_keys, dropna=False
+            )["PRODUCT_TYPE_KEY"].transform(
+                lambda values: values.str.contains("CBFL", regex=False).any()
+            )
+
         builds = []
         for _, row in data.iterrows():
             planning_target_tonnes = self._number(row.get("VALUE"))
@@ -205,6 +218,13 @@ class PlanningPlanTargets:
             if target_tonnes <= 0:
                 continue
             brand = self.normalize_brand(row.get("PRODUCT_TYPE"), mine, configured_brands)
+            byproduct = ""
+            if byproducts_enabled and str(mine or "").strip().upper() == "CB":
+                product_type = str(row.get("PRODUCT_TYPE_KEY") or "")
+                if "CBFL" in product_type:
+                    byproduct = "lump"
+                elif "CBSF" in product_type:
+                    byproduct = "fines"
             grades = {
                 "fe": self._number(row.get("FE")),
                 "si": self._number(row.get("SIO2")),
@@ -215,6 +235,8 @@ class PlanningPlanTargets:
             build = {
                 "build_id": len(builds) + 1,
                 "brand": brand,
+                "byproduct": byproduct,
+                "cbfl_campaign": bool(row.get("CBFL_CAMPAIGN", False)),
                 "target_tonnes": target_tonnes,
                 "planning_target_tonnes": planning_target_tonnes,
                 "crusher_contribution_ratio": crusher_contribution_ratio,
@@ -239,13 +261,54 @@ class PlanningPlanTargets:
         brand_counts = {}
         for build in builds:
             brand = build["brand"]
-            brand_counts[brand] = brand_counts.get(brand, 0) + 1
-            build["build_name"] = f"{brand} Build {brand_counts[brand]}" if brand else f"Build {build['build_id']}"
+            lane = str(build.get("byproduct") or "")
+            count_key = (brand, lane)
+            brand_counts[count_key] = brand_counts.get(count_key, 0) + 1
+            lane_label = f" {lane.title()}" if lane else ""
+            build["build_name"] = (
+                f"{brand}{lane_label} Build {brand_counts[count_key]}"
+                if brand else f"Build {build['build_id']}"
+            )
         return builds
 
     @classmethod
     def group_builds_by_brand(cls, builds):
         """Combine only consecutive 2WP rows that share the same brand."""
+        builds = list(builds or [])
+        if any(str(build.get("byproduct") or "").strip() for build in builds):
+            grouped = []
+            lanes = []
+            for build in builds:
+                lane = str(build.get("byproduct") or "").strip().lower()
+                if lane not in lanes:
+                    lanes.append(lane)
+            for lane in lanes:
+                lane_builds = [
+                    dict(build) for build in builds
+                    if str(build.get("byproduct") or "").strip().lower() == lane
+                ]
+                lane_grouped = cls.group_builds_by_brand([
+                    {**build, "byproduct": ""} for build in lane_builds
+                ])
+                for build in lane_grouped:
+                    build["byproduct"] = lane
+                grouped.extend(lane_grouped)
+            grouped.sort(key=lambda build: (
+                build.get("planning_period_start") or datetime.min,
+                0 if build.get("byproduct") == "lump" else 1,
+            ))
+            lane_counts = {}
+            for index, build in enumerate(grouped):
+                build["build_id"] = index + 1
+                brand = str(build.get("brand") or "").strip().upper()
+                lane = str(build.get("byproduct") or "").strip().lower()
+                key = (brand, lane)
+                lane_counts[key] = lane_counts.get(key, 0) + 1
+                build["build_name"] = (
+                    f"{brand} {lane.title()} Build {lane_counts[key]}"
+                    if brand and lane else build.get("build_name")
+                )
+            return grouped
         grade_fields = [
             f"target_{grade}_{bound}"
             for grade in ("fe", "si", "al", "p", "mn")

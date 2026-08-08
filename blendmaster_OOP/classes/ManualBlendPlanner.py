@@ -8,6 +8,15 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductBuildLanes import (
+    BYPRODUCT_LANES,
+    lane_actual_tonnes_column,
+    lane_grade_column,
+    lane_grade_weight_column,
+    lane_source_tonnes_column,
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from classes.GradeStreams import (
     DEFAULT_STREAM,
     STREAMS,
@@ -62,6 +71,22 @@ class ManualBlendPlanner:
         "source_blend_ratio", "source_opening_balance",
         "source_actual_tonnes", "source_closing_balance",
         "reclaimer_source_tonnes", "crusher_source_tonnes", "product_build_source_tonnes",
+        *[
+            column
+            for lane in BYPRODUCT_LANES
+            for column in (
+                lane_source_tonnes_column(lane),
+                lane_actual_tonnes_column(lane),
+                *[
+                    value
+                    for grade in GRADE_NAMES
+                    for value in (
+                        lane_grade_column(lane, grade),
+                        lane_grade_weight_column(lane, grade),
+                    )
+                ],
+            )
+        ],
         *[f"selected_grade_weight_{grade}_tonnes" for grade in GRADE_NAMES],
         "reclaimer_tonnes_stream", "crusher_tonnes_stream",
         "product_build_tonnes_stream", "product_build_actual_tonnes",
@@ -170,11 +195,32 @@ class ManualBlendPlanner:
             or solver_config.get("product_build_tonnes_stream")
             or "modelled_product_wmt"
         )
+        self.byproducts_enabled = bool(
+            site_context.get("byproducts_enabled")
+            or solver_config.get("byproducts_enabled", False)
+        )
+        self.byproduct_quantity_fields = normalize_byproduct_quantity_fields(
+            site_context.get("byproduct_quantity_fields")
+            or solver_config.get("byproduct_quantity_fields")
+        )
+        self.byproduct_grade_fields = normalize_byproduct_grade_fields(
+            site_context.get("byproduct_grade_fields")
+            or solver_config.get("byproduct_grade_fields")
+        )
         self.required_source_property_keys.update({
             self.crusher_tonnes_stream,
             self.reclaimer_tonnes_stream,
             self.product_build_tonnes_stream,
         })
+        if self.byproducts_enabled:
+            self.required_source_property_keys.update(
+                self.byproduct_quantity_fields.values()
+            )
+            self.required_source_property_keys.update(
+                field
+                for lane_fields in self.byproduct_grade_fields.values()
+                for field in lane_fields.values()
+            )
         if self.selected_data_stream in STREAMS:
             self.required_source_property_keys.update(
                 f"{self.selected_data_stream}_{grade}"
@@ -1080,6 +1126,37 @@ class ManualBlendPlanner:
                 row["reclaimer_tonnes_stream"] = self.reclaimer_tonnes_stream
                 row["crusher_tonnes_stream"] = self.crusher_tonnes_stream
                 row["product_build_tonnes_stream"] = self.product_build_tonnes_stream
+                if self.byproducts_enabled:
+                    row["product_build_source_tonnes"] = 0.0
+                    row["product_build_tonnes_stream"] = "lump+fines"
+                    for lane in BYPRODUCT_LANES:
+                        quantity_field = self.byproduct_quantity_fields[lane]
+                        lane_tonnes = mapped_tonnes(
+                            quantity_field,
+                            required=bool(self.product_build_settings),
+                        )
+                        row[lane_source_tonnes_column(lane)] = lane_tonnes
+                        row[f"product_build_{lane}_quantity_field"] = quantity_field
+                        row["product_build_source_tonnes"] += lane_tonnes
+                        for grade in self.GRADES:
+                            grade_field = self.byproduct_grade_fields[lane][grade]
+                            grade_value = properties.get(grade_field)
+                            weight_field = self.source_property_weights.get(grade_field)
+                            if lane_tonnes > 0 and (
+                                grade_value is None or not weight_field
+                            ):
+                                raise ManualBlendPlanningError(
+                                    f"{row.get('source') or row.get('source_id')}: "
+                                    f"required {lane} grade field '{grade_field}' or "
+                                    "its configured weight field is unmapped."
+                                )
+                            row[lane_grade_column(lane, grade)] = (
+                                self._number(grade_value) if grade_value is not None else None
+                            )
+                            row[lane_grade_weight_column(lane, grade)] = (
+                                mapped_tonnes(weight_field)
+                                if weight_field else 0.0
+                            )
                 try:
                     warnings = json.loads(row.get("grade_stream_warnings") or "[]")
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -1183,6 +1260,14 @@ class ManualBlendPlanner:
                         self._number(item.get("product_build_source_tonnes"))
                         for item in source_rows
                     ),
+                    **{
+                        lane_actual_tonnes_column(lane): sum(
+                            self._number(item.get(lane_source_tonnes_column(lane)))
+                            for item in source_rows
+                        )
+                        for lane in BYPRODUCT_LANES
+                        if self.byproducts_enabled
+                    },
                     "crusher_rate_input": state.get(
                         "crusher_rate", self.crusher_rate
                     ),
@@ -1219,7 +1304,9 @@ class ManualBlendPlanner:
             ],
         )
         report = ProductBuildProgress.annotate(
-            report, self.product_build_settings
+            report,
+            self.product_build_settings,
+            byproducts_enabled=self.byproducts_enabled,
         )
         return report.reindex(columns=[
             *base_columns,

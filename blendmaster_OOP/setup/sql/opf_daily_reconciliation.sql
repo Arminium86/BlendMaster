@@ -67,9 +67,17 @@ opf_product AS (
     WHERE SHIFT_DATE >= %s AND SHIFT_DATE < %s
     GROUP BY 1, 2, SHIFT_DATE
 ),
+opf_product_campaign AS (
+    SELECT
+        *,
+        MAX(IFF(BRAND = 'CBFL', 1, 0)) OVER (
+            PARTITION BY DERIVED_OPERATION, SHIFT_DATE
+        ) AS HAS_CBFL_PRODUCT
+    FROM opf_product
+),
 opf_product_total AS (
     SELECT DERIVED_OPERATION, SHIFT_DATE, SUM(PROD_DMT) AS TOTAL_PROD_DMT
-    FROM opf_product
+    FROM opf_product_campaign
     GROUP BY 1, 2
 ),
 opf_tails AS (
@@ -96,7 +104,7 @@ allocated AS (
     SELECT p.*, 
         COALESCE((p.PROD_DMT / NULLIF(pt.TOTAL_PROD_DMT, 0)) * t.TAILS_DMT, 0) AS TAILS_DMT_ALLOC,
         t.TAILS_FE, t.TAILS_SIO2, t.TAILS_AL2O3, t.TAILS_P, t.TAILS_MN
-    FROM opf_product p
+    FROM opf_product_campaign p
     LEFT JOIN opf_product_total pt USING (DERIVED_OPERATION, SHIFT_DATE)
     LEFT JOIN opf_tails t USING (DERIVED_OPERATION, SHIFT_DATE)
 ),
@@ -111,6 +119,7 @@ back_calc AS (
 )
 SELECT
     f.DERIVED_OPERATION, b.BRAND, f.SHIFT_DATE, f.FEED_WMT, b.PROD_WMT,
+    COALESCE(b.HAS_CBFL_PRODUCT, 0) AS CBFL_CAMPAIGN,
     b.BACK_CALC_FE / NULLIF(f.MOD_ROM_FE, 0) AS BLEND_RECON_FE,
     b.BACK_CALC_SIO2 / NULLIF(f.MOD_ROM_SIO2, 0) AS BLEND_RECON_SIO2,
     b.BACK_CALC_AL2O3 / NULLIF(f.MOD_ROM_AL2O3, 0) AS BLEND_RECON_AL2O3,

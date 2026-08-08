@@ -317,25 +317,42 @@ which APS has already calculated.
 For user lump fraction `L` and fines fraction `F = 1 - L`:
 
 ```text
-PROD1 lump WMT = source WMT x L
-PROD1 fines WMT = source WMT x F
-PROD1 lump DMT = source DMT x L
-PROD1 fines DMT = source DMT x F
+PROD1 lump WMT = total Product 1 WMT x L
+PROD1 fines WMT = total Product 1 WMT x F
+PROD1 lump DMT = total Product 1 DMT x L
+PROD1 fines DMT = total Product 1 DMT x F
 ```
 
-When a total Product 1 assay `Gtotal` and an independent fines assay `Gfines`
-are available, the lump assay preserves the total product metal balance:
+The adjusted head grade is the modelled Product 1 grade multiplied by the
+ordinary SF regression reconciliation. The adjusted fines grade uses the
+separate **SF - CBFL Campaign Fines** regression factor. The lump grade then
+preserves the adjusted total-product metal balance:
 
 ```text
-Glump = (Gtotal x total product mass - Gfines x fines mass) / lump mass
+Ghead  = Gmodelled x standard SF regression
+Gfines = Gmodelled x SF - CBFL Campaign Fines regression
+Glump  = (Ghead x total product mass - Gfines x fines mass) / lump mass
 ```
 
-The calculation prefers DMT and uses WMT when DMT is unavailable. If no
-independent fines assay is available, both lump and fines inherit the total
-Product 1 assay; this is the determinate mass-conserving fallback and is
-recorded in `cb_split_warning`. The provenance is exposed as
-`cb_split_method`; a negative back-calculated lump assay is retained to
-preserve the mass balance and is explicitly warned.
+The calculation prefers Product 1 DMT and uses Product 1 WMT only when DMT is
+unavailable. It never splits insitu/ROM tonnes. Missing mapped product mass,
+missing required product grades, or a negative/out-of-range back-calculated
+lump grade blocks Data Streams submission and identifies the invalid analyte.
+
+When **Enable Lump and Fines by-products** is selected, Data Streams also
+requires explicit canonical fields for the Lump/Fines quantities and the five
+Lump/Fines grades. Product Build Settings then operates two independent lanes:
+one active Lump build and one active Fines build. Every transaction contributes
+its configured portion to both active builds and must satisfy both build-grade
+contracts. Rows are sequential within each lane. Completion of either active
+build ends the steady state; the completed lane advances while the other lane
+retains its current build and balance in the new steady state. Optimised and
+manual reports expose both lane IDs, additions, grades and progress.
+
+For imported Cloudbreak 2WP targets in by-product mode, `CBFL` rows populate
+the Lump/FL lane and `CBSF` rows populate the Fines/SF lane. The paired rows
+retain their independent target tonnes and grades; they are not merged into a
+single build target.
 
 ### AMT spatial tonnage reconciliation
 
@@ -373,6 +390,14 @@ weighted by PROD_WMT. Missing brand/analyte results use an available OPF brand
 when possible, otherwise factor 1.0 with a warning. Calculated and user-edited
 effective factors are stored separately.
 
+Cloudbreak has one additional editable factor per analyte named **SF - CBFL
+Campaign Fines**. It is calculated only from CBSF assay rows on completed CB
+shift dates that also contain a CBFL product row; the CBFL row's own regression
+factor is never applied. Each analyte retains its shortest successful window in
+7, 14, 21, 28, 30, then 60 days. If no paired CBSF+CBFL history exists within
+60 days, BlendMaster uses that analyte's ordinary SF regression factor and
+shows an explicit fallback warning.
+
 The product-stream Planning Plan category defaults to `OPF Production`; ROM
 streams default to `OPF Feed`. Both remain configurable for APS model variants.
 
@@ -401,8 +426,20 @@ Mappings store the exact APS header but expose the stable BlendMaster name in
 Database View and constraint expressions. An additive mapped total is prorated
 to each APS payload by `payload tonnes / grouped source tonnes`; an intensive
 value is copied unchanged. When payloads for the same grade block are
-consolidated, additive properties are summed and intensive properties are
-WMT-weighted.
+consolidated, additive properties are summed and every weighted-average field
+uses its own additive **Weight Field** from Define Fields. A mapped field is
+rejected when the same raw APS grade is configured with incompatible raw
+weighting bases.
+
+When an APS payload is sent to a stockpile destination, every retained mapped
+additive property is added to that inventory stockpile and every retained
+weighted-average property is recalculated using its configured additive weight.
+Only the portion actually sent to the destination is accumulated; a direct-tip
+portion is excluded. A destination stockpile is represented as an Inventory
+Stockpile even if its on-ground counterpart was previously available as AMT.
+Later reclaim proportionally depletes additive balances while its weighted
+averages remain unchanged until new material is built into it. APS modelled and
+adjusted grades remain equal because APS inputs are already reconciled.
 
 Raw fields that are not mapped do not become canonical source properties. A
 defined but unmapped canonical field remains present with a blank value on
@@ -532,7 +569,14 @@ the product stream, while lineage identities, physical properties and coverage
 remain diagnostic/model-input provenance. A
 positive hex with incomplete lineage is actionable and is recorded in the
 `warnings` field. For generated chunks, repeated per-hex product messages are
-replaced by one WMT-weighted coverage summary per product channel. Partial
+replaced by one WMT-weighted, fixed-format summary:
+
+```text
+Lineage: OK | Mapped fields: Partial - product_wmt 96.54% | Product grades: Partial - PROD1 Fe 92.29% | Fallbacks: None | Geometry: OK
+```
+
+Each section is always present and reports `OK`, `Partial`, `Missing`, `None`
+or `Not applicable` as appropriate. Partial
 coverage of the active product channel is warned: the displayed modelled grade is based on covered lineage tonnes, while
 the coverage field quantifies the excluded share. During chunk/source
 aggregation, product mass without a valid grade is excluded from that grade's

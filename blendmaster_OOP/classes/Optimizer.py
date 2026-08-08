@@ -35,6 +35,16 @@ from pulp import (
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
+from classes.ProductBuildLanes import (
+    BYPRODUCT_LANES,
+    PRODUCT_LANE,
+    lane_actual_tonnes_column,
+    lane_grade_column,
+    lane_grade_weight_column,
+    lane_source_tonnes_column,
+    normalize_byproduct_grade_fields,
+    normalize_byproduct_quantity_fields,
+)
 from classes.CustomConstraints import (
     CustomConstraintError,
     compile_event_custom_constraint,
@@ -221,9 +231,16 @@ class Optimizer:
     ):
         """Shorten a steady state if the active product build reaches target tonnes."""
         solver_config = solver_config or {}
-        target_build = solver_config.get("target_product_build") or {}
-        target_build_state = solver_config.get("target_product_build_state") or {}
-        if not target_build:
+        target_builds = solver_config.get("target_product_builds") or {}
+        target_states = solver_config.get("target_product_build_states") or {}
+        if not target_builds and solver_config.get("target_product_build"):
+            target_builds = {
+                PRODUCT_LANE: solver_config.get("target_product_build") or {}
+            }
+            target_states = {
+                PRODUCT_LANE: solver_config.get("target_product_build_state") or {}
+            }
+        if not target_builds:
             return steady_state_duration, None, None
 
         def safe_float(value, default=0.0):
@@ -232,28 +249,36 @@ class Optimizer:
             except (TypeError, ValueError):
                 return default
 
-        target_tonnes = safe_float(target_build.get("target_tonnes"), 0.0)
-        opening_tonnes = safe_float(target_build_state.get("tonnes"), 0.0)
-        remaining_tonnes = target_tonnes - opening_tonnes
-        product_build_rate_output = safe_float(
-            result.get("product_build_actual_tonnes"), 0.0
-        ) / max(float(steady_state_duration), Optimizer.SOLUTION_TOLERANCE)
-        if (
-            target_tonnes <= Optimizer.SOLUTION_TOLERANCE
-            or remaining_tonnes <= Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE
-            or product_build_rate_output <= Optimizer.SOLUTION_TOLERANCE
-        ):
+        candidates = []
+        for lane, target_build in target_builds.items():
+            target_build_state = target_states.get(lane) or {}
+            target_tonnes = safe_float(target_build.get("target_tonnes"), 0.0)
+            opening_tonnes = safe_float(target_build_state.get("tonnes"), 0.0)
+            remaining_tonnes = target_tonnes - opening_tonnes
+            product_build_rate_output = safe_float(
+                result.get(lane_actual_tonnes_column(lane)), 0.0
+            ) / max(float(steady_state_duration), Optimizer.SOLUTION_TOLERANCE)
+            if (
+                target_tonnes <= Optimizer.SOLUTION_TOLERANCE
+                or remaining_tonnes <= Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE
+                or product_build_rate_output <= Optimizer.SOLUTION_TOLERANCE
+            ):
+                continue
+            duration_to_complete = remaining_tonnes / product_build_rate_output
+            if (
+                duration_to_complete > Optimizer.SOLUTION_TOLERANCE
+                and duration_to_complete
+                < steady_state_duration - Optimizer.SOLUTION_TOLERANCE
+            ):
+                candidates.append((
+                    duration_to_complete,
+                    target_build.get("build_name") or f"{lane.title()} product build",
+                    remaining_tonnes,
+                ))
+        if not candidates:
             return steady_state_duration, None, None
-
-        duration_to_complete = remaining_tonnes / product_build_rate_output
-        if (
-            duration_to_complete > Optimizer.SOLUTION_TOLERANCE
-            and duration_to_complete < steady_state_duration - Optimizer.SOLUTION_TOLERANCE
-        ):
-            build_name = target_build.get("build_name") or "Product build"
-            return duration_to_complete, f"{build_name} complete", remaining_tonnes
-
-        return steady_state_duration, None, None
+        duration, build_name, remaining = min(candidates, key=lambda item: item[0])
+        return duration, f"{build_name} complete", remaining
 
     @staticmethod
     def product_build_can_complete_in_steady_state(
@@ -551,6 +576,35 @@ class Optimizer:
         product_build_tonnes_stream = str(
             solver_config.get("product_build_tonnes_stream") or "modelled_product_wmt"
         )
+        byproducts_enabled = bool(solver_config.get("byproducts_enabled", False))
+        target_product_builds = dict(
+            solver_config.get("target_product_builds") or {}
+        )
+        target_product_build_states = dict(
+            solver_config.get("target_product_build_states") or {}
+        )
+        if not target_product_builds and solver_config.get("target_product_build"):
+            target_product_builds = {
+                PRODUCT_LANE: solver_config.get("target_product_build") or {}
+            }
+            target_product_build_states = {
+                PRODUCT_LANE: solver_config.get("target_product_build_state") or {}
+            }
+        product_build_lanes = tuple(target_product_builds)
+        byproduct_quantity_fields = normalize_byproduct_quantity_fields(
+            solver_config.get("byproduct_quantity_fields")
+        )
+        byproduct_grade_fields = normalize_byproduct_grade_fields(
+            solver_config.get("byproduct_grade_fields")
+        )
+        product_build_quantity_fields = {
+            lane: (
+                byproduct_quantity_fields[lane]
+                if byproducts_enabled and lane in BYPRODUCT_LANES
+                else product_build_tonnes_stream
+            )
+            for lane in product_build_lanes
+        }
         # Coefficients are source-stream tonnes per physical ROM tonne. Missing
         # is materially different from zero: zero is a valid mapped quantity;
         # missing means the source cannot be used where that quantity is
@@ -578,10 +632,13 @@ class Optimizer:
             capacity_stream_tonnes(event, reclaimer_tonnes_stream, physical)
             for event, physical in zip(event_pool, physical_tonnes)
         ]
-        product_build_stream_tonnes = [
-            capacity_stream_tonnes(event, product_build_tonnes_stream, physical)
-            for event, physical in zip(event_pool, physical_tonnes)
-        ]
+        product_build_stream_tonnes_by_lane = {
+            lane: [
+                capacity_stream_tonnes(event, field_name, physical)
+                for event, physical in zip(event_pool, physical_tonnes)
+            ]
+            for lane, field_name in product_build_quantity_fields.items()
+        }
         crusher_coefficients = [
             max(value, 0.0) / physical
             if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
@@ -592,11 +649,27 @@ class Optimizer:
             if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
             for value, physical in zip(reclaimer_stream_tonnes, physical_tonnes)
         ]
-        product_build_coefficients = [
-            max(value, 0.0) / physical
-            if value is not None and physical > Optimizer.SOLUTION_TOLERANCE else 0.0
-            for value, physical in zip(product_build_stream_tonnes, physical_tonnes)
-        ]
+        product_build_coefficients_by_lane = {
+            lane: [
+                max(value, 0.0) / physical
+                if value is not None and physical > Optimizer.SOLUTION_TOLERANCE
+                else 0.0
+                for value, physical in zip(values, physical_tonnes)
+            ]
+            for lane, values in product_build_stream_tonnes_by_lane.items()
+        }
+        primary_product_lane = (
+            PRODUCT_LANE if PRODUCT_LANE in product_build_lanes
+            else (product_build_lanes[0] if product_build_lanes else PRODUCT_LANE)
+        )
+        product_build_stream_tonnes = product_build_stream_tonnes_by_lane.get(
+            primary_product_lane,
+            [None for _ in event_pool],
+        )
+        product_build_coefficients = product_build_coefficients_by_lane.get(
+            primary_product_lane,
+            [0.0 for _ in event_pool],
+        )
         source_property_weights = {
             str(name).strip().lower(): str(weight).strip().lower()
             for name, weight in dict(
@@ -634,11 +707,52 @@ class Optimizer:
                 )
             grade_weight_coefficients[analyte] = coefficients
 
+        product_build_grade_values = {}
+        product_build_grade_weight_coefficients = {}
+        product_build_grade_weight_available = {}
+        for lane in product_build_lanes:
+            product_build_grade_values[lane] = {}
+            product_build_grade_weight_coefficients[lane] = {}
+            product_build_grade_weight_available[lane] = {}
+            for analyte in ("fe", "si", "al", "p", "mn"):
+                if lane == PRODUCT_LANE:
+                    values = [
+                        safe_float(getattr(event, f"grade_{analyte}", None), None)
+                        for event in event_pool
+                    ]
+                    coefficients = list(grade_weight_coefficients[analyte])
+                    available = [True for _ in event_pool]
+                else:
+                    grade_field = byproduct_grade_fields[lane][analyte]
+                    weight_field = source_property_weights.get(grade_field)
+                    values = []
+                    coefficients = []
+                    available = []
+                    for event, physical in zip(event_pool, physical_tonnes):
+                        grade_value = stream_tonnes(event, grade_field)
+                        weight_tonnes = (
+                            stream_tonnes(event, weight_field)
+                            if weight_field else None
+                        )
+                        values.append(grade_value)
+                        available.append(
+                            grade_value is not None and weight_tonnes is not None
+                        )
+                        coefficients.append(
+                            max(weight_tonnes, 0.0) / physical
+                            if weight_tonnes is not None
+                            and physical > Optimizer.SOLUTION_TOLERANCE
+                            else 0.0
+                        )
+                product_build_grade_values[lane][analyte] = values
+                product_build_grade_weight_coefficients[lane][analyte] = coefficients
+                product_build_grade_weight_available[lane][analyte] = available
+
         # The decision variable is physical ROM depletion. Reclaimer capacity
         # is converted from the selected reclaimer stream back to that physical
         # basis for each source independently.
         bounds = []
-        product_build_required = bool(solver_config.get("target_product_build"))
+        product_build_required = bool(target_product_builds)
         for index, (event, coefficient) in enumerate(
             zip(event_pool, reclaimer_coefficients)
         ):
@@ -648,9 +762,23 @@ class Optimizer:
                 and reclaimer_stream_tonnes[index] is not None
                 and (
                     not product_build_required
-                    or product_build_stream_tonnes[index] is not None
+                    or all(
+                        values[index] is not None
+                        for values in product_build_stream_tonnes_by_lane.values()
+                    )
                 )
             )
+            if mappings_available and product_build_required:
+                for lane in product_build_lanes:
+                    lane_quantity = product_build_stream_tonnes_by_lane[lane][index]
+                    if lane_quantity is None or lane_quantity <= Optimizer.SOLUTION_TOLERANCE:
+                        continue
+                    if not all(
+                        product_build_grade_weight_available[lane][analyte][index]
+                        for analyte in ("fe", "si", "al", "p", "mn")
+                    ):
+                        mappings_available = False
+                        break
             physical_capacity = (
                 reclaim_capacity / coefficient
                 if mappings_available
@@ -1140,17 +1268,25 @@ class Optimizer:
                 A_ub_stockpile_grade_feasibility.extend([min_row, max_row])
                 b_ub_stockpile_grade_feasibility.extend([0, 0])
 
-        # Product-build grade targeting. When the active product build can be
-        # completed inside this steady state, constrain the cumulative build
-        # inventory plus the candidate feed so the build is on spec at target
-        # tonnes. A repair pass can apply the same cumulative constraint from
-        # an earlier checkpoint after the normal rolling pass proves that the
-        # terminal state is infeasible or off spec.
+        # Product-build grade targeting. In by-product mode every decision
+        # contributes simultaneously to the active Lump and Fines builds, and
+        # each lane uses its explicitly configured quantity and grade fields.
         A_ub_product_build_grade = []
         b_ub_product_build_grade = []
-        target_product_build = solver_config.get("target_product_build") or {}
-        target_product_build_state = solver_config.get("target_product_build_state") or {}
-        if target_product_build:
+        completion_projection = dict(
+            solver_config.get("active_product_builds_complete_within_horizon")
+            or {}
+        )
+        cumulative_repairs = dict(
+            solver_config.get("enforce_cumulative_product_build_grades") or {}
+        )
+        hard_repairs = dict(
+            solver_config.get("force_product_build_state_grades_on_spec_by_lane")
+            or {}
+        )
+        for lane, target_product_build in target_product_builds.items():
+            target_product_build_state = target_product_build_states.get(lane) or {}
+            lane_quantity_coefficients = product_build_coefficients_by_lane[lane]
             opening_product_tonnes = safe_float(target_product_build_state.get("tonnes"), 0.0)
             target_product_tonnes = safe_float(target_product_build.get("target_tonnes"), 0.0)
             product_build_can_complete = Optimizer.product_build_can_complete_in_steady_state(
@@ -1159,7 +1295,7 @@ class Optimizer:
                 min(
                     sum(
                         upper * coefficient
-                        for (_, upper), coefficient in zip(bounds, product_build_coefficients)
+                        for (_, upper), coefficient in zip(bounds, lane_quantity_coefficients)
                     ),
                     safe_float(period_crusher_target.get("crusher_rate"), 0.0)
                     * steady_state_duration
@@ -1170,7 +1306,7 @@ class Optimizer:
                             else 0.0
                         )
                         for product_coefficient, crusher_coefficient in zip(
-                            product_build_coefficients, crusher_coefficients
+                            lane_quantity_coefficients, crusher_coefficients
                         )
                     ),
                 ) / max(steady_state_duration, Optimizer.SOLUTION_TOLERANCE),
@@ -1180,11 +1316,17 @@ class Optimizer:
                 solver_config.get(
                     "allow_offspec_steady_states_for_product_build", False
                 )
-                and solver_config.get(
-                    "active_product_build_completes_within_horizon", False
+                and completion_projection.get(
+                    lane,
+                    solver_config.get(
+                        "active_product_build_completes_within_horizon", False
+                    ),
                 )
-                and not solver_config.get(
-                    "force_product_build_state_grades_on_spec", False
+                and not hard_repairs.get(
+                    lane,
+                    solver_config.get(
+                        "force_product_build_state_grades_on_spec", False
+                    ),
                 )
             )
             # If the build is not capacity-projected to finish by the end of
@@ -1194,18 +1336,26 @@ class Optimizer:
                 for grade_key in ["fe", "si", "al", "p", "mn"]:
                     min_target = safe_float(target_product_build.get(f"target_{grade_key}_min"), 0.0)
                     max_target = safe_float(target_product_build.get(f"target_{grade_key}_max"), 100.0)
+                    values = product_build_grade_values[lane][grade_key]
+                    weights = product_build_grade_weight_coefficients[lane][grade_key]
                     A_ub_product_build_grade.extend([
-                        [coefficient * (min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0))) for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])],
                         [
-                            coefficient * (safe_float(
-                                getattr(event, f"grade_{grade_key}", 0.0)
-                            ) - max_target)
-                            for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
+                            coefficient * (min_target - safe_float(grade_value, 0.0))
+                            for grade_value, coefficient in zip(values, weights)
+                        ],
+                        [
+                            coefficient * (safe_float(grade_value, 0.0) - max_target)
+                            for grade_value, coefficient in zip(values, weights)
                         ],
                     ])
                     b_ub_product_build_grade.extend([0, 0])
             enforce_cumulative_build_grade = bool(
-                solver_config.get("enforce_cumulative_product_build_grade", False)
+                cumulative_repairs.get(
+                    lane,
+                    solver_config.get(
+                        "enforce_cumulative_product_build_grade", False
+                    ),
+                )
             )
             if product_build_can_complete or enforce_cumulative_build_grade:
                 for grade_key in ["fe", "si", "al", "p", "mn"]:
@@ -1219,14 +1369,15 @@ class Optimizer:
                         target_product_build_state.get(f"grade_{grade_key}_weight"),
                         opening_product_tonnes,
                     )
-
+                    values = product_build_grade_values[lane][grade_key]
+                    weights = product_build_grade_weight_coefficients[lane][grade_key]
                     min_row = [
-                        coefficient * (min_target - safe_float(getattr(event, f"grade_{grade_key}", 0.0)))
-                        for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
+                        coefficient * (min_target - safe_float(grade_value, 0.0))
+                        for grade_value, coefficient in zip(values, weights)
                     ]
                     max_row = [
-                        coefficient * (safe_float(getattr(event, f"grade_{grade_key}", 0.0)) - max_target)
-                        for event, coefficient in zip(event_pool, grade_weight_coefficients[grade_key])
+                        coefficient * (safe_float(grade_value, 0.0) - max_target)
+                        for grade_value, coefficient in zip(values, weights)
                     ]
                     A_ub_product_build_grade.extend([min_row, max_row])
                     b_ub_product_build_grade.extend([
@@ -1750,6 +1901,37 @@ class Optimizer:
                             event, "source_property_kinds", None
                         ),
                     )
+                    lane_transaction_fields = {}
+                    for lane in product_build_lanes:
+                        lane_tonnes = (
+                            result.x[i]
+                            * product_build_coefficients_by_lane[lane][i]
+                        )
+                        lane_transaction_fields[
+                            lane_source_tonnes_column(lane)
+                        ] = lane_tonnes
+                        lane_transaction_fields[
+                            f"product_build_{lane}_quantity_field"
+                        ] = product_build_quantity_fields[lane]
+                        if lane != PRODUCT_LANE:
+                            for analyte in ("fe", "si", "al", "p", "mn"):
+                                lane_transaction_fields[
+                                    lane_grade_column(lane, analyte)
+                                ] = product_build_grade_values[lane][analyte][i]
+                                lane_transaction_fields[
+                                    lane_grade_weight_column(lane, analyte)
+                                ] = (
+                                    result.x[i]
+                                    * product_build_grade_weight_coefficients[
+                                        lane
+                                    ][analyte][i]
+                                )
+                    combined_product_build_tonnes = sum(
+                        float(lane_transaction_fields.get(
+                            lane_source_tonnes_column(lane), 0.0
+                        ) or 0.0)
+                        for lane in product_build_lanes
+                    )
                     transaction = {
                             "source": source_name,
                             "source_id": source_id,
@@ -1768,7 +1950,12 @@ class Optimizer:
                             "actual_tonnes": result.x[i],
                             "reclaimer_source_tonnes": result.x[i] * reclaimer_coefficients[i],
                             "crusher_source_tonnes": result.x[i] * crusher_coefficients[i],
-                            "product_build_source_tonnes": result.x[i] * product_build_coefficients[i],
+                            "product_build_source_tonnes": (
+                                combined_product_build_tonnes
+                                if byproducts_enabled
+                                else result.x[i] * product_build_coefficients[i]
+                            ),
+                            **lane_transaction_fields,
                             **{
                                 f"selected_grade_weight_{analyte}_tonnes": (
                                     result.x[i] * grade_weight_coefficients[analyte][i]
@@ -1777,7 +1964,10 @@ class Optimizer:
                             },
                             "reclaimer_tonnes_stream": reclaimer_tonnes_stream,
                             "crusher_tonnes_stream": crusher_tonnes_stream,
-                            "product_build_tonnes_stream": product_build_tonnes_stream,
+                            "product_build_tonnes_stream": (
+                                "lump+fines" if byproducts_enabled
+                                else product_build_tonnes_stream
+                            ),
                             "grade_fe": event.grade_fe,
                             "grade_si": event.grade_si,
                             "grade_al": event.grade_al,
@@ -1878,7 +2068,25 @@ class Optimizer:
                 if steady_state_duration != 0
                 else 0,
                 "crusher_actual_tonnes": sum(result.x[i] * crusher_coefficients[i] for i in range(len(event_pool))),
-                "product_build_actual_tonnes": sum(result.x[i] * product_build_coefficients[i] for i in range(len(event_pool))),
+                "product_build_actual_tonnes": (
+                    sum(
+                        sum(
+                            result.x[i] * coefficients[i]
+                            for i in range(len(event_pool))
+                        )
+                        for coefficients in product_build_coefficients_by_lane.values()
+                    )
+                    if byproducts_enabled else
+                    sum(result.x[i] * product_build_coefficients[i] for i in range(len(event_pool)))
+                ),
+                **{
+                    lane_actual_tonnes_column(lane): sum(
+                        result.x[i]
+                        * product_build_coefficients_by_lane[lane][i]
+                        for i in range(len(event_pool))
+                    )
+                    for lane in product_build_lanes
+                },
                 **custom_constraint_fields,
                 "solver_score": solver_score,
                 "solver_objective_value": objective_value,

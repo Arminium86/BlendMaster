@@ -18,6 +18,8 @@ from setup.OpeningStockpileInventories import OpeningStockpileInventories
 
 class DataStreamReconciliation:
     LOOKBACK_DAYS = (7, 14, 21, 28, 30)
+    CB_CAMPAIGN_LOOKBACK_DAYS = (*LOOKBACK_DAYS, 60)
+    CB_CAMPAIGN_FACTOR = "cbfl_campaign_fines_regression"
     SQL_PATH = Path(__file__).with_name("sql") / "opf_daily_reconciliation.sql"
     SQL_ANALYTE = {"fe": "FE", "si": "SIO2", "al": "AL2O3", "p": "P", "mn": "MN"}
 
@@ -38,7 +40,9 @@ class DataStreamReconciliation:
         # Completed SHIFT_DATEs only: the upper bound is the scenario calendar
         # date, never the partially-completed scenario day.
         end_date = scenario_start.date()
-        start_date = end_date - timedelta(days=max(self.LOOKBACK_DAYS))
+        start_date = end_date - timedelta(
+            days=max(self.CB_CAMPAIGN_LOOKBACK_DAYS)
+        )
         query = self.SQL_PATH.read_text(encoding="utf-8")
         parameters = (start_date, end_date, start_date, end_date, start_date, end_date)
         connection = self.inventory_loader.connect_snowflake_with_service_account()
@@ -72,17 +76,38 @@ class DataStreamReconciliation:
             return None
         return float((values[valid] * weights[valid]).sum() / weights[valid].sum())
 
-    def _shortest_factor(self, frame, scenario_start, value_column, weight_column):
+    def _shortest_factor(
+        self,
+        frame,
+        scenario_start,
+        value_column,
+        weight_column,
+        lookback_days=None,
+    ):
         if frame is None or frame.empty or "SHIFT_DATE" not in frame.columns:
             return None, None, 0
         end_date = pd.Timestamp(self._scenario_datetime(scenario_start).date())
-        for days in self.LOOKBACK_DAYS:
+        for days in (lookback_days or self.LOOKBACK_DAYS):
             start_date = end_date - pd.Timedelta(days=days)
             window = frame[(frame["SHIFT_DATE"] >= start_date) & (frame["SHIFT_DATE"] < end_date)]
             value = self._weighted_factor(window, value_column, weight_column)
             if value is not None:
                 return value, days, int(len(window))
         return None, None, 0
+
+    @staticmethod
+    def _campaign_rows(frame):
+        """Return rows explicitly identified as CB lump/fines campaigns."""
+        if frame is None or frame.empty or "CBFL_CAMPAIGN" not in frame:
+            return frame.iloc[0:0].copy() if frame is not None else pd.DataFrame()
+        marker = frame["CBFL_CAMPAIGN"]
+        if marker.dtype == bool:
+            valid = marker
+        else:
+            valid = marker.astype("string").str.strip().str.lower().isin(
+                {"1", "true", "yes", "y"}
+            )
+        return frame[valid].copy()
 
     def aggregate(self, daily: pd.DataFrame, opf: Any, brands: Iterable[str], scenario_start: Any):
         opf_key = normalise_opf(opf)
@@ -201,6 +226,52 @@ class DataStreamReconciliation:
                     "blend": blend_source,
                     "regression": regression_source,
                 }
+
+            # Cloudbreak lump/fines campaigns still assay their fines as
+            # CBSF.  The dedicated fines factor therefore comes from CBSF
+            # rows only on dates where CBFL was also produced; CBFL's own
+            # regression is deliberately never applied.  The ordinary SF
+            # factor remains the head/total-product adjustment.
+            if opf_key == "CB_OPF" and normalise_brand(brand) == "SF":
+                campaign_frame = self._campaign_rows(brand_frame)
+                record[self.CB_CAMPAIGN_FACTOR] = {}
+                for analyte, sql_analyte in self.SQL_ANALYTE.items():
+                    value, days, row_count = self._shortest_factor(
+                        campaign_frame,
+                        scenario_start,
+                        f"REGRESSION_RECON_{sql_analyte}",
+                        "PROD_WMT",
+                        self.CB_CAMPAIGN_LOOKBACK_DAYS,
+                    )
+                    fallback = value is None
+                    if fallback:
+                        standard = record["regression"][analyte]
+                        value = standard["effective"]
+                        days = record["lookback_days"][analyte]["regression"]
+                        row_count = standard["row_count"]
+                        warnings.append(
+                            "CB_OPF / SF / "
+                            f"{analyte}: no paired CBSF+CBFL campaign history "
+                            "in 60 days; SF - CBFL Campaign Fines uses the "
+                            "standard SF regression recon."
+                        )
+                    record[self.CB_CAMPAIGN_FACTOR][analyte] = {
+                        "calculated": value,
+                        "effective": value,
+                        "locked": False,
+                        "row_count": row_count,
+                        "fallback_to_standard_sf": fallback,
+                    }
+                    record["lookback_days"][analyte][
+                        self.CB_CAMPAIGN_FACTOR
+                    ] = days
+                    record["source_brand_by_analyte"][analyte][
+                        self.CB_CAMPAIGN_FACTOR
+                    ] = (
+                        "CBSF (CBFL campaign)"
+                        if not fallback else record["source_brand_by_analyte"]
+                        [analyte]["regression"]
+                    )
             result[brand] = record
         if opf_key == "IB_OPF" or (not available_brands and requested_brands):
             warnings.append(f"{opf_key}: no assayed brand history; factors defaulted to 1.0.")
@@ -232,6 +303,24 @@ class DataStreamReconciliation:
                     for a in ANALYTES
                 },
             }
+            if opf_key == "CB_OPF" and normalise_brand(brand) == "SF":
+                factors[brand][self.CB_CAMPAIGN_FACTOR] = {
+                    a: {
+                        "calculated": 1.0,
+                        "effective": 1.0,
+                        "locked": False,
+                        "row_count": 0,
+                        "fallback_to_standard_sf": True,
+                    }
+                    for a in ANALYTES
+                }
+                for analyte in ANALYTES:
+                    factors[brand]["lookback_days"][analyte][
+                        self.CB_CAMPAIGN_FACTOR
+                    ] = None
+                    factors[brand]["source_brand_by_analyte"][analyte][
+                        self.CB_CAMPAIGN_FACTOR
+                    ] = "SF"
         return factors, ([warning] if warning else [])
 
     @staticmethod
