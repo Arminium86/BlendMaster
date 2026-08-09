@@ -395,6 +395,13 @@ not raw tonnes, is used for AMT chunking. The spatial algorithm is tonnage-only;
 grade-block composition is subsequently aligned to `FINAL_WMT` under the
 documented proportional-depletion assumption.
 
+On the AMT map, **Exclude / Restore Hexes** can deliberately remove individual
+displayed hexes before automatic or manually directed chunk generation. These
+hexes are excluded from axes, dig paths, chunks and solver sources; the chunk
+goal seek uses remaining eligible AMT WMT. Generated chunks retain the excluded
+hex IDs, count and WMT for audit and project reload. Clicking an excluded
+red-cross marker again in exclusion mode restores it.
+
 ## Historical OPF factors
 
 Only completed shift dates strictly before scenario start are used. Each brand

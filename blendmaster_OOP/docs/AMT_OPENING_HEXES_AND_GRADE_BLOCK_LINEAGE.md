@@ -168,6 +168,17 @@ target chunk size. The UI reports the excluded hex IDs, WMT and allocation
 warning. This preserves the authoritative opening balance without inventing a
 replacement coordinate.
 
+### Manual pre-chunk hex exclusions
+
+The AMT map's **Exclude / Restore Hexes** mode removes individual displayed
+hexes before automatic or manually directed chunks are generated. Excluded
+hexes are marked with a red cross, omitted from automatic axis detection, the
+dig path, chunk aggregation and solver sources, and can be restored by clicking
+them again in the same mode. Goal-seek chunk count and size use eligible AMT WMT
+after exclusions. Each generated chunk persists `excluded_hex_count`,
+`excluded_hex_wmt` and `excluded_hexes`, so exclusions survive project
+save/load and the deliberately omitted tonnes remain traceable.
+
 ## Grade-block linkage
 
 Each deduplicated inbound AMT trip is enriched through two paths.

@@ -2169,6 +2169,7 @@ class DrawAMTStockpile:
         "modelled_product_coverage", "modelled_properties",
         "geometry_quarantine_count", "geometry_quarantine_wmt",
         "geometry_quarantine_hexes",
+        "excluded_hex_count", "excluded_hex_wmt", "excluded_hexes",
         "modelled_rom_grades", "adjusted_rom_grades",
         "modelled_product_grades", "adjusted_product_grades",
     ]
@@ -2190,6 +2191,8 @@ class DrawAMTStockpile:
         self.cut_directions = {}
         self.dig_paths = {}
         self.geometry_outliers = {}
+        self.excluded_hexes = {}
+        self.exclusion_mode_footprints = set()
         self.status_message = "Select a footprint, digitize reclaim and cut directions, then generate chunks."
         self.server = self.app.server  # Get Flask server instance
         self.data = self.fetch_data()
@@ -2217,9 +2220,69 @@ class DrawAMTStockpile:
     def clean_up_hex_sequence_table(self):
         """Removes all string entries from self.selected_points."""
         self.selected_points = [entry for entry in self.selected_points if not isinstance(entry, str)]
+        if not hasattr(self, "excluded_hexes"):
+            self.excluded_hexes = {}
         for entry in self.selected_points:
             if isinstance(entry, dict) and isinstance(entry.get("member_hexes"), list):
                 entry["member_hexes"] = ",".join(str(hex_id) for hex_id in entry["member_hexes"])
+            if not isinstance(entry, dict):
+                continue
+            footprint = str(entry.get("footprint") or "").strip()
+            raw_excluded = entry.get("excluded_hexes") or []
+            if isinstance(raw_excluded, str):
+                raw_excluded = [
+                    value.strip() for value in raw_excluded.split(",")
+                    if value.strip()
+                ]
+            if footprint and isinstance(raw_excluded, (list, tuple, set)):
+                self.excluded_hexes.setdefault(footprint, set()).update(
+                    str(value) for value in raw_excluded if str(value).strip()
+                )
+
+    def excluded_hex_ids(self, footprint):
+        return set(
+            (getattr(self, "excluded_hexes", {}) or {}).get(footprint, set())
+        )
+
+    def excluded_hex_summary(self, footprint):
+        excluded = self.excluded_hex_ids(footprint)
+        if not excluded:
+            return {"hexes": [], "count": 0, "wmt": 0.0}
+        data = getattr(self, "data", pd.DataFrame())
+        if data is None or data.empty:
+            return {
+                "hexes": sorted(excluded),
+                "count": len(excluded),
+                "wmt": 0.0,
+            }
+        rows = data[
+            (data["footprint"] == footprint)
+            & (data["hex"].astype(str).isin(excluded))
+        ]
+        return {
+            "hexes": sorted(excluded),
+            "count": len(excluded),
+            "wmt": sum(
+                self.positive_tonnes(value) for value in rows.get("balance", [])
+            ),
+        }
+
+    def toggle_hex_exclusion(self, footprint, hex_id):
+        footprint = str(footprint or "").strip()
+        hex_id = str(hex_id or "").strip()
+        if not footprint or not hex_id:
+            return False
+        if not hasattr(self, "excluded_hexes"):
+            self.excluded_hexes = {}
+        excluded = self.excluded_hexes.setdefault(footprint, set())
+        if hex_id in excluded:
+            excluded.remove(hex_id)
+            excluded_now = False
+        else:
+            excluded.add(hex_id)
+            excluded_now = True
+        self.dig_paths.pop(footprint, None)
+        return excluded_now
 
     @staticmethod
     def dash_table_scalar(value, column=None):
@@ -2279,9 +2342,9 @@ class DrawAMTStockpile:
                 "inventory_total_wmt": self.get_chunk_setting(
                     entry.get("footprint"), "inventory_total_wmt", None
                 ),
-                "calculated_chunk_count": int(self.get_chunk_setting(
-                    entry.get("footprint"), "chunk_count", 1
-                )),
+                "calculated_chunk_count": int(
+                    self.get_chunk_plan(entry.get("footprint"))["chunk_count"]
+                ),
                 "inventory_match": (
                     "Matched" if bool(entry.get(
                         "amt_inventory_matched",
@@ -2498,6 +2561,11 @@ class DrawAMTStockpile:
                 filtered.get("balance", pd.Series(dtype=float)),
                 errors="coerce",
             ).fillna(0).clip(lower=0).sum()
+        total_wmt = max(
+            float(total_wmt or 0.0)
+            - self.excluded_hex_summary(footprint)["wmt"],
+            0.0,
+        )
         reclaim_rate = self.get_chunk_setting(
             footprint,
             "average_reclaim_rate",
@@ -2514,7 +2582,10 @@ class DrawAMTStockpile:
 
     def get_chunk_size(self, footprint):
         stored = self.get_chunk_setting(footprint, "chunk_size", None)
-        if stored is not None and stored > 0:
+        if (
+            stored is not None and stored > 0
+            and not self.excluded_hex_ids(footprint)
+        ):
             return stored
         return self.get_chunk_plan(footprint)["chunk_size"]
 
@@ -2526,7 +2597,16 @@ class DrawAMTStockpile:
             footprint, "amt_total_wmt", None
         )
         if amt_total is None:
-            amt_total = plan["chunk_size"] * plan["chunk_count"]
+            data = getattr(self, "data", pd.DataFrame())
+            footprint_rows = (
+                data[data["footprint"] == footprint]
+                if data is not None and not data.empty
+                else pd.DataFrame()
+            )
+            amt_total = pd.to_numeric(
+                footprint_rows.get("balance", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0).clip(lower=0).sum()
         inventory_total = self.get_chunk_setting(
             footprint, "inventory_total_wmt", None
         )
@@ -2548,6 +2628,13 @@ class DrawAMTStockpile:
                 f" | Missing Coordinates: {geometry['missing_position_count']} "
                 f"hex(es), {geometry.get('missing_position_wmt', 0.0):,.0f} t"
             )
+        exclusion = self.excluded_hex_summary(footprint)
+        exclusion_display = (
+            f" | Manually Excluded: {exclusion['count']} hex(es), "
+            f"{exclusion['wmt']:,.0f} t | Eligible AMT WMT: "
+            f"{max(amt_total - exclusion['wmt'], 0.0):,.0f} t"
+            if exclusion["count"] else ""
+        )
         return (
             f"Raw Signed AMT WMT: {raw_signed_total:,.0f} t | "
             if raw_signed_total is not None else "Raw Signed AMT WMT: Unavailable | "
@@ -2558,6 +2645,7 @@ class DrawAMTStockpile:
             f"Calculated Chunk Size: {plan['chunk_size']:,.0f} t | "
             f"Resulting Hours/Chunk: {plan['resulting_chunk_hours']:.2f}"
             f"{geometry_display}"
+            f"{exclusion_display}"
         )
 
     def remove_footprint_chunks(self, footprint, table_data=None):
@@ -2589,6 +2677,11 @@ class DrawAMTStockpile:
         filtered_data, _outliers, _missing = self.footprint_geometry_rows(
             footprint, positive_only=False
         )
+        excluded = self.excluded_hex_ids(footprint)
+        if excluded:
+            filtered_data = filtered_data[
+                ~filtered_data["hex"].astype(str).isin(excluded)
+            ].copy()
         if filtered_data.empty:
             return None, None, "No AMT hexagons were found for this footprint."
         coordinates = filtered_data[["long", "lat"]].drop_duplicates().to_numpy()
@@ -2668,6 +2761,7 @@ class DrawAMTStockpile:
         total_tonnes = sum(row["_positive_balance"] for row in chunk_rows)
         member_hexes = [row["hex"] for row in chunk_rows if row.get("hex") is not None]
         chunk_id = f"{footprint}_CHUNK_{sequence:03d}"
+        exclusion = self.excluded_hex_summary(footprint)
         weighted_grades = {}
         weighted_streams = {stream: {} for stream in STREAMS}
         stream_grade_mass = defaultdict(float)
@@ -3064,6 +3158,9 @@ class DrawAMTStockpile:
             "geometry_quarantine_hexes": ",".join(
                 str(row.get("hex") or "") for row in geometry_quarantine_rows
             ),
+            "excluded_hex_count": exclusion["count"],
+            "excluded_hex_wmt": exclusion["wmt"],
+            "excluded_hexes": ",".join(exclusion["hexes"]),
             **provenance,
         }
 
@@ -3144,6 +3241,17 @@ class DrawAMTStockpile:
         filtered_data, coordinate_outliers, missing_positions = (
             self.footprint_geometry_rows(footprint, positive_only=True)
         )
+        excluded = self.excluded_hex_ids(footprint)
+        if excluded:
+            filtered_data = filtered_data[
+                ~filtered_data["hex"].astype(str).isin(excluded)
+            ].copy()
+            coordinate_outliers = coordinate_outliers[
+                ~coordinate_outliers["hex"].astype(str).isin(excluded)
+            ].copy()
+            missing_positions = missing_positions[
+                ~missing_positions["hex"].astype(str).isin(excluded)
+            ].copy()
         coordinate_outliers = coordinate_outliers.copy()
         missing_positions = missing_positions.copy()
         coordinate_outliers["_geometry_quarantine_reason"] = (
@@ -3154,7 +3262,10 @@ class DrawAMTStockpile:
             [coordinate_outliers, missing_positions], ignore_index=False
         ).copy()
         if filtered_data.empty:
-            return [], "No positioned AMT hexagons remain after geometry validation."
+            return [], (
+                "No positioned AMT hexagons remain after geometry validation "
+                "and manual exclusions."
+            )
 
         numeric_columns = [
             "lat", "long", "balance", "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"
@@ -3263,6 +3374,14 @@ class DrawAMTStockpile:
                 "their tonnes were retained through non-spatial chunk allocation. "
                 "Hexes: "
                 + ", ".join(str(row.get("hex") or "") for row in quarantined_rows)
+                + "."
+            )
+        exclusion = self.excluded_hex_summary(footprint)
+        if exclusion["count"]:
+            message += (
+                f" Excluded {exclusion['count']} user-selected hex(es), "
+                f"{exclusion['wmt']:,.0f} t: "
+                + ", ".join(exclusion["hexes"])
                 + "."
             )
         return chunk_rows, message
@@ -3562,6 +3681,12 @@ class DrawAMTStockpile:
                                 style={**button_style, "backgroundColor": "#2563eb", "borderColor": "#2563eb", "color": "#ffffff"}
                             ),
                             dbc.Button(
+                                "Exclude / Restore Hexes",
+                                id="exclude-hex-button",
+                                size="sm",
+                                style={**button_style, "backgroundColor": "#be123c", "borderColor": "#be123c", "color": "#ffffff"}
+                            ),
+                            dbc.Button(
                                 "Generate Chunks",
                                 id="generate-chunks-button",
                                 size="sm",
@@ -3682,6 +3807,7 @@ class DrawAMTStockpile:
             Input("upload-dxf", "contents"),   # Handle DXF file upload
             Input("digitize-direction-button", "n_clicks"),
             Input("digitize-cut-direction-button", "n_clicks"),
+            Input("exclude-hex-button", "n_clicks"),
             Input("generate-chunks-button", "n_clicks"),
             Input("auto-generate-chunks-button", "n_clicks"),
             Input("clear-footprint-button", "n_clicks")],
@@ -3690,7 +3816,8 @@ class DrawAMTStockpile:
             State("scatter-plot", "relayoutData")]
         )
         def update_table_and_plot(click_data, selected_footprint, hex_size, dxf_contents,
-                                digitize_clicks, digitize_cut_clicks, generate_clicks,
+                                digitize_clicks, digitize_cut_clicks,
+                                exclude_hex_clicks, generate_clicks,
                                 auto_generate_clicks, clear_clicks,
                                 table_data, current_fig, relayout_data):
             triggered = dash.callback_context.triggered_id
@@ -3711,12 +3838,28 @@ class DrawAMTStockpile:
             table_data = table_data or []
 
             if triggered == "digitize-direction-button":
+                self.exclusion_mode_footprints.discard(selected_footprint)
                 self.direction_clicks[selected_footprint] = {"mode": "reclaim", "points": []}
                 status_message = f"Click two hexagons on {selected_footprint} to define the reclaim direction."
 
             if triggered == "digitize-cut-direction-button":
+                self.exclusion_mode_footprints.discard(selected_footprint)
                 self.direction_clicks[selected_footprint] = {"mode": "cut", "points": []}
                 status_message = f"Click two hexagons on {selected_footprint} to define the cut direction."
+
+            if triggered == "exclude-hex-button":
+                self.direction_clicks.pop(selected_footprint, None)
+                if selected_footprint in self.exclusion_mode_footprints:
+                    self.exclusion_mode_footprints.discard(selected_footprint)
+                    status_message = (
+                        f"Hex exclusion mode finished for {selected_footprint}."
+                    )
+                else:
+                    self.exclusion_mode_footprints.add(selected_footprint)
+                    status_message = (
+                        "Click hexagons to exclude or restore them. Press "
+                        "Exclude / Restore Hexes again when finished."
+                    )
 
             if triggered == "clear-footprint-button":
                 table_data = self.clear_footprint_chunking(
@@ -3727,9 +3870,11 @@ class DrawAMTStockpile:
                 )
 
             if triggered == "generate-chunks-button":
+                self.exclusion_mode_footprints.discard(selected_footprint)
                 table_data, status_message = self.generate_chunks_from_directions(selected_footprint, table_data)
 
             if triggered == "auto-generate-chunks-button":
+                self.exclusion_mode_footprints.discard(selected_footprint)
                 table_data, status_message = (
                     self.auto_generate_chunks_for_footprint(
                         selected_footprint, table_data
@@ -3742,7 +3887,29 @@ class DrawAMTStockpile:
 
                 if "customdata" in clicked_point:
                     capture = self.direction_clicks.get(selected_footprint)
-                    if not capture:
+                    clicked_customdata = clicked_point.get("customdata") or []
+                    clicked_hex = (
+                        clicked_customdata[0] if clicked_customdata else ""
+                    )
+                    if selected_footprint in self.exclusion_mode_footprints:
+                        excluded_now = self.toggle_hex_exclusion(
+                            selected_footprint, clicked_hex
+                        )
+                        table_data = self.remove_footprint_chunks(
+                            selected_footprint, table_data
+                        )
+                        exclusion = self.excluded_hex_summary(
+                            selected_footprint
+                        )
+                        action = "Excluded" if excluded_now else "Restored"
+                        status_message = (
+                            f"{action} hex {clicked_hex}. "
+                            f"{exclusion['count']} hex(es), "
+                            f"{exclusion['wmt']:,.0f} t currently excluded. "
+                            "Click another hex or press Exclude / Restore "
+                            "Hexes to finish."
+                        )
+                    elif not capture:
                         status_message = "Press Digitize Reclaim Direction or Digitize Cut Direction before clicking the map."
                     else:
                         capture["points"].append(
@@ -3928,13 +4095,20 @@ class DrawAMTStockpile:
 
         chunk_lookup = self.chunk_lookup_for_footprint(selected_footprint)
         filtered_data["chunk_sequence"] = filtered_data["hex"].map(chunk_lookup)
+        excluded_hexes = self.excluded_hex_ids(selected_footprint)
+        excluded_data = filtered_data[
+            filtered_data["hex"].astype(str).isin(excluded_hexes)
+        ].copy()
+        eligible_data = filtered_data[
+            ~filtered_data["hex"].astype(str).isin(excluded_hexes)
+        ].copy()
         chunk_palette = [
             "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7",
             "#BFD8D2", "#C9B8EA", "#F4B6C2", "#8ECAD1", "#D7E8BA",
             "#F3C0A8", "#B8D8F0", "#E7D3A0", "#C6E2C6", "#D8C8E8"
         ]
 
-        chunked_data = filtered_data[filtered_data["chunk_sequence"].notna()]
+        chunked_data = eligible_data[eligible_data["chunk_sequence"].notna()]
         for chunk_sequence, group in chunked_data.groupby("chunk_sequence"):
             color = chunk_palette[(int(chunk_sequence) - 1) % len(chunk_palette)]
             fig.add_trace(go.Scatter(
@@ -3977,7 +4151,7 @@ class DrawAMTStockpile:
                 )
             ))
 
-        remaining_data = filtered_data[filtered_data["chunk_sequence"].isna()]
+        remaining_data = eligible_data[eligible_data["chunk_sequence"].isna()]
         if not remaining_data.empty:
             fig.add_trace(go.Scatter(
                 x=remaining_data["long"],
@@ -4016,6 +4190,39 @@ class DrawAMTStockpile:
                     "P Grade: %{customdata[5]:.2f}%<br>" +
                     "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
                 )
+            ))
+
+        if not excluded_data.empty:
+            fig.add_trace(go.Scatter(
+                x=excluded_data["long"],
+                y=excluded_data["lat"],
+                mode="markers",
+                marker=dict(
+                    size=hex_size,
+                    symbol="x",
+                    color="#e11d48",
+                    line=dict(color="#881337", width=2),
+                    opacity=0.95,
+                ),
+                name="Manually Excluded Hexagons",
+                customdata=excluded_data[[
+                    "hex", "balance", "grade_fe_tooltip", "grade_si_tooltip",
+                    "grade_al_tooltip", "grade_p_tooltip", "grade_mn_tooltip",
+                    "lat_tooltip", "long_tooltip", "raw_wmt",
+                    "spatial_adjustment_wmt", "ledger_adjustment_wmt",
+                    "grade_block_count", "lineage_coverage_pct",
+                    "lineage_unmatched_final_wmt",
+                ]],
+                hovertemplate=(
+                    "<b>Manually Excluded</b><br>"
+                    "Hex: %{customdata[0]}<br>"
+                    "Latitude: %{customdata[7]:.2f}<br>"
+                    "Longitude: %{customdata[8]:.2f}<br>"
+                    "Final Balance: %{customdata[1]:,.0f} t<br>"
+                    "Lineage Coverage: %{customdata[13]:.2f}%<br>"
+                    "Click in exclusion mode to restore this hex."
+                    "<extra></extra>"
+                ),
             ))
 
         direction = self.reclaim_directions.get(selected_footprint)
