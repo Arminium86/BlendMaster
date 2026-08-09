@@ -62,9 +62,10 @@ Site Configuration -> Guidance Schedules -> Stockpile Inventories
 
 **Guidance Schedules** precedes inventory selection so the 24HR APS schedule
 can supply each stockpile's 2WP brand and the haul-cycle selection can supply
-its nearest crusher. **Stockpile Inventories** then preselects only stockpiles
-whose nearest crusher matches the planned tipping point and which have brand
-guidance. It remains intentionally pre-calculation: it shows source selection,
+its nearest crusher. **Stockpile Inventories** then preselects both **Use** and
+**AMT** only for stockpiles whose nearest crusher matches one of the explicitly
+selected planned tipping points and which have 2WP brand guidance. It remains
+intentionally pre-calculation: it shows source selection,
 inventory identity/build, opening balance and insitu assays. The modelled and
 adjusted fields are not treated as defined until the next steps. The submitted
 opening inventory is persisted here; Data Streams does not rewrite it.

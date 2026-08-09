@@ -10664,6 +10664,15 @@ class UserInputs(QMainWindow):
         """Clear workflow state that is owned by the submitted site context."""
         self.stockpile_data_use_column = {}
         self.stockpile_data_AMT_column = {}
+        # The table can still contain rows from the previously active site.
+        # Leaving them rendered lets capture_scenario_state repopulate the two
+        # freshly-cleared selection dictionaries before Guidance Schedules has
+        # had a chance to derive the new defaults.
+        if hasattr(self, "stockpile_table"):
+            self.stockpile_table.blockSignals(True)
+            self.stockpile_table.clearContents()
+            self.stockpile_table.setRowCount(0)
+            self.stockpile_table.blockSignals(False)
         self.updated_stockpile_data = None
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
@@ -13784,24 +13793,13 @@ class UserInputs(QMainWindow):
         mapped_nodes = {
             self.normalized_crusher_display_name(value)
             for value in self.current_haul_cycle_crusher_node()
+            if self.normalized_crusher_display_name(value)
         }
         if not mapped_nodes:
-            mapped_nodes = {
-                self.normalized_crusher_display_name(
-                    getattr(self, "crusher_input_choice", None)
-                    or (self.site_crusher_input.currentText() if hasattr(self, "site_crusher_input") else "")
-                )
+            return {
+                stockpile_name: False
+                for stockpile_name in (stockpile_data or {})
             }
-        nearest_values = [
-            str(
-                attributes.get("nearest_crusher", attributes.get("NEAREST_CRUSHER", ""))
-                or ""
-            ).strip()
-            for attributes in (stockpile_data or {}).values()
-            if isinstance(attributes, dict)
-        ]
-        if not any(mapped_nodes) or not any(nearest_values):
-            return None
         return {
             stockpile_name: (
                 self.normalized_crusher_display_name(
@@ -13822,6 +13820,21 @@ class UserInputs(QMainWindow):
             )
             for stockpile_name, attributes in (stockpile_data or {}).items()
         }
+
+    def apply_default_stockpile_preselection(self, stockpile_data):
+        """Seed both inventory checkbox columns once from schedule guidance."""
+        if self.stockpile_data_use_column or self.stockpile_data_AMT_column:
+            return None
+        defaults = self.default_stockpile_use_for_active_crusher(
+            stockpile_data
+        )
+        if defaults is None:
+            return None
+        self.stockpile_data_use_column.update(defaults)
+        # AMT is the default representation for every guided match.  Its Use
+        # checkbox must be selected as well, hence the identical dictionaries.
+        self.stockpile_data_AMT_column.update(defaults)
+        return defaults
 
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -13852,12 +13865,14 @@ class UserInputs(QMainWindow):
         self.stockpile_table.setRowCount(len(self.stockpile_data))
 
         default_use_by_stockpile = None
-        if not self.stockpile_data_use_column:
-            default_use_by_stockpile = self.default_stockpile_use_for_active_crusher(
-                data_source
+        has_saved_selection = bool(
+            self.stockpile_data_use_column
+            or self.stockpile_data_AMT_column
+        )
+        if not has_saved_selection:
+            default_use_by_stockpile = (
+                self.apply_default_stockpile_preselection(data_source)
             )
-            if default_use_by_stockpile is not None:
-                self.stockpile_data_use_column.update(default_use_by_stockpile)
 
         # Populate Stockpile Data
         for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
@@ -13868,9 +13883,9 @@ class UserInputs(QMainWindow):
             AMT_checkbox = QCheckBox()
 
             
-            if self.stockpile_data_use_column:
+            if has_saved_selection or default_use_by_stockpile is not None:
                 # Set the checkbox state based on the value in self.stockpile_data_use_column
-                use_checkbox.setChecked(self.stockpile_data_use_column.get(stockpile_name, True))  # Default to checked if not found
+                use_checkbox.setChecked(self.stockpile_data_use_column.get(stockpile_name, False))
                 AMT_checkbox.setChecked(self.stockpile_data_AMT_column.get(stockpile_name, False))  # Default to checked if not found
 
             else:
