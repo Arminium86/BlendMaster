@@ -120,10 +120,28 @@ class ExpitDataHandler:
                 if isinstance(brand_mappings, dict):
                     mapped_grade_columns.update(value for value in brand_mappings.values() if value)
         self.mapped_grade_columns = mapped_grade_columns
-        # Retain numeric APS properties beyond the core schedule fields so
-        # ultrafines, recovery, physical properties, and other model inputs can
-        # participate in Database View and custom constraints.
-        self.data = pd.read_csv(input_data)
+        configured_property_mappings = {
+            field: header
+            for field, header in self.source_property_field_mappings.items()
+            if header
+        }
+        mapped_property_columns = set(configured_property_mappings.values())
+
+        # Map Fields is the strict APS data boundary.  Read the columns needed
+        # to construct schedule transactions plus only the grade/property
+        # headers the user explicitly mapped.  APS exports can contain hundreds
+        # of unrelated numeric planning columns; loading and auto-promoting
+        # those columns used substantial memory and made them appear to flow
+        # into Database View despite never being mapped.
+        required_columns = (
+            set(self.TRANSACTION_COLUMNS)
+            | self.mapped_grade_columns
+            | mapped_property_columns
+        )
+        self.data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in required_columns,
+        )
         missing_mapped_columns = sorted(
             self.mapped_grade_columns - set(self.data.columns)
         )
@@ -132,11 +150,6 @@ class ExpitDataHandler:
                 "APS 24HR grade field mapping column(s) were not found: "
                 + ", ".join(missing_mapped_columns)
             )
-        configured_property_mappings = {
-            field: header
-            for field, header in self.source_property_field_mappings.items()
-            if header
-        }
         missing_property_columns = sorted(
             set(configured_property_mappings.values()) - set(self.data.columns)
         )
@@ -145,7 +158,6 @@ class ExpitDataHandler:
                 "APS 24HR source-property mapping column(s) were not found: "
                 + ", ".join(missing_property_columns)
             )
-        mapped_property_columns = set(configured_property_mappings.values())
         self.mapped_property_column_keys = {}
         for field, column in configured_property_mappings.items():
             existing_field = self.mapped_property_column_keys.get(column)
@@ -161,48 +173,13 @@ class ExpitDataHandler:
                     f"'{field}'."
                 )
             self.mapped_property_column_keys.setdefault(column, field)
+
+        # Kept for compatibility with the grouping/payload code, but automatic
+        # numeric-property discovery is intentionally disabled.  Explicit Map
+        # Fields mappings are supplied through mapped_property_column_keys.
         self.property_columns = []
         self.property_column_keys = {}
-        canonical_sources = {}
-        ignored_property_columns = (
-            set(self.TRANSACTION_COLUMNS)
-            | set(self.mapped_grade_columns)
-            | mapped_property_columns
-        )
-        for column in self.data.columns:
-            if column in ignored_property_columns:
-                continue
-            numeric_values = pd.to_numeric(self.data[column], errors="coerce")
-            if not numeric_values.notna().any():
-                continue
-            key = canonical_property_key(column)
-            if not key:
-                continue
-            prior = canonical_sources.get(key)
-            if prior is not None and prior != column:
-                raise ValueError(
-                    "APS numeric property headers collide after field-name "
-                    f"normalisation: '{prior}' and '{column}' both become '{key}'."
-                )
-            canonical_sources[key] = column
-            self.property_columns.append(column)
-            self.property_column_keys[column] = key
-        unknown_property_columns = [
-            column for column in self.property_columns
-            if self.property_kind(self.property_column_keys[column]) == "unknown"
-        ]
         self.property_warnings = []
-        if unknown_property_columns:
-            preview = ", ".join(unknown_property_columns[:10])
-            suffix = (
-                f" (+{len(unknown_property_columns) - 10} more)"
-                if len(unknown_property_columns) > 10 else ""
-            )
-            self.property_warnings.append(
-                "APS numeric properties without a recognised total/control "
-                "name were treated as WMT-weighted source properties: "
-                f"{preview}{suffix}."
-            )
 
         if not self.data.empty:
             self._preprocess_data()

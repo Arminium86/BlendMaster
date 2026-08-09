@@ -459,6 +459,14 @@ uses its own additive **Weight Field** from Define Fields. A mapped field is
 rejected when the same raw APS grade is configured with incompatible raw
 weighting bases.
 
+Map Fields is also the strict APS processing boundary. BlendMaster reads the
+fixed schedule, destination and haulage columns required to construct APS
+transactions, plus only the APS grade and source-property headers explicitly
+mapped on this page. Other numeric columns remain available in the header
+browser but are not loaded, grouped, shown in Database View, passed to the
+solver or written to reports until they are mapped. This avoids treating APS
+calendar, period, UID and other model-control columns as material properties.
+
 When an APS payload is sent to a stockpile destination, every retained mapped
 additive property is added to that inventory stockpile and every retained
 weighted-average property is recalculated using its configured additive weight.
