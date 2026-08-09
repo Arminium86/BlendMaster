@@ -10875,6 +10875,15 @@ class UserInputs(QMainWindow):
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
+        # Changing a planned tipping-point on Guidance can cause the live table
+        # refresh above to seed an all-false default before 2WP brands have been
+        # applied.  Guidance submission is the authoritative point at which
+        # both inputs are available, so discard those provisional checkbox
+        # values and derive the defaults again.  Any manual edits happen on the
+        # Stockpile Inventories step after this point.
+        self.stockpile_data_use_column = {}
+        self.stockpile_data_AMT_column = {}
+
         # Rebuild only after guidance has been applied.  With no prior user
         # choices this derives the default Use selection from both 2WP brand
         # guidance and the nearest planned tipping-point crusher.
