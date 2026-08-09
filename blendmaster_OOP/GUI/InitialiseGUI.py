@@ -365,14 +365,16 @@ class UserInputs(QMainWindow):
         # Add Site Configuration Tab
         self.setup_site_configuration()
 
-        # Add Stockpile Tab
+        # Guidance Schedules is registered by Site Configuration first.  Keep
+        # Stockpile Inventories after it so APS brand guidance and haul-cycle
+        # routes exist before the inventory table derives its defaults.
         self.stockpile_tab = QWidget()
         self.stockpile_tab_index = self.register_page(
             "stockpile_inventories",
             self.setup_tabs,
             self.stockpile_tab,
             "Stockpile Inventories",
-            position=1,
+            position=2,
         )
         self.stockpile_tab_layout = QVBoxLayout(self.stockpile_tab)
 
@@ -381,7 +383,8 @@ class UserInputs(QMainWindow):
         self.stockpile_tab_layout.addWidget(self.stockpile_table)
 
         # Canonical field schema and source mappings are deliberately defined
-        # after the opening inventory is visible and before streams are built.
+        # after the guided opening inventory selection and before streams are
+        # built.
         self.setup_define_fields()
         self.setup_map_fields()
         self.setup_data_streams()
@@ -5540,7 +5543,7 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.define_fields_tab,
             "Define Fields",
-            position=2,
+            position=3,
         )
         self.set_page_enabled(self.define_fields_tab_index, False)
         layout = QVBoxLayout(self.define_fields_tab)
@@ -5902,7 +5905,7 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.map_fields_tab,
             "Map Fields",
-            position=3,
+            position=4,
         )
         self.set_page_enabled(self.map_fields_tab_index, False)
         layout = QVBoxLayout(self.map_fields_tab)
@@ -6597,7 +6600,7 @@ class UserInputs(QMainWindow):
             self.setup_tabs,
             self.data_streams_tab,
             "Data Streams",
-            position=4,
+            position=5,
         )
         self.set_page_enabled(self.data_streams_tab_index, False)
 
@@ -8282,29 +8285,28 @@ class UserInputs(QMainWindow):
             self.reconcile_saved_AMT_chunk_grade_streams()
             self.apply_canonical_field_mappings()
             self.apply_grade_streams_to_inventory()
-            registering_scenarios = bool(self.data_stream_pending_build_targets)
             self.refresh_AMT_enrichment_if_needed(
-                persist=not registering_scenarios,
-                refresh_map=not registering_scenarios,
+                persist=True,
+                refresh_map=True,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
-        if registering_scenarios:
-            # Registration clears and then seeds the scenario database.  The
-            # seed is the sole inventory/AMT/reconciliation write on this path.
-            self.register_submitted_site_scenarios(self.data_stream_pending_build_targets)
-            if self.AMT_stockpile_data:
-                self.refresh_AMT_map_data_from_database()
-        else:
-            self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
-            self.data_stream_reconciliation.save_to_database(
-                self.opf_input_choice,
-                self.start_time_choice,
-                self.historical_recon_factors,
-                self.historical_recon_warnings,
+        if self.data_stream_pending_build_targets:
+            # Stockpile Inventories has already established and persisted the
+            # opening source set.  Applying later 2WP targets must not clear
+            # and rewrite those opening tables.
+            self.register_submitted_site_scenarios(
+                self.data_stream_pending_build_targets,
+                reset_database=False,
             )
-            self.save_active_scenario_state()
+        self.data_stream_reconciliation.save_to_database(
+            self.opf_input_choice,
+            self.start_time_choice,
+            self.historical_recon_factors,
+            self.historical_recon_warnings,
+        )
+        self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
         # The field schema remains editable after Data Streams. It is common
         # to return to the raw sources while auditing recon factors.
@@ -8315,7 +8317,13 @@ class UserInputs(QMainWindow):
         ):
             self.set_page_enabled(page_id, True)
         self.set_page_enabled(self.guidance_schedules_tab_index, True)
-        self.show_page(self.guidance_schedules_tab_index, force=True)
+        if any((self.stockpile_data_AMT_column or {}).values()):
+            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
+            self.show_page(self.AMT_stockpile_tab_index, force=True)
+        else:
+            self.hex_sequence_table = []
+            self.hex_sequence_table_argument = []
+            self.open_database_view(navigate=True)
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -10698,7 +10706,9 @@ class UserInputs(QMainWindow):
                 "Run the optimiser to review feasible blend options."
             )
 
-    def register_submitted_site_scenarios(self, build_targets):
+    def register_submitted_site_scenarios(
+        self, build_targets, reset_database=True
+    ):
         selected_crushers = list(self.selected_site_crushers or [])
         if not selected_crushers:
             return
@@ -10711,8 +10721,9 @@ class UserInputs(QMainWindow):
         self.stored_blend_sequence_table_for_gantt = []
         self.stored_blend_sequence_table_for_gantt_default = []
         self.reset_workflow_tabs_for_scenario()
-        DatabaseManager.clear_all_tables(get_database_path())
-        self.seed_active_scenario_database(force=True)
+        if reset_database:
+            DatabaseManager.clear_all_tables(get_database_path())
+            self.seed_active_scenario_database(force=True)
         current_state = self.capture_scenario_state()
         current_state["crusher_input_choice"] = current_crusher
         current_state["selected_site_crushers"] = [current_crusher]
@@ -10788,7 +10799,12 @@ class UserInputs(QMainWindow):
         if not restoring_project:
             QMessageBox.information(self, "BlendMaster", message)
 
-        self.setup_stockpile_table()
+        if restoring_project:
+            # A restored project already owns authoritative guidance and
+            # stockpile choices, so rebuild its table immediately.  Fresh
+            # scenarios defer this until Guidance Schedules has populated the
+            # APS brand and nearest-crusher fields used by preselection.
+            self.setup_stockpile_table()
         self.populate_define_fields_table()
         self.refresh_map_field_brands()
         self.ensure_field_mapping_migration()
@@ -10800,17 +10816,16 @@ class UserInputs(QMainWindow):
         self.load_byproduct_build_settings()
         self.refresh_map_available_fields()
         self.populate_recon_factor_table()
-        self.set_page_enabled(
-            self.stockpile_tab_index,
-            True,
-        )
         if not restoring_project:
+            self.set_page_enabled(self.guidance_schedules_tab_index, True)
+            self.set_page_enabled(self.stockpile_tab_index, False)
             self.set_page_enabled(self.define_fields_tab_index, False)
             self.set_page_enabled(self.map_fields_tab_index, False)
             self.set_page_enabled(self.data_streams_tab_index, False)
-            self.set_page_enabled(self.guidance_schedules_tab_index, False)
-            self.show_page(self.stockpile_tab_index)
+            self.show_page(self.guidance_schedules_tab_index, force=True)
         else:
+            self.set_page_enabled(self.guidance_schedules_tab_index, True)
+            self.set_page_enabled(self.stockpile_tab_index, True)
             self.apply_canonical_field_mappings()
             self.apply_grade_streams_to_inventory()
         self.validate_form()
@@ -10819,7 +10834,7 @@ class UserInputs(QMainWindow):
             self.agent_workflow_after_data_streams = True
 
     def handle_guidance_schedules_submit(self):
-        """Apply optional schedule guidance and advance to source chunking."""
+        """Apply optional schedule guidance before inventory selection."""
         if not self.stockpile_data:
             QMessageBox.warning(
                 self,
@@ -10851,14 +10866,13 @@ class UserInputs(QMainWindow):
             self.haul_cycle_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
+        # Rebuild only after guidance has been applied.  With no prior user
+        # choices this derives the default Use selection from both 2WP brand
+        # guidance and the nearest planned tipping-point crusher.
+        self.setup_stockpile_table()
         self.save_active_scenario_state()
-        if any((self.stockpile_data_AMT_column or {}).values()):
-            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
-            self.show_page(self.AMT_stockpile_tab_index, force=True)
-        else:
-            self.hex_sequence_table = []
-            self.hex_sequence_table_argument = []
-            self.open_database_view(navigate=True)
+        self.set_page_enabled(self.stockpile_tab_index, True)
+        self.show_page(self.stockpile_tab_index, force=True)
         self.validate_form()
 
     def handle_site_config_error(self, error_message):
@@ -14267,10 +14281,20 @@ class UserInputs(QMainWindow):
                 return
 
         if self.updated_stockpile_data:
+            # Guidance is complete and the selected opening source set is now
+            # authoritative.  Reset stale downstream results and persist the
+            # inventory once here; Data Streams only adds reconciliation and
+            # must not rewrite this table.
+            if not getattr(self, "project_load_restore_in_progress", False):
+                DatabaseManager.clear_all_tables(get_database_path())
+                self.opening_stockpile_inventories.save_to_database(
+                    self.stockpile_data
+                )
             self.save_active_scenario_state()
             self.setup_calendar()
-            # Fetch AMT raw fields now so they are available on Map Fields, but
-            # leave chunk generation until after Guidance Schedules.
+            # Fetch AMT raw fields now so they are available on Map Fields;
+            # chunk generation remains after Data Streams has applied the
+            # selected mappings and historical reconciliation.
             self.setup_AMT_stockpile_table()
             self.populate_define_fields_table()
             self.set_page_enabled(self.define_fields_tab_index, True)
@@ -22187,11 +22211,11 @@ class UserInputs(QMainWindow):
                 "solver_configuration",
                 "database_view",
                 "amt_stockpiles",
-                "guidance_schedules",
                 "data_streams",
                 "map_fields",
                 "define_fields",
                 "stockpile_inventories",
+                "guidance_schedules",
                 "site_configuration",
             )
             destination = next(

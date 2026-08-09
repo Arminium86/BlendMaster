@@ -55,14 +55,19 @@ and `<field>_closing_balance`.
 The Setup sequence is:
 
 ```text
-Site Configuration -> Stockpile Inventories -> Define Fields -> Map Fields
--> Data Streams -> Guidance Schedules -> AMT Stockpiles (when selected)
+Site Configuration -> Guidance Schedules -> Stockpile Inventories
+-> Define Fields -> Map Fields -> Data Streams -> AMT Stockpiles (when selected)
 -> Database View
 ```
 
-**Stockpile Inventories** is intentionally pre-calculation. It shows source
-selection, inventory identity/build, opening balance and insitu assays. The
-modelled and adjusted fields are not treated as defined until the next steps.
+**Guidance Schedules** precedes inventory selection so the 24HR APS schedule
+can supply each stockpile's 2WP brand and the haul-cycle selection can supply
+its nearest crusher. **Stockpile Inventories** then preselects only stockpiles
+whose nearest crusher matches the planned tipping point and which have brand
+guidance. It remains intentionally pre-calculation: it shows source selection,
+inventory identity/build, opening balance and insitu assays. The modelled and
+adjusted fields are not treated as defined until the next steps. The submitted
+opening inventory is persisted here; Data Streams does not rewrite it.
 
 **Define Fields** creates the stable BlendMaster schema shared by Inventory,
 AMT and APS sources. A field name may contain letters, numbers and underscores
@@ -108,8 +113,9 @@ coefficient. This makes the data gap distinguishable from a genuine zero.
 
 **Map Fields** maps raw Inventory, AMT and APS columns onto the canonical rows.
 Choose a source family (and, for APS, an optional brand), then double-click or
-drag an available raw field into **Source Field**. The page owns the 24HR
-`Mining.csv` selector; Guidance Schedules reuses the same path. Mappings save
+drag an available raw field into **Source Field**. Guidance Schedules owns the
+initial 24HR `Mining.csv` selection and Map Fields exposes the same shared path
+so it can still be replaced while mapping. Mappings save
 the exact raw header while every downstream component uses only the stable
 BlendMaster field name. Older projects migrate their former APS mappings and
 receive explicit compatibility mappings for the established inventory and AMT
@@ -470,9 +476,9 @@ zero.
 
 ## Database View
 
-Guidance Schedules proceeds to AMT Stockpiles when any footprint uses AMT;
+Data Streams proceeds to AMT Stockpiles when any footprint uses AMT;
 submitting its chunks opens **Database View**. Inventory-only scenarios open
-Database View directly from Guidance Schedules. This source-level audit
+Database View directly from Data Streams. This source-level audit
 snapshot is reused by the next optimisation run. It includes:
 
 - selected inventory stockpiles, excluding the duplicate inventory instance
