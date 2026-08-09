@@ -157,6 +157,14 @@ are hidden. Canonical downstream fields such as `insitu_fe`,
 mapping/calculation outputs, not source inputs. Existing saved mappings to a
 hidden alias remain valid.
 
+The flattened names in that browser are virtual aliases over one compact
+per-hex `modelled_properties` JSON catalogue; BlendMaster no longer stores a
+second physical column for every `MODELLED_*` value and coverage percentage.
+The AMT SQLite table contains the fixed balance/geometry/lineage audit columns,
+the compact raw catalogue, grade-stream JSON and the canonical fields created
+in Define Fields. This preserves every raw option for remapping while avoiding
+hundreds of duplicate columns in memory, project files and the opening table.
+
 The AMT source browser always exposes the supported grade-block-lineage
 additive schema: Product 1/2/3 WMT and DMT, Product 1 lump/fines WMT and DMT,
 Product 1/2 minus-1-mm WMT and DMT, and ore-type WMT and DMT. These are per-hex
@@ -183,6 +191,13 @@ It also includes **Insitu / ROM WMT/DMT** (stored raw as
 then use that DMT denominator when hexes are consolidated into chunks. The
 same canonical mass mappings are available for inventory stockpiles, whose
 `feed_wmt` is their opening balance and whose `feed_dmt` is its dry equivalent.
+
+Chunks are a canonical scheduling layer, not another copy of the raw AMT
+catalogue. Chunk construction aggregates only Define Fields values, selected
+grade streams and the compact lineage/product-coverage audit needed for
+warnings. Unmapped raw candidates remain on the underlying hex snapshot and
+can still be mapped later; changing a mapping causes the affected chunks to be
+rebuilt from their member hexes.
 
 The required `insitu_*` fields are visible in Map Fields for Inventory, AMT
 and APS. They default to the established raw assay fields during migration but
@@ -643,12 +658,15 @@ publishing additional raw `grade_*` aliases alongside the five canonical grade
 families, so one meaning has one visible field name.
 
 When an older project contains saved AMT chunks, BlendMaster preserves each
-chunk's membership, sequence, tonnes and modelled grades, then refreshes the
-branded modelled-ROM copies and recalculates adjusted ROM/product grades from
-the current editable historical factors. This upgrade runs during project
-restore, Data Streams submission, Database View refresh and immediately before
-solving, so a legacy blank adjusted-product vector does not force an obsolete
-fallback to modelled product.
+chunk's membership and sequence, then refreshes its mapped tonnes/grades from
+the current member hexes and recalculates branded adjusted streams. The
+restore, Data Streams, Database View and solver boundaries all check the same
+input signature, but the expensive member-hex rebuild runs only once while the
+opening snapshot, mappings, factors, by-product settings and chunk membership
+remain unchanged. `hex_sequence_table_argument` is a deep solver snapshot of
+that one canonical result; it is not independently rebuilt. Older projects
+without a saved signature perform one compatibility rebuild and then use the
+same guarded path.
 
 Not every raw stream field is used at the same time. BlendMaster retains all
 five so the selected result can be traced and the user can switch streams

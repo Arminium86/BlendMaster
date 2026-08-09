@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from database.DatabaseContext import get_database_path
 from classes.GradeStreams import ANALYTES, flatten_grade_streams
+from classes.CustomConstraints import canonical_property_key
 from setup.AMTSpatialReconciliation import reconcile_amt_hex_rows
 from setup.AMTGradeBlockLineage import (
     align_amt_grade_block_lineage,
@@ -177,6 +178,72 @@ INVENTORY_TEXT_FIELDS = {
     "cb_split_method", "cb_split_warning",
 }
 INVENTORY_INTEGER_FIELDS = {"isfeedable", "isinbuildpurity"}
+
+
+# Compact AMT persistence keeps remappable raw properties and coverage once in
+# modelled_properties_json. Only stable balance/geometry/lineage audit fields
+# and canonical Define Fields values receive relational columns.
+AMT_FIXED_COLUMN_TYPES = {
+    "footprint": "TEXT",
+    "hex": "TEXT",
+    "balance": "REAL",
+    "grade_fe": "REAL",
+    "grade_si": "REAL",
+    "grade_al": "REAL",
+    "grade_p": "REAL",
+    "grade_mn": "REAL",
+    "lat": "REAL",
+    "long": "REAL",
+    "northing": "REAL",
+    "easting": "REAL",
+    "last_update": "TEXT",
+    "hex_updated": "TEXT",
+    "grade_streams_json": "TEXT",
+    "defined_fields_json": "TEXT",
+    "modelled_properties_json": "TEXT",
+    "amt_inventory_matched": "INTEGER",
+    "amt_inventory_stockpile": "TEXT",
+    "amt_inventory_build": "TEXT",
+    "amt_inventory_transaction_datetime": "TEXT",
+    "amt_inventory_match_rule": "TEXT",
+    "location_name": "TEXT",
+    "inventory_balance_wmt": "REAL",
+    "raw_wmt": "REAL",
+    "spatially_corrected_wmt": "REAL",
+    "spatial_adjustment_wmt": "REAL",
+    "ledger_adjustment_wmt": "REAL",
+    "inventory_recon_deduction_wmt": "REAL",
+    "inventory_recon_lineage_coverage_pct": "REAL",
+    "spatial_deficit_wmt": "REAL",
+    "spatial_deficit_filled_wmt": "REAL",
+    "spatial_donor_wmt": "REAL",
+    "spatial_unresolved_wmt": "REAL",
+    "raw_stockpile_wmt": "REAL",
+    "raw_positive_stockpile_wmt": "REAL",
+    "spatially_corrected_stockpile_wmt": "REAL",
+    "final_stockpile_wmt": "REAL",
+    "unattributed_movement_wmt": "REAL",
+    "spatial_recon_status": "TEXT",
+    "spatial_recon_method": "TEXT",
+    "reclaim_direction_easting": "REAL",
+    "reclaim_direction_northing": "REAL",
+    "grade_block_lineage_json": "TEXT",
+    "grade_block_count": "INTEGER",
+    "lineage_entry_count": "INTEGER",
+    "lineage_inbound_wmt": "REAL",
+    "lineage_matched_wmt": "REAL",
+    "lineage_unmatched_wmt": "REAL",
+    "lineage_final_wmt": "REAL",
+    "lineage_matched_final_wmt": "REAL",
+    "lineage_unmatched_final_wmt": "REAL",
+    "lineage_coverage_pct": "REAL",
+    "lineage_warning": "TEXT",
+    "grade_stream_warnings_json": "TEXT",
+    "modelled_rom_mats": "TEXT",
+    "modelled_dominant_ore_type": "TEXT",
+    "cb_split_method": "TEXT",
+    "cb_split_warning": "TEXT",
+}
 
 
 def _sqlite_scalar(value):
@@ -1262,259 +1329,286 @@ class OpeningStockpileInventories:
         print(f"Stockpile inventories saved to database {database_name}")
     
     def save_AMT_to_database(self, data_dict):
-        # SQLite connection
+        """Persist a compact, backward-readable AMT opening snapshot.
+
+        Raw lineage-derived candidates and their coverage are stored once in
+        modelled_properties_json. Canonical fields selected through Map Fields
+        remain individually queryable, while grade streams and lineage retain
+        their dedicated JSON/audit columns. A staging-table swap removes stale
+        flattened columns left by older saves without risking the current
+        table if construction fails.
+        """
         database_name = get_database_path()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
+        prepared_rows = []
+        dynamic_fields = set()
 
-        # Create table for stockpile inventories
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS opening_AMT_stockpile_inventories (
-            footprint TEXT,
-            hex TEXT,    
-            balance REAL,
-            grade_fe REAL,
-            grade_si REAL,
-            grade_al REAL,
-            grade_p REAL,
-            grade_mn REAL,
-            lat REAL,
-            long REAL,
-            northing REAL,
-            easting REAL,
-            last_update TEXT,
-            hex_updated TEXT,
-            grade_streams_json TEXT,
-            defined_fields_json TEXT
-        )
-        ''')
+        def value(row, *names):
+            for name in names:
+                if name in row and row.get(name) is not None:
+                    return row.get(name)
+            return None
 
-        cursor.execute("PRAGMA table_info(opening_AMT_stockpile_inventories)")
-        existing_columns = {column[1] for column in cursor.fetchall()}
-        if "last_update" not in existing_columns:
-            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN last_update TEXT")
-        if "grade_streams_json" not in existing_columns:
-            cursor.execute("ALTER TABLE opening_AMT_stockpile_inventories ADD COLUMN grade_streams_json TEXT")
-        if "defined_fields_json" not in existing_columns:
-            cursor.execute(
-                "ALTER TABLE opening_AMT_stockpile_inventories "
-                "ADD COLUMN defined_fields_json TEXT"
-            )
-        amt_audit_by_hex = {}
+        def json_payload(raw, expected_type):
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError):
+                    raw = None
+            return raw if isinstance(raw, expected_type) else expected_type()
+
         for footprint, rows in (data_dict or {}).items():
             for row in rows or []:
-                modelled_audit = {
-                    str(column).lower(): value
-                    for column, value in row.items()
-                    if str(column).upper().startswith("MODELLED_")
-                }
-                property_payload = (
-                    row.get("MODELLED_PROPERTIES_JSON")
-                    or row.get("modelled_properties_json")
-                    or row.get("modelled_properties")
-                    or {}
-                )
-                if isinstance(property_payload, str):
+                row = row if isinstance(row, dict) else {}
+                row_footprint = value(row, "FOOTPRINT", "footprint") or footprint
+                if not row_footprint:
+                    continue
+                raw_defined_fields = value(
+                    row, "defined_fields", "DEFINED_FIELDS",
+                    "defined_fields_json",
+                ) or {}
+                if isinstance(raw_defined_fields, str):
                     try:
-                        property_payload = json.loads(property_payload)
+                        raw_defined_fields = json.loads(raw_defined_fields)
                     except (TypeError, ValueError):
-                        property_payload = {}
-                property_payload = (
-                    dict(property_payload)
-                    if isinstance(property_payload, dict) else {}
-                )
-                property_values = dict(property_payload.get("values") or {})
-                property_coverage = dict(
-                    property_payload.get("coverage") or {}
-                )
-                for field_name, field_value in dict(
-                    row.get("defined_fields") or {}
-                ).items():
-                    if field_value is None:
-                        continue
-                    property_values[str(field_name)] = field_value
-                    property_coverage[str(field_name)] = 1.0
-                property_payload["values"] = property_values
-                property_payload["coverage"] = property_coverage
-                audit = {
-                    "amt_inventory_matched": int(bool(row.get("AMT_INVENTORY_MATCHED"))),
-                    "amt_inventory_stockpile": row.get("AMT_INVENTORY_STOCKPILE"),
-                    "amt_inventory_build": row.get("AMT_INVENTORY_BUILD"),
-                    "amt_inventory_transaction_datetime": row.get(
-                        "AMT_INVENTORY_TRANSACTION_DATETIME"
-                    ),
-                    "amt_inventory_match_rule": row.get("AMT_INVENTORY_MATCH_RULE"),
-                    "location_name": row.get("LOCATION_NAME"),
-                    "inventory_balance_wmt": row.get("INVENTORY_BALANCE_WMT"),
-                    "raw_wmt": row.get("RAW_WMT"),
-                    "spatially_corrected_wmt": row.get("SPATIALLY_CORRECTED_WMT"),
-                    "spatial_adjustment_wmt": row.get("SPATIAL_ADJUSTMENT_WMT"),
-                    "ledger_adjustment_wmt": row.get("LEDGER_ADJUSTMENT_WMT"),
-                    "inventory_recon_deduction_wmt": row.get(
-                        "INVENTORY_RECON_DEDUCTION_WMT"
-                    ),
-                    "inventory_recon_lineage_coverage_pct": row.get(
-                        "INVENTORY_RECON_LINEAGE_COVERAGE_PCT"
-                    ),
-                    "spatial_deficit_wmt": row.get("SPATIAL_DEFICIT_WMT"),
-                    "spatial_deficit_filled_wmt": row.get("SPATIAL_DEFICIT_FILLED_WMT"),
-                    "spatial_donor_wmt": row.get("SPATIAL_DONOR_WMT"),
-                    "spatial_unresolved_wmt": row.get("SPATIAL_UNRESOLVED_WMT"),
-                    "raw_stockpile_wmt": row.get("RAW_STOCKPILE_WMT"),
-                    "raw_positive_stockpile_wmt": row.get("RAW_POSITIVE_STOCKPILE_WMT"),
-                    "spatially_corrected_stockpile_wmt": row.get(
-                        "SPATIALLY_CORRECTED_STOCKPILE_WMT"
-                    ),
-                    "final_stockpile_wmt": row.get("FINAL_STOCKPILE_WMT"),
-                    "unattributed_movement_wmt": row.get("UNATTRIBUTED_MOVEMENT_WMT"),
-                    "spatial_recon_status": row.get("SPATIAL_RECON_STATUS"),
-                    "spatial_recon_method": row.get("SPATIAL_RECON_METHOD"),
-                    "reclaim_direction_easting": row.get("RECLAIM_DIRECTION_EASTING"),
-                    "reclaim_direction_northing": row.get("RECLAIM_DIRECTION_NORTHING"),
-                    "grade_block_lineage_json": row.get("GRADE_BLOCK_LINEAGE_JSON"),
-                    "grade_block_count": row.get("GRADE_BLOCK_COUNT"),
-                    "lineage_entry_count": row.get("LINEAGE_ENTRY_COUNT"),
-                    "lineage_inbound_wmt": row.get("LINEAGE_INBOUND_WMT"),
-                    "lineage_matched_wmt": row.get("LINEAGE_MATCHED_WMT"),
-                    "lineage_unmatched_wmt": row.get("LINEAGE_UNMATCHED_WMT"),
-                    "lineage_final_wmt": row.get("LINEAGE_FINAL_WMT"),
-                    "lineage_matched_final_wmt": row.get(
-                        "LINEAGE_MATCHED_FINAL_WMT"
-                    ),
-                    "lineage_unmatched_final_wmt": row.get(
-                        "LINEAGE_UNMATCHED_FINAL_WMT"
-                    ),
-                    "lineage_coverage_pct": row.get("LINEAGE_COVERAGE_PCT"),
-                    "lineage_warning": row.get("LINEAGE_WARNING"),
-                    "grade_stream_warnings_json": row.get(
-                        "GRADE_STREAM_WARNINGS"
-                    ),
-                    "cb_split_method": row.get("CB_SPLIT_METHOD"),
-                    "cb_split_warning": row.get("CB_SPLIT_WARNING"),
-                    # Keep the exact Map Fields result separate from the
-                    # broader lineage/modelled-property payload.  In
-                    # particular, explicit nulls must survive the SQLite
-                    # round trip so strict mapping can distinguish an
-                    # unmapped field from an automatically derived property.
-                    "defined_fields_json": dict(
-                        row.get("defined_fields") or {}
-                    ),
-                    **modelled_audit,
-                    "modelled_properties_json": property_payload,
-                    **flatten_grade_streams(
-                        row.get("GRADE_STREAMS") or row.get("grade_streams")
-                    ),
+                        raw_defined_fields = {}
+                defined_fields = {
+                    canonical_property_key(name): field_value
+                    for name, field_value in dict(raw_defined_fields).items()
+                    if canonical_property_key(name)
                 }
-                amt_audit_by_hex[(str(footprint), str(row.get("HEX") or row.get("hex")))] = audit
-        text_audit_columns = {
-            "amt_inventory_stockpile",
-            "amt_inventory_build",
-            "amt_inventory_transaction_datetime",
-            "amt_inventory_match_rule",
-            "location_name",
-            "spatial_recon_status",
-            "spatial_recon_method",
-            "grade_block_lineage_json",
-            "lineage_warning",
-            "grade_stream_warnings_json",
-            "defined_fields_json",
-            "modelled_properties_json",
-            "modelled_rom_mats",
-            "modelled_dominant_ore_type",
-            "cb_split_method",
-            "cb_split_warning",
+                dynamic_fields.update(
+                    name for name in defined_fields
+                    if name not in AMT_FIXED_COLUMN_TYPES
+                )
+                prepared = {
+                    "footprint": row_footprint,
+                    "hex": value(row, "HEX", "hex"),
+                    "balance": value(row, "FINAL_WMT", "final_wmt", "balance"),
+                    "grade_fe": value(row, "FE", "grade_fe"),
+                    "grade_si": value(row, "SIO2", "grade_si"),
+                    "grade_al": value(row, "AL2O3", "grade_al"),
+                    "grade_p": value(row, "P", "grade_p"),
+                    "grade_mn": value(row, "MN", "grade_mn"),
+                    "lat": value(row, "LATITUDE", "lat"),
+                    "long": value(row, "LONGITUDE", "long"),
+                    "northing": value(row, "SOURCEHEXNORTHING", "northing"),
+                    "easting": value(row, "SOURCEHEXEASTING", "easting"),
+                    "last_update": value(row, "LAST_UPDATE", "last_update"),
+                    "hex_updated": value(row, "HEX_UPDATED", "hex_updated"),
+                    "grade_streams_json": json_payload(
+                        value(row, "GRADE_STREAMS", "grade_streams"), dict
+                    ),
+                    "defined_fields_json": defined_fields,
+                    "modelled_properties_json": json_payload(
+                        value(
+                            row, "MODELLED_PROPERTIES_JSON",
+                            "modelled_properties_json", "modelled_properties",
+                        ),
+                        dict,
+                    ),
+                    "amt_inventory_matched": int(bool(value(
+                        row, "AMT_INVENTORY_MATCHED", "amt_inventory_matched"
+                    ))),
+                    "amt_inventory_stockpile": value(
+                        row, "AMT_INVENTORY_STOCKPILE", "amt_inventory_stockpile"
+                    ),
+                    "amt_inventory_build": value(
+                        row, "AMT_INVENTORY_BUILD", "amt_inventory_build"
+                    ),
+                    "amt_inventory_transaction_datetime": value(
+                        row, "AMT_INVENTORY_TRANSACTION_DATETIME",
+                        "amt_inventory_transaction_datetime",
+                    ),
+                    "amt_inventory_match_rule": value(
+                        row, "AMT_INVENTORY_MATCH_RULE", "amt_inventory_match_rule"
+                    ),
+                    "location_name": value(row, "LOCATION_NAME", "location_name"),
+                    "inventory_balance_wmt": value(
+                        row, "INVENTORY_BALANCE_WMT", "inventory_balance_wmt"
+                    ),
+                    "raw_wmt": value(row, "RAW_WMT", "raw_wmt"),
+                    "spatially_corrected_wmt": value(
+                        row, "SPATIALLY_CORRECTED_WMT", "spatially_corrected_wmt"
+                    ),
+                    "spatial_adjustment_wmt": value(
+                        row, "SPATIAL_ADJUSTMENT_WMT", "spatial_adjustment_wmt"
+                    ),
+                    "ledger_adjustment_wmt": value(
+                        row, "LEDGER_ADJUSTMENT_WMT", "ledger_adjustment_wmt"
+                    ),
+                    "inventory_recon_deduction_wmt": value(
+                        row, "INVENTORY_RECON_DEDUCTION_WMT",
+                        "inventory_recon_deduction_wmt",
+                    ),
+                    "inventory_recon_lineage_coverage_pct": value(
+                        row, "INVENTORY_RECON_LINEAGE_COVERAGE_PCT",
+                        "inventory_recon_lineage_coverage_pct",
+                    ),
+                    "spatial_deficit_wmt": value(
+                        row, "SPATIAL_DEFICIT_WMT", "spatial_deficit_wmt"
+                    ),
+                    "spatial_deficit_filled_wmt": value(
+                        row, "SPATIAL_DEFICIT_FILLED_WMT",
+                        "spatial_deficit_filled_wmt",
+                    ),
+                    "spatial_donor_wmt": value(
+                        row, "SPATIAL_DONOR_WMT", "spatial_donor_wmt"
+                    ),
+                    "spatial_unresolved_wmt": value(
+                        row, "SPATIAL_UNRESOLVED_WMT", "spatial_unresolved_wmt"
+                    ),
+                    "raw_stockpile_wmt": value(
+                        row, "RAW_STOCKPILE_WMT", "raw_stockpile_wmt"
+                    ),
+                    "raw_positive_stockpile_wmt": value(
+                        row, "RAW_POSITIVE_STOCKPILE_WMT",
+                        "raw_positive_stockpile_wmt",
+                    ),
+                    "spatially_corrected_stockpile_wmt": value(
+                        row, "SPATIALLY_CORRECTED_STOCKPILE_WMT",
+                        "spatially_corrected_stockpile_wmt",
+                    ),
+                    "final_stockpile_wmt": value(
+                        row, "FINAL_STOCKPILE_WMT", "final_stockpile_wmt"
+                    ),
+                    "unattributed_movement_wmt": value(
+                        row, "UNATTRIBUTED_MOVEMENT_WMT",
+                        "unattributed_movement_wmt",
+                    ),
+                    "spatial_recon_status": value(
+                        row, "SPATIAL_RECON_STATUS", "spatial_recon_status"
+                    ),
+                    "spatial_recon_method": value(
+                        row, "SPATIAL_RECON_METHOD", "spatial_recon_method"
+                    ),
+                    "reclaim_direction_easting": value(
+                        row, "RECLAIM_DIRECTION_EASTING", "reclaim_direction_easting"
+                    ),
+                    "reclaim_direction_northing": value(
+                        row, "RECLAIM_DIRECTION_NORTHING", "reclaim_direction_northing"
+                    ),
+                    "grade_block_lineage_json": json_payload(
+                        value(
+                            row, "GRADE_BLOCK_LINEAGE_JSON",
+                            "grade_block_lineage_json", "grade_block_lineage",
+                        ),
+                        list,
+                    ),
+                    "grade_block_count": value(
+                        row, "GRADE_BLOCK_COUNT", "grade_block_count"
+                    ),
+                    "lineage_entry_count": value(
+                        row, "LINEAGE_ENTRY_COUNT", "lineage_entry_count"
+                    ),
+                    "lineage_inbound_wmt": value(
+                        row, "LINEAGE_INBOUND_WMT", "lineage_inbound_wmt"
+                    ),
+                    "lineage_matched_wmt": value(
+                        row, "LINEAGE_MATCHED_WMT", "lineage_matched_wmt"
+                    ),
+                    "lineage_unmatched_wmt": value(
+                        row, "LINEAGE_UNMATCHED_WMT", "lineage_unmatched_wmt"
+                    ),
+                    "lineage_final_wmt": value(
+                        row, "LINEAGE_FINAL_WMT", "lineage_final_wmt"
+                    ),
+                    "lineage_matched_final_wmt": value(
+                        row, "LINEAGE_MATCHED_FINAL_WMT",
+                        "lineage_matched_final_wmt",
+                    ),
+                    "lineage_unmatched_final_wmt": value(
+                        row, "LINEAGE_UNMATCHED_FINAL_WMT",
+                        "lineage_unmatched_final_wmt",
+                    ),
+                    "lineage_coverage_pct": value(
+                        row, "LINEAGE_COVERAGE_PCT", "lineage_coverage_pct"
+                    ),
+                    "lineage_warning": value(
+                        row, "LINEAGE_WARNING", "lineage_warning"
+                    ),
+                    "grade_stream_warnings_json": json_payload(
+                        value(
+                            row, "GRADE_STREAM_WARNINGS",
+                            "grade_stream_warnings_json", "grade_stream_warnings",
+                        ),
+                        list,
+                    ),
+                    "modelled_rom_mats": value(
+                        row, "MODELLED_ROM_MATS", "modelled_rom_mats"
+                    ),
+                    "modelled_dominant_ore_type": value(
+                        row, "MODELLED_DOMINANT_ORE_TYPE",
+                        "modelled_dominant_ore_type",
+                    ),
+                    "cb_split_method": value(
+                        row, "CB_SPLIT_METHOD", "cb_split_method"
+                    ),
+                    "cb_split_warning": value(
+                        row, "CB_SPLIT_WARNING", "cb_split_warning"
+                    ),
+                    **defined_fields,
+                }
+                prepared_rows.append(prepared)
+
+        dynamic_fields = sorted(dynamic_fields)
+        column_types = {
+            **AMT_FIXED_COLUMN_TYPES,
+            **{field: "REAL" for field in dynamic_fields},
         }
-        audit_columns = sorted({
-            column for values in amt_audit_by_hex.values() for column in values
-        })
-        existing_columns = {column[1] for column in cursor.execute(
-            "PRAGMA table_info(opening_AMT_stockpile_inventories)"
-        ).fetchall()}
-        for column in audit_columns:
-            if column in existing_columns:
-                continue
-            column_type = (
-                "TEXT" if column in text_audit_columns or column.endswith("_json")
-                else "INTEGER" if column in {
-                    "amt_inventory_matched", "grade_block_count",
-                    "lineage_entry_count",
-                }
-                else "REAL"
+        insert_columns = list(column_types)
+
+        def quote_identifier(name):
+            return '"' + str(name).replace('"', '""') + '"'
+
+        staging_table = "opening_AMT_stockpile_inventories_new"
+        try:
+            cursor.execute(f'DROP TABLE IF EXISTS {quote_identifier(staging_table)}')
+            definitions = ", ".join(
+                f"{quote_identifier(column)} {column_type}"
+                for column, column_type in column_types.items()
             )
             cursor.execute(
-                f'ALTER TABLE opening_AMT_stockpile_inventories '
-                f'ADD COLUMN "{column}" {column_type}'
+                f"CREATE TABLE {quote_identifier(staging_table)} ({definitions})"
             )
-
-        # Clear the table
-        cursor.execute('DELETE FROM opening_AMT_stockpile_inventories')
-
-        # Insert each hex once. Previously every row was inserted and then
-        # immediately updated with its audit payload, doubling SQLite work for
-        # the largest setup table.
-        base_columns = [
-            "footprint", "hex", "balance", "grade_fe", "grade_si",
-            "grade_al", "grade_p", "grade_mn", "lat", "long",
-            "northing", "easting", "last_update", "hex_updated",
-            "grade_streams_json",
-        ]
-        insert_columns = base_columns + [
-            column for column in audit_columns if column not in base_columns
-        ]
-        quoted_columns = ", ".join(f'"{column}"' for column in insert_columns)
-        placeholders = ", ".join("?" for _column in insert_columns)
-        insert_sql = (
-            "INSERT INTO opening_AMT_stockpile_inventories "
-            f"({quoted_columns}) VALUES ({placeholders})"
-        )
-        insert_rows = []
-        for key, rows in data_dict.items():
-            for row in rows:  # Each key (FOOTPRINT) may now have multiple rows
-                # Map uppercase keys to expected database column names
-                mapped_row = {
-                    "footprint": row.get("FOOTPRINT", None),  # Adjusted for uppercase column names
-                    "hex": row.get("HEX", None),
-                    "balance": row.get("FINAL_WMT", 0.0),
-                    "grade_fe": row.get("FE", None),
-                    "grade_si": row.get("SIO2", None),  # Fixed typo "SI02" -> "SIO2"
-                    "grade_al": row.get("AL2O3", None),
-                    "grade_p": row.get("P", None),
-                    "grade_mn": row.get("MN", None),
-                    "lat": row.get("LATITUDE", None),
-                    "long": row.get("LONGITUDE", None),
-                    "northing": row.get("SOURCEHEXNORTHING", None),
-                    "easting": row.get("SOURCEHEXEASTING", None),
-                    "last_update": row.get("LAST_UPDATE", None),
-                    "hex_updated": row.get("HEX_UPDATED", None),
-                    "grade_streams_json": json.dumps(row.get("GRADE_STREAMS")) if row.get("GRADE_STREAMS") else None,
-                }
-
-                # Skip insertion if mandatory fields (e.g., footprint) are missing
-                if not mapped_row["footprint"]:
-                    print(f"Skipping row with missing footprint: {mapped_row}")
-                    continue
-
-                audit_values = amt_audit_by_hex.get(
-                    (str(key), str(row.get("HEX") or row.get("hex"))), {}
-                )
-                audit_values = {
-                    column: (
-                        json.dumps(value, default=str, separators=(",", ":"))
-                        if isinstance(value, (dict, list, tuple)) else value
+            quoted_columns = ", ".join(
+                quote_identifier(column) for column in insert_columns
+            )
+            placeholders = ", ".join("?" for _column in insert_columns)
+            insert_sql = (
+                f"INSERT INTO {quote_identifier(staging_table)} "
+                f"({quoted_columns}) VALUES ({placeholders})"
+            )
+            serialised_rows = []
+            json_columns = {
+                column for column, column_type in column_types.items()
+                if column_type == "TEXT" and column.endswith("_json")
+            }
+            for row in prepared_rows:
+                serialised_rows.append(tuple(
+                    json.dumps(
+                        row.get(column), default=str, separators=(",", ":")
                     )
-                    for column, value in audit_values.items()
-                }
-                combined = {**mapped_row, **audit_values}
-                insert_rows.append(tuple(
-                    combined.get(column) for column in insert_columns
+                    if column in json_columns and row.get(column) is not None
+                    else _sqlite_scalar(row.get(column))
+                    for column in insert_columns
                 ))
-
-        if insert_rows:
-            cursor.executemany(insert_sql, insert_rows)
-
-        # Commit and close the connection
-        conn.commit()
-        conn.close()
+            if serialised_rows:
+                cursor.executemany(insert_sql, serialised_rows)
+            cursor.execute(
+                'DROP TABLE IF EXISTS "opening_AMT_stockpile_inventories"'
+            )
+            cursor.execute(
+                f"ALTER TABLE {quote_identifier(staging_table)} RENAME TO "
+                '"opening_AMT_stockpile_inventories"'
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         print(f"Stockpile AMT inventories saved to database {database_name}")
 
     def connect_snowflake_with_service_account(

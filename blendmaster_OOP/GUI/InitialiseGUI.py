@@ -33,6 +33,7 @@ from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
 from setup.DataStreamReconciliation import DataStreamReconciliation
+from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
     ANALYTES,
     DEFAULT_PLANNING_CATEGORIES,
@@ -112,6 +113,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
 AMT_OPENING_CACHE_VERSION = 1
+AMT_CHUNK_RECONCILIATION_VERSION = 1
 
 SITE_OPF_OPTIONS = {
     "CC": ["CC OPF01", "CC OPF02"],
@@ -670,6 +672,7 @@ class UserInputs(QMainWindow):
         self.stockpile_data_use_column = {}
         self.stockpile_data_AMT_column = {}
         self.AMT_chunk_settings = {}
+        self.AMT_chunk_reconciliation_signature = ""
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
         self.start_dash_AMT_map_thread_first_call = True
@@ -1405,6 +1408,7 @@ class UserInputs(QMainWindow):
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "AMT_data_request_signature", "AMT_enrichment_signature",
+            "AMT_chunk_reconciliation_signature",
             "data_stream_input_cache_signature", "data_stream_input_cache_result",
             "AMT_chunk_settings",
             "hex_sequence_table", "hex_sequence_table_argument",
@@ -1734,12 +1738,17 @@ class UserInputs(QMainWindow):
             self.stockpile_data_AMT_column = copy.deepcopy(state.get("stockpile_data_AMT_column") or {})
             self.updated_stockpile_data = copy.deepcopy(state.get("updated_stockpile_data"))
             self.updated_stockpile_data_keys = (self.updated_stockpile_data or {}).keys()
-            self.AMT_stockpile_data = copy.deepcopy(state.get("AMT_stockpile_data") or {})
+            self.AMT_stockpile_data = compact_amt_stockpile_data(
+                copy.deepcopy(state.get("AMT_stockpile_data") or {})
+            )
             self.AMT_data_request_signature = str(
                 state.get("AMT_data_request_signature") or ""
             )
             self.AMT_enrichment_signature = str(
                 state.get("AMT_enrichment_signature") or ""
+            )
+            self.AMT_chunk_reconciliation_signature = str(
+                state.get("AMT_chunk_reconciliation_signature") or ""
             )
             self.data_stream_input_cache_signature = str(
                 state.get("data_stream_input_cache_signature") or ""
@@ -8282,7 +8291,6 @@ class UserInputs(QMainWindow):
             return
         try:
             self.capture_recon_factor_table()
-            self.reconcile_saved_AMT_chunk_grade_streams()
             self.apply_canonical_field_mappings()
             self.apply_grade_streams_to_inventory()
             self.refresh_AMT_enrichment_if_needed(
@@ -13138,6 +13146,8 @@ class UserInputs(QMainWindow):
             loaded_state["AMT_stockpile_data"] = {}
         if loaded_state.get("AMT_chunk_settings") is None:
             loaded_state["AMT_chunk_settings"] = {}
+        if loaded_state.get("AMT_chunk_reconciliation_signature") is None:
+            loaded_state["AMT_chunk_reconciliation_signature"] = ""
         if loaded_state.get("product_brand_labels_choice") is None:
             loaded_state["product_brand_labels_choice"] = self.default_product_brand_labels()
         loaded_state["product_brand_labels_choice"] = self.parse_product_brand_labels(
@@ -14389,6 +14399,7 @@ class UserInputs(QMainWindow):
         self.database_view_rows = []
         self.database_view_snapshot_signature = None
         self.database_view_refresh_pending = True
+        self.AMT_chunk_reconciliation_signature = ""
 
     def set_default_manual_schedule_periods(self):
         if self.default_start_datetime and self.default_end_datetime:
@@ -15165,37 +15176,41 @@ class UserInputs(QMainWindow):
 
     def AMT_enrichment_request_signature(self):
         """Identify inputs that change mapped or reconciled AMT hex values."""
+        # Read instance state directly. Besides avoiding unnecessary Qt
+        # property lookups, this keeps the signature helper usable in the
+        # lightweight non-window objects used by reconciliation tests.
+        state = vars(self)
         payload = {
             "opening_snapshot": str(
-                getattr(self, "AMT_data_request_signature", "") or ""
+                state.get("AMT_data_request_signature", "") or ""
             ),
             "field_definitions": normalize_field_definitions(
-                getattr(self, "field_definitions", None)
+                state.get("field_definitions")
             ),
             "field_mappings": normalize_field_mappings(
-                getattr(self, "field_mappings", None)
+                state.get("field_mappings")
             ),
-            "historical_recon_factors": getattr(
-                self, "historical_recon_factors", {}
+            "historical_recon_factors": state.get(
+                "historical_recon_factors", {}
             ) or {},
-            "opf": str(getattr(self, "opf_input_choice", "") or ""),
+            "opf": str(state.get("opf_input_choice", "") or ""),
             "brands": configured_brands(
-                getattr(self, "product_brand_labels_choice", "")
+                state.get("product_brand_labels_choice", "")
             ),
             "cb_lump_fines_mode": str(
-                getattr(self, "cb_lump_fines_mode", "derived") or "derived"
+                state.get("cb_lump_fines_mode", "derived") or "derived"
             ),
             "cb_lump_percentage": numeric(
-                getattr(self, "cb_lump_percentage", 50.0)
+                state.get("cb_lump_percentage", 50.0)
             ),
             "byproducts_enabled": bool(
-                getattr(self, "byproducts_enabled", False)
+                state.get("byproducts_enabled", False)
             ),
             "byproduct_quantity_fields": normalize_byproduct_quantity_fields(
-                getattr(self, "byproduct_quantity_fields", None)
+                state.get("byproduct_quantity_fields")
             ),
             "byproduct_grade_fields": normalize_byproduct_grade_fields(
-                getattr(self, "byproduct_grade_fields", None)
+                state.get("byproduct_grade_fields")
             ),
         }
         return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
@@ -15213,6 +15228,7 @@ class UserInputs(QMainWindow):
         """Rebuild and persist AMT hex fields only when their inputs changed."""
         if not getattr(self, "AMT_stockpile_data", None):
             self.AMT_enrichment_signature = ""
+            self.AMT_chunk_reconciliation_signature = ""
             return False
         signature = self.AMT_enrichment_request_signature()
         if (
@@ -15226,6 +15242,7 @@ class UserInputs(QMainWindow):
             self.AMT_stockpile_data,
         )
         self.AMT_enrichment_signature = signature
+        self.AMT_chunk_reconciliation_signature = ""
         if persist:
             self.opening_stockpile_inventories.save_AMT_to_database(
                 self.AMT_stockpile_data
@@ -15387,6 +15404,7 @@ class UserInputs(QMainWindow):
     ):
         self.AMT_data_request_signature = str(request_signature or "")
         self.AMT_enrichment_signature = ""
+        self.AMT_chunk_reconciliation_signature = ""
         self._available_mapping_fields_cache = {}
         self.set_AMT_cache_status(
             "AMT opening snapshot fetched from Snowflake and cached for this "
@@ -15436,7 +15454,9 @@ class UserInputs(QMainWindow):
         refresh_prepared_map=False
     ):
         headers = self.amt_stockpile_headers()
-        self.AMT_stockpile_data = AMT_stockpile_data or {}
+        self.AMT_stockpile_data = compact_amt_stockpile_data(
+            AMT_stockpile_data or {}
+        )
         if not reuse_prepared:
             if self.AMT_stockpile_data:
                 self.refresh_AMT_enrichment_if_needed(
@@ -15718,6 +15738,7 @@ class UserInputs(QMainWindow):
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
+                raw_amt_fields = flatten_available_source_fields(row)
                 canonical = apply_field_mappings(
                     row,
                     vars(self).get("field_definitions"),
@@ -15812,7 +15833,7 @@ class UserInputs(QMainWindow):
                         source_name = {"si": "SIO2", "al": "AL2O3"}.get(
                             analyte, analyte.upper()
                         )
-                        coverage = numeric(row.get(
+                        coverage = numeric(raw_amt_fields.get(
                             f"MODELLED_{product_slot.upper()}_{source_name}_COVERAGE_PCT"
                         ))
                         if (numeric(row.get("FINAL_WMT")) or 0.0) <= 0:
@@ -15836,7 +15857,7 @@ class UserInputs(QMainWindow):
                         f"{footprint}/{row.get('HEX', '')}: {warning}"
                     )
         self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
-        return enriched
+        return compact_amt_stockpile_data(enriched)
 
     def refresh_AMT_map_data_from_database(self):
         draw_AMT_map = getattr(self, "draw_AMT_map", None)
@@ -15853,7 +15874,38 @@ class UserInputs(QMainWindow):
         draw_AMT_map.clean_up_hex_sequence_table()
         draw_AMT_map.update_sequence_counter()
 
-    def reconcile_saved_AMT_chunk_grade_streams(self):
+    def AMT_chunk_reconciliation_request_signature(self):
+        """Identify every input that can change a submitted AMT chunk."""
+        chunks = (
+            getattr(self, "hex_sequence_table", [])
+            or getattr(self, "hex_sequence_table_argument", [])
+            or []
+        )
+        membership = []
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            member_hexes = chunk.get("member_hexes") or []
+            if isinstance(member_hexes, str):
+                member_hexes = [
+                    value.strip() for value in member_hexes.split(",")
+                    if value.strip()
+                ]
+            membership.append({
+                "footprint": str(chunk.get("footprint") or ""),
+                "sequence": numeric(chunk.get("sequence")),
+                "member_hexes": sorted(str(value) for value in member_hexes),
+            })
+        payload = {
+            "version": AMT_CHUNK_RECONCILIATION_VERSION,
+            "enrichment": self.AMT_enrichment_request_signature(),
+            "membership": membership,
+        }
+        return json.dumps(
+            payload, sort_keys=True, default=str, separators=(",", ":")
+        )
+
+    def reconcile_saved_AMT_chunk_grade_streams(self, force=False):
         """Refresh derived brand streams in saved AMT chunks.
 
         Projects saved before partial-lineage aggregation was corrected can
@@ -15861,10 +15913,20 @@ class UserInputs(QMainWindow):
         membership and modelled values remain authoritative; only the derived
         brand copies and historical reconciliation layers are rebuilt here.
         """
+        request_signature = self.AMT_chunk_reconciliation_request_signature()
+        if (
+            not force
+            and str(vars(self).get(
+                "AMT_chunk_reconciliation_signature", ""
+            ) or "") == request_signature
+        ):
+            return 0
+
         brands = configured_brands(
             getattr(self, "product_brand_labels_choice", None)
         )
         if not brands:
+            self.AMT_chunk_reconciliation_signature = request_signature
             return 0
 
         factors = getattr(self, "historical_recon_factors", None)
@@ -15886,7 +15948,7 @@ class UserInputs(QMainWindow):
 
         def reconcile_rows(rows):
             nonlocal refreshed
-            result = copy.deepcopy(rows or [])
+            result = list(rows or [])
             for chunk in result:
                 if not isinstance(chunk, dict):
                     continue
@@ -15956,25 +16018,31 @@ class UserInputs(QMainWindow):
             return result
 
         draw_amt = vars(self).get("draw_AMT_map")
-
-        def rebuild_and_reconcile(rows):
-            nonlocal refreshed
-            rebuilt_rows = rows or []
-            if draw_amt is not None and hasattr(
-                draw_amt, "rebuild_saved_chunk_records"
-            ):
-                rebuilt_rows, rebuilt_count = (
-                    draw_amt.rebuild_saved_chunk_records(rebuilt_rows)
-                )
-                refreshed += rebuilt_count
-            return reconcile_rows(rebuilt_rows)
-
-        self.hex_sequence_table = rebuild_and_reconcile(
+        draw_data = getattr(draw_amt, "data", None) if draw_amt is not None else None
+        can_rebuild = (
+            draw_amt is not None
+            and hasattr(draw_amt, "rebuild_saved_chunk_records")
+            and isinstance(draw_data, pd.DataFrame)
+            and not draw_data.empty
+        )
+        canonical_rows = (
             getattr(self, "hex_sequence_table", [])
+            or getattr(self, "hex_sequence_table_argument", [])
+            or []
         )
-        self.hex_sequence_table_argument = rebuild_and_reconcile(
-            getattr(self, "hex_sequence_table_argument", [])
+        expected_rebuilds = sum(
+            1 for row in canonical_rows
+            if isinstance(row, dict) and bool(row.get("member_hexes"))
         )
+        rebuild_complete = expected_rebuilds == 0
+        if can_rebuild:
+            canonical_rows, rebuilt_count = (
+                draw_amt.rebuild_saved_chunk_records(canonical_rows)
+            )
+            refreshed += rebuilt_count
+            rebuild_complete = rebuilt_count >= expected_rebuilds
+        canonical_rows = reconcile_rows(canonical_rows)
+        self.hex_sequence_table = canonical_rows
 
         # Rebuilding a chunk from its member hexes necessarily restores the
         # raw/mapped hex lump and fines properties.  In calculated CB mode the
@@ -15988,9 +16056,13 @@ class UserInputs(QMainWindow):
             ) == "calculated"
         ):
             self.apply_cb_split_to_amt_chunks(self.hex_sequence_table)
-            self.apply_cb_split_to_amt_chunks(
-                self.hex_sequence_table_argument
-            )
+        # The argument table is a solver-boundary snapshot of the one
+        # canonical chunk table. It must not be independently rebuilt.
+        self.hex_sequence_table_argument = copy.deepcopy(
+            self.hex_sequence_table
+        )
+        if rebuild_complete or not self.hex_sequence_table:
+            self.AMT_chunk_reconciliation_signature = request_signature
         return refreshed
 
     def get_AMT_stockpile_data(self, builds):
@@ -21636,6 +21708,9 @@ class UserInputs(QMainWindow):
                 'AMT_enrichment_signature': getattr(
                     self, "AMT_enrichment_signature", ""
                 ),
+                'AMT_chunk_reconciliation_signature': getattr(
+                    self, "AMT_chunk_reconciliation_signature", ""
+                ),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
                 "database_view_selected_columns": copy.deepcopy(
                     getattr(self, "database_view_selected_columns", None)
@@ -22090,20 +22165,25 @@ class UserInputs(QMainWindow):
         )
         self.hex_sequence_table = loaded_state.get("hex_sequence_table", [])
         self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table or [])
-        self.reconcile_saved_AMT_chunk_grade_streams()
         self.stockpile_data_AMT_column = loaded_state.get("stockpile_data_AMT_column", {})
-        self.AMT_stockpile_data = loaded_state.get("AMT_stockpile_data", {}) or {}
+        self.AMT_stockpile_data = compact_amt_stockpile_data(
+            loaded_state.get("AMT_stockpile_data", {}) or {}
+        )
         self.AMT_data_request_signature = str(
             loaded_state.get("AMT_data_request_signature") or ""
         )
         self.AMT_enrichment_signature = str(
             loaded_state.get("AMT_enrichment_signature") or ""
         )
+        self.AMT_chunk_reconciliation_signature = str(
+            loaded_state.get("AMT_chunk_reconciliation_signature") or ""
+        )
         self.data_stream_input_cache_signature = ""
         self.data_stream_input_cache_result = {}
         self.data_stream_input_request_inflight = ""
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+        self.reconcile_saved_AMT_chunk_grade_streams()
         self.database_view_selected_columns = copy.deepcopy(
             loaded_state.get("database_view_selected_columns")
         )
@@ -22379,6 +22459,7 @@ class UserInputs(QMainWindow):
         self.AMT_stockpile_data = {}
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
+        self.AMT_chunk_reconciliation_signature = ""
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = {}
         self.solver_config = {}

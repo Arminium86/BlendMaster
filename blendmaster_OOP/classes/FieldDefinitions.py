@@ -540,7 +540,33 @@ def flatten_available_source_fields(record):
         if isinstance(nested, Mapping):
             values = nested.get("values") or {}
             if isinstance(values, Mapping):
-                result.update({str(name): value for name, value in values.items()})
+                for name, value in values.items():
+                    raw_name = str(name)
+                    result[raw_name] = value
+                    # AMT snapshots persist the raw lineage catalogue once in
+                    # modelled-properties JSON. Recreate the former flattened
+                    # source name on demand so existing MODELLED_* mappings and
+                    # the Map Fields browser remain backward compatible.
+                    canonical = canonical_property_key(raw_name)
+                    if canonical:
+                        result.setdefault(
+                            f"MODELLED_{canonical.upper()}", value
+                        )
+                        if canonical.startswith("oretype_") and canonical.endswith("_wmt"):
+                            result.setdefault(
+                                f"MODELLED_{canonical[:-4].upper()}_TONNES",
+                                value,
+                            )
+            coverage = nested.get("coverage") or {}
+            if isinstance(coverage, Mapping):
+                for name, value in coverage.items():
+                    canonical = canonical_property_key(name)
+                    number = _number(value)
+                    if canonical and number is not None:
+                        result.setdefault(
+                            f"MODELLED_{canonical.upper()}_COVERAGE_PCT",
+                            number * 100.0,
+                        )
     return result
 
 

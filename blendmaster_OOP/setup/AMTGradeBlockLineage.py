@@ -15,6 +15,45 @@ from collections import defaultdict
 from classes.SourcePropertyMappings import AMT_MODELLED_ADDITIVE_FIELDS
 
 
+_COMPACT_MODELLED_TOP_LEVEL_FIELDS = {
+    "MODELLED_PROPERTIES_JSON",
+    "MODELLED_ROM_MATS",
+    "MODELLED_DOMINANT_ORE_TYPE",
+}
+
+
+def compact_amt_hex_row(row):
+    """Remove duplicated flattened modelled fields from one AMT hex row.
+
+    The complete remapping catalogue remains in MODELLED_PROPERTIES_JSON.
+    Define Fields values, grade streams, lineage and geometry metadata remain
+    separate because they have different lifecycle/audit responsibilities.
+    Legacy MODELLED_* source names are materialised virtually when mappings
+    are read, so saved mappings continue to resolve without retaining hundreds
+    of duplicate top-level values per hex.
+    """
+    if not isinstance(row, dict):
+        return row
+    for key in list(row):
+        if (
+            isinstance(key, str)
+            and key.startswith("MODELLED_")
+            and key not in _COMPACT_MODELLED_TOP_LEVEL_FIELDS
+        ):
+            row.pop(key, None)
+    return row
+
+
+def compact_amt_stockpile_data(data):
+    """Compact every AMT hex row in a footprint-keyed snapshot in place."""
+    if not isinstance(data, dict):
+        return data
+    for rows in data.values():
+        for row in rows or []:
+            compact_amt_hex_row(row)
+    return data
+
+
 TRUCK_PROPERTY_COLUMNS = {
     "GRADE_BLOCK_GBI": "truck.GBI",
     "GRADE_BLOCK_FE": "truck.FE",

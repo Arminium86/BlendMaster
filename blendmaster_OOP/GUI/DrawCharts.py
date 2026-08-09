@@ -2772,12 +2772,8 @@ class DrawAMTStockpile:
         mapped_intensive_weight = defaultdict(float)
         mapped_coverage_tonnes = defaultdict(float)
         mapped_properties = {}
-        property_mass = defaultdict(float)
-        property_tonnes = defaultdict(float)
-        property_coverage_tonnes = defaultdict(float)
         warning_coverage_tonnes = defaultdict(float)
         warning_coverage_observed = set()
-        additive_properties = set()
         lineage_keys = set()
         lineage_matched_final_wmt = 0.0
         grade_stream_warnings = []
@@ -2792,6 +2788,11 @@ class DrawAMTStockpile:
             ).items()
             if canonical_property_key(name) and canonical_property_key(weight)
         }
+        product_coverage_names = {
+            f"prod{product}_{suffix}"
+            for product in (1, 2)
+            for suffix in ("fe", "sio2", "al2o3", "p", "mn")
+        }
 
         for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
             if total_tonnes > 0:
@@ -2804,24 +2805,25 @@ class DrawAMTStockpile:
         for row in chunk_rows:
             row_tonnes = row["_positive_balance"]
             property_payload = row.get("modelled_properties") or {}
-            values = property_payload.get("values", {}) if isinstance(
-                property_payload, dict
-            ) else {}
             coverage = property_payload.get("coverage", {}) if isinstance(
                 property_payload, dict
             ) else {}
+            # Raw AMT lineage exposes hundreds of remapping candidates. They
+            # remain on the hex snapshot for Map Fields, but a submitted chunk
+            # carries only canonical Define Fields plus the small coverage
+            # audit needed for product-grade warnings. Aggregating every raw
+            # candidate here duplicated data and made every chunk rebuild
+            # proportional to the full Snowflake catalogue.
             for property_name, raw_fraction in coverage.items():
+                name = canonical_property_key(property_name)
+                if name not in product_coverage_names:
+                    continue
                 fraction = self.to_float(raw_fraction, None)
                 if fraction is None:
                     continue
-                name = canonical_property_key(property_name)
                 fraction = min(max(fraction, 0.0), 1.0)
                 warning_coverage_tonnes[name] += row_tonnes * fraction
                 warning_coverage_observed.add(name)
-            canonical_values = {
-                canonical_property_key(name): raw
-                for name, raw in values.items()
-            }
             row_mapped_properties = {
                 canonical_property_key(name): value
                 for name, raw in dict(row.get("defined_fields") or {}).items()
@@ -2878,47 +2880,6 @@ class DrawAMTStockpile:
                         key = (stream, brand, analyte)
                         stream_grade_mass[key] += grade * weight
                         stream_grade_weight[key] += weight
-            for property_name, raw_value in values.items():
-                value = self.to_float(raw_value, None)
-                covered_fraction = self.to_float(
-                    coverage.get(property_name), None
-                )
-                if value is None:
-                    continue
-                if covered_fraction is None:
-                    covered_fraction = 1.0
-                covered_fraction = min(max(covered_fraction, 0.0), 1.0)
-                coverage_tonnes = row_tonnes * covered_fraction
-                if source_property_kind(
-                    property_name,
-                    vars(self).get("source_property_kinds", {}),
-                ) == "additive":
-                    if coverage_tonnes <= 0:
-                        continue
-                    property_mass[property_name] += value
-                    additive_properties.add(property_name)
-                    denominator = coverage_tonnes
-                else:
-                    weight_field = canonical_property_key(
-                        vars(self).get("source_property_weights", {}).get(
-                            canonical_property_key(property_name), ""
-                        )
-                    )
-                    if weight_field:
-                        weight_value = self.to_float(
-                            canonical_values.get(weight_field), None
-                        )
-                        if weight_value is None:
-                            continue
-                        denominator = max(weight_value, 0.0) * covered_fraction
-                    else:
-                        denominator = coverage_tonnes
-                    if denominator <= 0:
-                        continue
-                    property_mass[property_name] += value * denominator
-                property_tonnes[property_name] += denominator
-                property_coverage_tonnes[property_name] += coverage_tonnes
-
             lineage = row.get("grade_block_lineage") or []
             for contribution in lineage if isinstance(lineage, list) else []:
                 key = str((contribution or {}).get("lineage_key") or "")
@@ -2965,20 +2926,8 @@ class DrawAMTStockpile:
                 }
 
         modelled_properties = {
-            "values": {
-                name: (
-                    property_mass[name]
-                    if name in additive_properties
-                    else property_mass[name] / covered_tonnes
-                )
-                for name, covered_tonnes in property_tonnes.items()
-                if covered_tonnes > 0
-            },
-            "coverage": {
-                name: covered_tonnes / total_tonnes
-                for name, covered_tonnes in property_coverage_tonnes.items()
-                if total_tonnes > 0
-            },
+            "values": {},
+            "coverage": {},
         }
         for name, value in mapped_properties.items():
             modelled_properties["values"][name] = value
