@@ -9,15 +9,19 @@ the authoritative inventory balance.
 
 from __future__ import annotations
 
+import json
 from math import atan2, cos, hypot, radians, sin, sqrt
 from statistics import median
 
 
 SPATIAL_METHOD = (
-    "directional_nearest_capacity_v1: negative hex deficits are allocated to "
+    "directional_nearest_capacity_v2: negative hex deficits are allocated to "
     "positive hexes by distance, connected geometry, and inferred reclaim-front "
-    "direction; the inventory balance is then applied proportionally"
+    "direction; residual inventory deductions are then weighted toward lower "
+    "grade-block lineage coverage"
 )
+
+INVENTORY_RECON_LINEAGE_BIAS = 4.0
 
 
 def _number(value, default=None):
@@ -27,6 +31,98 @@ def _number(value, default=None):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _lineage_coverage(row):
+    """Return pre-reconciliation matched lineage coverage as a 0..1 ratio."""
+    explicit = _number(row.get("LINEAGE_COVERAGE_PCT"))
+    if explicit is not None:
+        return min(max(explicit / 100.0, 0.0), 1.0)
+
+    lineage = row.get("GRADE_BLOCK_LINEAGE_JSON")
+    if isinstance(lineage, str):
+        try:
+            lineage = json.loads(lineage)
+        except (TypeError, ValueError):
+            lineage = []
+    if not isinstance(lineage, list):
+        lineage = []
+
+    inbound_total = 0.0
+    matched_total = 0.0
+    for item in lineage:
+        if not isinstance(item, dict):
+            continue
+        inbound_wmt = max(_number(item.get("inbound_wmt"), 0.0), 0.0)
+        inbound_total += inbound_wmt
+        if str(item.get("match_method") or "").strip().upper() != "UNMATCHED":
+            matched_total += inbound_wmt
+    if inbound_total <= 1e-9:
+        return 0.0
+    return min(max(matched_total / inbound_total, 0.0), 1.0)
+
+
+def _lineage_weighted_inventory_deductions(balances, target_total, coverages):
+    """Allocate a stockpile-level reduction without creating negative hexes."""
+    balances = [max(_number(value, 0.0), 0.0) for value in balances]
+    deduction_required = max(sum(balances) - max(target_total, 0.0), 0.0)
+    deductions = [0.0] * len(balances)
+    remaining_capacity = list(balances)
+    active = {
+        index for index, balance in enumerate(remaining_capacity)
+        if balance > 1e-9
+    }
+
+    # Capped proportional (water-filling) allocation. A 0%-covered hex has
+    # five times the initial deduction weight of a fully covered hex, while
+    # every positive hex remains eligible if the uncertain tonnes are not
+    # sufficient to absorb the authoritative inventory difference.
+    while deduction_required > 1e-9 and active:
+        weights = {
+            index: remaining_capacity[index] * (
+                1.0
+                + INVENTORY_RECON_LINEAGE_BIAS
+                * (1.0 - min(max(coverages[index], 0.0), 1.0))
+            )
+            for index in active
+        }
+        total_weight = sum(weights.values())
+        if total_weight <= 1e-12:
+            break
+        proposed = {
+            index: deduction_required * weight / total_weight
+            for index, weight in weights.items()
+        }
+        capped = {
+            index for index in active
+            if proposed[index] >= remaining_capacity[index] - 1e-9
+        }
+        if not capped:
+            for index, amount in proposed.items():
+                deductions[index] += amount
+                remaining_capacity[index] -= amount
+            deduction_required = 0.0
+            break
+        for index in capped:
+            amount = remaining_capacity[index]
+            deductions[index] += amount
+            deduction_required -= amount
+            remaining_capacity[index] = 0.0
+            active.remove(index)
+
+    # Numerical remainder only; distribute by remaining mass so the final
+    # sum still equals the inventory balance exactly within floating precision.
+    if deduction_required > 1e-9 and active:
+        remaining_total = sum(remaining_capacity[index] for index in active)
+        if remaining_total > 1e-12:
+            for index in active:
+                amount = min(
+                    remaining_capacity[index],
+                    deduction_required
+                    * remaining_capacity[index] / remaining_total,
+                )
+                deductions[index] += amount
+    return deductions
 
 
 def _weighted_centroid(points):
@@ -330,11 +426,33 @@ def reconcile_amt_hex_rows(rows):
 
     final_balances = list(spatial_nonnegative)
     ledger_adjustments = [0.0] * len(corrected_rows)
+    inventory_recon_deductions = [0.0] * len(corrected_rows)
+    lineage_coverages = [
+        _lineage_coverage(row) for row in corrected_rows
+    ]
     if inventory_balance is not None:
         inventory_balance = max(inventory_balance, 0.0)
         if spatial_total > 1e-9:
-            scale = inventory_balance / spatial_total
-            final_balances = [value * scale for value in spatial_nonnegative]
+            if inventory_balance < spatial_total - 1e-9:
+                inventory_recon_deductions = (
+                    _lineage_weighted_inventory_deductions(
+                        spatial_nonnegative,
+                        inventory_balance,
+                        lineage_coverages,
+                    )
+                )
+                final_balances = [
+                    max(spatial - deduction, 0.0)
+                    for spatial, deduction in zip(
+                        spatial_nonnegative,
+                        inventory_recon_deductions,
+                    )
+                ]
+            else:
+                scale = inventory_balance / spatial_total
+                final_balances = [
+                    value * scale for value in spatial_nonnegative
+                ]
         elif corrected_rows:
             final_balances = [0.0] * len(corrected_rows)
             final_balances[0] = inventory_balance
@@ -360,6 +478,12 @@ def reconcile_amt_hex_rows(rows):
             "SPATIALLY_CORRECTED_WMT": spatial_nonnegative[index],
             "SPATIAL_ADJUSTMENT_WMT": spatial_nonnegative[index] - raw_balance,
             "LEDGER_ADJUSTMENT_WMT": ledger_adjustments[index],
+            "INVENTORY_RECON_DEDUCTION_WMT": (
+                inventory_recon_deductions[index]
+            ),
+            "INVENTORY_RECON_LINEAGE_COVERAGE_PCT": (
+                lineage_coverages[index] * 100.0
+            ),
             "FINAL_WMT": final_balances[index],
             "SPATIAL_DEFICIT_WMT": max(-raw_balance, 0.0),
             "SPATIAL_DEFICIT_FILLED_WMT": deficit_filled.get(index, 0.0),

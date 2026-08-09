@@ -50,6 +50,7 @@ _ROM_DMT_ALIASES = {
 _AMT_RECONCILIATION_QUANTITY_FIELDS = {
     "final_stockpile_wmt",
     "inventory_balance_wmt",
+    "inventory_recon_deduction_wmt",
     "ledger_adjustment_wmt",
     "raw_positive_stockpile_wmt",
     "raw_stockpile_wmt",

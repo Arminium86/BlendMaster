@@ -1350,6 +1350,12 @@ class OpeningStockpileInventories:
                     "spatially_corrected_wmt": row.get("SPATIALLY_CORRECTED_WMT"),
                     "spatial_adjustment_wmt": row.get("SPATIAL_ADJUSTMENT_WMT"),
                     "ledger_adjustment_wmt": row.get("LEDGER_ADJUSTMENT_WMT"),
+                    "inventory_recon_deduction_wmt": row.get(
+                        "INVENTORY_RECON_DEDUCTION_WMT"
+                    ),
+                    "inventory_recon_lineage_coverage_pct": row.get(
+                        "INVENTORY_RECON_LINEAGE_COVERAGE_PCT"
+                    ),
                     "spatial_deficit_wmt": row.get("SPATIAL_DEFICIT_WMT"),
                     "spatial_deficit_filled_wmt": row.get("SPATIAL_DEFICIT_FILLED_WMT"),
                     "spatial_donor_wmt": row.get("SPATIAL_DONOR_WMT"),

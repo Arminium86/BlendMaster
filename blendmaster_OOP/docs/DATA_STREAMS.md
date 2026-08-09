@@ -379,13 +379,18 @@ this before chunking as follows:
 2. Each deficit is transferred to positive hex capacity in deterministic
    nearest-first order. Connected adjacent hexes and the inferred progression
    direction are preferred; progressively more distant rows are used as needed.
-3. Negative corrected hexes are set to zero. The residual stockpile-level
-   difference, including unattributed movements and inventory adjustments, is
-   applied proportionally to the remaining positive hexes so their sum exactly
-   equals the authoritative inventory `BALANCEWMT`.
+3. Negative corrected hexes are set to zero. If the remaining hex total exceeds
+   inventory, the residual deduction is biased toward poorer grade-block
+   lineage using `hex WMT x (1 + 4 x (1 - lineage coverage))`. A zero-coverage
+   hex therefore has five times the initial deduction weight of a fully covered
+   hex. Per-hex deductions are capped at available WMT and spill into
+   better-covered hexes when necessary. Inventory additions remain proportional
+   to positive WMT. The final sum exactly equals authoritative inventory
+   `BALANCEWMT`.
 
-The UI retains raw signed tonnes, spatial and inventory adjustments, final
-tonnes, unresolved deficits, direction and method/status fields. `FINAL_WMT`,
+The UI retains raw signed tonnes, spatial and inventory adjustments—including
+the per-hex inventory deduction and lineage coverage used—final tonnes,
+unresolved deficits, direction and method/status fields. `FINAL_WMT`,
 not raw tonnes, is used for AMT chunking. The spatial algorithm is tonnage-only;
 grade-block composition is subsequently aligned to `FINAL_WMT` under the
 documented proportional-depletion assumption.

@@ -131,8 +131,14 @@ The reconciliation is deterministic:
    when nearer capacity is insufficient.
 5. Do not pass any negative balance into chunking. Retain unresolved deficits in
    audit fields.
-6. Scale the remaining nonnegative hex balances proportionally so their sum
-   equals inventory `BALANCEWMT` exactly.
+6. If the spatially corrected total exceeds inventory `BALANCEWMT`, distribute
+   the residual deduction using `hex WMT x (1 + 4 x (1 - lineage coverage))`.
+   Thus a hex with no matched grade-block lineage initially receives five times
+   the deduction weight of a fully covered hex. Deductions are capped at the
+   available hex WMT and spill progressively into better-covered hexes as
+   required. If inventory exceeds the spatial total, additions remain
+   proportional to positive WMT. The final hex sum equals inventory
+   `BALANCEWMT` exactly.
 
 The resulting tonnage stages are:
 
@@ -143,8 +149,9 @@ RAW_WMT
 ```
 
 `FINAL_WMT` drives AMT chunking and optimisation. Raw tonnes, spatial donor and
-deficit values, the inventory/ledger adjustment, inferred direction, method and
-status remain available for audit.
+deficit values, the inventory/ledger adjustment,
+`INVENTORY_RECON_DEDUCTION_WMT`, the lineage coverage used for that deduction,
+inferred direction, method and status remain available for audit.
 
 ### Coordinate outlier quarantine
 
