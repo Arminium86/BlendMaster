@@ -10,8 +10,8 @@ import pandas as pd
 class ClosingROMStocksCompliance:
     REQUIRED_COLUMNS = [
         "Source.Name",
-        "Period.Start Datetime",
-        "Period.End Datetime",
+        "Period.Start DateTime",
+        "Period.End DateTime",
         "Mining.wetTonnes",
     ]
     NORMALIZED_COLUMNS = [
@@ -87,10 +87,10 @@ class ClosingROMStocksCompliance:
             cls.normalize_stockpile_name
         )
         data["two_wp_period_start_datetime"] = data[
-            "Period.Start Datetime"
+            "Period.Start DateTime"
         ].map(cls._naive_timestamp)
         data["two_wp_period_end_datetime"] = data[
-            "Period.End Datetime"
+            "Period.End DateTime"
         ].map(cls._naive_timestamp)
         data["two_wp_closing_rom_wmt"] = pd.to_numeric(
             data["Mining.wetTonnes"], errors="coerce"

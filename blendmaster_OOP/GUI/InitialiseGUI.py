@@ -18384,6 +18384,36 @@ class UserInputs(QMainWindow):
         finally:
             connection.close()
 
+    def render_closing_rom_stocks_chart(self, figure):
+        """Render Plotly through a local file instead of QWebEngine.setHtml.
+
+        An inline Plotly document is larger than QWebEngine's setHtml data-URL
+        limit, which leaves the view blank even though the report table is
+        populated. A temporary file has no equivalent size limit and keeps the
+        chart self-contained/offline.
+        """
+        chart_directory = os.path.join(
+            getattr(self, "scenario_session_directory", tempfile.gettempdir()),
+            "charts",
+        )
+        os.makedirs(chart_directory, exist_ok=True)
+        chart_path = os.path.join(
+            chart_directory,
+            "closing_rom_stocks_compliance.html",
+        )
+        pio.write_html(
+            figure,
+            file=chart_path,
+            include_plotlyjs=True,
+            full_html=True,
+            auto_open=False,
+        )
+        chart_url = QUrl.fromLocalFile(os.path.abspath(chart_path))
+        if self.closing_rom_stocks_chart.url() == chart_url:
+            self.closing_rom_stocks_chart.reload()
+        else:
+            self.closing_rom_stocks_chart.setUrl(chart_url)
+
     def refresh_closing_rom_stocks_compliance(self, *_args):
         if not hasattr(self, "closing_rom_stocks_table"):
             return
@@ -18464,11 +18494,7 @@ class UserInputs(QMainWindow):
             margin=dict(l=55, r=25, t=55, b=45),
             template="plotly_white",
         )
-        self.closing_rom_stocks_chart.setHtml(
-            pio.to_html(
-                figure, include_plotlyjs=True, full_html=True
-            )
-        )
+        self.render_closing_rom_stocks_chart(figure)
 
     def setup_sqlite_reports_tab(self):
         self.sqlite_reports_tab = QWidget()

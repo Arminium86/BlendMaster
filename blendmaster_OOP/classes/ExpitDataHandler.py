@@ -1,6 +1,7 @@
 import math
 import pandas as pd
 import re
+from bisect import bisect_right
 from datetime import timedelta
 import snowflake.connector
 from datetime import datetime
@@ -639,9 +640,17 @@ class ExpitDataHandler:
     ):
         """Resolve first reclaim after arrival and its linear horizon priority."""
         destination_key = cls.destination_guidance_stockpile_key(destination)
-        arrival = pd.to_datetime(arrival_datetime, errors="coerce")
-        start = pd.to_datetime(horizon_start, errors="coerce")
-        end = pd.to_datetime(horizon_end, errors="coerce")
+        def timestamp(value):
+            if isinstance(value, pd.Timestamp):
+                return value
+            try:
+                return pd.Timestamp(value)
+            except (TypeError, ValueError):
+                return pd.NaT
+
+        arrival = timestamp(arrival_datetime)
+        start = timestamp(horizon_start)
+        end = timestamp(horizon_end)
         if not destination_key or pd.isna(arrival) or pd.isna(start) or pd.isna(end):
             return {
                 "two_wp_turnover_guidance_applicable": False,
@@ -650,20 +659,24 @@ class ExpitDataHandler:
             }
 
         first_reclaim = None
-        for window in reclaim_windows.get(destination_key, []):
-            reclaim_start = pd.to_datetime(
-                window.get("start_datetime"), errors="coerce"
-            )
-            reclaim_end = pd.to_datetime(
-                window.get("end_datetime"), errors="coerce"
-            )
-            if pd.isna(reclaim_start) or pd.isna(reclaim_end):
-                continue
-            # A reclaim already in progress when the planned deposit completes
-            # is an immediate requirement for that destination.
-            if reclaim_end > arrival:
-                first_reclaim = reclaim_start
-                break
+        lookup = reclaim_windows.get(destination_key, {})
+        if isinstance(lookup, dict) and "end_nanoseconds" in lookup:
+            end_nanoseconds = lookup.get("end_nanoseconds") or []
+            starts = lookup.get("start_timestamps") or []
+            index = bisect_right(end_nanoseconds, int(arrival.value))
+            if index < len(starts):
+                first_reclaim = starts[index]
+        else:
+            # Compatibility for callers/tests supplying the persisted list
+            # representation rather than the optimized in-memory lookup.
+            for window in lookup if isinstance(lookup, list) else []:
+                reclaim_start = timestamp(window.get("start_datetime"))
+                reclaim_end = timestamp(window.get("end_datetime"))
+                if pd.isna(reclaim_start) or pd.isna(reclaim_end):
+                    continue
+                if reclaim_end > arrival:
+                    first_reclaim = reclaim_start
+                    break
 
         horizon_seconds = max((end - start).total_seconds(), 0.0)
         if first_reclaim is None:
@@ -733,6 +746,7 @@ class ExpitDataHandler:
         horizon_end = all_end_times.max()
 
         reclaim_windows = {}
+        reclaim_lookup = {}
         if {"Agent.Name", "OriginalSource.Name"}.issubset(data.columns):
             reclaim_mask = (
                 data["Destination.Type"].astype("string").str.strip().str.lower().eq("crusher")
@@ -755,15 +769,46 @@ class ExpitDataHandler:
                 for stockpile_key, group in reclaim_rows.groupby(
                     "_stockpile_key", sort=False
                 ):
+                    # Merge overlapping reclaim windows once. Their end times
+                    # are then strictly increasing, allowing each destination
+                    # allocation to use a logarithmic lookup instead of
+                    # repeatedly reparsing and scanning every reclaim row.
+                    merged_windows = []
+                    ordered = group.sort_values(["_start", "_end"])
+                    for reclaim_start, reclaim_end in ordered[
+                        ["_start", "_end"]
+                    ].itertuples(index=False, name=None):
+                        reclaim_start = pd.Timestamp(reclaim_start)
+                        reclaim_end = pd.Timestamp(reclaim_end)
+                        if (
+                            merged_windows
+                            and reclaim_start <= merged_windows[-1][1]
+                        ):
+                            merged_windows[-1] = (
+                                merged_windows[-1][0],
+                                max(merged_windows[-1][1], reclaim_end),
+                            )
+                        else:
+                            merged_windows.append(
+                                (reclaim_start, reclaim_end)
+                            )
                     reclaim_windows[str(stockpile_key)] = [
                         {
-                            "start_datetime": row["_start"].isoformat(),
-                            "end_datetime": row["_end"].isoformat(),
+                            "start_datetime": reclaim_start.isoformat(),
+                            "end_datetime": reclaim_end.isoformat(),
                         }
-                        for _, row in group.sort_values(
-                            ["_start", "_end"]
-                        ).iterrows()
+                        for reclaim_start, reclaim_end in merged_windows
                     ]
+                    reclaim_lookup[str(stockpile_key)] = {
+                        "end_nanoseconds": [
+                            int(reclaim_end.value)
+                            for _, reclaim_end in merged_windows
+                        ],
+                        "start_timestamps": [
+                            reclaim_start
+                            for reclaim_start, _ in merged_windows
+                        ],
+                    }
 
         source_type = data["Source.Type"].astype("string").str.strip().str.lower()
         destination_type = (
@@ -836,7 +881,7 @@ class ExpitDataHandler:
                 turnover = cls._destination_turnover_details(
                     row["destination"],
                     row["guidance_end_datetime"],
-                    reclaim_windows,
+                    reclaim_lookup,
                     horizon_start,
                     horizon_end,
                 )
