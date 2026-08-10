@@ -172,6 +172,7 @@ class BalanceTracker:
         self.direct_tipped_tonnes_by_payload = {}
         self.total_AMT_stockpile_balances = {}
         self.populate_total_AMT_stockpile_balances()
+        self.physical_balance_history = []
 
     def _synchronise_rom_wmt_properties(self, name, properties, balance=None):
         """Keep physical ROM quantity fields aligned with the tracked balance.
@@ -391,7 +392,36 @@ class BalanceTracker:
 
                     else: 
                         raise ValueError(f"Stockpile '{name}' is not selected or found in Stockpile Inventories. Either select the stockpile by ticking the 'Use' option or remove the transactions to this destination from APS output.")
-                     
+
+        self.record_physical_balance_snapshot(
+            steady_state_end_time, steady_state_tracker
+        )
+
+    def physical_stockpile_balances(self):
+        """Return physical ROM WMT by inventory stockpile/AMT footprint."""
+        balances = {}
+        for name in self.state:
+            if self.is_amt.get(name, False):
+                value = self.total_AMT_stockpile_balances.get(name, 0.0)
+            else:
+                value = self.balance_copy.get(name, 0.0)
+            try:
+                value = max(float(value or 0.0), 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            balances[name] = value
+        return balances
+
+    def record_physical_balance_snapshot(self, snapshot_datetime, steady_state):
+        self.physical_balance_history.append({
+            "snapshot_datetime": snapshot_datetime,
+            "steady_state_number": steady_state,
+            "balances": self.physical_stockpile_balances(),
+        })
+
+    def get_physical_balance_history(self):
+        return copy.deepcopy(self.physical_balance_history)
+
     def get_build_transactions(self):
         """Retrieve the list of build transactions."""
         return pd.DataFrame(self.build_report)

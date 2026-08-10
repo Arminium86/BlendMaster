@@ -22,7 +22,7 @@ from classes.SourcePropertyMappings import (
 )
 
 class ExpitDataHandler:
-    DESTINATION_GUIDANCE_VERSION = 2
+    DESTINATION_GUIDANCE_VERSION = 3
     TRANSACTION_COLUMNS = {
         "Agent.Name",
         "Source.Type",
@@ -620,6 +620,68 @@ class ExpitDataHandler:
         )
         return normalized.upper()
 
+    @staticmethod
+    def destination_guidance_stockpile_key(value):
+        """Return the canonical stockpile name used by both APS movement layers."""
+        value = str(value or "").strip().replace("\\", "/")
+        value = re.sub(r"/+", "/", value).strip(" /")
+        value = re.sub(r"^stockpiles/", "", value, flags=re.IGNORECASE)
+        return value.rsplit("/", 1)[-1].strip().upper()
+
+    @classmethod
+    def _destination_turnover_details(
+        cls,
+        destination,
+        arrival_datetime,
+        reclaim_windows,
+        horizon_start,
+        horizon_end,
+    ):
+        """Resolve first reclaim after arrival and its linear horizon priority."""
+        destination_key = cls.destination_guidance_stockpile_key(destination)
+        arrival = pd.to_datetime(arrival_datetime, errors="coerce")
+        start = pd.to_datetime(horizon_start, errors="coerce")
+        end = pd.to_datetime(horizon_end, errors="coerce")
+        if not destination_key or pd.isna(arrival) or pd.isna(start) or pd.isna(end):
+            return {
+                "two_wp_turnover_guidance_applicable": False,
+                "two_wp_first_reclaim_datetime": "",
+                "two_wp_destination_turnover_priority": None,
+            }
+
+        first_reclaim = None
+        for window in reclaim_windows.get(destination_key, []):
+            reclaim_start = pd.to_datetime(
+                window.get("start_datetime"), errors="coerce"
+            )
+            reclaim_end = pd.to_datetime(
+                window.get("end_datetime"), errors="coerce"
+            )
+            if pd.isna(reclaim_start) or pd.isna(reclaim_end):
+                continue
+            # A reclaim already in progress when the planned deposit completes
+            # is an immediate requirement for that destination.
+            if reclaim_end > arrival:
+                first_reclaim = reclaim_start
+                break
+
+        horizon_seconds = max((end - start).total_seconds(), 0.0)
+        if first_reclaim is None:
+            priority = 1.0
+            first_reclaim_text = ""
+        else:
+            priority = (
+                (first_reclaim - start).total_seconds() / horizon_seconds
+                if horizon_seconds > 0 else 0.0
+            )
+            priority = min(max(float(priority), 0.0), 1.0)
+            first_reclaim_text = first_reclaim.isoformat()
+        return {
+            "two_wp_turnover_guidance_applicable": True,
+            "two_wp_first_reclaim_datetime": first_reclaim_text,
+            "two_wp_destination_turnover_priority": priority,
+        }
+
     @classmethod
     def build_2wp_destination_guidance(cls, input_data):
         """Build dated grade-block destination candidates and fallbacks."""
@@ -634,9 +696,13 @@ class ExpitDataHandler:
             "Time.EndTime",
             "Mining.wetTonnes",
         }
+        read_columns = required_columns | {
+            "Agent.Name",
+            "OriginalSource.Name",
+        }
         data = pd.read_csv(
             input_data,
-            usecols=lambda column: column in required_columns,
+            usecols=lambda column: column in read_columns,
         )
         if data.empty:
             return {
@@ -656,6 +722,48 @@ class ExpitDataHandler:
                 "2WP Mining.csv is missing destination-guidance column(s): "
                 + ", ".join(sorted(missing))
             )
+
+        all_start_times = cls._parse_datetime_column(
+            data["Time.StartTime"], "Time.StartTime"
+        )
+        all_end_times = cls._parse_datetime_column(
+            data["Time.EndTime"], "Time.EndTime"
+        )
+        horizon_start = all_start_times.min()
+        horizon_end = all_end_times.max()
+
+        reclaim_windows = {}
+        if {"Agent.Name", "OriginalSource.Name"}.issubset(data.columns):
+            reclaim_mask = (
+                data["Destination.Type"].astype("string").str.strip().str.lower().eq("crusher")
+                & data["Source.Type"].astype("string").str.strip().str.lower().eq("flow")
+                & data["Agent.Name"].astype("string").str.strip().str.lower().eq("plantagent")
+            )
+            reclaim_rows = data[reclaim_mask].copy()
+            if not reclaim_rows.empty:
+                reclaim_rows["_start"] = all_start_times.loc[reclaim_rows.index]
+                reclaim_rows["_end"] = all_end_times.loc[reclaim_rows.index]
+                reclaim_rows["_stockpile_key"] = reclaim_rows[
+                    "OriginalSource.Name"
+                ].map(cls.destination_guidance_stockpile_key)
+                reclaim_rows = reclaim_rows[
+                    reclaim_rows["_stockpile_key"].ne("")
+                    & reclaim_rows["_start"].notna()
+                    & reclaim_rows["_end"].notna()
+                    & (reclaim_rows["_end"] > reclaim_rows["_start"])
+                ]
+                for stockpile_key, group in reclaim_rows.groupby(
+                    "_stockpile_key", sort=False
+                ):
+                    reclaim_windows[str(stockpile_key)] = [
+                        {
+                            "start_datetime": row["_start"].isoformat(),
+                            "end_datetime": row["_end"].isoformat(),
+                        }
+                        for _, row in group.sort_values(
+                            ["_start", "_end"]
+                        ).iterrows()
+                    ]
 
         source_type = data["Source.Type"].astype("string").str.strip().str.lower()
         destination_type = (
@@ -699,6 +807,10 @@ class ExpitDataHandler:
             stockpile_rows["Time.StartTime"],
             "Time.StartTime",
         )
+        stockpile_rows["guidance_end_datetime"] = cls._parse_datetime_column(
+            stockpile_rows["Time.EndTime"],
+            "Time.EndTime",
+        )
         stockpile_rows = stockpile_rows[
             stockpile_rows["source"].notna()
             & stockpile_rows["source"].ne("")
@@ -719,8 +831,16 @@ class ExpitDataHandler:
         for source_key, group in stockpile_rows.groupby(
             "source_key", sort=False
         ):
-            source_destinations[str(source_key)] = [
-                {
+            allocations = []
+            for _, row in group.sort_values("_row_order").iterrows():
+                turnover = cls._destination_turnover_details(
+                    row["destination"],
+                    row["guidance_end_datetime"],
+                    reclaim_windows,
+                    horizon_start,
+                    horizon_end,
+                )
+                allocations.append({
                     "destination": str(row["destination"]),
                     "destination_name": str(row["destination_name"]),
                     "ratio": 1.0,
@@ -731,11 +851,16 @@ class ExpitDataHandler:
                         if pd.notna(row["guidance_datetime"])
                         else ""
                     ),
+                    "guidance_end_datetime": (
+                        row["guidance_end_datetime"].isoformat()
+                        if pd.notna(row["guidance_end_datetime"])
+                        else ""
+                    ),
                     "source": str(row["source"]),
                     "row_order": int(row["_row_order"]),
-                }
-                for _, row in group.sort_values("_row_order").iterrows()
-            ]
+                    **turnover,
+                })
+            source_destinations[str(source_key)] = allocations
 
         pit_destinations = {}
         pit_rows = stockpile_rows[stockpile_rows["pit"].ne("")]
@@ -792,6 +917,13 @@ class ExpitDataHandler:
             "source_destinations": source_destinations,
             "pit_destinations": pit_destinations,
             "last_destination": last_destination,
+            "horizon_start_datetime": (
+                horizon_start.isoformat() if pd.notna(horizon_start) else ""
+            ),
+            "horizon_end_datetime": (
+                horizon_end.isoformat() if pd.notna(horizon_end) else ""
+            ),
+            "stockpile_reclaim_windows": reclaim_windows,
         }
 
     @classmethod
@@ -1287,6 +1419,20 @@ class ExpitDataHandler:
                     split_row["HaulageResult.NumberOfTrips"] = reported_trips * ratio
                 split_row["two_wp_destination_resolution"] = resolution
                 split_row["two_wp_destination_ratio"] = ratio
+                split_row["two_wp_turnover_guidance_applicable"] = bool(
+                    resolution == "exact_2wp"
+                    and allocation.get(
+                        "two_wp_turnover_guidance_applicable", False
+                    )
+                )
+                split_row["two_wp_first_reclaim_datetime"] = (
+                    allocation.get("two_wp_first_reclaim_datetime", "")
+                    if resolution == "exact_2wp" else ""
+                )
+                split_row["two_wp_destination_turnover_priority"] = (
+                    allocation.get("two_wp_destination_turnover_priority")
+                    if resolution == "exact_2wp" else None
+                )
                 expanded_rows.append(split_row)
         if not expanded_rows:
             return movements.iloc[0:0].copy()
@@ -1310,6 +1456,12 @@ class ExpitDataHandler:
             self.data["two_wp_destination_resolution"] = "schedule_destination"
         if "two_wp_destination_ratio" not in self.data.columns:
             self.data["two_wp_destination_ratio"] = 1.0
+        if "two_wp_turnover_guidance_applicable" not in self.data.columns:
+            self.data["two_wp_turnover_guidance_applicable"] = False
+        if "two_wp_first_reclaim_datetime" not in self.data.columns:
+            self.data["two_wp_first_reclaim_datetime"] = ""
+        if "two_wp_destination_turnover_priority" not in self.data.columns:
+            self.data["two_wp_destination_turnover_priority"] = pd.NA
         self.data["Time.StartTime"] = self._parse_datetime_column(
             self.data["Time.StartTime"],
             "Time.StartTime",
@@ -1492,6 +1644,24 @@ class ExpitDataHandler:
             "two_wp_destination_ratio": float(
                 row.get("two_wp_destination_ratio", 1.0) or 1.0
             ),
+            "two_wp_turnover_guidance_applicable": (
+                False
+                if pd.isna(row.get(
+                    "two_wp_turnover_guidance_applicable", False
+                ))
+                else bool(row.get(
+                    "two_wp_turnover_guidance_applicable", False
+                ))
+            ),
+            "two_wp_first_reclaim_datetime": str(
+                row.get("two_wp_first_reclaim_datetime", "") or ""
+            ),
+            "two_wp_destination_turnover_priority": pd.to_numeric(
+                pd.Series([
+                    row.get("two_wp_destination_turnover_priority")
+                ]),
+                errors="coerce",
+            ).iloc[0],
         }
 
     def _direct_tip_rule_matches(self, source_name):
@@ -1672,8 +1842,12 @@ class ExpitDataHandler:
                 "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
                 "Destination.Name", "Destination.FullName",
                 "two_wp_destination_resolution", "two_wp_destination_ratio",
+                "two_wp_turnover_guidance_applicable",
+                "two_wp_first_reclaim_datetime",
+                "two_wp_destination_turnover_priority",
             ],
-            as_index=False
+            as_index=False,
+            dropna=False,
         ).agg(aggregation)
 
         # Calculate weighted average of LoaderProductionRate.Wtph

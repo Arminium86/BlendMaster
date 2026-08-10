@@ -27,6 +27,10 @@ class EventData:
         source_properties=None,
         source_property_kinds=None,
         source_property_weights=None,
+        two_wp_planned_stockpile_destination=None,
+        two_wp_first_reclaim_datetime=None,
+        two_wp_destination_turnover_priority=None,
+        two_wp_turnover_guidance_applicable=False,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -57,6 +61,18 @@ class EventData:
         self._selected_grade_stream = None
         self._selected_grade_brand = None
         self._grade_stream_warnings = []
+        self._two_wp_planned_stockpile_destination = (
+            two_wp_planned_stockpile_destination or ""
+        )
+        self._two_wp_first_reclaim_datetime = (
+            two_wp_first_reclaim_datetime or ""
+        )
+        self._two_wp_destination_turnover_priority = (
+            two_wp_destination_turnover_priority
+        )
+        self._two_wp_turnover_guidance_applicable = bool(
+            two_wp_turnover_guidance_applicable
+        )
 
     # Getters
     @property
@@ -174,6 +190,22 @@ class EventData:
     @property
     def grade_stream_warnings(self):
         return self._grade_stream_warnings
+
+    @property
+    def two_wp_planned_stockpile_destination(self):
+        return self._two_wp_planned_stockpile_destination
+
+    @property
+    def two_wp_first_reclaim_datetime(self):
+        return self._two_wp_first_reclaim_datetime
+
+    @property
+    def two_wp_destination_turnover_priority(self):
+        return self._two_wp_destination_turnover_priority
+
+    @property
+    def two_wp_turnover_guidance_applicable(self):
+        return self._two_wp_turnover_guidance_applicable
 
     # Setters
     @stockpile.setter
@@ -329,4 +361,16 @@ class EventData:
             "selected_grade_stream": self._selected_grade_stream,
             "selected_grade_brand": self._selected_grade_brand,
             "grade_stream_warnings": self._grade_stream_warnings,
+            "two_wp_planned_stockpile_destination": (
+                self._two_wp_planned_stockpile_destination
+            ),
+            "two_wp_first_reclaim_datetime": (
+                self._two_wp_first_reclaim_datetime
+            ),
+            "two_wp_destination_turnover_priority": (
+                self._two_wp_destination_turnover_priority
+            ),
+            "two_wp_turnover_guidance_applicable": (
+                self._two_wp_turnover_guidance_applicable
+            ),
         }

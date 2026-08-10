@@ -964,6 +964,7 @@ class ManualBlendPlanner:
         inventory = deepcopy(self._inventory_template)
         report_rows = []
         produced_tonnes = 0.0
+        self.physical_balance_history = []
 
         for state in states:
             blend = self.blends[state["blend_ID"]]
@@ -1281,6 +1282,17 @@ class ManualBlendPlanner:
                     **targets,
                     **custom_constraint_fields,
                 })
+            self.physical_balance_history.append({
+                "snapshot_datetime": state["end_datetime"],
+                "steady_state_number": state["steady_state_number"],
+                "balances": {
+                    name: sum(
+                        self._number(chunk.get("balance"))
+                        for chunk in chunks
+                    )
+                    for name, chunks in inventory.items()
+                },
+            })
             produced_tonnes += total_tonnes
 
         custom_columns = self.custom_constraint_report_columns()

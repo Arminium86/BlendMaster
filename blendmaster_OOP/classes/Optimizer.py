@@ -469,6 +469,20 @@ class Optimizer:
             solver_config.get("require_whole_direct_tip_payloads", False)
         )
         direct_tip_cash_incentive = 0.0
+        destination_turnover_guidance_enabled = bool(
+            solver_config.get(
+                "two_wp_destination_turnover_guidance_enabled", False
+            )
+        )
+        try:
+            destination_turnover_incentive = max(
+                float(solver_config.get(
+                    "two_wp_destination_turnover_incentive", 10.0
+                ) or 0.0),
+                0.0,
+            )
+        except (TypeError, ValueError):
+            destination_turnover_incentive = 10.0
         if direct_tip_enabled:
             try:
                 direct_tip_cash_incentive = float(solver_config.get("direct_tip_cash_incentive", 10.0))
@@ -1064,6 +1078,19 @@ class Optimizer:
             # incentive is applied separately below so it can be configured.
             preference_reward = preference_rewards[i]
             direct_tip_reward = direct_tip_cash_incentive if event.is_grade_block else 0
+            destination_turnover_reward = 0.0
+            if (
+                destination_turnover_guidance_enabled
+                and event.is_grade_block
+                and event.two_wp_turnover_guidance_applicable
+            ):
+                priority = safe_float(
+                    event.two_wp_destination_turnover_priority, 0.0
+                )
+                destination_turnover_reward = (
+                    destination_turnover_incentive
+                    * min(max(priority, 0.0), 1.0)
+                )
             continuity_reward = (
                 stay_on_same_blend_incentive
                 if event.is_stockpile and str(event.stockpile) in previous_blend_stockpile_source_ids
@@ -1108,7 +1135,7 @@ class Optimizer:
                 event.cost + event.cash + brand_guidance_cost
                 + timing_guidance_cost
                 - preference_reward - direct_tip_reward - continuity_reward
-                - grade_block_pair_reward
+                - grade_block_pair_reward - destination_turnover_reward
             )
 
         throughput_incentive_per_tonne = max(
@@ -1977,6 +2004,36 @@ class Optimizer:
                             "selected_grade_brand": event.selected_grade_brand,
                             "grade_stream_warnings": event.grade_stream_warnings,
                             "grade_streams": deepcopy(event.grade_streams),
+                            "two_wp_planned_stockpile_destination": (
+                                event.two_wp_planned_stockpile_destination
+                                if event.is_grade_block else ""
+                            ),
+                            "two_wp_first_reclaim_datetime": (
+                                event.two_wp_first_reclaim_datetime
+                                if event.is_grade_block else ""
+                            ),
+                            "two_wp_destination_turnover_priority": (
+                                event.two_wp_destination_turnover_priority
+                                if event.is_grade_block
+                                and event.two_wp_turnover_guidance_applicable
+                                else None
+                            ),
+                            "two_wp_destination_turnover_guidance_applied": bool(
+                                destination_turnover_guidance_enabled
+                                and event.is_grade_block
+                                and event.two_wp_turnover_guidance_applicable
+                            ),
+                            "two_wp_destination_turnover_incentive_applied": (
+                                destination_turnover_incentive
+                                * min(max(safe_float(
+                                    event.two_wp_destination_turnover_priority,
+                                    0.0,
+                                ), 0.0), 1.0)
+                                if destination_turnover_guidance_enabled
+                                and event.is_grade_block
+                                and event.two_wp_turnover_guidance_applicable
+                                else 0.0
+                            ),
                             "source_properties": deepcopy(
                                 visible_source_properties
                             ),
@@ -2399,6 +2456,12 @@ class Optimizer:
             ),
             "direct_tip_enabled": solver_config.get("direct_tip_enabled", True),
             "direct_tip_cash_incentive": solver_config.get("direct_tip_cash_incentive", 10.0),
+            "two_wp_destination_turnover_guidance_enabled": solver_config.get(
+                "two_wp_destination_turnover_guidance_enabled", False
+            ),
+            "two_wp_destination_turnover_incentive": solver_config.get(
+                "two_wp_destination_turnover_incentive", 10.0
+            ),
             "stay_on_same_blend_incentive": solver_config.get("stay_on_same_blend_incentive", 0.0),
             "blend_option_timeout_seconds": solver_config.get("blend_option_timeout_seconds", 0.0),
             "max_blend_options_per_steady_state": solver_config.get("max_blend_options_per_steady_state", 12),

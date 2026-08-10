@@ -512,6 +512,18 @@ class DataLoader:
                 source=record.get("source"),
                 grade_streams=self.coerce_grade_streams(record.get("grade_streams")),
                 source_properties=self.solver_source_properties(record),
+                two_wp_planned_stockpile_destination=record.get(
+                    "planned_destination"
+                ),
+                two_wp_first_reclaim_datetime=record.get(
+                    "two_wp_first_reclaim_datetime"
+                ),
+                two_wp_destination_turnover_priority=record.get(
+                    "two_wp_destination_turnover_priority"
+                ),
+                two_wp_turnover_guidance_applicable=record.get(
+                    "two_wp_turnover_guidance_applicable", False
+                ),
                 period_values={
                     **{
                         f"max_quantity_{period_key}":

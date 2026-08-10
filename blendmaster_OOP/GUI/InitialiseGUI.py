@@ -1,4 +1,6 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv, re
+import plotly.graph_objects as go
+import plotly.io as pio
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
     QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QCompleter
@@ -80,6 +82,7 @@ from classes.SourcePropertyMappings import (
 )
 from classes.CloudbreakProductSplit import calculate_cb_lump_fines
 from classes.DataQualityWarnings import format_chunk_quality_warning
+from classes.ClosingROMStocksCompliance import ClosingROMStocksCompliance
 from classes.ProductBuildLanes import (
     ANALYTES as PRODUCT_BUILD_ANALYTES,
     BYPRODUCT_LANES,
@@ -588,6 +591,8 @@ class UserInputs(QMainWindow):
 
         self.setup_profiles_tab()
 
+        self.setup_closing_rom_stocks_compliance_tab()
+
         self.setup_optimised_grade_profile_tab()
 
         self.setup_sqlite_reports_tab()
@@ -697,6 +702,7 @@ class UserInputs(QMainWindow):
             self.decision_point_tab_index,
             self.results_tab_index,
             self.profiles_tab_index,
+            self.closing_rom_stocks_tab_index,
             self.sqlite_reports_tab_index,
             self.optimised_grade_profile_tab_index,
             self.blend_config_tab_index,
@@ -1267,6 +1273,9 @@ class UserInputs(QMainWindow):
             "aps_active_blend_guidance": copy.deepcopy(getattr(
                 self, "aps_active_blend_guidance", []
             )),
+            "two_wp_closing_stock_balances": copy.deepcopy(getattr(
+                self, "two_wp_closing_stock_balances", pd.DataFrame()
+            )),
             "selected_24hr_expit_agents": copy.deepcopy(getattr(
                 self, "selected_24hr_expit_agents", []
             )),
@@ -1381,6 +1390,8 @@ class UserInputs(QMainWindow):
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
             "planning_period_count_choice",
             "expit_mode_choice", "file_path_choice", "file_path_24hr_choice",
+            "two_wp_closing_stocks_path_choice",
+            "two_wp_closing_stock_balances",
             "available_24hr_expit_agents", "selected_24hr_expit_agents",
             "haul_cycle_file_path_choice",
             "available_haul_cycle_crushers",
@@ -1474,6 +1485,7 @@ class UserInputs(QMainWindow):
             self.decision_levers_tab_index,
             self.calendar_tab_index, self.decision_point_tab_index,
             self.results_tab_index, self.profiles_tab_index,
+            self.closing_rom_stocks_tab_index,
             self.sqlite_reports_tab_index, self.optimised_grade_profile_tab_index,
             self.blend_config_tab_index, self.blend_sequence_tab_index,
             self.grade_profile_tab_index,
@@ -1599,6 +1611,14 @@ class UserInputs(QMainWindow):
                 state.get("file_path_24hr_choice")
                 or state.get("twenty_four_hour_file_path_choice")
                 or ""
+            )
+            self.two_wp_closing_stocks_path_choice = str(
+                state.get("two_wp_closing_stocks_path_choice") or ""
+            )
+            self.two_wp_closing_stock_balances = (
+                ClosingROMStocksCompliance.normalize_target_rows(
+                    state.get("two_wp_closing_stock_balances")
+                )
             )
             self.available_24hr_expit_agents = self.normalized_expit_agent_names(
                 state.get("available_24hr_expit_agents") or []
@@ -2277,6 +2297,25 @@ class UserInputs(QMainWindow):
         direct_tip_layout.addStretch()
         self.solver_config_layout.addLayout(direct_tip_layout)
 
+        turnover_guidance_layout = QHBoxLayout()
+        self.two_wp_destination_turnover_incentive_input = (
+            self.create_solver_threshold_input("10.0", threshold_validator)
+        )
+        self.two_wp_destination_turnover_incentive_input.setToolTip(
+            "Maximum additional $/t reward for direct-tip grade blocks whose "
+            "exact 2WP ROM stockpile destination is reclaimed late, or not "
+            "reclaimed, within the complete 2WP horizon."
+        )
+        turnover_guidance_layout.addWidget(
+            QLabel("2WP ROM Destination Turnover Incentive:")
+        )
+        turnover_guidance_layout.addWidget(
+            self.two_wp_destination_turnover_incentive_input
+        )
+        turnover_guidance_layout.addWidget(QLabel("$/t"))
+        turnover_guidance_layout.addStretch()
+        self.solver_config_layout.addLayout(turnover_guidance_layout)
+
         same_blend_layout = QHBoxLayout()
         self.stay_on_same_blend_incentive_input = self.create_solver_threshold_input("0.0", threshold_validator)
         same_blend_layout.addWidget(QLabel("Stay on Same Blend Incentive:"))
@@ -2682,6 +2721,18 @@ class UserInputs(QMainWindow):
             self.update_direct_tip_input_state
         )
         layout.addWidget(self.direct_tip_enabled_checkbox)
+        self.two_wp_destination_turnover_guidance_checkbox = QCheckBox(
+            "Use 2WP ROM Destination Turnover Guidance"
+        )
+        self.two_wp_destination_turnover_guidance_checkbox.setChecked(False)
+        self.two_wp_destination_turnover_guidance_checkbox.setToolTip(
+            "Give exact-match direct-tip candidates a linear reward based on "
+            "how late their planned ROM destination first reclaims in the "
+            "complete 2WP horizon."
+        )
+        layout.addWidget(
+            self.two_wp_destination_turnover_guidance_checkbox
+        )
 
         preference_section = QLabel("Source Preferences")
         preference_section.setStyleSheet(
@@ -3493,6 +3544,14 @@ class UserInputs(QMainWindow):
     def update_direct_tip_input_state(self, checked=None):
         direct_tip_enabled = self.direct_tip_enabled_checkbox.isChecked()
         self.direct_tip_cash_incentive_input.setEnabled(direct_tip_enabled)
+        if hasattr(self, "two_wp_destination_turnover_incentive_input"):
+            self.two_wp_destination_turnover_incentive_input.setEnabled(
+                direct_tip_enabled
+            )
+        if hasattr(self, "two_wp_destination_turnover_guidance_checkbox"):
+            self.two_wp_destination_turnover_guidance_checkbox.setEnabled(
+                direct_tip_enabled
+            )
         if hasattr(self, "min_grade_block_pair_duration_input"):
             self.min_grade_block_pair_duration_input.setEnabled(direct_tip_enabled)
         if hasattr(self, "stay_on_same_grade_block_pair_incentive_input"):
@@ -3523,6 +3582,8 @@ class UserInputs(QMainWindow):
             "min_feed_duration_hours": None,
             "direct_tip_enabled": True,
             "direct_tip_cash_incentive": 10.0,
+            "two_wp_destination_turnover_guidance_enabled": False,
+            "two_wp_destination_turnover_incentive": 10.0,
             "stay_on_same_blend_incentive": 0.0,
             "blend_option_timeout_seconds": 30.0,
             "max_blend_options_per_steady_state": 12,
@@ -8682,6 +8743,25 @@ class UserInputs(QMainWindow):
 
         guidance_layout.addRow(file_label, file_layout)
 
+        closing_stocks_label = QLabel(
+            "Select 2WP Closing ROM Stocks.xlsx (optional):"
+        )
+        closing_stocks_label.setStyleSheet("font-weight: bold;")
+        self.two_wp_closing_stocks_path = QLineEdit()
+        self.two_wp_closing_stocks_path.setReadOnly(True)
+        self.two_wp_closing_stocks_path.setFixedWidth(400)
+        self.two_wp_closing_stocks_button = QPushButton("Browse")
+        self.two_wp_closing_stocks_button.setFixedWidth(100)
+        self.two_wp_closing_stocks_button.clicked.connect(
+            self.browse_two_wp_closing_stocks_file
+        )
+        closing_stocks_layout = QHBoxLayout()
+        closing_stocks_layout.addWidget(self.two_wp_closing_stocks_path)
+        closing_stocks_layout.addWidget(self.two_wp_closing_stocks_button)
+        guidance_layout.addRow(
+            closing_stocks_label, closing_stocks_layout
+        )
+
         # This input is derived from 2WP Mining.csv, so keep it with the
         # schedule guidance that supplies that data.
         crusher_ratio_label = QLabel("Crusher Contribution:")
@@ -9251,6 +9331,17 @@ class UserInputs(QMainWindow):
                 reset_agents=True,
                 show_mapping_errors=True,
             )
+
+    def browse_two_wp_closing_stocks_file(self):
+        """Browse for the optional explicit 2WP closing-ROM workbook."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select 2WP Closing ROM Stocks.xlsx",
+            "",
+            "Excel Workbooks (*.xlsx);;All Files (*)",
+        )
+        if file_path:
+            self.two_wp_closing_stocks_path.setText(file_path)
 
     def browse_haul_cycle_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -10413,6 +10504,9 @@ class UserInputs(QMainWindow):
         )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.two_wp_closing_stocks_path_choice = (
+            self.two_wp_closing_stocks_path.text().strip()
+        )
         self.available_two_wp_product_crushers = (
             self.available_two_wp_product_crusher_names()
         )
@@ -10468,6 +10562,9 @@ class UserInputs(QMainWindow):
         )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
+        self.two_wp_closing_stocks_path_choice = (
+            self.two_wp_closing_stocks_path.text().strip()
+        )
         self.available_two_wp_product_crushers = (
             self.available_two_wp_product_crusher_names()
         )
@@ -10529,6 +10626,9 @@ class UserInputs(QMainWindow):
         )
         self.file_path.setText(str(self.file_path_choice or ""))
         self.set_24hr_mining_path(self.file_path_24hr_choice)
+        self.two_wp_closing_stocks_path.setText(str(
+            getattr(self, "two_wp_closing_stocks_path_choice", "") or ""
+        ))
         self.set_24hr_expit_agent_items(
             getattr(self, "available_24hr_expit_agents", []),
             getattr(self, "selected_24hr_expit_agents", []),
@@ -10872,6 +10972,28 @@ class UserInputs(QMainWindow):
             )
             self.validate_form()
             return
+
+        try:
+            closing_stocks_path = vars(self).get(
+                "two_wp_closing_stocks_path_choice", ""
+            )
+            self.two_wp_closing_stock_balances = (
+                ClosingROMStocksCompliance.read_workbook(
+                    closing_stocks_path
+                )
+                if closing_stocks_path
+                else pd.DataFrame(
+                    columns=ClosingROMStocksCompliance.NORMALIZED_COLUMNS
+                )
+            )
+        except (OSError, ValueError, ImportError) as error:
+            QMessageBox.warning(
+                self, "Guidance Schedules", str(error)
+            )
+            return
+        DatabaseManager().write_two_wp_closing_rom_stocks(
+            self.two_wp_closing_stock_balances
+        )
 
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
@@ -12470,6 +12592,8 @@ class UserInputs(QMainWindow):
             "min_feed_duration_hours",
             "direct_tip_enabled",
             "direct_tip_cash_incentive",
+            "two_wp_destination_turnover_guidance_enabled",
+            "two_wp_destination_turnover_incentive",
             "stay_on_same_blend_incentive",
             "blend_option_timeout_seconds",
             "max_blend_options_per_steady_state",
@@ -13585,6 +13709,16 @@ class UserInputs(QMainWindow):
         if key == "direct_tip_cash_incentive":
             set_line_edit(self.direct_tip_cash_incentive_input, value)
             return True
+        if key == "two_wp_destination_turnover_guidance_enabled":
+            self.two_wp_destination_turnover_guidance_checkbox.setChecked(
+                to_bool(value)
+            )
+            return True
+        if key == "two_wp_destination_turnover_incentive":
+            set_line_edit(
+                self.two_wp_destination_turnover_incentive_input, value
+            )
+            return True
         if key == "stay_on_same_blend_incentive":
             set_line_edit(self.stay_on_same_blend_incentive_input, value)
             return True
@@ -14453,6 +14587,7 @@ class UserInputs(QMainWindow):
         "manual_direct_tip_allocations",
         "manual_steady_states",
         "manual_blend_report",
+        "manual_physical_balance_history",
         "crusher_rate",
         "crusher_rate_input_value",
         "crusher_rate_input_values",
@@ -14523,6 +14658,35 @@ class UserInputs(QMainWindow):
         self.write_manual_material_destination_plan(report)
         self.capture_active_manual_plan_state()
 
+    def write_manual_closing_rom_stocks_compliance(self, report):
+        targets = ClosingROMStocksCompliance.normalize_target_rows(
+            getattr(self, "two_wp_closing_stock_balances", None)
+        )
+        history = getattr(self, "manual_physical_balance_history", []) or []
+        if targets.empty or not history:
+            return
+        periods = PeriodManager(self.planning_period_count())
+        periods.calculate_periods(
+            getattr(self, "start_time_choice", None) or datetime.now()
+        )
+        base_plan_id = str(
+            getattr(self, "active_manual_plan_id", "Primary") or "Primary"
+        )
+        plan_id = f"Manual - {base_plan_id}"
+        compliance = ClosingROMStocksCompliance.build_report(
+            plan_id=plan_id,
+            plan_type="manual",
+            periods=periods.get_periods(),
+            physical_balance_history=history,
+            target_rows=targets,
+            used_stockpiles=Run._closing_compliance_stockpiles(
+                self.active_site_context(), report, None
+            ),
+        )
+        DatabaseManager().write_closing_rom_stocks_compliance(
+            compliance, plan_id, "manual"
+        )
+
     def reset_manual_blending_plan_state(self):
         self.blend_config_table_inputs = {}
         self.blend_data_from_config_table_inputs = {}
@@ -14534,6 +14698,7 @@ class UserInputs(QMainWindow):
         self.manual_blend_report = pd.DataFrame(
             columns=ManualBlendPlanner.REPORT_COLUMNS
         )
+        self.manual_physical_balance_history = []
         self.manual_gantt_legend_and_tooltip = []
 
     def clear_manual_blending_plan(self):
@@ -14733,7 +14898,11 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = allocations
         self.manual_steady_states = states
         self.manual_blend_report = report
+        self.manual_physical_balance_history = copy.deepcopy(
+            getattr(planner, "physical_balance_history", [])
+        )
         self.write_active_manual_plan_reports(report)
+        self.write_manual_closing_rom_stocks_compliance(report)
 
         # Rebuild Setup Blends so every optimized source-to-ratio pattern is
         # visible, including plans containing more than five Blend IDs.
@@ -16748,6 +16917,16 @@ class UserInputs(QMainWindow):
         )
         self.direct_tip_enabled_checkbox.setChecked(bool(solver_config.get("direct_tip_enabled", True)))
         self.direct_tip_cash_incentive_input.setText(str(solver_config.get("direct_tip_cash_incentive", 10.0)))
+        self.two_wp_destination_turnover_guidance_checkbox.setChecked(bool(
+            solver_config.get(
+                "two_wp_destination_turnover_guidance_enabled", False
+            )
+        ))
+        self.two_wp_destination_turnover_incentive_input.setText(str(
+            solver_config.get(
+                "two_wp_destination_turnover_incentive", 10.0
+            )
+        ))
         self.stay_on_same_blend_incentive_input.setText(str(solver_config.get("stay_on_same_blend_incentive", 0.0)))
         self.blend_option_timeout_input.setText(str(solver_config.get("blend_option_timeout_seconds", 30.0)))
         self.max_blend_options_input.setText(str(solver_config.get("max_blend_options_per_steady_state", 12)))
@@ -16999,6 +17178,11 @@ class UserInputs(QMainWindow):
             "Direct Tip Incentive",
             10.0,
         )
+        two_wp_destination_turnover_incentive = parse_non_negative_input(
+            self.two_wp_destination_turnover_incentive_input,
+            "2WP ROM Destination Turnover Incentive",
+            10.0,
+        )
         stay_on_same_blend_incentive = parse_non_negative_input(
             self.stay_on_same_blend_incentive_input,
             "Stay on Same Blend Incentive",
@@ -17075,6 +17259,7 @@ class UserInputs(QMainWindow):
             or contaminated_preference_incentive is None
             or low_fe_preference_incentive is None
             or direct_tip_cash_incentive is None
+            or two_wp_destination_turnover_incentive is None
             or stay_on_same_blend_incentive is None
             or blend_option_timeout_seconds is None
             or max_blend_options_per_steady_state is None
@@ -17146,6 +17331,12 @@ class UserInputs(QMainWindow):
             "min_feed_duration_hours": min_feed_duration_hours,
             "direct_tip_enabled": self.direct_tip_enabled_checkbox.isChecked(),
             "direct_tip_cash_incentive": direct_tip_cash_incentive,
+            "two_wp_destination_turnover_guidance_enabled": (
+                self.two_wp_destination_turnover_guidance_checkbox.isChecked()
+            ),
+            "two_wp_destination_turnover_incentive": (
+                two_wp_destination_turnover_incentive
+            ),
             "stay_on_same_blend_incentive": stay_on_same_blend_incentive,
             "blend_option_timeout_seconds": blend_option_timeout_seconds,
             "max_blend_options_per_steady_state": max_blend_options_per_steady_state,
@@ -17440,6 +17631,7 @@ class UserInputs(QMainWindow):
         for tab_index in [
             self.results_tab_index,
             self.profiles_tab_index,
+            self.closing_rom_stocks_tab_index,
             self.sqlite_reports_tab_index,
             self.optimised_grade_profile_tab_index,
         ]:
@@ -18126,6 +18318,158 @@ class UserInputs(QMainWindow):
         # Add the button to the layout at the bottom-left
         self.profiles_layout.addWidget(self.load_profile_chart_button)
 
+    def setup_closing_rom_stocks_compliance_tab(self):
+        self.closing_rom_stocks_tab = QWidget()
+        profile_location = self.page_locations.get(
+            "build_depletion_profiles"
+        )
+        position = (
+            profile_location[1] + 1 if profile_location is not None else None
+        )
+        self.closing_rom_stocks_tab_index = self.register_page(
+            "closing_rom_stocks_compliance",
+            self.results_tabs,
+            self.closing_rom_stocks_tab,
+            "Closing ROM Stocks Compliance",
+            position=position,
+        )
+        layout = QVBoxLayout(self.closing_rom_stocks_tab)
+        layout.setContentsMargins(12, 10, 12, 10)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Plan:"))
+        self.closing_rom_plan_selector = QComboBox()
+        self.closing_rom_plan_selector.setMinimumWidth(180)
+        controls.addWidget(self.closing_rom_plan_selector)
+        controls.addWidget(QLabel("Stockpile:"))
+        self.closing_rom_stockpile_selector = QComboBox()
+        self.closing_rom_stockpile_selector.setMinimumWidth(220)
+        controls.addWidget(self.closing_rom_stockpile_selector)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(
+            self.refresh_closing_rom_stocks_compliance
+        )
+        controls.addWidget(refresh_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.closing_rom_stocks_status = QLabel(
+            "Load a four-column 2WP closing-stocks workbook in Guidance "
+            "Schedules, then run a plan."
+        )
+        layout.addWidget(self.closing_rom_stocks_status)
+        self.closing_rom_stocks_chart = CustomWebEngineView()
+        self.closing_rom_stocks_chart.setMinimumHeight(340)
+        layout.addWidget(self.closing_rom_stocks_chart, stretch=2)
+        self.closing_rom_stocks_table = CustomTableWidget()
+        self.closing_rom_stocks_table.setEditTriggers(
+            QTableWidget.NoEditTriggers
+        )
+        layout.addWidget(self.closing_rom_stocks_table, stretch=1)
+        self.closing_rom_plan_selector.currentTextChanged.connect(
+            self.refresh_closing_rom_stocks_compliance
+        )
+        self.closing_rom_stockpile_selector.currentTextChanged.connect(
+            self.refresh_closing_rom_stocks_compliance
+        )
+
+    def fetch_closing_rom_stocks_compliance(self):
+        connection = sqlite3.connect(get_database_path())
+        try:
+            return pd.read_sql(
+                "SELECT * FROM closing_rom_stocks_compliance "
+                "ORDER BY plan_type, plan_id, stockpile, period_end_datetime",
+                connection,
+            )
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
+        finally:
+            connection.close()
+
+    def refresh_closing_rom_stocks_compliance(self, *_args):
+        if not hasattr(self, "closing_rom_stocks_table"):
+            return
+        data = self.fetch_closing_rom_stocks_compliance()
+        if data.empty:
+            self.closing_rom_stocks_status.setText(
+                "No closing-ROM compliance result is available. Load the "
+                "optional workbook in Guidance Schedules and run a plan."
+            )
+            self.closing_rom_stocks_table.clear()
+            self.closing_rom_stocks_chart.setHtml("")
+            return
+
+        selected_plan = self.closing_rom_plan_selector.currentText()
+        plans = list(dict.fromkeys(data["plan_id"].astype(str)))
+        self.closing_rom_plan_selector.blockSignals(True)
+        self.closing_rom_plan_selector.clear()
+        self.closing_rom_plan_selector.addItems(plans)
+        self.closing_rom_plan_selector.setCurrentText(
+            selected_plan if selected_plan in plans else plans[0]
+        )
+        self.closing_rom_plan_selector.blockSignals(False)
+        selected_plan = self.closing_rom_plan_selector.currentText()
+        plan_data = data[data["plan_id"].astype(str) == selected_plan].copy()
+
+        selected_stockpile = self.closing_rom_stockpile_selector.currentText()
+        stockpiles = sorted(plan_data["stockpile"].dropna().astype(str).unique())
+        self.closing_rom_stockpile_selector.blockSignals(True)
+        self.closing_rom_stockpile_selector.clear()
+        self.closing_rom_stockpile_selector.addItems(stockpiles)
+        self.closing_rom_stockpile_selector.setCurrentText(
+            selected_stockpile
+            if selected_stockpile in stockpiles
+            else (stockpiles[0] if stockpiles else "")
+        )
+        self.closing_rom_stockpile_selector.blockSignals(False)
+        selected_stockpile = self.closing_rom_stockpile_selector.currentText()
+        display = plan_data[
+            plan_data["stockpile"].astype(str) == selected_stockpile
+        ].copy()
+        self.populate_dataframe_table(
+            self.closing_rom_stocks_table, display
+        )
+        compared = display[
+            display["comparison_status"].astype(str).eq("Compared")
+        ]
+        self.closing_rom_stocks_status.setText(
+            f"{selected_plan} | {selected_stockpile} | "
+            f"{len(compared)} of {len(display)} BlendMaster period(s) compared"
+        )
+
+        figure = go.Figure()
+        if not display.empty:
+            x = pd.to_datetime(
+                display["period_end_datetime"], errors="coerce"
+            )
+            figure.add_trace(go.Scatter(
+                x=x,
+                y=pd.to_numeric(
+                    display["blendmaster_closing_rom_wmt"], errors="coerce"
+                ),
+                mode="lines+markers",
+                name="BlendMaster closing ROM WMT",
+            ))
+            figure.add_trace(go.Scatter(
+                x=x,
+                y=pd.to_numeric(
+                    display["two_wp_closing_rom_wmt"], errors="coerce"
+                ),
+                mode="lines+markers",
+                name="2WP closing ROM WMT",
+            ))
+        figure.update_layout(
+            title=f"{selected_stockpile} Closing ROM Stocks",
+            xaxis_title="BlendMaster Period End",
+            yaxis_title="Closing ROM WMT",
+            hovermode="x unified",
+            margin=dict(l=55, r=25, t=55, b=45),
+            template="plotly_white",
+        )
+        self.closing_rom_stocks_chart.setHtml(
+            pio.to_html(
+                figure, include_plotlyjs=True, full_html=True
+            )
+        )
+
     def setup_sqlite_reports_tab(self):
         self.sqlite_reports_tab = QWidget()
         self.sqlite_reports_tab_index = self.register_page(
@@ -18248,6 +18592,7 @@ class UserInputs(QMainWindow):
             )
         self.execute_sqlite_report_query()
         self.refresh_manual_blend_plan_report()
+        self.refresh_closing_rom_stocks_compliance()
 
     def fetch_manual_blend_plan_report(self):
         connection = sqlite3.connect(get_database_path())
@@ -18726,6 +19071,7 @@ class UserInputs(QMainWindow):
             self.decision_select_button.setEnabled(True)
             self.set_page_enabled(self.results_tab_index, True)
             self.set_page_enabled(self.profiles_tab_index, True)
+            self.set_page_enabled(self.closing_rom_stocks_tab_index, True)
             self.set_page_enabled(self.sqlite_reports_tab_index, True)
             self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
 
@@ -18736,6 +19082,7 @@ class UserInputs(QMainWindow):
             self.decision_select_button.setEnabled(False)
             self.set_page_enabled(self.results_tab_index, True)
             self.set_page_enabled(self.profiles_tab_index, True)
+            self.set_page_enabled(self.closing_rom_stocks_tab_index, True)
             self.set_page_enabled(self.sqlite_reports_tab_index, True)
             self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
         # Calendar submission always lands on Decision Point. Completed runs
@@ -21518,6 +21865,10 @@ class UserInputs(QMainWindow):
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
             self.file_path_24hr_choice = self.file_path_24hr.text()
+            self.two_wp_closing_stocks_path_choice = (
+                self.two_wp_closing_stocks_path.text()
+                if hasattr(self, "two_wp_closing_stocks_path") else ""
+            )
         if hasattr(self, "expit_agent_input"):
             self.available_24hr_expit_agents = (
                 self.available_24hr_expit_agent_names()
@@ -21977,6 +22328,14 @@ class UserInputs(QMainWindow):
             or loaded_state.get("twenty_four_hour_file_path_choice")
             or ""
         )
+        self.two_wp_closing_stocks_path_choice = str(
+            loaded_state.get("two_wp_closing_stocks_path_choice") or ""
+        )
+        self.two_wp_closing_stock_balances = (
+            ClosingROMStocksCompliance.normalize_target_rows(
+                loaded_state.get("two_wp_closing_stock_balances")
+            )
+        )
         self.available_24hr_expit_agents = self.normalized_expit_agent_names(
             loaded_state.get("available_24hr_expit_agents") or []
         )
@@ -22361,6 +22720,10 @@ class UserInputs(QMainWindow):
         self.expit_mode_choice = None
         self.file_path_choice = None
         self.file_path_24hr_choice = None
+        self.two_wp_closing_stocks_path_choice = None
+        self.two_wp_closing_stock_balances = pd.DataFrame(
+            columns=ClosingROMStocksCompliance.NORMALIZED_COLUMNS
+        )
         self.available_24hr_expit_agents = []
         self.selected_24hr_expit_agents = []
         self.haul_cycle_file_path_choice = None
@@ -22446,6 +22809,7 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = {}
         self.manual_steady_states = []
         self.manual_blend_report = pd.DataFrame()
+        self.manual_physical_balance_history = []
         self.manual_plan_states = {}
         self.active_manual_plan_id = "Primary"
         self.time_mode_choice = None

@@ -26,6 +26,10 @@ class GradeBlockData:
         period_values=None,
         grade_streams=None,
         source_properties=None,
+        two_wp_planned_stockpile_destination=None,
+        two_wp_first_reclaim_datetime=None,
+        two_wp_destination_turnover_priority=None,
+        two_wp_turnover_guidance_applicable=False,
     ):
         self._name = name
         self._balance = balance
@@ -52,6 +56,18 @@ class GradeBlockData:
         self._period_values = dict(period_values or {})
         self._grade_streams = grade_streams
         self._source_properties = dict(source_properties or {})
+        self._two_wp_planned_stockpile_destination = (
+            two_wp_planned_stockpile_destination or ""
+        )
+        self._two_wp_first_reclaim_datetime = (
+            two_wp_first_reclaim_datetime or ""
+        )
+        self._two_wp_destination_turnover_priority = (
+            two_wp_destination_turnover_priority
+        )
+        self._two_wp_turnover_guidance_applicable = bool(
+            two_wp_turnover_guidance_applicable
+        )
     
     # Getters
     @property
@@ -149,6 +165,22 @@ class GradeBlockData:
     @property
     def source_properties(self):
         return self._source_properties
+
+    @property
+    def two_wp_planned_stockpile_destination(self):
+        return self._two_wp_planned_stockpile_destination
+
+    @property
+    def two_wp_first_reclaim_datetime(self):
+        return self._two_wp_first_reclaim_datetime
+
+    @property
+    def two_wp_destination_turnover_priority(self):
+        return self._two_wp_destination_turnover_priority
+
+    @property
+    def two_wp_turnover_guidance_applicable(self):
+        return self._two_wp_turnover_guidance_applicable
     
 
     # Setters
@@ -275,6 +307,18 @@ class GradeBlockData:
             "source": self._source,
             "grade_streams": self._grade_streams,
             "source_properties": self._source_properties,
+            "two_wp_planned_stockpile_destination": (
+                self._two_wp_planned_stockpile_destination
+            ),
+            "two_wp_first_reclaim_datetime": (
+                self._two_wp_first_reclaim_datetime
+            ),
+            "two_wp_destination_turnover_priority": (
+                self._two_wp_destination_turnover_priority
+            ),
+            "two_wp_turnover_guidance_applicable": (
+                self._two_wp_turnover_guidance_applicable
+            ),
         }
         result.update(self._period_values)
         return result

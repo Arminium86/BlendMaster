@@ -2111,6 +2111,50 @@ class CaseModeller:
                 else:
                     record["estimated_delivery_datetime"] = ""
 
+            # One readable grade block can contain several 2WP allocation
+            # payloads. Preserve all exact destinations while reporting the
+            # same tonnes-weighted turnover coefficient that contributed to
+            # the grouped objective.
+            for text_column in (
+                "two_wp_planned_stockpile_destination",
+                "two_wp_first_reclaim_datetime",
+            ):
+                if text_column in group:
+                    values = [
+                        str(value).strip()
+                        for value in group[text_column].dropna()
+                        if str(value).strip()
+                    ]
+                    record[text_column] = ", ".join(dict.fromkeys(values))
+            weights = pd.to_numeric(
+                group["source_actual_tonnes"], errors="coerce"
+            ).fillna(0)
+            for numeric_column in (
+                "two_wp_destination_turnover_priority",
+                "two_wp_destination_turnover_incentive_applied",
+            ):
+                if numeric_column in group:
+                    values = pd.to_numeric(
+                        group[numeric_column], errors="coerce"
+                    )
+                    valid = values.notna() & (
+                        weights > Optimizer.SOLUTION_TOLERANCE
+                    )
+                    valid_tonnes = weights[valid].sum()
+                    record[numeric_column] = (
+                        (values[valid] * weights[valid]).sum()
+                        / valid_tonnes
+                        if valid_tonnes > Optimizer.SOLUTION_TOLERANCE
+                        else None
+                    )
+            if "two_wp_destination_turnover_guidance_applied" in group:
+                record["two_wp_destination_turnover_guidance_applied"] = any(
+                    str(value).strip().lower() in {"true", "1", "yes"}
+                    for value in group[
+                        "two_wp_destination_turnover_guidance_applied"
+                    ].dropna()
+                )
+
             # The grouped source row remains an audit record, so raw stream
             # fields must be weighted exactly like the selected legacy grades.
             for grade_column in [
@@ -2515,6 +2559,17 @@ class CaseModeller:
                         key: value
                         for key, value in transaction.items()
                         if str(key).startswith("product_build_")
+                    },
+                    **{
+                        key: value
+                        for key, value in transaction.items()
+                        if str(key).startswith(
+                            "two_wp_destination_turnover_"
+                        )
+                        or key in {
+                            "two_wp_planned_stockpile_destination",
+                            "two_wp_first_reclaim_datetime",
+                        }
                     },
                     "equipment": transaction["equipment"],
                     "equipment_rate_input": transaction["equipment_rate_input"],

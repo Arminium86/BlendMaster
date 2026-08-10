@@ -70,6 +70,29 @@ inventory identity/build, opening balance and insitu assays. The modelled and
 adjusted fields are not treated as defined until the next steps. The submitted
 opening inventory is persisted here; Data Streams does not rewrite it.
 
+Guidance Schedules also accepts an optional **2WP Closing ROM Stocks.xlsx**
+workbook with exactly these four columns:
+
+```text
+Source.Name
+Period.Start Datetime
+Period.End Datetime
+Mining.wetTonnes
+```
+
+`Mining.wetTonnes` is the planned closing ROM WMT at the explicit period end.
+The normalized rows are stored in the project, so an already-prepared project
+does not depend on rereading the workbook simply to run its reports.
+
+After an optimised, contingency or manual plan is produced, **Closing ROM
+Stocks Compliance** appears directly after **Build and Depletion Profiles** in
+Results. For every BlendMaster period boundary it compares physical remaining
+ROM WMT with the latest completed 2WP period whose end is at or before that
+boundary. Inventory sources use their remaining inventory balance; AMT sources
+use the remaining reconciled AMT chunks without a second inventory adjustment.
+The comparison is limited to stockpiles used as a source or destination in the
+2WP or BlendMaster plan and reports both WMT and percentage variance.
+
 **Define Fields** creates the stable BlendMaster schema shared by Inventory,
 AMT and APS sources. A field name may contain letters, numbers and underscores
 and must start with a letter. Each row is one of:

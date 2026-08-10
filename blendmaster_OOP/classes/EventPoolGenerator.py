@@ -107,6 +107,18 @@ class EventPoolGenerator:
                         "source_property_weights": getattr(
                             grade_block, "source_property_weights", {}
                         ),
+                        "two_wp_planned_stockpile_destination": (
+                            grade_block.two_wp_planned_stockpile_destination
+                        ),
+                        "two_wp_first_reclaim_datetime": (
+                            grade_block.two_wp_first_reclaim_datetime
+                        ),
+                        "two_wp_destination_turnover_priority": (
+                            grade_block.two_wp_destination_turnover_priority
+                        ),
+                        "two_wp_turnover_guidance_applicable": (
+                            grade_block.two_wp_turnover_guidance_applicable
+                        ),
                     })
 
         return events
@@ -253,6 +265,18 @@ class EventPoolGenerator:
                 source_properties=record.get("source_properties"),
                 source_property_kinds=record.get("source_property_kinds"),
                 source_property_weights=record.get("source_property_weights"),
+                two_wp_planned_stockpile_destination=record.get(
+                    "two_wp_planned_stockpile_destination"
+                ),
+                two_wp_first_reclaim_datetime=record.get(
+                    "two_wp_first_reclaim_datetime"
+                ),
+                two_wp_destination_turnover_priority=record.get(
+                    "two_wp_destination_turnover_priority"
+                ),
+                two_wp_turnover_guidance_applicable=record.get(
+                    "two_wp_turnover_guidance_applicable", False
+                ),
 
             )
             for record in event_data_dicts

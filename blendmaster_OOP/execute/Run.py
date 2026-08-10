@@ -18,6 +18,7 @@ from classes.ProductBuildLanes import (
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
 from classes.GradeStreams import configured_brands, resolve_grade_vector
+from classes.ClosingROMStocksCompliance import ClosingROMStocksCompliance
 from database.SQLiteDatabase import DatabaseManager
 from execute.Requirements import Requirements
 from pandas import DataFrame
@@ -213,6 +214,44 @@ class Run:
                     )
                 )
         return names
+
+    @staticmethod
+    def _closing_compliance_stockpiles(
+        site_context, blend_report=None, build_report=None
+    ):
+        """Return stockpiles used by either 2WP guidance or BlendMaster."""
+        names = set()
+        guidance = (site_context or {}).get("aps_destination_guidance") or {}
+        for allocations in (
+            guidance.get("source_destinations", {}) or {}
+        ).values():
+            for allocation in allocations or []:
+                names.add(
+                    allocation.get("destination_name")
+                    or allocation.get("destination")
+                )
+        names.update(
+            (guidance.get("stockpile_reclaim_windows", {}) or {}).keys()
+        )
+        if isinstance(blend_report, pd.DataFrame) and not blend_report.empty:
+            rows = blend_report
+            if "source_type" in rows:
+                rows = rows[
+                    rows["source_type"].astype(str).str.lower().eq("stockpile")
+                ]
+            for column in (
+                "parent_stockpile", "balance_tracker_source_id", "source",
+            ):
+                if column in rows:
+                    names.update(rows[column].dropna().astype(str))
+                    break
+        if isinstance(build_report, pd.DataFrame) and "stockpile" in build_report:
+            names.update(build_report["stockpile"].dropna().astype(str))
+        return {
+            ClosingROMStocksCompliance.normalize_stockpile_name(name)
+            for name in names
+            if ClosingROMStocksCompliance.normalize_stockpile_name(name)
+        }
 
     def execute(
         self,
@@ -770,6 +809,29 @@ class Run:
                         contingency.contingency_reuse_fallbacks
                     ),
                 })
+
+        closing_targets = ClosingROMStocksCompliance.normalize_target_rows(
+            (site_context or {}).get("two_wp_closing_stock_balances")
+        )
+        if not closing_targets.empty:
+            for plan_id, modeller in self.case_modellers.items():
+                blend_report = self._case_blend_report(modeller)
+                build_report = modeller.balance_tracker.get_build_transactions()
+                compliance = ClosingROMStocksCompliance.build_report(
+                    plan_id=plan_id,
+                    plan_type="optimised",
+                    periods=periods.get_periods(),
+                    physical_balance_history=(
+                        modeller.balance_tracker.get_physical_balance_history()
+                    ),
+                    target_rows=closing_targets,
+                    used_stockpiles=self._closing_compliance_stockpiles(
+                        site_context, blend_report, build_report
+                    ),
+                )
+                database_manager.write_closing_rom_stocks_compliance(
+                    compliance, plan_id, "optimised"
+                )
 
         database_manager.write_optimisation_plan_status(plan_status_rows)
         self.case_modeller = primary_case_modeller

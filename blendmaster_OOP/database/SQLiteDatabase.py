@@ -52,10 +52,83 @@ class DatabaseManager:
                 self.PLAN_RESULT_TABLES["product_build"],
                 "optimisation_plan_status",
                 "two_wp_active_blend_report",
+                "closing_rom_stocks_compliance",
             ):
                 connection.execute(
                     f'DROP TABLE IF EXISTS "{table_name}"'
                 )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def write_two_wp_closing_rom_stocks(
+        self, rows, database_name=None
+    ):
+        """Persist the normalized four-column 2WP closing-stock input."""
+        database_name = database_name or get_database_path()
+        frame = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows or [])
+        for column in frame.columns:
+            if pd.api.types.is_datetime64_any_dtype(frame[column]):
+                frame[column] = pd.to_datetime(
+                    frame[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+        connection = sqlite3.connect(database_name)
+        try:
+            frame.to_sql(
+                "two_wp_closing_rom_stocks",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def write_closing_rom_stocks_compliance(
+        self, rows, plan_id, plan_type, database_name=None
+    ):
+        """Replace one plan's closing-ROM compliance rows."""
+        database_name = database_name or get_database_path()
+        frame = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows or [])
+        if "plan_id" not in frame:
+            frame.insert(0, "plan_id", str(plan_id))
+        if "plan_type" not in frame:
+            frame.insert(1, "plan_type", str(plan_type))
+        for column in frame.columns:
+            if pd.api.types.is_datetime64_any_dtype(frame[column]):
+                frame[column] = pd.to_datetime(
+                    frame[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+        connection = sqlite3.connect(database_name)
+        try:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                ("closing_rom_stocks_compliance",),
+            ).fetchone()
+            existing = (
+                pd.read_sql(
+                    'SELECT * FROM "closing_rom_stocks_compliance"',
+                    connection,
+                )
+                if table_exists else pd.DataFrame()
+            )
+            if not existing.empty and "plan_id" in existing:
+                existing = existing[
+                    existing["plan_id"].astype(str) != str(plan_id)
+                ]
+            columns = list(dict.fromkeys([
+                *existing.columns.tolist(), *frame.columns.tolist()
+            ]))
+            combined = pd.concat([
+                existing.reindex(columns=columns),
+                frame.reindex(columns=columns),
+            ], ignore_index=True)
+            combined.to_sql(
+                "closing_rom_stocks_compliance",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
             connection.commit()
         finally:
             connection.close()
@@ -796,6 +869,9 @@ class DatabaseManager:
             aps_direct_tip_candidate INTEGER,
             two_wp_destination_resolution TEXT,
             two_wp_destination_ratio REAL,
+            two_wp_turnover_guidance_applicable INTEGER,
+            two_wp_first_reclaim_datetime TEXT,
+            two_wp_destination_turnover_priority REAL,
             grade_streams_json TEXT,
             source_properties_json TEXT
         )
@@ -811,6 +887,9 @@ class DatabaseManager:
             "aps_direct_tip_candidate": "INTEGER",
             "two_wp_destination_resolution": "TEXT",
             "two_wp_destination_ratio": "REAL",
+            "two_wp_turnover_guidance_applicable": "INTEGER",
+            "two_wp_first_reclaim_datetime": "TEXT",
+            "two_wp_destination_turnover_priority": "REAL",
             "grade_streams_json": "TEXT",
             "source_properties_json": "TEXT",
         }
@@ -858,6 +937,11 @@ class DatabaseManager:
         results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
+        results["two_wp_turnover_guidance_applicable"] = results[
+            "two_wp_turnover_guidance_applicable"
+        ].map(
+            lambda value: str(value).strip().lower() in {"true", "1", "yes"}
+        ).astype(int)
 
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -884,6 +968,9 @@ class DatabaseManager:
                 aps_direct_tip_candidate,
                 two_wp_destination_resolution,
                 two_wp_destination_ratio,
+                two_wp_turnover_guidance_applicable,
+                two_wp_first_reclaim_datetime,
+                two_wp_destination_turnover_priority,
                 grade_streams_json,
                 source_properties_json
             ) VALUES (
@@ -905,6 +992,9 @@ class DatabaseManager:
                 :aps_direct_tip_candidate,
                 :two_wp_destination_resolution,
                 :two_wp_destination_ratio,
+                :two_wp_turnover_guidance_applicable,
+                :two_wp_first_reclaim_datetime,
+                :two_wp_destination_turnover_priority,
                 :grade_streams_json,
                 :source_properties_json
             )

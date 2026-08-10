@@ -77,6 +77,7 @@ sum over sources [
         + guidance penalties
         - throughput incentive
         - direct-tip reward
+        - 2WP destination-turnover reward
         - continuity rewards
         - source-preference rewards
       )
@@ -112,6 +113,7 @@ The 2WP guidance value fields accept positive and negative numbers:
 | 2WP Source Stockpile Timing Compliance | Decision Levers and Solver Configuration | Disabled; 0 $/t; 0 h tolerance | Rewards use inside the 2WP source window, including tolerance. Outside the window, compliance declines progressively as time distance increases. |
 | 2WP Active Blend | Decision Levers and Solver Configuration | Disabled; 0 $/t | Compares the selected stockpile set with the 2WP stockpile set for the active product brand and time. Ratios are not compared. |
 | Direct Tip Incentive | Decision Levers and Solver Configuration | Direct tip enabled; 10 $/t | Reward for eligible direct-tip tonnes. Direct-tip ratio limits remain hard constraints. |
+| 2WP ROM Destination Turnover Guidance | Decision Levers and Solver Configuration | Disabled; 10 $/t | Applies only to exact grade-block-to-ROM-stockpile matches from the 2WP. It gives less direct-tip reward to blocks planned for stockpiles reclaimed early in the available 2WP horizon, and the full configured reward to stockpiles first reclaimed at the horizon end or not reclaimed within it. |
 | Stay on Same Blend Incentive | Solver Configuration | 0 $/t | Rewards stockpile sources retained from the previously selected blend. |
 | Stay With Same Grade Block Pair Incentive | Solver Configuration | 0 $/t | Rewards reuse of the previous direct-tip grade-block and stockpile pairing. |
 | Prefer Fewer Stockpiles | Decision Levers and Solver Configuration | Disabled; 10 per selected stockpile | Adds a fixed penalty for each selected stockpile. This is not a per-tonne value. |
@@ -158,6 +160,29 @@ Active-blend guidance compares stockpile names as a set:
 
 Stockpile ratios are deliberately excluded. If an expected stockpile is not
 available, an exact match cannot be achieved.
+
+### 2WP ROM destination turnover guidance
+
+BlendMaster scans the complete imported 2WP horizon. For every grade block
+planned to a ROM stockpile, it finds that stockpile's first planned reclaim
+after the deposit. The resulting priority is linear across the actual horizon:
+
+```text
+priority = (first reclaim time - 2WP horizon start)
+           / (2WP horizon end - 2WP horizon start)
+
+turnover reward ($/t) = configured incentive x priority
+```
+
+Priority is clamped to 0 through 1. A stockpile with no planned reclaim in the
+imported horizon receives priority 1. Only an exact 2WP destination match is
+eligible; pit-level and last-destination fallbacks receive no turnover reward.
+This is a soft direct-tip ranking preference and never overrides balances,
+grades, delivery timing or other hard constraints.
+
+Optimised source rows retain the planned stockpile destination, first reclaim
+datetime, normalized priority, whether the guidance was applied, and the
+effective per-tonne incentive after priority scaling.
 
 ## Source eligibility rules
 
