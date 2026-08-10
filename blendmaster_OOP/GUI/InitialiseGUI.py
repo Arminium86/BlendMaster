@@ -18597,6 +18597,9 @@ class UserInputs(QMainWindow):
     def refresh_sqlite_reports(self):
         current_table = self.sqlite_report_selector.currentText()
         current_query = self.sqlite_report_query.text().strip()
+        DatabaseManager().ensure_two_wp_grade_block_turnover_audit(
+            getattr(self, "solver_config", {})
+        )
         tables = self.get_sqlite_report_tables()
 
         self.sqlite_report_selector.blockSignals(True)

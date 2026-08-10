@@ -184,6 +184,17 @@ Optimised source rows retain the planned stockpile destination, first reclaim
 datetime, normalized priority, whether the guidance was applied, and the
 effective per-tonne incentive after priority scaling.
 
+The SQLite report `two_wp_grade_block_turnover_audit` provides the same audit
+independently of optimiser selection. It is built from the complete prepared
+APS payload population, so grade blocks that were not direct tipped are still
+included. A grade block with more than one distinct derived 2WP outcome has one
+row per outcome. The report includes available payload WMT and timing, the APS
+schedule destination, exact 2WP planned stockpile destination, first reclaim
+datetime, normalized turnover priority, destination-resolution method,
+guidance applicability, whether the enabled guidance was applied, and its
+effective per-tonne incentive. Pit/last-destination fallbacks remain visible
+for audit but have no exact 2WP destination, priority or applied guidance.
+
 ## Source eligibility rules
 
 The solver only sees sources that pass the operational eligibility rules.

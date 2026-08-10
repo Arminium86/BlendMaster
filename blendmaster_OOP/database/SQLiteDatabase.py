@@ -52,6 +52,7 @@ class DatabaseManager:
                 self.PLAN_RESULT_TABLES["product_build"],
                 "optimisation_plan_status",
                 "two_wp_active_blend_report",
+                "two_wp_grade_block_turnover_audit",
                 "closing_rom_stocks_compliance",
             ):
                 connection.execute(
@@ -842,9 +843,221 @@ class DatabaseManager:
         print(f"Build report (if used) saved to database {database_name}")
         print(f"Expit payload transactions (if used) saved to database {database_name}")
 
-    def write_expit_payload_transactions_to_database (self, results: pd.DataFrame):
+    @staticmethod
+    def _joined_unique_text(values):
+        return ", ".join(dict.fromkeys(
+            str(value).strip()
+            for value in values.dropna()
+            if str(value).strip()
+        ))
+
+    def write_two_wp_grade_block_turnover_audit(
+        self,
+        results,
+        solver_config=None,
+        database_name=None,
+    ):
+        """Write one audit row per grade block and derived 2WP outcome.
+
+        This is deliberately based on the complete prepared APS payload set,
+        not optimiser selections, so unused grade blocks remain visible.
+        """
+        database_name = database_name or get_database_path()
+        source = (
+            results.copy()
+            if isinstance(results, pd.DataFrame)
+            else pd.DataFrame(results or [])
+        )
+        output_columns = [
+            "grade_block",
+            "agents",
+            "available_payload_wmt",
+            "payload_count",
+            "first_source_start_datetime",
+            "last_source_start_datetime",
+            "first_estimated_delivery_datetime",
+            "last_estimated_delivery_datetime",
+            "aps_schedule_destinations",
+            "two_wp_planned_stockpile_destination",
+            "two_wp_first_reclaim_datetime",
+            "two_wp_destination_turnover_priority",
+            "two_wp_destination_resolution",
+            "two_wp_turnover_guidance_applicable",
+            "two_wp_destination_turnover_guidance_applied",
+            "two_wp_destination_turnover_incentive_applied",
+        ]
+        if source.empty:
+            audit = pd.DataFrame(columns=output_columns)
+        else:
+            defaults = {
+                "source": "",
+                "agent": "",
+                "payload": 0.0,
+                "start_datetime": pd.NaT,
+                "delivered_datetime": pd.NaT,
+                "destination": "",
+                "planned_destination": "",
+                "two_wp_first_reclaim_datetime": "",
+                "two_wp_destination_turnover_priority": None,
+                "two_wp_destination_resolution": "",
+                "two_wp_turnover_guidance_applicable": False,
+            }
+            for column, default in defaults.items():
+                if column not in source:
+                    source[column] = default
+
+            source["grade_block"] = source["source"].astype("string").fillna("")
+            source["available_payload_wmt"] = pd.to_numeric(
+                source["payload"], errors="coerce"
+            ).fillna(0.0)
+            for column in ("start_datetime", "delivered_datetime"):
+                source[column] = pd.to_datetime(
+                    source[column], errors="coerce"
+                )
+            source["two_wp_destination_resolution"] = (
+                source["two_wp_destination_resolution"]
+                .astype("string").fillna("").str.strip()
+            )
+            exact_match = source[
+                "two_wp_destination_resolution"
+            ].str.lower().eq("exact_2wp")
+            source["two_wp_planned_stockpile_destination"] = (
+                source["planned_destination"].where(exact_match, "")
+                .astype("string").fillna("").str.strip()
+            )
+            source["two_wp_first_reclaim_datetime"] = (
+                source["two_wp_first_reclaim_datetime"].where(
+                    exact_match, ""
+                ).astype("string").fillna("").str.strip()
+            )
+            source["two_wp_destination_turnover_priority"] = pd.to_numeric(
+                source["two_wp_destination_turnover_priority"],
+                errors="coerce",
+            ).where(exact_match)
+            source["two_wp_turnover_guidance_applicable"] = (
+                exact_match
+                & source["two_wp_turnover_guidance_applicable"].map(
+                    lambda value: str(value).strip().lower()
+                    in {"true", "1", "yes"}
+                )
+            )
+            config = dict(solver_config or {})
+            guidance_enabled = bool(config.get(
+                "two_wp_destination_turnover_guidance_enabled", False
+            ))
+            try:
+                incentive = max(float(config.get(
+                    "two_wp_destination_turnover_incentive", 10.0
+                ) or 0.0), 0.0)
+            except (TypeError, ValueError):
+                incentive = 10.0
+            source[
+                "two_wp_destination_turnover_guidance_applied"
+            ] = (
+                guidance_enabled
+                & source["two_wp_turnover_guidance_applicable"]
+            )
+            source[
+                "two_wp_destination_turnover_incentive_applied"
+            ] = source[
+                "two_wp_destination_turnover_priority"
+            ].fillna(0.0).clip(0.0, 1.0) * incentive
+            source.loc[
+                ~source["two_wp_destination_turnover_guidance_applied"],
+                "two_wp_destination_turnover_incentive_applied",
+            ] = 0.0
+
+            group_keys = [
+                "grade_block",
+                "two_wp_planned_stockpile_destination",
+                "two_wp_first_reclaim_datetime",
+                "two_wp_destination_turnover_priority",
+                "two_wp_destination_resolution",
+                "two_wp_turnover_guidance_applicable",
+                "two_wp_destination_turnover_guidance_applied",
+                "two_wp_destination_turnover_incentive_applied",
+            ]
+            audit = source.groupby(
+                group_keys, as_index=False, dropna=False, sort=False
+            ).agg(
+                agents=("agent", self._joined_unique_text),
+                available_payload_wmt=("available_payload_wmt", "sum"),
+                payload_count=("available_payload_wmt", "size"),
+                first_source_start_datetime=("start_datetime", "min"),
+                last_source_start_datetime=("start_datetime", "max"),
+                first_estimated_delivery_datetime=(
+                    "delivered_datetime", "min"
+                ),
+                last_estimated_delivery_datetime=(
+                    "delivered_datetime", "max"
+                ),
+                aps_schedule_destinations=(
+                    "destination", self._joined_unique_text
+                ),
+            )
+            audit = audit[output_columns]
+            for column in (
+                "first_source_start_datetime",
+                "last_source_start_datetime",
+                "first_estimated_delivery_datetime",
+                "last_estimated_delivery_datetime",
+            ):
+                audit[column] = pd.to_datetime(
+                    audit[column], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M:%S")
+            for column in (
+                "two_wp_turnover_guidance_applicable",
+                "two_wp_destination_turnover_guidance_applied",
+            ):
+                audit[column] = audit[column].astype(int)
+
+        connection = sqlite3.connect(database_name)
+        try:
+            audit.to_sql(
+                "two_wp_grade_block_turnover_audit",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return audit
+
+    def ensure_two_wp_grade_block_turnover_audit(
+        self, solver_config=None, database_name=None
+    ):
+        """Reconstruct the audit for an older project when payloads exist."""
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "two_wp_grade_block_turnover_audit" in tables:
+                return
+            payloads = (
+                pd.read_sql(
+                    "SELECT * FROM expit_payload_transactions", connection
+                )
+                if "expit_payload_transactions" in tables
+                else pd.DataFrame()
+            )
+        finally:
+            connection.close()
+        if "expit_payload_transactions" in tables:
+            self.write_two_wp_grade_block_turnover_audit(
+                payloads, solver_config, database_name
+            )
+
+    def write_expit_payload_transactions_to_database (
+        self, results: pd.DataFrame, solver_config=None
+    ):
         # Connect to the SQLite database or create it
         database_name = get_database_path()
+        results = results.copy()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
 
@@ -1003,6 +1216,10 @@ class DatabaseManager:
         # Commit and close the connection
         conn.commit()
         conn.close()
+
+        self.write_two_wp_grade_block_turnover_audit(
+            results, solver_config, database_name
+        )
 
         print(f"Expit payload transactions saved to database {database_name}")
 

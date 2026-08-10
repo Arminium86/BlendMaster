@@ -603,7 +603,10 @@ class Run:
 
         if expit_payload_transactions_to_save is not None:
             self.case_bridge.print("Writing expit payload transactions to database...")
-            database_manager.write_expit_payload_transactions_to_database(expit_payload_transactions_to_save)
+            database_manager.write_expit_payload_transactions_to_database(
+                expit_payload_transactions_to_save,
+                solver_config,
+            )
 
         self.case_bridge.print("Writing build report to database...")
         self.case_modeller.save_build_report()
