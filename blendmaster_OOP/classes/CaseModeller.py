@@ -19,6 +19,7 @@ from classes.ProductBuildLanes import (
 )
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
+from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.CustomConstraints import (
     custom_constraint_property_keys,
     expand_required_property_keys,
@@ -1788,20 +1789,39 @@ class CaseModeller:
         if result_duration + Optimizer.SOLUTION_TOLERANCE < required_duration:
             return []
 
-        source_details = {}
-        for transaction in result.get("transactions", []):
+        transactions = list(result.get("transactions", []) or [])
+        selected_parent_sources = set()
+        for transaction in transactions:
             if transaction.get("source_type") != "grade_block":
                 continue
             try:
                 actual_tonnes = float(transaction.get("actual_tonnes") or 0)
             except (TypeError, ValueError):
                 actual_tonnes = 0
-            if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-                continue
+            source = parent_grade_block_name(
+                transaction.get("source") or transaction.get("source_id")
+            )
+            if (
+                source
+                and actual_tonnes > Optimizer.SOLUTION_TOLERANCE
+            ):
+                selected_parent_sources.add(source)
 
-            source = str(transaction.get("source") or transaction.get("source_id") or "")
-            if not source:
+        source_details = {}
+        for transaction in transactions:
+            if transaction.get("source_type") != "grade_block":
                 continue
+            source = parent_grade_block_name(
+                transaction.get("source") or transaction.get("source_id")
+            )
+            if source not in selected_parent_sources:
+                continue
+            try:
+                actual_tonnes = max(
+                    float(transaction.get("actual_tonnes") or 0), 0.0
+                )
+            except (TypeError, ValueError):
+                actual_tonnes = 0.0
             details = source_details.setdefault(
                 source,
                 {
@@ -1973,9 +1993,11 @@ class CaseModeller:
                 actual_tonnes = 0
             if actual_tonnes <= Optimizer.SOLUTION_TOLERANCE:
                 continue
-            source = transaction.get("source") or transaction.get("source_id")
+            source = parent_grade_block_name(
+                transaction.get("source") or transaction.get("source_id")
+            )
             if source:
-                grade_block_sources.add(str(source))
+                grade_block_sources.add(source)
         return grade_block_sources
 
     def grade_block_pair_signatures_from_dataframe(self, data):
@@ -1999,9 +2021,12 @@ class CaseModeller:
             return {}
 
         return {
-            str(source): tuple(sorted(stockpile_ids))
-            for source in grade_block_data["source"].dropna().unique()
-            if str(source)
+            source: tuple(sorted(stockpile_ids))
+            for source in {
+                parent_grade_block_name(value)
+                for value in grade_block_data["source"].dropna().unique()
+            }
+            if source
         }
 
     def active_source_ids_from_result(self, result):
@@ -2044,6 +2069,14 @@ class CaseModeller:
         other_rows = data[data["source_type"] != "grade_block"].copy()
         if grade_block_rows.empty:
             return data
+
+        # Reporting operates at the operational parent grade-block level.
+        # Individual payload IDs and arrival timestamps remain available on
+        # the grouped row, but slice suffixes such as _627 and _124 do not
+        # create separate output rows.
+        grade_block_rows["source"] = grade_block_rows["source"].map(
+            parent_grade_block_name
+        )
 
         for column in [
             "source_actual_tonnes",

@@ -946,9 +946,9 @@ class DatabaseManager:
                 "two_wp_destination_turnover_guidance_enabled", False
             ))
             try:
-                incentive = max(float(config.get(
+                incentive = float(config.get(
                     "two_wp_destination_turnover_incentive", 10.0
-                ) or 0.0), 0.0)
+                ) or 0.0)
             except (TypeError, ValueError):
                 incentive = 10.0
             source[
@@ -957,11 +957,16 @@ class DatabaseManager:
                 guidance_enabled
                 & source["two_wp_turnover_guidance_applicable"]
             )
+            priority = source[
+                "two_wp_destination_turnover_priority"
+            ].fillna(0.0).clip(0.0, 1.0)
             source[
                 "two_wp_destination_turnover_incentive_applied"
-            ] = source[
-                "two_wp_destination_turnover_priority"
-            ].fillna(0.0).clip(0.0, 1.0) * incentive
+            ] = (
+                priority * incentive
+                if incentive >= 0
+                else -(1.0 - priority) * abs(incentive)
+            )
             source.loc[
                 ~source["two_wp_destination_turnover_guidance_applied"],
                 "two_wp_destination_turnover_incentive_applied",

@@ -1418,6 +1418,7 @@ class UserInputs(QMainWindow):
             "aps_active_blend_guidance", "aps_destination_guidance",
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
+            "inventory_data_request_signature",
             "AMT_data_request_signature", "AMT_enrichment_signature",
             "AMT_chunk_reconciliation_signature",
             "data_stream_input_cache_signature", "data_stream_input_cache_result",
@@ -1754,6 +1755,13 @@ class UserInputs(QMainWindow):
                 state.get("aps_destination_guidance") or {}
             )
             self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
+            self.inventory_data_request_signature = str(
+                (
+                    state.get("inventory_data_request_signature")
+                    or self.inventory_opening_request_signature()
+                )
+                if self.stockpile_data else ""
+            )
             self.stockpile_data_use_column = copy.deepcopy(state.get("stockpile_data_use_column") or {})
             self.stockpile_data_AMT_column = copy.deepcopy(state.get("stockpile_data_AMT_column") or {})
             self.updated_stockpile_data = copy.deepcopy(state.get("updated_stockpile_data"))
@@ -2299,15 +2307,17 @@ class UserInputs(QMainWindow):
 
         turnover_guidance_layout = QHBoxLayout()
         self.two_wp_destination_turnover_incentive_input = (
-            self.create_solver_threshold_input("10.0", threshold_validator)
+            self.create_solver_threshold_input(
+                "10.0", signed_incentive_validator
+            )
         )
         self.two_wp_destination_turnover_incentive_input.setToolTip(
-            "Maximum additional $/t reward for direct-tip grade blocks whose "
-            "exact 2WP ROM stockpile destination is reclaimed late, or not "
-            "reclaimed, within the complete 2WP horizon."
+            "Positive values reward later/no turnover using turnover priority. "
+            "Negative values penalise earlier turnover using one minus "
+            "turnover priority."
         )
         turnover_guidance_layout.addWidget(
-            QLabel("2WP ROM Destination Turnover Incentive:")
+            QLabel("2WP ROM Destination Turnover Reward/Penalty:")
         )
         turnover_guidance_layout.addWidget(
             self.two_wp_destination_turnover_incentive_input
@@ -10733,7 +10743,13 @@ class UserInputs(QMainWindow):
             )
             return
 
-        if self.is_project_loaded:
+        inventory_signature = self.inventory_opening_request_signature()
+        if (
+            self.is_project_loaded
+            and str(getattr(
+                self, "inventory_data_request_signature", ""
+            ) or "") == inventory_signature
+        ):
             if not self.stockpile_data:
                 QMessageBox.warning(
                     self,
@@ -10748,7 +10764,7 @@ class UserInputs(QMainWindow):
         progress_message = "Fetching stockpile inventories from Snowflake..."
         self.run_background_task(
             progress_message,
-            self.fetch_site_configuration_data,
+            lambda: self.fetch_site_configuration_data(inventory_signature),
             self.finish_site_config_submit,
             self.handle_site_config_error,
         )
@@ -10759,10 +10775,40 @@ class UserInputs(QMainWindow):
         mine_input = self.mine_input_choice
         return self.opening_stockpile_inventories.call_opening_stockpile_inventories(hub_input, mine_input, self.start_time_choice)
 
-    def fetch_site_configuration_data(self):
+    def inventory_opening_request_signature(self):
+        """Identify the Snowflake inputs that determine inventory opening data."""
+        start_time = getattr(self, "start_time_choice", None)
+        if hasattr(start_time, "toPyDateTime"):
+            start_time = start_time.toPyDateTime()
+        if isinstance(start_time, pd.Timestamp):
+            start_time = start_time.to_pydatetime()
+        if isinstance(start_time, datetime):
+            start_time = start_time.isoformat(timespec="microseconds")
+        payload = {
+            "cache_version": 1,
+            "hub": str(getattr(
+                self, "hub_input_choice", ""
+            ) or "").strip().upper(),
+            "mine": str(getattr(
+                self, "mine_input_choice", ""
+            ) or "").strip().upper(),
+            "opf": str(getattr(
+                self, "opf_input_choice", ""
+            ) or "").strip().upper(),
+            "crusher": str(getattr(
+                self, "crusher_input_choice", ""
+            ) or "").strip().upper(),
+            "start_time": str(start_time or "").strip(),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def fetch_site_configuration_data(self, request_signature=None):
         stockpile_data = self.fetch_stockpile_data()
         return {
             "stockpile_data": stockpile_data,
+            "inventory_data_request_signature": (
+                request_signature or self.inventory_opening_request_signature()
+            ),
             "build_targets": {},
             "target_errors": {},
             "automatic_2wp_targets": self.auto_load_2wp_targets_choice,
@@ -10784,6 +10830,7 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data = None
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
+        self.inventory_data_request_signature = ""
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
         self._available_mapping_fields_cache = {}
@@ -10875,8 +10922,13 @@ class UserInputs(QMainWindow):
             automatic_2wp_targets = bool(
                 stockpile_data.get("automatic_2wp_targets", True)
             )
+            inventory_signature = str(
+                stockpile_data.get("inventory_data_request_signature")
+                or self.inventory_opening_request_signature()
+            )
             stockpile_data = stockpile_data.get("stockpile_data") or {}
             self.reset_downstream_inputs_for_new_site_configuration()
+            self.inventory_data_request_signature = inventory_signature
         self.stockpile_data = stockpile_data
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
@@ -13914,7 +13966,7 @@ class UserInputs(QMainWindow):
             "2WP Brand",
             "Nearest Crusher",
             "Build",
-            "Inventory Grade Timestamp",
+            "Inventory Timestamp",
             "Balance (WMT)",
             "Grade Fe (%)",
             "Grade Si (%)",
@@ -17178,9 +17230,9 @@ class UserInputs(QMainWindow):
             "Direct Tip Incentive",
             10.0,
         )
-        two_wp_destination_turnover_incentive = parse_non_negative_input(
+        two_wp_destination_turnover_incentive = parse_signed_input(
             self.two_wp_destination_turnover_incentive_input,
-            "2WP ROM Destination Turnover Incentive",
+            "2WP ROM Destination Turnover Reward/Penalty",
             10.0,
         )
         stay_on_same_blend_incentive = parse_non_negative_input(
@@ -22067,6 +22119,9 @@ class UserInputs(QMainWindow):
                 "start_time_choice": self.start_time_choice,
                 "planning_period_count_choice": self.planning_period_count_choice,
                 "stockpile_data": self.stockpile_data,
+                "inventory_data_request_signature": getattr(
+                    self, "inventory_data_request_signature", ""
+                ),
                 "stockpile_data_use_column": self.stockpile_data_use_column,
                 "stored_blend_sequence_table_for_gantt": self.stored_blend_sequence_table_for_gantt,
                 "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
@@ -22524,6 +22579,13 @@ class UserInputs(QMainWindow):
             loaded_state.get("planning_period_count_choice", 3)
         )
         self.stockpile_data = loaded_state.get("stockpile_data", None)
+        self.inventory_data_request_signature = str(
+            (
+                loaded_state.get("inventory_data_request_signature")
+                or self.inventory_opening_request_signature()
+            )
+            if self.stockpile_data else ""
+        )
         self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", {})
         self.stored_blend_sequence_table_for_gantt = (
             loaded_state.get("stored_blend_sequence_table_for_gantt") or []
@@ -22828,6 +22890,7 @@ class UserInputs(QMainWindow):
         self.planning_plan_targets = PlanningPlanTargets()
         self.data_stream_reconciliation = DataStreamReconciliation()
         self.opening_stockpile_inventories = None
+        self.inventory_data_request_signature = ""
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
         self.planning_period_count_choice = 3

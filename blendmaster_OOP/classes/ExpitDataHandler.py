@@ -21,6 +21,7 @@ from classes.CustomConstraints import (
 from classes.SourcePropertyMappings import (
     normalise_aps_source_property_mappings,
 )
+from classes.GradeBlockIdentity import parent_grade_block_name
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 3
@@ -608,18 +609,7 @@ class ExpitDataHandler:
     @staticmethod
     def destination_guidance_source_key(source_full_name):
         """Ignore the APS instance suffix on the final grade-block part."""
-        source = str(source_full_name or "").strip().replace("\\", "/")
-        source = re.sub(r"/+", "/", source).rstrip("/")
-        if not source:
-            return ""
-        prefix, separator, final_part = source.rpartition("/")
-        final_part = re.sub(r"_\d+$", "", final_part)
-        normalized = (
-            f"{prefix}{separator}{final_part}"
-            if separator
-            else final_part
-        )
-        return normalized.upper()
+        return parent_grade_block_name(source_full_name).upper()
 
     @staticmethod
     def destination_guidance_stockpile_key(value):

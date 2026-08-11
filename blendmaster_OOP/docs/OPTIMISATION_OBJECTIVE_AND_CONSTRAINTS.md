@@ -113,9 +113,9 @@ The 2WP guidance value fields accept positive and negative numbers:
 | 2WP Source Stockpile Timing Compliance | Decision Levers and Solver Configuration | Disabled; 0 $/t; 0 h tolerance | Rewards use inside the 2WP source window, including tolerance. Outside the window, compliance declines progressively as time distance increases. |
 | 2WP Active Blend | Decision Levers and Solver Configuration | Disabled; 0 $/t | Compares the selected stockpile set with the 2WP stockpile set for the active product brand and time. Ratios are not compared. |
 | Direct Tip Incentive | Decision Levers and Solver Configuration | Direct tip enabled; 10 $/t | Reward for eligible direct-tip tonnes. Direct-tip ratio limits remain hard constraints. |
-| 2WP ROM Destination Turnover Guidance | Decision Levers and Solver Configuration | Disabled; 10 $/t | Applies only to exact grade-block-to-ROM-stockpile matches from the 2WP. It gives less direct-tip reward to blocks planned for stockpiles reclaimed early in the available 2WP horizon, and the full configured reward to stockpiles first reclaimed at the horizon end or not reclaimed within it. |
+| 2WP ROM Destination Turnover Guidance | Decision Levers and Solver Configuration | Disabled; 10 $/t | Applies only to exact grade-block-to-ROM-stockpile matches from the 2WP. A positive value increasingly rewards later/no turnover. A negative value increasingly penalises earlier turnover and applies no penalty to no-turnover destinations. |
 | Stay on Same Blend Incentive | Solver Configuration | 0 $/t | Rewards stockpile sources retained from the previously selected blend. |
-| Stay With Same Grade Block Pair Incentive | Solver Configuration | 0 $/t | Rewards reuse of the previous direct-tip grade-block and stockpile pairing. |
+| Stay With Same Grade Block Pair Incentive | Solver Configuration | 0 $/t | Rewards reuse of the previous direct-tip parent-grade-block and stockpile pairing. Operational slice suffixes such as `_627` and `_124` are ignored. |
 | Prefer Fewer Stockpiles | Decision Levers and Solver Configuration | Disabled; 10 per selected stockpile | Adds a fixed penalty for each selected stockpile. This is not a per-tonne value. |
 | Balance Preference | Decision Levers and Solver Configuration | None; 1 $/t | If enabled, rewards either lower-balance or higher-balance stockpiles. The reward is scaled between the lowest and highest available stockpile balances. |
 | Prefer AMT Stockpiles | Decision Levers and Solver Configuration | Disabled; 1 $/t | Rewards AMT stockpile tonnes over weighted-average inventory stockpile tonnes. |
@@ -171,7 +171,10 @@ after the deposit. The resulting priority is linear across the actual horizon:
 priority = (first reclaim time - 2WP horizon start)
            / (2WP horizon end - 2WP horizon start)
 
-turnover reward ($/t) = configured incentive x priority
+positive turnover reward ($/t) = configured value x priority
+
+negative early-turnover penalty ($/t)
+    = absolute configured value x (1 - priority)
 ```
 
 Priority is clamped to 0 through 1. A stockpile with no planned reclaim in the
@@ -182,7 +185,7 @@ grades, delivery timing or other hard constraints.
 
 Optimised source rows retain the planned stockpile destination, first reclaim
 datetime, normalized priority, whether the guidance was applied, and the
-effective per-tonne incentive after priority scaling.
+effective signed per-tonne reward/penalty after priority scaling.
 
 The SQLite report `two_wp_grade_block_turnover_audit` provides the same audit
 independently of optimiser selection. It is built from the complete prepared
@@ -234,6 +237,12 @@ Direct-tip sources are available only when:
 Payload arrival does **not** create a new steady state. Payloads whose delivery
 time falls inside the existing steady-state window become candidates for that
 window.
+
+Operational slices whose final grade-block path component differs only by a
+numeric suffix, for example `LG46_627` and `LG46_124`, keep their individual
+payload arrival and balance identity. Reporting, minimum grade-block pair
+duration, grade-block-to-stockpile lock, and same-pair continuity use their
+shared parent name (`LG46`).
 
 ## Configuring custom constraints
 
@@ -498,14 +507,16 @@ the earliest depletion time among the selected stockpiles.
 ### Minimum Grade Block Pair Duration
 
 For steady states at least as long as the configured threshold, selected
-direct-tip grade-block payloads must span the minimum delivery duration. Missing
-or insufficient delivery timestamps cause the candidate to be rejected.
+direct-tip payloads from each parent grade block must collectively span the
+minimum delivery duration. Operational slices of the same parent are assessed
+together. Missing or insufficient delivery timestamps cause the candidate to
+be rejected.
 
 ### Grade block to stockpile-mix lock
 
-When enabled, the first accepted stockpile mix used with a grade-block source
-becomes that source's lock. A later candidate using the same grade-block source
-with a different stockpile set is rejected.
+When enabled, the first accepted stockpile mix used with a parent grade-block
+source becomes that parent's lock. A later operational slice of the same parent
+using a different stockpile set is rejected.
 
 ## Steady-state boundaries
 

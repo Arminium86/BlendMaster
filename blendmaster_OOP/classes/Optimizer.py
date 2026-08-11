@@ -35,6 +35,7 @@ from pulp import (
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
+from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
     PRODUCT_LANE,
@@ -475,12 +476,9 @@ class Optimizer:
             )
         )
         try:
-            destination_turnover_incentive = max(
-                float(solver_config.get(
-                    "two_wp_destination_turnover_incentive", 10.0
-                ) or 0.0),
-                0.0,
-            )
+            destination_turnover_incentive = float(solver_config.get(
+                "two_wp_destination_turnover_incentive", 10.0
+            ) or 0.0)
         except (TypeError, ValueError):
             destination_turnover_incentive = 10.0
         if direct_tip_enabled:
@@ -509,9 +507,9 @@ class Optimizer:
             stay_on_same_grade_block_pair_incentive = 0.0
         previous_grade_block_pairs = solver_config.get("previous_grade_block_pairs", {}) or {}
         previous_grade_block_pair_sources = {
-            str(source)
+            parent_grade_block_name(source)
             for source, stockpiles in previous_grade_block_pairs.items()
-            if stockpiles
+            if stockpiles and parent_grade_block_name(source)
         }
         previous_grade_block_pair_stockpile_source_ids = {
             str(source_id)
@@ -925,6 +923,13 @@ class Optimizer:
                 return -value * compliance
             return abs(value) * (1.0 - compliance)
 
+        def signed_turnover_adjustment(value, priority):
+            """Return a reward (positive) or early-turnover penalty (negative)."""
+            priority = max(0.0, min(1.0, safe_float(priority)))
+            if value >= 0:
+                return value * priority
+            return -abs(value) * (1.0 - priority)
+
         def event_brand_match_proportion(event):
             if not target_product_brand or not event.is_stockpile:
                 return 0.0
@@ -1078,18 +1083,15 @@ class Optimizer:
             # incentive is applied separately below so it can be configured.
             preference_reward = preference_rewards[i]
             direct_tip_reward = direct_tip_cash_incentive if event.is_grade_block else 0
-            destination_turnover_reward = 0.0
+            destination_turnover_adjustment = 0.0
             if (
                 destination_turnover_guidance_enabled
                 and event.is_grade_block
                 and event.two_wp_turnover_guidance_applicable
             ):
-                priority = safe_float(
-                    event.two_wp_destination_turnover_priority, 0.0
-                )
-                destination_turnover_reward = (
-                    destination_turnover_incentive
-                    * min(max(priority, 0.0), 1.0)
+                destination_turnover_adjustment = signed_turnover_adjustment(
+                    destination_turnover_incentive,
+                    event.two_wp_destination_turnover_priority,
                 )
             continuity_reward = (
                 stay_on_same_blend_incentive
@@ -1100,7 +1102,9 @@ class Optimizer:
             if stay_on_same_grade_block_pair_incentive:
                 if (
                     event.is_grade_block
-                    and str(event.source_name or event.grade_block) in previous_grade_block_pair_sources
+                    and parent_grade_block_name(
+                        event.source_name or event.grade_block
+                    ) in previous_grade_block_pair_sources
                 ):
                     grade_block_pair_reward = stay_on_same_grade_block_pair_incentive
                 elif (
@@ -1135,7 +1139,7 @@ class Optimizer:
                 event.cost + event.cash + brand_guidance_cost
                 + timing_guidance_cost
                 - preference_reward - direct_tip_reward - continuity_reward
-                - grade_block_pair_reward - destination_turnover_reward
+                - grade_block_pair_reward - destination_turnover_adjustment
             )
 
         throughput_incentive_per_tonne = max(
@@ -2024,11 +2028,10 @@ class Optimizer:
                                 and event.two_wp_turnover_guidance_applicable
                             ),
                             "two_wp_destination_turnover_incentive_applied": (
-                                destination_turnover_incentive
-                                * min(max(safe_float(
+                                signed_turnover_adjustment(
+                                    destination_turnover_incentive,
                                     event.two_wp_destination_turnover_priority,
-                                    0.0,
-                                ), 0.0), 1.0)
+                                )
                                 if destination_turnover_guidance_enabled
                                 and event.is_grade_block
                                 and event.two_wp_turnover_guidance_applicable
