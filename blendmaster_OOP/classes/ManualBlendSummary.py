@@ -160,6 +160,7 @@ class ManualBlendSummary:
             ).fillna("").astype(str).str.strip()
             source_names = source_names.where(source_names.ne(""), raw_names)
             totals = contributions.groupby(source_names).sum()
+            tonnes_totals = physical_tonnes.groupby(source_names).sum()
             totals = totals[totals.index.astype(str).str.strip() != ""]
             crusher_total = cls._unique_state_crusher_tonnes(rows)
             if not totals.empty:
@@ -169,13 +170,64 @@ class ManualBlendSummary:
                     if crusher_total > 0 else 0.0
                     for source in sources
                 ]
-                return sources, ratios
+                tonnes = [
+                    float(tonnes_totals.get(source, 0.0))
+                    for source in sources
+                ]
+                return sources, ratios, tonnes
 
         sources = cls._split(fallback.get("Sources"))
         ratios = [cls._number(value, 0.0) for value in cls._split(
             fallback.get("Source Ratios")
         )]
-        return sources, ratios
+        fallback_tonnes = cls._split(fallback.get("Source Tonnes"))
+        tonnes = [
+            cls._number(
+                fallback_tonnes[index]
+                if index < len(fallback_tonnes) else None,
+                None,
+            )
+            for index in range(len(sources))
+        ]
+        return sources, ratios, tonnes
+
+    @classmethod
+    def _bar_duration_hours(cls, sequence_row, rows):
+        start = pd.to_datetime(
+            sequence_row.get("_exact_start")
+            or sequence_row.get("Start Datetime"),
+            errors="coerce",
+        )
+        end = pd.to_datetime(
+            sequence_row.get("_exact_end")
+            or sequence_row.get("End Datetime"),
+            errors="coerce",
+        )
+        if pd.notna(start) and pd.notna(end) and end > start:
+            return float((end - start).total_seconds() / 3600.0)
+        if not rows.empty and "steady_state_duration" in rows:
+            state_columns = [
+                column for column in ("steady_state_number", "start_datetime")
+                if column in rows
+            ]
+            unique = (
+                rows.drop_duplicates(state_columns, keep="first")
+                if state_columns else rows.iloc[:1]
+            )
+            return float(pd.to_numeric(
+                unique["steady_state_duration"], errors="coerce"
+            ).fillna(0.0).sum())
+        return 0.0
+
+    @staticmethod
+    def _source_summary(source, ratio, tonnes, rate):
+        details = ""
+        if tonnes is not None:
+            details = f" ({tonnes:,.0f} t"
+            if rate is not None:
+                details += f", {rate:,.0f} t/h"
+            details += ")"
+        return f"{source} @ {ratio * 100:.2f}%{details}"
 
     @classmethod
     def _direct_tip_details(cls, rows, fallback):
@@ -289,8 +341,20 @@ class ManualBlendSummary:
             stream = stream_values[0] if stream_values else cls._text(
                 sequence_row.get("Optimiser Grade Stream")
             )
-            sources, source_ratios = cls._source_details(rows, fallback)
+            sources, source_ratios, source_tonnes = cls._source_details(
+                rows, fallback
+            )
             direct_tips = cls._direct_tip_details(rows, fallback)
+            duration_hours = cls._bar_duration_hours(sequence_row, rows)
+            source_rates = [
+                tonnes / duration_hours
+                if tonnes is not None and duration_hours > 0 else None
+                for tonnes in source_tonnes
+            ]
+            direct_tip_rates = [
+                tonnes / duration_hours if duration_hours > 0 else None
+                for _source, tonnes, _ratio in direct_tips
+            ]
             summary = {
                 "Bar": index + 1,
                 "Blend ID": blend_id,
@@ -308,9 +372,19 @@ class ManualBlendSummary:
                 "Source Ratios": ", ".join(
                     f"{ratio:.6f}" for ratio in source_ratios
                 ),
+                "Source Tonnes": ", ".join(
+                    "" if tonnes is None else f"{tonnes:.6f}"
+                    for tonnes in source_tonnes
+                ),
+                "Source Rates": ", ".join(
+                    "" if rate is None else f"{rate:.6f}"
+                    for rate in source_rates
+                ),
                 "Sources and Ratios": "; ".join(
-                    f"{source} @ {ratio * 100:.2f}%"
-                    for source, ratio in zip(sources, source_ratios)
+                    cls._source_summary(source, ratio, tonnes, rate)
+                    for source, ratio, tonnes, rate in zip(
+                        sources, source_ratios, source_tonnes, source_rates
+                    )
                 ),
                 "Direct Tip Sources": ", ".join(
                     source for source, _tonnes, _ratio in direct_tips
@@ -321,9 +395,15 @@ class ManualBlendSummary:
                 "Direct Tip Tonnes": ", ".join(
                     f"{tonnes:.2f}" for _source, tonnes, _ratio in direct_tips
                 ),
+                "Direct Tip Rates": ", ".join(
+                    "" if rate is None else f"{rate:.6f}"
+                    for rate in direct_tip_rates
+                ),
                 "Direct Tip Grade Blocks": "; ".join(
-                    f"{source} @ {ratio * 100:.2f}% ({tonnes:,.0f} t)"
-                    for source, tonnes, ratio in direct_tips
+                    cls._source_summary(source, ratio, tonnes, rate)
+                    for (source, tonnes, ratio), rate in zip(
+                        direct_tips, direct_tip_rates
+                    )
                 ),
                 "_stockpile_mix_key": cls.stockpile_mix_key(", ".join(sources)),
             }

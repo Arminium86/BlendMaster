@@ -545,6 +545,8 @@ function buildLegendDetails(row) {
     if (row["Sources"] && row["Source Ratios"]) {
         const sources = String(row["Sources"]).split(",");
         const ratios = String(row["Source Ratios"]).split(",");
+        const tonnes = String(row["Source Tonnes"] || "").split(",");
+        const rates = String(row["Source Rates"] || "").split(",");
         html += "<div style='margin-top:5px;'>Sources and Ratios:</div>";
         sources.forEach((source, index) => {
             const rawRatio = String(ratios[index] || "").trim();
@@ -552,26 +554,46 @@ function buildLegendDetails(row) {
             const displayedRatio = Number.isFinite(numericRatio)
                 ? (numericRatio * 100).toFixed(2)
                 : rawRatio;
+            const rawTonnes = String(tonnes[index] || "").trim();
+            const rawRate = String(rates[index] || "").trim();
+            const numericTonnes = rawTonnes === "" ? NaN : Number(rawTonnes);
+            const numericRate = rawRate === "" ? NaN : Number(rawRate);
+            const details = Number.isFinite(numericTonnes)
+                ? " (" + numericTonnes.toLocaleString(undefined, {
+                    maximumFractionDigits: 0
+                }) + " t" + (Number.isFinite(numericRate)
+                    ? ", " + numericRate.toLocaleString(undefined, {
+                        maximumFractionDigits: 0
+                    }) + " t/h"
+                    : "") + ")"
+                : "";
             html += "<div>- " + escapeHtml(source.trim()) + " @ " +
-                escapeHtml(displayedRatio) + "%</div>";
+                escapeHtml(displayedRatio) + "%" + details + "</div>";
         });
     }
     if (row["Direct Tip Sources"]) {
         const sources = String(row["Direct Tip Sources"]).split(",");
         const ratios = String(row["Direct Tip Ratios"] || "").split(",");
         const tonnes = String(row["Direct Tip Tonnes"] || "").split(",");
+        const rates = String(row["Direct Tip Rates"] || "").split(",");
         html += "<div style='margin-top:5px;'>Direct Tip Grade Blocks:</div>";
         sources.forEach((source, index) => {
             const numericRatio = Number(String(ratios[index] || "").trim());
-            const numericTonnes = Number(String(tonnes[index] || "").trim());
+            const rawTonnes = String(tonnes[index] || "").trim();
+            const rawRate = String(rates[index] || "").trim();
+            const numericTonnes = rawTonnes === "" ? NaN : Number(rawTonnes);
+            const numericRate = rawRate === "" ? NaN : Number(rawRate);
             const displayedRatio = Number.isFinite(numericRatio)
                 ? (numericRatio * 100).toFixed(2) + "%"
                 : "";
             const displayedTonnes = Number.isFinite(numericTonnes)
                 ? " (" + numericTonnes.toLocaleString(undefined, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2
-                }) + " t)"
+                    maximumFractionDigits: 0
+                }) + " t" + (Number.isFinite(numericRate)
+                    ? ", " + numericRate.toLocaleString(undefined, {
+                        maximumFractionDigits: 0
+                    }) + " t/h"
+                    : "") + ")"
                 : "";
             html += "<div>- " + escapeHtml(source.trim()) +
                 (displayedRatio ? " @ " + escapeHtml(displayedRatio) : "") +

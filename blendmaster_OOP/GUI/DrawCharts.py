@@ -1466,6 +1466,21 @@ class DrawGanttChart:
         data["source_blend_ratio_numeric"] = pd.to_numeric(
             data["source_blend_ratio"], errors="coerce"
         ).fillna(0)
+        source_actual_tonnes = data.get(
+            "source_actual_tonnes",
+            pd.Series(0.0, index=data.index),
+        )
+        data["source_actual_tonnes_numeric"] = pd.to_numeric(
+            source_actual_tonnes, errors="coerce"
+        ).fillna(0)
+        duration_hours = pd.to_numeric(
+            data["steady_state_duration"], errors="coerce"
+        ).fillna(0)
+        data["source_rate_numeric"] = data[
+            "source_actual_tonnes_numeric"
+        ].where(duration_hours > 0, 0).div(
+            duration_hours.where(duration_hours > 0, 1)
+        )
 
         def build_stockpile_signature(group):
             stockpile_rows = group[
@@ -1508,32 +1523,86 @@ class DrawGanttChart:
         aggregated = data.groupby(["blend_ID", "steady_state_number"]).agg({
             "source": lambda x: list(x.dropna()),  # Drop NaN values before aggregating
             "source_blend_ratio": lambda x: list(x.dropna()),
+            "source_actual_tonnes_numeric": lambda x: list(x),
+            "source_rate_numeric": lambda x: list(x),
         }).reset_index()
         
         # Merge back with original data
         data = pd.merge(data, aggregated, on=["blend_ID", "steady_state_number"], suffixes=("", "_agg"))
         data = pd.merge(data, stockpile_signatures, on=["blend_ID", "steady_state_number"], how="left")
     
-        def format_ratio_list(values):
+        def format_numeric_list(values):
             if not isinstance(values, list):
                 return ""
             formatted_values = []
             for value in values:
                 try:
-                    formatted_values.append(f"{float(value):.2f}")
+                    formatted_values.append(f"{float(value):.6f}")
                 except (TypeError, ValueError):
                     formatted_values.append(str(value))
             return ", ".join(formatted_values)
 
         # Convert lists to comma-separated strings for DataTable compatibility
         data['source_agg'] = data['source_agg'].apply(lambda x: ", ".join(map(str, x)) if isinstance(x, list) else "")
-        data['source_blend_ratio_agg'] = data['source_blend_ratio_agg'].apply(format_ratio_list)
+        data['source_blend_ratio_agg'] = data['source_blend_ratio_agg'].apply(format_numeric_list)
+        data['source_actual_tonnes_numeric_agg'] = data[
+            'source_actual_tonnes_numeric_agg'
+        ].apply(format_numeric_list)
+        data['source_rate_numeric_agg'] = data[
+            'source_rate_numeric_agg'
+        ].apply(format_numeric_list)
 
         # Add a new column for lanes (to cascade top to bottom)
         lane_map = {blend_id: idx + 1 for idx, blend_id in enumerate(sorted(data['blend_ID'].unique(), reverse=True))}
         data['lane'] = data['blend_ID'].map(lane_map)
 
-        # Create a tooltip column with formatted sources and ratios
+        def source_summary_lines(row):
+            sources = (
+                row['source_agg'].split(", ")
+                if isinstance(row['source_agg'], str) else []
+            )
+            ratios = (
+                row['source_blend_ratio_agg'].split(", ")
+                if isinstance(row['source_blend_ratio_agg'], str) else []
+            )
+            tonnes = (
+                row['source_actual_tonnes_numeric_agg'].split(", ")
+                if isinstance(row['source_actual_tonnes_numeric_agg'], str)
+                else []
+            )
+            rates = (
+                row['source_rate_numeric_agg'].split(", ")
+                if isinstance(row['source_rate_numeric_agg'], str) else []
+            )
+            lines = []
+            for index, source in enumerate(sources):
+                try:
+                    ratio_text = f"{float(ratios[index]) * 100:.2f}%"
+                except (IndexError, TypeError, ValueError):
+                    ratio_text = ""
+                try:
+                    tonnes_text = f"{float(tonnes[index]):,.0f} t"
+                except (IndexError, TypeError, ValueError):
+                    tonnes_text = ""
+                try:
+                    rate_text = f"{float(rates[index]):,.0f} t/h"
+                except (IndexError, TypeError, ValueError):
+                    rate_text = ""
+                quantities = ", ".join(
+                    value for value in (tonnes_text, rate_text) if value
+                )
+                details = f" ({quantities})" if quantities else ""
+                ratio = f" @ {ratio_text}" if ratio_text else ""
+                lines.append(
+                    f" - {source}{ratio}{details}<br>"
+                )
+            return "".join(lines)
+
+        data["source_summary_lines"] = data.apply(
+            source_summary_lines, axis=1
+        )
+
+        # Create a tooltip column with formatted sources, ratios and rates.
         data['Details'] = data.apply(
             lambda row: f"<br>Steady State: {row['steady_state_number']}<br>"
                         f"Duration: {float(row['steady_state_duration']):.2f} hrs<br>"
@@ -1542,13 +1611,7 @@ class DrawGanttChart:
                         f"Stockpile Component: {row['stockpile_component']}<br>"
                         f"{row['stockpile_component_details']}<br>"
                         f"Sources and Ratios:<br>" +
-                        "".join(
-                            f" - {source} @ {float(ratio) * 100:.2f}%<br>"  # Format ratio as percent
-                            for source, ratio in zip(
-                                (row['source_agg'].split(", ") if isinstance(row['source_agg'], str) else []),
-                                (row['source_blend_ratio_agg'].split(", ") if isinstance(row['source_blend_ratio_agg'], str) else [])
-                            )
-                        ) +
+                        row["source_summary_lines"] +
                         f"Actual Direct Tip Ratio: {float(row['actual_direct_tip_ratio']):.2f}<br>"
                         f"Crusher Rate Output: {float(row['crusher_rate_output']):.1f}<br>"  # Format to 1 decimal point
                         f"Crusher Actual Tonnes: {float(row['crusher_actual_tonnes']):,.0f}<br>"
@@ -1564,13 +1627,7 @@ class DrawGanttChart:
         data['Legend'] = data.apply(
             lambda row: f"Blend ID: {row['blend_ID']}<br>"
                         f"Sources and Ratios:<br>" +
-                        "".join(
-                            f" - {source} @ {float(ratio) * 100:.2f}%<br>"  # Format ratio as percent
-                            for source, ratio in zip(
-                                (row['source_agg'].split(", ") if isinstance(row['source_agg'], str) else []),
-                                (row['source_blend_ratio_agg'].split(", ") if isinstance(row['source_blend_ratio_agg'], str) else [])
-                            )
-                        ),
+                        row["source_summary_lines"],
             axis=1
         )
 
