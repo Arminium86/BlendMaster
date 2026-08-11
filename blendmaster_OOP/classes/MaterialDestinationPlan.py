@@ -3,6 +3,8 @@ from collections import defaultdict
 
 import pandas as pd
 
+from classes.GradeBlockIdentity import parent_grade_block_name
+
 
 class MaterialDestinationPlan:
     """Build final material destinations from APS payloads and blend decisions."""
@@ -212,9 +214,9 @@ class MaterialDestinationPlan:
         # Keep the explicit IDs first, then supplement them from payloads for
         # the same source and steady-state window when they cannot cover the
         # reported tonnes.
-        source = cls._text(report_row.get("source"))
+        source = parent_grade_block_name(report_row.get("source"))
         candidates = payloads[
-            payloads["source"].astype(str).str.strip().eq(source)
+            payloads["source"].map(parent_grade_block_name).eq(source)
         ].copy()
         if candidates.empty:
             return []
@@ -245,6 +247,86 @@ class MaterialDestinationPlan:
             for identifier in source_identifiers
             if identifier not in identifiers
         ]
+
+    @classmethod
+    def summarize_parent_grade_blocks(cls, report):
+        """Collapse sliced grade blocks while preserving report dimensions.
+
+        Source tonnes are repeated across a grade block's destination rows, so
+        take one source total per original slice before summing those slice
+        totals to the parent. Assigned tonnes are additive at the full report
+        dimensionality. Assigned ratio is derived again after aggregation.
+        """
+        result = cls._frame(report).reindex(columns=cls.COLUMNS)
+        if result.empty:
+            return result
+
+        result["_slice_grade_block"] = result["grade_block"].map(cls._text)
+        result["grade_block"] = result["_slice_grade_block"].map(
+            parent_grade_block_name
+        )
+        for column in ("source_tonnes", "assigned_tonnes"):
+            result[column] = pd.to_numeric(
+                result[column], errors="coerce"
+            ).fillna(0.0)
+
+        source_totals = (
+            result.groupby(
+                [
+                    "plan_type",
+                    "plan_id",
+                    "_slice_grade_block",
+                    "grade_block",
+                ],
+                dropna=False,
+                as_index=False,
+            )["source_tonnes"]
+            .max()
+            .groupby(
+                ["plan_type", "plan_id", "grade_block"],
+                dropna=False,
+                as_index=False,
+            )["source_tonnes"]
+            .sum()
+        )
+
+        group_columns = [
+            column
+            for column in cls.COLUMNS
+            if column not in {
+                "source_tonnes",
+                "assigned_tonnes",
+                "assigned_ratio",
+            }
+        ]
+        result = (
+            result.groupby(
+                group_columns, dropna=False, as_index=False
+            )["assigned_tonnes"]
+            .sum()
+            .merge(
+                source_totals,
+                on=["plan_type", "plan_id", "grade_block"],
+                how="left",
+            )
+        )
+        result["assigned_ratio"] = (
+            result["assigned_tonnes"]
+            / result["source_tonnes"].replace(0, pd.NA)
+        ).fillna(0.0)
+        return (
+            result.reindex(columns=cls.COLUMNS)
+            .sort_values(
+                [
+                    "grade_block",
+                    "assigned_destination_type",
+                    "assigned_destination",
+                ],
+                kind="stable",
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
 
     @classmethod
     def build(
@@ -422,6 +504,9 @@ class MaterialDestinationPlan:
         # steady-state audit. Retain payload detail only while reconciling
         # direct-tip tonnes above, then aggregate it away here.
         result = pd.DataFrame(rows)
+        result["grade_block"] = result["grade_block"].map(
+            parent_grade_block_name
+        )
         group_columns = [
             "plan_type",
             "plan_id",
@@ -442,7 +527,9 @@ class MaterialDestinationPlan:
 
         source_totals = (
             payloads.assign(
-                grade_block=payloads["source"].map(cls._text)
+                grade_block=payloads["source"].map(
+                    parent_grade_block_name
+                )
             )
             .groupby("grade_block", dropna=False)["payload"]
             .sum()

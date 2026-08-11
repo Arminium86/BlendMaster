@@ -664,34 +664,9 @@ class DatabaseManager:
                 existing = existing_raw.reindex(
                     columns=MaterialDestinationPlan.COLUMNS
                 )
-                group_columns = [
-                    column
-                    for column in MaterialDestinationPlan.COLUMNS
-                    if column not in {
-                        "source_tonnes", "assigned_tonnes",
-                        "assigned_ratio",
-                    }
-                ]
                 if not existing.empty:
-                    existing = (
-                        existing.groupby(
-                            group_columns, dropna=False, as_index=False
-                        )
-                        .agg({
-                            "source_tonnes": "max",
-                            "assigned_tonnes": "sum",
-                        })
-                    )
-                    existing["assigned_ratio"] = (
-                        pd.to_numeric(
-                            existing["assigned_tonnes"], errors="coerce"
-                        ).fillna(0.0)
-                        / pd.to_numeric(
-                            existing["source_tonnes"], errors="coerce"
-                        ).replace(0, np.nan)
-                    ).fillna(0.0)
-                    existing = existing.reindex(
-                        columns=MaterialDestinationPlan.COLUMNS
+                    existing = MaterialDestinationPlan.summarize_parent_grade_blocks(
+                        existing
                     )
                 same_plan = (
                     existing["plan_type"].astype(str).str.lower().eq(
