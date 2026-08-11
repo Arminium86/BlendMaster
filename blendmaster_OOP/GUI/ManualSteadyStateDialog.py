@@ -14,14 +14,16 @@ from PyQt5.QtWidgets import (
 )
 
 from classes.ManualBlendPlanner import ManualBlendPlanningError
+from classes.GradeBlockIdentity import parent_grade_block_name
 
 
 class ManualSteadyStateDialog(QDialog):
     """Edit direct-tip tonnes and review the resulting manual feed."""
 
+    GRADES = ("fe", "si", "al", "p", "mn")
     HEADERS = [
         "Steady State", "Blend ID", "Start", "End", "Duration (h)",
-        "Boundary Event", "Direct Tip Source", "Available (t)",
+        "Boundary Event", "Direct Tip Parent Grade Block", "Available (t)",
         "Acceptance Ratio (0–1)", "DT Fe", "DT Si", "DT Al", "DT P", "DT Mn",
         "Stockpile Feed (t)", "Direct Tip (%)", "Total Feed (t)",
         "Output Fe", "Output Si", "Output Al", "Output P", "Output Mn",
@@ -44,11 +46,12 @@ class ManualSteadyStateDialog(QDialog):
         layout = QVBoxLayout(self)
 
         help_label = QLabel(
-            "Each row is an aggregated grade-block source delivered within "
-            "that steady state. Enter the ratio of its available tonnes to "
-            "direct tip, from 0 (none) to 1 (all). The remaining crusher feed "
-            "is supplied by the scheduled stockpile blend, so direct tip plus "
-            "stockpile feed always equals 100%."
+            "Each row is a parent grade block delivered within that steady "
+            "state; operational slices are combined. Enter the ratio of its "
+            "total available tonnes to direct tip, from 0 (none) to 1 (all). "
+            "The ratio is applied to every underlying slice. The remaining "
+            "crusher feed is supplied by the scheduled stockpile blend, so "
+            "direct tip plus stockpile feed always equals 100%."
         )
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
@@ -107,10 +110,82 @@ class ManualSteadyStateDialog(QDialog):
         except (TypeError, ValueError):
             return ""
 
+    @classmethod
+    def aggregate_parent_candidates(cls, candidates):
+        """Combine steady-state slice candidates at parent-block level."""
+        grouped = {}
+        for candidate in candidates or []:
+            source = str(candidate.get("source") or "").strip()
+            parent = parent_grade_block_name(source)
+            if not parent:
+                continue
+            available = max(
+                float(candidate.get("available_tonnes") or 0), 0.0
+            )
+            aggregate = grouped.setdefault(parent, {
+                "source": parent,
+                "available_tonnes": 0.0,
+                "_slice_candidates": [],
+                **{
+                    f"_grade_mass_{grade}": 0.0
+                    for grade in cls.GRADES
+                },
+                **{
+                    f"_grade_weight_{grade}": 0.0
+                    for grade in cls.GRADES
+                },
+            })
+            aggregate["available_tonnes"] += available
+            aggregate["_slice_candidates"].append({
+                "source": source,
+                "available_tonnes": available,
+            })
+            for grade in cls.GRADES:
+                value = candidate.get(f"grade_{grade}")
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                aggregate.setdefault(f"_grade_mass_{grade}", 0.0)
+                aggregate.setdefault(f"_grade_weight_{grade}", 0.0)
+                aggregate[f"_grade_mass_{grade}"] += numeric * available
+                aggregate[f"_grade_weight_{grade}"] += available
+
+        result = []
+        for aggregate in grouped.values():
+            for grade in cls.GRADES:
+                weight = aggregate.pop(f"_grade_weight_{grade}", 0.0)
+                mass = aggregate.pop(f"_grade_mass_{grade}", 0.0)
+                aggregate[f"grade_{grade}"] = (
+                    mass / weight if weight > 0 else None
+                )
+            result.append(aggregate)
+        return result
+
+    @staticmethod
+    def selected_parent_tonnes(allocations, state_key, candidate):
+        selected = (allocations or {}).get(state_key, {}) or {}
+        return sum(
+            float(selected.get(slice_row["source"], 0) or 0)
+            for slice_row in candidate.get("_slice_candidates", [])
+        )
+
+    @staticmethod
+    def apply_parent_ratio(
+        allocations, state_key, candidate, acceptance_ratio
+    ):
+        state_allocations = allocations.setdefault(state_key, {})
+        for slice_row in candidate.get("_slice_candidates", []):
+            state_allocations[slice_row["source"]] = (
+                acceptance_ratio * slice_row["available_tonnes"]
+            )
+
     def populate(self):
         rows = []
         for state in self.states:
-            candidates = state.get("direct_tip_candidates", [])
+            candidates = self.aggregate_parent_candidates(
+                state.get("direct_tip_candidates", [])
+            )
             if not candidates:
                 rows.append((state, None))
             else:
@@ -125,6 +200,7 @@ class ManualSteadyStateDialog(QDialog):
                     state["state_key"],
                     source,
                     candidate["available_tonnes"] if candidate else 0,
+                    candidate,
                 )
                 values = [
                     state["steady_state_number"],
@@ -145,9 +221,11 @@ class ManualSteadyStateDialog(QDialog):
                     )
 
                 selected_tonnes = (
-                    self.allocations.get(
-                        state["state_key"], {}
-                    ).get(source, 0)
+                    self.selected_parent_tonnes(
+                        self.allocations,
+                        state["state_key"],
+                        candidate,
+                    )
                     if candidate else 0
                 )
                 acceptance_ratio = (
@@ -194,7 +272,9 @@ class ManualSteadyStateDialog(QDialog):
     def handle_cell_changed(self, row, column):
         if self._updating or column != self.SELECTED_COLUMN:
             return
-        state_key, source, available_tonnes = self._row_context[row]
+        (
+            state_key, source, available_tonnes, candidate
+        ) = self._row_context[row]
         if not source:
             return
         item = self.table.item(row, column)
@@ -212,8 +292,11 @@ class ManualSteadyStateDialog(QDialog):
             )
             self.apply_button.setEnabled(False)
             return
-        self.allocations.setdefault(state_key, {})[source] = (
-            acceptance_ratio * available_tonnes
+        self.apply_parent_ratio(
+            self.allocations,
+            state_key,
+            candidate,
+            acceptance_ratio,
         )
         self.recalculate()
 
@@ -233,7 +316,7 @@ class ManualSteadyStateDialog(QDialog):
         self._updating = True
         try:
             for row_number, (
-                state_key, _source, _available_tonnes
+                state_key, _source, _available_tonnes, _candidate
             ) in self._row_context.items():
                 summary = summaries[state_key]
                 output_values = [
