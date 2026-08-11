@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request
 import threading
 import math
 from datetime import date, datetime
+from classes.ManualBlendSummary import ManualBlendSummary
 from classes.ManualBlendRules import ManualBlendRules
 
 
@@ -159,8 +160,23 @@ class ManualBlendDash:
             legend = [row.copy() for row in (self.manual_gantt_legend_and_tooltip or [])]
             revision = self.data_revision
 
+        legend_by_blend = {
+            str(row.get("Blend ID") or ""): row
+            for row in legend
+        }
         for index, row in enumerate(rows):
             row["_row_index"] = index
+            summary = row.get("Blend Summary")
+            summary = summary if isinstance(summary, dict) else {}
+            detail = legend_by_blend.get(
+                str(row.get("Blend ID") or ""), {}
+            )
+            row["_stockpile_mix_key"] = (
+                summary.get("_stockpile_mix_key")
+                or ManualBlendSummary.stockpile_mix_key(
+                    summary.get("Sources") or detail.get("Sources")
+                )
+            )
 
         return self.json_safe_value({
             "rows": rows,
@@ -416,7 +432,7 @@ const state = {
     rows: [],
     legendRows: [],
     colors: [],
-    colorByBlend: {},
+    colorByMix: {},
     snapMinutes: 15,
     timelineStart: 0,
     timelineEnd: 0,
@@ -470,13 +486,13 @@ function setStatus(text) {
     document.getElementById("status").textContent = text || "";
 }
 
-function colorForBlend(blendId) {
-    const key = String(blendId ?? "");
-    if (!state.colorByBlend[key]) {
-        const index = Object.keys(state.colorByBlend).length;
-        state.colorByBlend[key] = state.colors[index % state.colors.length] || "#A8D5BA";
+function colorForRow(row) {
+    const key = String(row["_stockpile_mix_key"] || "NO_STOCKPILE_SOURCE");
+    if (!state.colorByMix[key]) {
+        const index = Object.keys(state.colorByMix).length;
+        state.colorByMix[key] = state.colors[index % state.colors.length] || "#A8D5BA";
     }
-    return state.colorByBlend[key];
+    return state.colorByMix[key];
 }
 
 function computeTimelineBounds() {
@@ -514,9 +530,17 @@ function buildLegendDetails(row) {
     const grade = name => {
         const value = row[name];
         if (value === undefined || value === null || value === "") return "";
-        return "<div>" + name + ": " + escapeHtml(value) + (value === "AMT" ? "" : "%") + "</div>";
+        const numeric = Number(value);
+        const displayed = Number.isFinite(numeric) ? numeric.toFixed(2) : String(value);
+        return "<div>" + name + ": " + escapeHtml(displayed) + "%</div>";
     };
     let html = "<div class='legend-heading'>Blend ID: " + escapeHtml(row["Blend ID"]) + "</div>";
+    if (row["Start Datetime"] || row["End Datetime"]) {
+        html += "<div class='muted'>" + escapeHtml(row["Start Datetime"] || "") +
+            " to " + escapeHtml(row["End Datetime"] || "") + "</div>";
+    }
+    html += "<div>Optimiser Grade Stream: " +
+        escapeHtml(row["Optimiser Grade Stream"] || "Not calculated") + "</div>";
     html += grade("Grade Fe") + grade("Grade Si") + grade("Grade Al") + grade("Grade P") + grade("Grade Mn");
     if (row["Sources"] && row["Source Ratios"]) {
         const sources = String(row["Sources"]).split(",");
@@ -563,14 +587,14 @@ function renderLegend() {
     state.legendRows.forEach(row => {
         legendByBlend[String(row["Blend ID"])] = row;
     });
-    const shown = new Set();
     let html = "<div class='legend-title'>Blend Details</div>";
     state.rows.forEach(row => {
         const blendId = String(row["Blend ID"] ?? "");
-        if (shown.has(blendId)) return;
-        shown.add(blendId);
-        const detailRow = legendByBlend[blendId] || row;
-        html += "<div class='legend-item'><div class='swatch' style='background:" + colorForBlend(blendId) + "'></div><div>" +
+        const detailRow = Object.assign(
+            {}, legendByBlend[blendId] || {}, row["Blend Summary"] || {}
+        );
+        detailRow["Blend ID"] = blendId;
+        html += "<div class='legend-item'><div class='swatch' style='background:" + colorForRow(row) + "'></div><div>" +
             buildLegendDetails(detailRow) + "</div></div>";
     });
     legend.innerHTML = html;
@@ -604,6 +628,10 @@ function updateRowFromTimes(rowIndex, startMs, endMs) {
     row["Start Datetime"] = formatDate(new Date(startMs));
     row["End Datetime"] = formatDate(new Date(endMs));
     row["Duration (hrs)"] = ((endMs - startMs) / 3600000).toFixed(1);
+    if (row["Blend Summary"]) {
+        row["Blend Summary"]["Start Datetime"] = row["Start Datetime"];
+        row["Blend Summary"]["End Datetime"] = row["End Datetime"];
+    }
 }
 
 function positionBar(bar, row) {
@@ -742,7 +770,7 @@ function render() {
         const bar = document.createElement("div");
         bar.className = "bar" + (row["Origin"] === "User Defined" ? "" : " default");
         bar.dataset.rowIndex = rowIndex;
-        bar.style.background = colorForBlend(row["Blend ID"]);
+        bar.style.background = colorForRow(row);
         const leftHandle = document.createElement("div");
         leftHandle.className = "handle left";
         const rightHandle = document.createElement("div");
@@ -772,7 +800,7 @@ async function loadData() {
         state.rows = payload.rows || [];
         state.legendRows = payload.legend || [];
         state.colors = payload.colors || [];
-        state.colorByBlend = {};
+        state.colorByMix = {};
         render();
     } catch (error) {
         document.getElementById("timeline-main").innerHTML = "<div class='empty'>Could not load manual Gantt data.</div>";

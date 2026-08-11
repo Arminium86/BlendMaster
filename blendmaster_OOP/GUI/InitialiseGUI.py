@@ -26,6 +26,7 @@ from classes.ManualBlendPlanner import (
     ManualBlendPlanningError,
 )
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
+from classes.ManualBlendSummary import ManualBlendSummary
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
@@ -14953,6 +14954,7 @@ class UserInputs(QMainWindow):
         self.manual_physical_balance_history = copy.deepcopy(
             getattr(planner, "physical_balance_history", [])
         )
+        self.update_manual_gantt_blend_summaries(report)
         self.write_active_manual_plan_reports(report)
         self.write_manual_closing_rom_stocks_compliance(report)
 
@@ -18569,21 +18571,45 @@ class UserInputs(QMainWindow):
         blend_plan_layout = QVBoxLayout(self.blend_plan_page)
         blend_plan_controls = QHBoxLayout()
         blend_plan_controls.addWidget(QLabel("Manual Blend Plan"))
+        blend_plan_controls.addStretch()
+        blend_plan_layout.addLayout(blend_plan_controls)
+        self.blend_plan_gantt_view = CustomWebEngineView()
+        self.blend_plan_gantt_view.setMinimumHeight(360)
+        blend_plan_layout.addWidget(self.blend_plan_gantt_view, stretch=2)
+
+        self.manual_blend_plan_lower_tabs = QTabWidget()
+        blend_plan_layout.addWidget(self.manual_blend_plan_lower_tabs, stretch=1)
+
+        detailed_report_page = QWidget()
+        detailed_report_layout = QVBoxLayout(detailed_report_page)
+        detailed_report_controls = QHBoxLayout()
         self.manual_blend_plan_fields_button = QPushButton(
             "Configure Report Columns..."
         )
         self.manual_blend_plan_fields_button.clicked.connect(
             self.choose_manual_blend_plan_columns
         )
-        blend_plan_controls.addWidget(self.manual_blend_plan_fields_button)
-        blend_plan_controls.addStretch()
-        blend_plan_layout.addLayout(blend_plan_controls)
-        self.blend_plan_gantt_view = CustomWebEngineView()
-        self.blend_plan_gantt_view.setMinimumHeight(360)
-        blend_plan_layout.addWidget(self.blend_plan_gantt_view, stretch=2)
+        detailed_report_controls.addWidget(self.manual_blend_plan_fields_button)
+        detailed_report_controls.addStretch()
+        detailed_report_layout.addLayout(detailed_report_controls)
         self.manual_blend_plan_table = CustomTableWidget()
         self.manual_blend_plan_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        blend_plan_layout.addWidget(self.manual_blend_plan_table, stretch=1)
+        detailed_report_layout.addWidget(self.manual_blend_plan_table)
+        self.manual_blend_plan_lower_tabs.addTab(
+            detailed_report_page, "Detailed Report"
+        )
+
+        blend_summary_page = QWidget()
+        blend_summary_layout = QVBoxLayout(blend_summary_page)
+        self.manual_blend_summary_table = CustomTableWidget()
+        self.manual_blend_summary_table.setEditTriggers(
+            QTableWidget.NoEditTriggers
+        )
+        self.manual_blend_summary_table.setWordWrap(True)
+        blend_summary_layout.addWidget(self.manual_blend_summary_table)
+        self.manual_blend_plan_lower_tabs.addTab(
+            blend_summary_page, "Blend Summary"
+        )
         self.manual_blend_plan_selected_columns = None
         self.manual_blend_plan_column_aliases = {}
         self.manual_blend_plan_column_widths = {}
@@ -18684,11 +18710,74 @@ class UserInputs(QMainWindow):
         finally:
             connection.close()
 
+    def update_manual_gantt_blend_summaries(self, report=None):
+        """Attach selected-stream output details to each manual Gantt bar."""
+        summaries = ManualBlendSummary.build(
+            getattr(self, "stored_blend_sequence_table_for_gantt", []) or [],
+            report if isinstance(report, pd.DataFrame) else pd.DataFrame(),
+            getattr(self, "manual_gantt_legend_and_tooltip", []) or [],
+        )
+        selected_stream = str(
+            getattr(self, "selected_data_stream", DEFAULT_STREAM)
+            or DEFAULT_STREAM
+        )
+        for summary in summaries:
+            if not summary.get("Optimiser Grade Stream"):
+                summary["Optimiser Grade Stream"] = selected_stream
+        sequence = getattr(
+            self, "stored_blend_sequence_table_for_gantt", []
+        ) or []
+        for sequence_row, summary in zip(sequence, summaries):
+            sequence_row["Blend Summary"] = copy.deepcopy(summary)
+        return summaries
+
+    def populate_manual_blend_summary_table(self, summaries):
+        table = getattr(self, "manual_blend_summary_table", None)
+        if table is None:
+            return
+        columns = list(ManualBlendSummary.COLUMNS)
+        table.clearContents()
+        table.setRowCount(len(summaries or []))
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        for row_index, summary in enumerate(summaries or []):
+            for column_index, column in enumerate(columns):
+                value = summary.get(column)
+                if column.startswith("Grade "):
+                    try:
+                        text = f"{float(value):.2f}"
+                    except (TypeError, ValueError):
+                        text = ""
+                else:
+                    text = "" if value is None else str(value)
+                table.setItem(
+                    row_index, column_index, QTableWidgetItem(text)
+                )
+        table.resizeColumnsToContents()
+        width_by_column = {
+            "Bar": 55,
+            "Blend ID": 75,
+            "Start Datetime": 145,
+            "End Datetime": 145,
+            "Optimiser Grade Stream": 170,
+            "Sources and Ratios": 320,
+            "Direct Tip Grade Blocks": 420,
+        }
+        for index, column in enumerate(columns):
+            table.setColumnWidth(
+                index, width_by_column.get(column, max(85, table.columnWidth(index)))
+            )
+        table.resizeRowsToContents()
+
     def refresh_manual_blend_plan_report(self):
         table = getattr(self, "manual_blend_plan_table", None)
         if table is None:
             return
-        report = order_balance_triplets(self.fetch_manual_blend_plan_report())
+        raw_report = self.fetch_manual_blend_plan_report()
+        summaries = self.update_manual_gantt_blend_summaries(raw_report)
+        self.populate_manual_blend_summary_table(summaries)
+        report = order_balance_triplets(raw_report)
         available = self.optimisation_snapshot_available_columns(report)
         selected = getattr(self, "manual_blend_plan_selected_columns", None)
         if selected is None:
@@ -18731,6 +18820,14 @@ class UserInputs(QMainWindow):
             table.resizeRowsToContents()
         if hasattr(self, "blend_plan_gantt_view"):
             self.blend_plan_gantt_view.setUrl(QUrl("http://localhost:8052"))
+        manual_chart = getattr(self, "draw_manual_gantt_chart", None)
+        if manual_chart is not None:
+            manual_chart.update_data(
+                getattr(
+                    self, "stored_blend_sequence_table_for_gantt", []
+                ) or [],
+                getattr(self, "manual_gantt_legend_and_tooltip", []) or [],
+            )
 
     def choose_manual_blend_plan_columns(self):
         report = self.fetch_manual_blend_plan_report()
@@ -21530,6 +21627,10 @@ class UserInputs(QMainWindow):
                         },
                     )
                 )
+
+        self.update_manual_gantt_blend_summaries(
+            getattr(self, "manual_blend_report", None)
+        )
 
         manual_chart = getattr(
             self, "draw_manual_gantt_chart", None
