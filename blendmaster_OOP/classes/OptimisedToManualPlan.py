@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pandas as pd
 
+from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.ManualBlendPlanner import ManualBlendPlanningError
 
 
@@ -569,9 +570,9 @@ class OptimisedToManualPlan:
             )
             if requested <= cls.TOLERANCE:
                 continue
-            selected_source = str(
-                selected.get("source") or ""
-            ).strip().upper()
+            selected_source = parent_grade_block_name(
+                selected.get("source")
+            ).upper()
             selected_ids = {
                 str(value).strip()
                 for value in selected.get("source_ids", [])
@@ -603,8 +604,9 @@ class OptimisedToManualPlan:
                     "direct_tip_candidates", []
                 ):
                     if (
-                        str(candidate.get("source") or "")
-                        .strip().upper() != selected_source
+                        parent_grade_block_name(
+                            candidate.get("source")
+                        ).upper() != selected_source
                     ):
                         continue
                     candidate_ids = {
