@@ -4,6 +4,8 @@ import math
 
 import pandas as pd
 
+from classes.GradeBlockIdentity import parent_grade_block_name
+
 
 class ManualBlendSummary:
     """Build one selected-stream summary for each manual Gantt bar."""
@@ -186,7 +188,7 @@ class ManualBlendSummary:
             ).fillna(0.0)
             names = grade_blocks.get(
                 "source", pd.Series("", index=grade_blocks.index)
-            ).fillna("").astype(str).str.strip()
+            ).fillna("").map(parent_grade_block_name)
             totals = tonnes.groupby(names).sum()
             totals = totals[totals.index.astype(str).str.strip() != ""]
             crusher_total = cls._unique_state_crusher_tonnes(rows)
@@ -204,13 +206,21 @@ class ManualBlendSummary:
         sources = cls._split(fallback.get("Direct Tip Sources"))
         ratios = cls._split(fallback.get("Direct Tip Ratios"))
         tonnes = cls._split(fallback.get("Direct Tip Tonnes"))
-        return [
-            (
-                source,
-                cls._number(tonnes[index] if index < len(tonnes) else None, 0.0),
-                cls._number(ratios[index] if index < len(ratios) else None, 0.0),
+        combined = {}
+        for index, source in enumerate(sources):
+            parent = parent_grade_block_name(source)
+            if not parent:
+                continue
+            values = combined.setdefault(parent, [0.0, 0.0])
+            values[0] += cls._number(
+                tonnes[index] if index < len(tonnes) else None, 0.0
             )
-            for index, source in enumerate(sources)
+            values[1] += cls._number(
+                ratios[index] if index < len(ratios) else None, 0.0
+            )
+        return [
+            (source, values[0], values[1])
+            for source, values in combined.items()
         ]
 
     @classmethod

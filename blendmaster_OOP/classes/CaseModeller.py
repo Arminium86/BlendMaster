@@ -2083,6 +2083,11 @@ class CaseModeller:
             "crusher_actual_tonnes",
             "source_opening_balance",
             "source_closing_balance",
+            "constraint_source_balance",
+            "reclaimer_source_tonnes",
+            "crusher_source_tonnes",
+            "product_build_source_tonnes",
+            "equipment_rate_input",
             "equipment_rate_output",
             "crusher_rate_output",
             "source_blend_ratio",
@@ -2123,6 +2128,21 @@ class CaseModeller:
                 record["source_opening_balance"] = group["source_opening_balance"].sum()
             if "source_closing_balance" in group:
                 record["source_closing_balance"] = group["source_closing_balance"].sum()
+            for additive_column in (
+                "constraint_source_balance",
+                "reclaimer_source_tonnes",
+                "crusher_source_tonnes",
+                "product_build_source_tonnes",
+                "equipment_rate_input",
+            ):
+                if additive_column in group:
+                    values = pd.to_numeric(
+                        group[additive_column], errors="coerce"
+                    )
+                    record[additive_column] = (
+                        values.sum(min_count=1)
+                        if values.notna().any() else None
+                    )
             if "equipment_rate_output" in group:
                 record["equipment_rate_output"] = group["equipment_rate_output"].sum()
             if "source_id" in group:

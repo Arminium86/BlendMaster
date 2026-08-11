@@ -27,6 +27,8 @@ from classes.ManualBlendPlanner import (
 )
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from classes.ManualBlendSummary import ManualBlendSummary
+from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
 from datetime import datetime, timedelta
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
@@ -18704,7 +18706,15 @@ class UserInputs(QMainWindow):
     def fetch_manual_blend_plan_report(self):
         connection = sqlite3.connect(get_database_path())
         try:
-            return pd.read_sql("SELECT * FROM manual_blend_report", connection)
+            report = pd.read_sql(
+                "SELECT * FROM manual_blend_report", connection
+            )
+            solver_config = (
+                getattr(self, "calendar_inputs", {}) or {}
+            ).get("solver_config") or {}
+            return consolidate_parent_grade_block_rows(
+                report, solver_config
+            )
         except (sqlite3.Error, pd.errors.DatabaseError):
             return pd.DataFrame()
         finally:
@@ -21666,7 +21676,9 @@ class UserInputs(QMainWindow):
                 selected_tonnes = float(tonnes or 0)
                 if selected_tonnes <= 0:
                     continue
-                source_name = str(source).strip()
+                source_name = parent_grade_block_name(source)
+                if not source_name:
+                    continue
                 source_totals[source_name] = (
                     source_totals.get(source_name, 0.0)
                     + selected_tonnes

@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
     lane_actual_tonnes_column,
@@ -143,6 +144,7 @@ class ManualBlendPlanner:
         self.calendar_inputs = dict(calendar_inputs or {})
         site_context = self.calendar_inputs.get("site_context") or {}
         solver_config = self.calendar_inputs.get("solver_config") or {}
+        self.solver_config = dict(solver_config)
         self.custom_constraints = normalize_custom_constraints(
             solver_config.get("custom_constraints")
         )
@@ -1319,6 +1321,9 @@ class ManualBlendPlanner:
             report,
             self.product_build_settings,
             byproducts_enabled=self.byproducts_enabled,
+        )
+        report = consolidate_parent_grade_block_rows(
+            report, self.solver_config
         )
         return report.reindex(columns=[
             *base_columns,
