@@ -1384,6 +1384,42 @@ class ExpitDataHandler:
             f"for pit '{pit or 'unknown'}', and no last 2WP stockpile destination."
         )
 
+    def _alternate_destinations_for_row(
+        self, row, assigned_destination, resolution
+    ):
+        """Return the remaining destinations in the existing fallback chain.
+
+        The chain is the exact 2WP destination, then the most-used destination
+        for the source pit, then the last stockpile destination in the 2WP.
+        ``assigned_destination`` has already consumed one point in that chain,
+        so only later, distinct destinations are returned.
+        """
+        source = str(row.get("Source.FullName", "") or "").strip()
+        pit = self._source_pit(row.get("Source.Pit", ""), source)
+        candidates = []
+        if resolution == "exact_2wp":
+            pit_fallback = getattr(
+                self, "_pit_destination_lookup", {}
+            ).get(pit.upper()) or {}
+            candidates.append(pit_fallback.get("destination"))
+        if resolution in {"exact_2wp", "pit_fallback"}:
+            last_fallback = (
+                self.destination_guidance.get("last_destination") or {}
+            )
+            candidates.append(last_fallback.get("destination"))
+
+        assigned_key = str(assigned_destination or "").strip().upper()
+        alternates = []
+        seen = {assigned_key} if assigned_key else set()
+        for candidate in candidates:
+            destination = str(candidate or "").strip()
+            key = destination.upper()
+            if not destination or key in seen:
+                continue
+            seen.add(key)
+            alternates.append(destination)
+        return (alternates + ["", ""])[:2]
+
     def _apply_2wp_destination_guidance(self, data):
         """Replace 24HR destinations and split tonnes using 2WP ratios."""
         if data.empty:
@@ -1454,6 +1490,12 @@ class ExpitDataHandler:
                     split_row["HaulageResult.NumberOfTrips"] = reported_trips * ratio
                 split_row["two_wp_destination_resolution"] = resolution
                 split_row["two_wp_destination_ratio"] = ratio
+                (
+                    split_row["alternate_destination_1"],
+                    split_row["alternate_destination_2"],
+                ) = self._alternate_destinations_for_row(
+                    row, destination, resolution
+                )
                 split_row["two_wp_turnover_guidance_applicable"] = bool(
                     resolution == "exact_2wp"
                     and allocation.get(
@@ -1491,6 +1533,11 @@ class ExpitDataHandler:
             self.data["two_wp_destination_resolution"] = "schedule_destination"
         if "two_wp_destination_ratio" not in self.data.columns:
             self.data["two_wp_destination_ratio"] = 1.0
+        for column in (
+            "alternate_destination_1", "alternate_destination_2"
+        ):
+            if column not in self.data.columns:
+                self.data[column] = ""
         if "two_wp_turnover_guidance_applicable" not in self.data.columns:
             self.data["two_wp_turnover_guidance_applicable"] = False
         if "two_wp_first_reclaim_datetime" not in self.data.columns:
@@ -1655,6 +1702,12 @@ class ExpitDataHandler:
             "destination_type": destination_type,
             "planned_destination": planned_destination,
             "fallback_destination": fallback_destination,
+            "alternate_destination_1": str(
+                row.get("alternate_destination_1", "") or ""
+            ).strip(),
+            "alternate_destination_2": str(
+                row.get("alternate_destination_2", "") or ""
+            ).strip(),
             # Stockpile-bound payloads are always available for direct-tip
             # consideration when their source has a rule. Crusher-bound rows
             # enter the same pool only when APS direct-tip re-evaluation is on.
@@ -1877,6 +1930,7 @@ class ExpitDataHandler:
                 "Agent.Name", "Source.Type", "Source.FullName", "Destination.Type",
                 "Destination.Name", "Destination.FullName",
                 "two_wp_destination_resolution", "two_wp_destination_ratio",
+                "alternate_destination_1", "alternate_destination_2",
                 "two_wp_turnover_guidance_applicable",
                 "two_wp_first_reclaim_datetime",
                 "two_wp_destination_turnover_priority",

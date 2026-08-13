@@ -752,6 +752,22 @@ class DatabaseManager:
                 ).fetchall()
             }
             if "material_destination_plan" in table_names:
+                existing_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(material_destination_plan)"
+                    ).fetchall()
+                }
+                for column_name in (
+                    "alternate_destination_1",
+                    "alternate_destination_2",
+                ):
+                    if column_name not in existing_columns:
+                        connection.execute(
+                            "ALTER TABLE material_destination_plan "
+                            f"ADD COLUMN {column_name} TEXT"
+                        )
+                connection.commit()
                 return
             reports = {}
             for plan_type, table_name in (
@@ -1059,6 +1075,8 @@ class DatabaseManager:
             destination_type TEXT,
             planned_destination TEXT,
             fallback_destination TEXT,
+            alternate_destination_1 TEXT,
+            alternate_destination_2 TEXT,
             aps_direct_tip_candidate INTEGER,
             two_wp_destination_resolution TEXT,
             two_wp_destination_ratio REAL,
@@ -1077,6 +1095,8 @@ class DatabaseManager:
             "destination_type": "TEXT",
             "planned_destination": "TEXT",
             "fallback_destination": "TEXT",
+            "alternate_destination_1": "TEXT",
+            "alternate_destination_2": "TEXT",
             "aps_direct_tip_candidate": "INTEGER",
             "two_wp_destination_resolution": "TEXT",
             "two_wp_destination_ratio": "REAL",
@@ -1158,6 +1178,8 @@ class DatabaseManager:
                 destination_type,
                 planned_destination,
                 fallback_destination,
+                alternate_destination_1,
+                alternate_destination_2,
                 aps_direct_tip_candidate,
                 two_wp_destination_resolution,
                 two_wp_destination_ratio,
@@ -1182,6 +1204,8 @@ class DatabaseManager:
                 :destination_type,
                 :planned_destination,
                 :fallback_destination,
+                :alternate_destination_1,
+                :alternate_destination_2,
                 :aps_direct_tip_candidate,
                 :two_wp_destination_resolution,
                 :two_wp_destination_ratio,

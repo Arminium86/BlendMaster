@@ -27,6 +27,7 @@ from classes.ManualBlendPlanner import (
 )
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from classes.ManualBlendSummary import ManualBlendSummary
+from classes.BlendPlanPDF import BlendPlanPDF, BlendPlanPDFError
 from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
@@ -116,8 +117,8 @@ import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-APP_TITLE = "BlendMaster PoC v0.1.0 - 2025 Fortescue - MOPP"
-APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v010"
+APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
+APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
 AMT_OPENING_CACHE_VERSION = 1
 AMT_CHUNK_RECONCILIATION_VERSION = 1
 
@@ -8419,7 +8420,10 @@ class UserInputs(QMainWindow):
         self.site_config_tab.setObjectName("siteConfigTab")  # Set an object name for the stylesheet
 
         # Construct path to the background image
-        background_path = preferred_resource_path("background_v2.PNG", "background.PNG").replace("\\", "/")
+        background_path = preferred_resource_path(
+            "background_v4.PNG", "background_v3.PNG", "background_v2.PNG",
+            "background.PNG"
+        ).replace("\\", "/")
 
 
         self.site_config_tab.setStyleSheet(f"""
@@ -18574,6 +18578,11 @@ class UserInputs(QMainWindow):
         blend_plan_controls = QHBoxLayout()
         blend_plan_controls.addWidget(QLabel("Manual Blend Plan"))
         blend_plan_controls.addStretch()
+        self.export_blend_plan_pdf_button = QPushButton("Export PDF...")
+        self.export_blend_plan_pdf_button.clicked.connect(
+            self.export_manual_blend_plan_pdf
+        )
+        blend_plan_controls.addWidget(self.export_blend_plan_pdf_button)
         blend_plan_layout.addLayout(blend_plan_controls)
         self.blend_plan_gantt_view = CustomWebEngineView()
         self.blend_plan_gantt_view.setMinimumHeight(360)
@@ -18838,6 +18847,73 @@ class UserInputs(QMainWindow):
                 ) or [],
                 getattr(self, "manual_gantt_legend_and_tooltip", []) or [],
             )
+
+    def export_manual_blend_plan_pdf(self):
+        raw_report = self.fetch_manual_blend_plan_report()
+        sequence = getattr(
+            self, "stored_blend_sequence_table_for_gantt", []
+        ) or []
+        if raw_report.empty or not sequence:
+            QMessageBox.information(
+                self,
+                "Export Blend Plan PDF",
+                "Submit or load a manual blend plan before exporting it.",
+            )
+            return
+
+        summaries = self.update_manual_gantt_blend_summaries(raw_report)
+        report = order_balance_triplets(raw_report)
+        available = self.optimisation_snapshot_available_columns(report)
+        selected = getattr(
+            self, "manual_blend_plan_selected_columns", None
+        )
+        if selected is None:
+            selected = self.default_optimisation_snapshot_columns(available)
+        selected = balance_triplet_columns([
+            column for column in selected if column in available
+        ])
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        default_name = f"blend_plan_{timestamp}.pdf"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Blend Plan PDF",
+            default_name,
+            "PDF Files (*.pdf)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".pdf"):
+            file_path += ".pdf"
+
+        try:
+            BlendPlanPDF.export(
+                file_path,
+                sequence_rows=sequence,
+                summaries=summaries,
+                detailed_report=report,
+                selected_columns=selected,
+                aliases=getattr(
+                    self, "manual_blend_plan_column_aliases", {}
+                ) or {},
+                widths=getattr(
+                    self, "manual_blend_plan_column_widths", {}
+                ) or {},
+                title="BlendMaster — Manual Blend Plan",
+                plan_id=str(
+                    getattr(self, "active_manual_plan_id", "Primary")
+                    or "Primary"
+                ),
+            )
+        except (BlendPlanPDFError, OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Export Blend Plan PDF", str(exc)
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Blend Plan PDF",
+            f"Blend Plan PDF exported to:\n{file_path}",
+        )
 
     def choose_manual_blend_plan_columns(self):
         report = self.fetch_manual_blend_plan_report()

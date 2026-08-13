@@ -18,6 +18,8 @@ class MaterialDestinationPlan:
         "fallback_destination",
         "two_wp_destination_resolution",
         "assigned_destination",
+        "alternate_destination_1",
+        "alternate_destination_2",
         "assigned_destination_type",
         "source_tonnes",
         "assigned_tonnes",
@@ -163,7 +165,37 @@ class MaterialDestinationPlan:
             "planned_2wp_destination": planned,
             "fallback_destination": fallback,
             "two_wp_destination_resolution": resolution,
+            "alternate_destination_1": cls._text(
+                payload.get("alternate_destination_1")
+            ),
+            "alternate_destination_2": cls._text(
+                payload.get("alternate_destination_2")
+            ),
         }
+
+    @classmethod
+    def _row_alternates(cls, base_row, assigned_destination, direct_tip=False):
+        candidates = []
+        if direct_tip:
+            candidates.append(
+                base_row.get("planned_2wp_destination")
+                or base_row.get("fallback_destination")
+            )
+        candidates.extend([
+            base_row.get("alternate_destination_1"),
+            base_row.get("alternate_destination_2"),
+        ])
+        assigned_key = cls._text(assigned_destination).upper()
+        seen = {assigned_key} if assigned_key else set()
+        alternates = []
+        for candidate in candidates:
+            destination = cls._text(candidate)
+            key = destination.upper()
+            if not destination or key in seen:
+                continue
+            seen.add(key)
+            alternates.append(destination)
+        return (alternates + ["", ""])[:2]
 
     @classmethod
     def _prepared_payloads(cls, payload_transactions):
@@ -459,13 +491,19 @@ class MaterialDestinationPlan:
             base_row = cls._base_row(payload, plan_type, plan_id)
 
             for assigned_tonnes, report_row in direct_tip_rows[identifier]:
+                assigned_destination = cls._crusher_destination(
+                    payload,
+                    crusher_destination,
+                    movement_rules,
+                )
+                alternate_1, alternate_2 = cls._row_alternates(
+                    base_row, assigned_destination, direct_tip=True
+                )
                 rows.append({
                     **base_row,
-                    "assigned_destination": cls._crusher_destination(
-                        payload,
-                        crusher_destination,
-                        movement_rules,
-                    ),
+                    "assigned_destination": assigned_destination,
+                    "alternate_destination_1": alternate_1,
+                    "alternate_destination_2": alternate_2,
                     "assigned_destination_type": "Crusher",
                     "assigned_tonnes": assigned_tonnes,
                     "assigned_ratio": (
@@ -484,9 +522,14 @@ class MaterialDestinationPlan:
                 fallback = base_row["fallback_destination"]
                 assigned_destination = planned or fallback
                 assignment_source = "2WP" if planned else "Fallback"
+                alternate_1, alternate_2 = cls._row_alternates(
+                    base_row, assigned_destination
+                )
                 rows.append({
                     **base_row,
                     "assigned_destination": assigned_destination,
+                    "alternate_destination_1": alternate_1,
+                    "alternate_destination_2": alternate_2,
                     "assigned_destination_type": "Stockpile",
                     "assigned_tonnes": stockpile_tonnes,
                     "assigned_ratio": (
@@ -515,6 +558,8 @@ class MaterialDestinationPlan:
             "fallback_destination",
             "two_wp_destination_resolution",
             "assigned_destination",
+            "alternate_destination_1",
+            "alternate_destination_2",
             "assigned_destination_type",
             "assignment_source",
         ]
