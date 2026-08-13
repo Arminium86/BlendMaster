@@ -111,6 +111,8 @@ class BlendPlanPDF:
         widths=None,
         title="Blend Plan",
         plan_id="Manual",
+        logo_path=None,
+        report_datetime=None,
     ):
         try:
             from reportlab.graphics.shapes import Drawing, Line, Rect, String
@@ -119,8 +121,9 @@ class BlendPlanPDF:
             from reportlab.lib.pagesizes import A3, landscape
             from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
             from reportlab.lib.units import mm
+            from reportlab.lib.utils import ImageReader
             from reportlab.platypus import (
-                KeepTogether,
+                Image as ReportLabImage,
                 LongTable,
                 PageBreak,
                 Paragraph,
@@ -150,6 +153,15 @@ class BlendPlanPDF:
             column for column in (selected_columns or [])
             if column in report.columns
         ]
+        report_datetime = report_datetime or datetime.now()
+        if not isinstance(report_datetime, datetime):
+            parsed_report_datetime = pd.to_datetime(
+                report_datetime, errors="coerce"
+            )
+            report_datetime = (
+                parsed_report_datetime.to_pydatetime()
+                if pd.notna(parsed_report_datetime) else datetime.now()
+            )
 
         page_size = landscape(A3)
         margin = 12 * mm
@@ -208,7 +220,13 @@ class BlendPlanPDF:
             )
             canvas.setFillColor(colors.HexColor("#5f6b78"))
             canvas.setFont("Helvetica", 7)
-            canvas.drawString(document.leftMargin, 5.5 * mm, "BlendMaster — Blend Plan")
+            canvas.drawString(document.leftMargin, 5.5 * mm, "BlendMaster - Blend Plan")
+            canvas.drawCentredString(
+                page_size[0] / 2.0,
+                5.5 * mm,
+                "Report date and time: "
+                + report_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+            )
             canvas.drawRightString(
                 page_size[0] - document.rightMargin,
                 5.5 * mm,
@@ -300,7 +318,7 @@ class BlendPlanPDF:
                 if cls._text(summary.get(grade))
             )
             lines = [
-                f"<b>Bar {html.escape(cls._text(summary.get('Bar')))} — Blend "
+                f"<b>Bar {html.escape(cls._text(summary.get('Bar')))} - Blend "
                 f"{html.escape(cls._text(summary.get('Blend ID')))}</b>",
                 f"{html.escape(cls._text(summary.get('Start Datetime')))} → "
                 f"{html.escape(cls._text(summary.get('End Datetime')))}",
@@ -376,10 +394,27 @@ class BlendPlanPDF:
             ]))
             return table
 
-        story = [
+        story = []
+        if logo_path and os.path.isfile(str(logo_path)):
+            image_width, image_height = ImageReader(str(logo_path)).getSize()
+            max_width = 55 * mm
+            max_height = 42 * mm
+            scale = min(
+                max_width / max(float(image_width), 1.0),
+                max_height / max(float(image_height), 1.0),
+            )
+            logo = ReportLabImage(
+                str(logo_path),
+                width=float(image_width) * scale,
+                height=float(image_height) * scale,
+            )
+            logo.hAlign = "CENTER"
+            story.extend([logo, Spacer(1, 4)])
+        story.extend([
             Paragraph(html.escape(title), styles["BlendPlanTitle"]),
             paragraph(
-                f"Plan: {plan_id} | Exported: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                f"Plan: {plan_id} | Report date and time: "
+                f"{report_datetime.strftime('%Y-%m-%d %H:%M:%S')}"
             ),
             Spacer(1, 6),
             Paragraph("Manual Blend Gantt", styles["BlendPlanSection"]),
@@ -389,7 +424,7 @@ class BlendPlanPDF:
             make_legend_grid(),
             PageBreak(),
             Paragraph("Blend Summary", styles["BlendPlanSection"]),
-        ]
+        ])
 
         summary_columns = [
             "Bar", "Blend ID", "Start Datetime", "End Datetime",
@@ -424,7 +459,7 @@ class BlendPlanPDF:
                     story.extend([
                         PageBreak(),
                         Paragraph(
-                            f"Detailed Report — columns {band_index + 1} of {len(bands)}",
+                            f"Detailed Report - columns {band_index + 1} of {len(bands)}",
                             styles["BlendPlanSection"],
                         ),
                     ])

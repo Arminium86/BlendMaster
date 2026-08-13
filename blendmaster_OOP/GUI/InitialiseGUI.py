@@ -28,6 +28,10 @@ from classes.ManualBlendPlanner import (
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from classes.ManualBlendSummary import ManualBlendSummary
 from classes.BlendPlanPDF import BlendPlanPDF, BlendPlanPDFError
+from classes.SpreadsheetReportExporter import (
+    SpreadsheetReportExporter,
+    SpreadsheetReportExportError,
+)
 from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
@@ -18583,6 +18587,11 @@ class UserInputs(QMainWindow):
             self.export_manual_blend_plan_pdf
         )
         blend_plan_controls.addWidget(self.export_blend_plan_pdf_button)
+        self.export_blend_plan_xlsx_button = QPushButton("Export XLSX...")
+        self.export_blend_plan_xlsx_button.clicked.connect(
+            self.export_manual_blend_plan_xlsx
+        )
+        blend_plan_controls.addWidget(self.export_blend_plan_xlsx_button)
         blend_plan_layout.addLayout(blend_plan_controls)
         self.blend_plan_gantt_view = CustomWebEngineView()
         self.blend_plan_gantt_view.setMinimumHeight(360)
@@ -18639,6 +18648,21 @@ class UserInputs(QMainWindow):
         refresh_button = QPushButton("Refresh Tables")
         refresh_button.clicked.connect(self.refresh_sqlite_reports)
         controls_layout.addWidget(refresh_button)
+        export_sqlite_xlsx_button = QPushButton("Export Current XLSX...")
+        export_sqlite_xlsx_button.clicked.connect(
+            lambda: self.export_current_sqlite_report("xlsx")
+        )
+        controls_layout.addWidget(export_sqlite_xlsx_button)
+        export_sqlite_csv_button = QPushButton("Export Current CSV...")
+        export_sqlite_csv_button.clicked.connect(
+            lambda: self.export_current_sqlite_report("csv")
+        )
+        controls_layout.addWidget(export_sqlite_csv_button)
+        export_all_sqlite_xlsx_button = QPushButton("Export All Tables XLSX...")
+        export_all_sqlite_xlsx_button.clicked.connect(
+            self.export_all_sqlite_reports_xlsx
+        )
+        controls_layout.addWidget(export_all_sqlite_xlsx_button)
         controls_layout.addStretch()
 
         self.sqlite_reports_layout.addLayout(controls_layout)
@@ -18898,11 +18922,16 @@ class UserInputs(QMainWindow):
                 widths=getattr(
                     self, "manual_blend_plan_column_widths", {}
                 ) or {},
-                title="BlendMaster — Manual Blend Plan",
+                title="BlendMaster - Manual Blend Plan",
                 plan_id=str(
                     getattr(self, "active_manual_plan_id", "Primary")
                     or "Primary"
                 ),
+                logo_path=preferred_resource_path(
+                    "background_v4.PNG", "background_v3.PNG",
+                    "background_v2.PNG", "background.PNG",
+                ),
+                report_datetime=datetime.now(),
             )
         except (BlendPlanPDFError, OSError, ValueError) as exc:
             QMessageBox.warning(
@@ -18913,6 +18942,101 @@ class UserInputs(QMainWindow):
             self,
             "Export Blend Plan PDF",
             f"Blend Plan PDF exported to:\n{file_path}",
+        )
+
+    def manual_material_destination_plan_report(self):
+        plan_id = str(
+            getattr(self, "active_manual_plan_id", "Primary")
+            or "Primary"
+        )
+        connection = sqlite3.connect(get_database_path())
+        try:
+            return pd.read_sql_query(
+                """
+                SELECT *
+                FROM material_destination_plan
+                WHERE lower(plan_type) = 'manual'
+                  AND plan_id = ?
+                ORDER BY grade_block, assigned_destination_type,
+                         assigned_destination
+                """,
+                connection,
+                params=(plan_id,),
+            )
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
+        finally:
+            connection.close()
+
+    def export_manual_blend_plan_xlsx(self):
+        raw_report = self.fetch_manual_blend_plan_report()
+        sequence = getattr(
+            self, "stored_blend_sequence_table_for_gantt", []
+        ) or []
+        if raw_report.empty or not sequence:
+            QMessageBox.information(
+                self,
+                "Export Blend Plan XLSX",
+                "Submit or load a manual blend plan before exporting it.",
+            )
+            return
+
+        summaries = self.update_manual_gantt_blend_summaries(raw_report)
+        report = order_balance_triplets(raw_report)
+        available = self.optimisation_snapshot_available_columns(report)
+        selected = getattr(
+            self, "manual_blend_plan_selected_columns", None
+        )
+        if selected is None:
+            selected = self.default_optimisation_snapshot_columns(available)
+        selected = balance_triplet_columns([
+            column for column in selected if column in available
+        ])
+        aliases = getattr(
+            self, "manual_blend_plan_column_aliases", {}
+        ) or {}
+        detailed_report = report.reindex(columns=selected).rename(
+            columns=aliases
+        )
+        blend_summary = pd.DataFrame(summaries).reindex(
+            columns=ManualBlendSummary.COLUMNS
+        )
+        material_destination_plan = (
+            self.manual_material_destination_plan_report()
+        )
+
+        timestamp = datetime.now()
+        default_name = timestamp.strftime("blend_plan_%Y%m%d_%H%M.xlsx")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Blend Plan XLSX",
+            default_name,
+            "Excel Workbooks (*.xlsx)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+        try:
+            SpreadsheetReportExporter.export_xlsx(
+                file_path,
+                [
+                    ("Blend Summary", blend_summary),
+                    ("Detailed Report", detailed_report),
+                    ("Material Destination Plan", material_destination_plan),
+                ],
+                report_title="BlendMaster - Manual Blend Plan",
+                report_datetime=timestamp,
+            )
+        except (SpreadsheetReportExportError, OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Export Blend Plan XLSX", str(exc)
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Blend Plan XLSX",
+            f"Blend Plan workbook exported to:\n{file_path}",
         )
 
     def choose_manual_blend_plan_columns(self):
@@ -18964,6 +19088,7 @@ class UserInputs(QMainWindow):
         self.sqlite_report_table.setRowCount(0)
         self.sqlite_report_table.setColumnCount(0)
         self.sqlite_report_status.setText("")
+        self.current_sqlite_report_df = pd.DataFrame()
 
     @staticmethod
     def is_read_only_report_query(query):
@@ -19046,7 +19171,131 @@ class UserInputs(QMainWindow):
         self.sqlite_report_status.setText(
             f"Query returned {len(df):,} row{'s' if len(df) != 1 else ''}."
         )
+        self.current_sqlite_report_df = df.copy()
         self.populate_dataframe_table(self.sqlite_report_table, df)
+
+    def current_sqlite_report_frame(self):
+        query = self.sqlite_report_query.text().strip()
+        if not self.is_read_only_report_query(query):
+            raise ValueError(
+                "Reports accepts one read-only SELECT or WITH query at a time."
+            )
+        connection = sqlite3.connect(get_database_path())
+        try:
+            self.configure_read_only_sqlite_connection(connection)
+            return pd.read_sql_query(query, connection)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def report_export_stem(value):
+        stem = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(value or "report")
+        ).strip("._")
+        return stem or "report"
+
+    def export_current_sqlite_report(self, export_format):
+        try:
+            report = self.current_sqlite_report_frame()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Export Database Report", f"Unable to run query: {exc}"
+            )
+            return
+        table_name = self.sqlite_report_selector.currentText() or "sqlite_report"
+        stem = self.report_export_stem(table_name)
+        timestamp = datetime.now()
+        suffix = str(export_format).lower()
+        file_filter = (
+            "Excel Workbooks (*.xlsx)" if suffix == "xlsx"
+            else "CSV Files (*.csv)"
+        )
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Database Report",
+            f"{stem}_{timestamp.strftime('%Y%m%d_%H%M')}.{suffix}",
+            file_filter,
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(f".{suffix}"):
+            file_path += f".{suffix}"
+        try:
+            if suffix == "xlsx":
+                SpreadsheetReportExporter.export_xlsx(
+                    file_path,
+                    [(table_name, report)],
+                    report_title=f"BlendMaster - {table_name}",
+                    report_datetime=timestamp,
+                )
+            else:
+                SpreadsheetReportExporter.export_csv(file_path, report)
+        except (SpreadsheetReportExportError, OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Export Database Report", str(exc)
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Database Report",
+            f"Database report exported to:\n{file_path}",
+        )
+
+    def export_all_sqlite_reports_xlsx(self):
+        tables = self.get_sqlite_report_tables()
+        if not tables:
+            QMessageBox.information(
+                self, "Export Database Reports", "No report tables are available."
+            )
+            return
+        timestamp = datetime.now()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export All Database Reports",
+            timestamp.strftime("blendmaster_database_reports_%Y%m%d_%H%M.xlsx"),
+            "Excel Workbooks (*.xlsx)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+        connection = sqlite3.connect(get_database_path())
+        try:
+            self.configure_read_only_sqlite_connection(connection)
+            sheets = []
+            for table_name in tables:
+                escaped_name = str(table_name).replace('"', '""')
+                sheets.append((
+                    table_name,
+                    pd.read_sql_query(
+                        f'SELECT * FROM "{escaped_name}"', connection
+                    ),
+                ))
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Export Database Reports",
+                f"Unable to read database reports: {exc}",
+            )
+            return
+        finally:
+            connection.close()
+        try:
+            SpreadsheetReportExporter.export_xlsx(
+                file_path,
+                sheets,
+                report_title="BlendMaster - Database Reports",
+                report_datetime=timestamp,
+            )
+        except (SpreadsheetReportExportError, OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Export Database Reports", str(exc)
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Database Reports",
+            f"All database tables exported to:\n{file_path}",
+        )
 
     @staticmethod
     def is_additive_tonne_column(header):
