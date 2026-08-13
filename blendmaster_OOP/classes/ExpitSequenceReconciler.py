@@ -28,9 +28,24 @@ AUDIT_COLUMNS = [
     "actual_first_sequence",
     "actual_last_sequence",
     "updated_sequence",
+    "aps_planned_wmt",
+    "actual_schedule_wmt",
+    "aps_remaining_wmt",
     "planned_wmt",
     "actual_wmt",
     "remaining_wmt",
+    "geological_data_available",
+    "nominal_geological_wmt",
+    "nominal_geological_dmt",
+    "cumulative_actual_wmt",
+    "estimated_geological_remaining_wmt",
+    "aps_share_of_nominal_pct",
+    "geological_depletion_pct",
+    "geological_material",
+    "geological_is_ore",
+    "geological_record_created_dt",
+    "geological_warning",
+    "schedule_completion_pct",
     "completion_ratio",
     "completion_tolerance_pct",
     "completion_status",
@@ -166,6 +181,7 @@ class ExpitSequenceResult:
     transactions: pd.DataFrame
     audit: pd.DataFrame
     geometry: pd.DataFrame
+    geological_blocks: pd.DataFrame
     actual_movements: pd.DataFrame
     summary: dict
     warnings: list
@@ -272,6 +288,180 @@ class ExpitSequenceReconciler:
             & frame["easting"].notna()
             & frame["northing"].notna()
         ].sort_values(["grade_block_key", "point"], na_position="last")
+
+    @staticmethod
+    def normalize_geological_blocks(blocks):
+        """Normalize the active GRADE_BLOCKS snapshot used by the route audit."""
+        frame = blocks.copy() if isinstance(blocks, pd.DataFrame) else pd.DataFrame()
+        columns = [
+            "full_name", "grade_block_key", "mine_code", "location_no",
+            "phase", "blast_rl", "blast_no", "flitch_rl", "gb_name",
+            "nominal_geological_wmt", "nominal_geological_dmt",
+            "geological_material", "geological_is_ore",
+            "geological_record_created_dt",
+        ]
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+        aliases = {
+            "FULL_NAME": "full_name",
+            "MINE_CODE": "mine_code",
+            "LOCATION_NO": "location_no",
+            "PHASE": "phase",
+            "BLAST_RL": "blast_rl",
+            "BLAST_NO": "blast_no",
+            "FLITCH_RL": "flitch_rl",
+            "GB_NAME": "gb_name",
+            "GB_WET_TONNES": "nominal_geological_wmt",
+            "GB_DRY_TONNES": "nominal_geological_dmt",
+            "GB_MATERIAL": "geological_material",
+            "IS_ORE": "geological_is_ore",
+            "RECORD_CREATED_DT": "geological_record_created_dt",
+        }
+        frame = frame.rename(columns={
+            column: aliases.get(str(column).upper(), column)
+            for column in frame.columns
+        })
+        for column in aliases.values():
+            if column not in frame:
+                frame[column] = pd.NA
+        missing_name = frame["full_name"].isna() | frame["full_name"].astype(
+            str
+        ).str.strip().isin({"", "nan", "None", "<NA>"})
+        if missing_name.any():
+            frame.loc[missing_name, "full_name"] = frame.loc[missing_name].apply(
+                lambda row: "_".join(_first_text(row.get(column)) for column in (
+                    "location_no", "phase", "blast_rl", "blast_no",
+                    "flitch_rl", "gb_name",
+                )),
+                axis=1,
+            )
+        frame["grade_block_key"] = frame["full_name"].map(grade_block_key)
+        for column in (
+            "nominal_geological_wmt", "nominal_geological_dmt",
+        ):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["geological_record_created_dt"] = pd.to_datetime(
+            frame["geological_record_created_dt"], errors="coerce"
+        )
+        source_order = frame.index
+        frame["__source_order"] = source_order
+        frame = frame[frame["grade_block_key"].ne("")].sort_values(
+            [
+                "grade_block_key", "geological_record_created_dt",
+                "__source_order",
+            ],
+            na_position="first",
+        ).drop_duplicates("grade_block_key", keep="last")
+        return frame[columns].reset_index(drop=True)
+
+    @staticmethod
+    def normalize_cumulative_actual(cumulative_actual):
+        """Normalize lifetime ExPit tonnes used only for geological depletion."""
+        frame = (
+            cumulative_actual.copy()
+            if isinstance(cumulative_actual, pd.DataFrame) else pd.DataFrame()
+        )
+        columns = [
+            "grade_block_key", "cumulative_actual_wmt",
+            "cumulative_first_actual_datetime", "cumulative_last_actual_datetime",
+        ]
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+        aliases = {
+            "FULL_NAME": "full_name",
+            "SOURCE_FMS": "full_name",
+            "CUMULATIVE_ACTUAL_WMT": "cumulative_actual_wmt",
+            "CUMULATIVE_FIRST_ACTUAL_DATETIME": "cumulative_first_actual_datetime",
+            "CUMULATIVE_LAST_ACTUAL_DATETIME": "cumulative_last_actual_datetime",
+        }
+        frame = frame.rename(columns={
+            column: aliases.get(str(column).upper(), column)
+            for column in frame.columns
+        })
+        for column in aliases.values():
+            if column not in frame:
+                frame[column] = pd.NA
+        frame["grade_block_key"] = frame["full_name"].map(grade_block_key)
+        frame["cumulative_actual_wmt"] = pd.to_numeric(
+            frame["cumulative_actual_wmt"], errors="coerce"
+        )
+        for column in (
+            "cumulative_first_actual_datetime", "cumulative_last_actual_datetime",
+        ):
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
+        frame = frame[
+            frame["grade_block_key"].ne("")
+            & frame["cumulative_actual_wmt"].notna()
+        ]
+        if frame.empty:
+            return pd.DataFrame(columns=columns)
+        return frame.groupby("grade_block_key", as_index=False).agg({
+            "cumulative_actual_wmt": "sum",
+            "cumulative_first_actual_datetime": "min",
+            "cumulative_last_actual_datetime": "max",
+        })[columns]
+
+    @staticmethod
+    def _geological_audit_values(
+        grade_block_key_value, aps_planned_wmt, geological_lookup,
+        cumulative_actual_lookup,
+    ):
+        geological = geological_lookup.get(grade_block_key_value)
+        cumulative = cumulative_actual_lookup.get(grade_block_key_value)
+        nominal_wmt = (
+            _finite(geological.get("nominal_geological_wmt"), float("nan"))
+            if geological is not None else float("nan")
+        )
+        nominal_dmt = (
+            _finite(geological.get("nominal_geological_dmt"), float("nan"))
+            if geological is not None else float("nan")
+        )
+        cumulative_wmt = (
+            _finite(cumulative.get("cumulative_actual_wmt"), float("nan"))
+            if cumulative is not None else float("nan")
+        )
+        warning = ""
+        if geological is None:
+            warning = "No active nominal grade-block record was matched."
+        elif not math.isfinite(nominal_wmt) or nominal_wmt <= 0:
+            warning = "Matched grade block has no positive nominal wet tonnes."
+        elif cumulative is None:
+            warning = "Cumulative ExPit actual tonnes were unavailable."
+        estimated_remaining = (
+            max(nominal_wmt - cumulative_wmt, 0.0)
+            if math.isfinite(nominal_wmt) and math.isfinite(cumulative_wmt)
+            else None
+        )
+        return {
+            "geological_data_available": bool(
+                geological is not None and math.isfinite(nominal_wmt)
+                and nominal_wmt > 0
+            ),
+            "nominal_geological_wmt": nominal_wmt if math.isfinite(nominal_wmt) else None,
+            "nominal_geological_dmt": nominal_dmt if math.isfinite(nominal_dmt) else None,
+            "cumulative_actual_wmt": cumulative_wmt if math.isfinite(cumulative_wmt) else None,
+            "estimated_geological_remaining_wmt": estimated_remaining,
+            "aps_share_of_nominal_pct": (
+                aps_planned_wmt / nominal_wmt * 100.0
+                if math.isfinite(nominal_wmt) and nominal_wmt > 0 else None
+            ),
+            "geological_depletion_pct": (
+                cumulative_wmt / nominal_wmt * 100.0
+                if math.isfinite(nominal_wmt) and nominal_wmt > 0
+                and math.isfinite(cumulative_wmt) else None
+            ),
+            "geological_material": (
+                geological.get("geological_material") if geological is not None else None
+            ),
+            "geological_is_ore": (
+                geological.get("geological_is_ore") if geological is not None else None
+            ),
+            "geological_record_created_dt": (
+                geological.get("geological_record_created_dt")
+                if geological is not None else None
+            ),
+            "geological_warning": warning,
+        }
 
     @staticmethod
     def centroids(geometry):
@@ -456,6 +646,8 @@ class ExpitSequenceReconciler:
         planned_transactions,
         actual_movements,
         geometry=None,
+        geological_blocks=None,
+        cumulative_actual=None,
         schedule_start=None,
         as_of=None,
     ):
@@ -467,7 +659,9 @@ class ExpitSequenceReconciler:
         if planned.empty:
             return ExpitSequenceResult(
                 planned, pd.DataFrame(columns=AUDIT_COLUMNS),
-                self.normalize_geometry(geometry), pd.DataFrame(), {}, [],
+                self.normalize_geometry(geometry),
+                self.normalize_geological_blocks(geological_blocks),
+                pd.DataFrame(), {}, [],
             )
 
         for column in ("start_datetime", "delivered_datetime"):
@@ -493,7 +687,17 @@ class ExpitSequenceReconciler:
 
         actual = self.normalize_actual_movements(actual_movements)
         geometry = self.normalize_geometry(geometry)
+        geological_blocks = self.normalize_geological_blocks(geological_blocks)
+        cumulative_actual = self.normalize_cumulative_actual(cumulative_actual)
         centroids = self.centroids(geometry)
+        geological_lookup = {
+            row["grade_block_key"]: row
+            for _, row in geological_blocks.iterrows()
+        }
+        cumulative_actual_lookup = {
+            row["grade_block_key"]: row
+            for _, row in cumulative_actual.iterrows()
+        }
         as_of = _perth_naive_timestamp(as_of or pd.Timestamp.now())
         minimum_start = planned["start_datetime"].dropna().min()
         schedule_start = _perth_naive_timestamp(
@@ -628,6 +832,10 @@ class ExpitSequenceReconciler:
                 else:
                     status = "Not started"
                 remaining_wmt = 0.0 if force_complete else max(planned_wmt - actual_wmt, 0.0)
+                geological_values = self._geological_audit_values(
+                    geometry_key, planned_wmt, geological_lookup,
+                    cumulative_actual_lookup,
+                )
                 if not retained.empty and remaining_wmt > 0:
                     remaining_frames[key] = retained
                     remaining_keys.append(key)
@@ -641,9 +849,14 @@ class ExpitSequenceReconciler:
                     "actual_first_sequence": actual_first.get(key),
                     "actual_last_sequence": actual_last.get(key),
                     "updated_sequence": None,
+                    "aps_planned_wmt": planned_wmt,
+                    "actual_schedule_wmt": actual_wmt,
+                    "aps_remaining_wmt": remaining_wmt,
                     "planned_wmt": planned_wmt,
                     "actual_wmt": actual_wmt,
                     "remaining_wmt": remaining_wmt,
+                    **geological_values,
+                    "schedule_completion_pct": ratio * 100.0,
                     "completion_ratio": ratio,
                     "completion_tolerance_pct": self.tolerance * 100.0,
                     "completion_status": status,
@@ -751,6 +964,9 @@ class ExpitSequenceReconciler:
             for key in unmatched_keys:
                 rows = agent_actual_context[agent_actual_context["grade_block_key"] == key]
                 parent = rows["parent_grade_block"].iloc[-1] if not rows.empty else key
+                geological_values = self._geological_audit_values(
+                    key, 0.0, geological_lookup, cumulative_actual_lookup,
+                )
                 audit_rows.append({
                     "agent": agent,
                     "record_type": "unmatched_actual_context",
@@ -761,9 +977,14 @@ class ExpitSequenceReconciler:
                     "actual_first_sequence": actual_first.get(key),
                     "actual_last_sequence": actual_last.get(key),
                     "updated_sequence": None,
+                    "aps_planned_wmt": 0.0,
+                    "actual_schedule_wmt": _finite(actual_totals.get(key)),
+                    "aps_remaining_wmt": 0.0,
                     "planned_wmt": 0.0,
                     "actual_wmt": _finite(actual_totals.get(key)),
                     "remaining_wmt": 0.0,
+                    **geological_values,
+                    "schedule_completion_pct": None,
                     "completion_ratio": None,
                     "completion_tolerance_pct": self.tolerance * 100.0,
                     "completion_status": "Actual only - route evidence",
@@ -780,6 +1001,16 @@ class ExpitSequenceReconciler:
             geometry_coverage = (
                 sum(
                     geometry_keys.get(key, key) in centroids
+                    for key in original_keys
+                ) / len(original_keys)
+                if original_keys else 0.0
+            )
+            geological_coverage = (
+                sum(
+                    bool(self._geological_audit_values(
+                        geometry_keys.get(key, key), 0.0, geological_lookup,
+                        cumulative_actual_lookup,
+                    )["geological_data_available"])
                     for key in original_keys
                 ) / len(original_keys)
                 if original_keys else 0.0
@@ -862,6 +1093,7 @@ class ExpitSequenceReconciler:
                 "course_correction_applied": needs_course_correction,
                 "course_correction_reason": "; ".join(correction_reasons),
                 "geometry_coverage_pct": geometry_coverage * 100.0,
+                "geological_coverage_pct": geological_coverage * 100.0,
                 "confidence": confidence,
                 "latest_actual_parent": (
                     agent_actual_context["parent_grade_block"].iloc[-1]
@@ -889,6 +1121,7 @@ class ExpitSequenceReconciler:
             updated.reset_index(drop=True),
             audit,
             geometry.reset_index(drop=True),
+            geological_blocks.reset_index(drop=True),
             actual.reset_index(drop=True),
             summary,
             warnings,

@@ -102,6 +102,28 @@ completion and remaining WMT at parent level, but preserves the APS slice and
 payload rows internally so their timing, grades, destinations and haulage
 properties remain authoritative for the solver.
 
+The parent audit also queries the latest active matching record in
+`DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS`, using only the parent identity,
+`GB_WET_TONNES`, `GB_DRY_TONNES`, `GB_MATERIAL`, `IS_ORE` and record timestamp.
+These geological values are context only: they never create payloads or replace
+the APS schedule. The displayed measures distinguish:
+
+- `aps_planned_wmt`: APS `Mining.wetTonnes` summed across slices of the parent;
+- `actual_schedule_wmt`: ExPit WMT inside the schedule-to-scenario-start window;
+- `aps_remaining_wmt`: scheduled tonnes still retained as future payloads;
+- `nominal_geological_wmt` / `nominal_geological_dmt`: original active grade-
+  block model tonnes;
+- `cumulative_actual_wmt`: all non-deleted ExPit WMT for the parent up to the
+  audit time;
+- `estimated_geological_remaining_wmt`: nominal WMT less cumulative actual WMT,
+  clamped at zero;
+- `aps_share_of_nominal_pct`: scheduled APS WMT as a share of nominal WMT; and
+- `geological_depletion_pct`: cumulative actual WMT as a share of nominal WMT.
+
+Schedule completion alone controls APS payload removal. Geological completion
+is an audit signal and may exceed 100% where surveyed/transaction precision or
+model revisions differ; that condition does not change scheduled payloads.
+
 The **Grade Block Completion Tolerance** defaults to 10%. A parent is complete
 when actual WMT is at least 90% of planned WMT; an overrun above 110% is also
 complete. A partial parent retains `max(planned WMT - actual WMT, 0)`, consumed
@@ -126,7 +148,8 @@ default interval. The corresponding SQLite audit tables are:
 - `expit_sequence_reconciliation_audit`;
 - `expit_sequence_reconciliation_summary`;
 - `expit_sequence_actual_movements`; and
-- `expit_sequence_geometry`.
+- `expit_sequence_geometry`; and
+- `expit_sequence_geological_blocks`.
 
 After an optimised, contingency or manual plan is produced, **Closing ROM
 Stocks Compliance** appears directly after **Build and Depletion Profiles** in

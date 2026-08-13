@@ -1238,11 +1238,14 @@ class DatabaseManager:
         attributes = dict(attributes or {})
         audit = attributes.get("expit_sequence_audit")
         geometry = attributes.get("expit_sequence_geometry")
+        geological_blocks = attributes.get(
+            "expit_sequence_geological_blocks"
+        )
         actual = attributes.get("expit_sequence_actual_movements")
         summary = attributes.get("expit_sequence_summary") or {}
         if not any(
             isinstance(frame, pd.DataFrame)
-            for frame in (audit, geometry, actual)
+            for frame in (audit, geometry, geological_blocks, actual)
         ):
             return
 
@@ -1252,6 +1255,7 @@ class DatabaseManager:
             for table_name, frame in (
                 ("expit_sequence_reconciliation_audit", audit),
                 ("expit_sequence_geometry", geometry),
+                ("expit_sequence_geological_blocks", geological_blocks),
                 ("expit_sequence_actual_movements", actual),
             ):
                 if isinstance(frame, pd.DataFrame):

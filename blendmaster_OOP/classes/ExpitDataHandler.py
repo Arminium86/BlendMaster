@@ -2536,6 +2536,173 @@ class ExpitDataHandler:
         finally:
             connection.close()
 
+    def fetch_grade_block_geological_audit(self, block_names, as_of):
+        """Fetch nominal block tonnes and lifetime ExPit progress for auditing.
+
+        This snapshot is deliberately separate from APS payload construction:
+        GRADE_BLOCKS supplies geological context only, while APS remains the
+        authority for scheduled tonnes, timing, destinations, and properties.
+        """
+        names = sorted({polygon_lookup_name(name) for name in block_names})
+        names = [name for name in names if name]
+        empty_blocks = pd.DataFrame()
+        empty_actual = pd.DataFrame()
+        if not names:
+            return empty_blocks, empty_actual
+        connection = self.connect_snowflake_with_service_account()
+        if connection is None:
+            raise ConnectionError(
+                "Snowflake connection unavailable for nominal grade-block tonnes."
+            )
+        parameters = {"as_of": pd.Timestamp(as_of).to_pydatetime()}
+        requested_rows = []
+        for index, name in enumerate(names):
+            parameters[f"block_{index}"] = name
+            parameters[f"key_{index}"] = grade_block_key(name)
+            requested_rows.append(
+                f"(%(block_{index})s, %(key_{index})s)"
+            )
+        requested_values = ", ".join(requested_rows)
+        full_name = """
+            CONCAT(
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(LOCATION_NO)), '[^A-Z0-9]', ''), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(PHASE)), UPPER(TO_VARCHAR(PHASE))), 2, '0'), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_RL)), UPPER(TO_VARCHAR(BLAST_RL))), 4, '0'), '_',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_NO)), UPPER(TO_VARCHAR(BLAST_NO))), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL)), UPPER(TO_VARCHAR(FLITCH_RL))), 4, '0'), '_',
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(GB_NAME)), '[^A-Z0-9]', '')
+            )
+        """
+        block_key = """
+            CONCAT(
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(LOCATION_NO)), '[^A-Z0-9]', ''), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(PHASE)), REGEXP_REPLACE(UPPER(TO_VARCHAR(PHASE)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_RL)), REGEXP_REPLACE(UPPER(TO_VARCHAR(BLAST_RL)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_NO)), REGEXP_REPLACE(UPPER(TO_VARCHAR(BLAST_NO)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL)), REGEXP_REPLACE(UPPER(TO_VARCHAR(FLITCH_RL)), '[^A-Z0-9]', '')), '|',
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(GB_NAME)), '[^A-Z0-9]', '')
+            )
+        """
+        actual_identity = """
+            COALESCE(
+                NULLIF(TRIM(TO_VARCHAR(SOURCE_FMS)), ''),
+                TRIM(TO_VARCHAR(SOURCE))
+            )
+        """
+        actual_key = f"""
+            CONCAT(
+                REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -6)), '[^A-Z0-9]', ''), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(SPLIT_PART({actual_identity}, '_', -5))), REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -5)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(SPLIT_PART({actual_identity}, '_', -4))), REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -4)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(SPLIT_PART({actual_identity}, '_', -3))), REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -3)), '[^A-Z0-9]', '')), '|',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(SPLIT_PART({actual_identity}, '_', -2))), REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -2)), '[^A-Z0-9]', '')), '|',
+                REGEXP_REPLACE(UPPER(SPLIT_PART({actual_identity}, '_', -1)), '[^A-Z0-9]', '')
+            )
+        """
+        query = f"""
+            WITH REQUESTED_BLOCKS AS (
+                SELECT
+                    COLUMN1::STRING AS FULL_NAME,
+                    COLUMN2::STRING AS BLOCK_KEY
+                FROM VALUES {requested_values}
+            ),
+            ACTIVE_BLOCKS AS (
+                SELECT
+                    {full_name} AS FULL_NAME,
+                    {block_key} AS BLOCK_KEY,
+                    MINE_CODE,
+                    LOCATION_NO,
+                    PHASE,
+                    BLAST_RL,
+                    BLAST_NO,
+                    FLITCH_RL,
+                    GB_NAME,
+                    GB_WET_TONNES,
+                    GB_DRY_TONNES,
+                    GB_MATERIAL,
+                    IS_ORE,
+                    RECORD_CREATED_DT
+                FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS
+                WHERE RECORD_ACTIVE_FLAG = 'Y'
+                  AND {block_key} IN (SELECT BLOCK_KEY FROM REQUESTED_BLOCKS)
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY {block_key}
+                    ORDER BY RECORD_CREATED_DT DESC NULLS LAST
+                ) = 1
+            ),
+            CUMULATIVE_ACTUAL AS (
+                SELECT
+                    {actual_key} AS BLOCK_KEY,
+                    SUM(WMT_REPORTING) AS CUMULATIVE_ACTUAL_WMT,
+                    MIN(TRANSACTION_DATETIME) AS CUMULATIVE_FIRST_ACTUAL_DATETIME,
+                    MAX(TRANSACTION_DATETIME) AS CUMULATIVE_LAST_ACTUAL_DATETIME
+                FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
+                WHERE MOVEMENT_TYPE = 'ExPit'
+                  AND TRANSACTION_DATETIME <= %(as_of)s
+                  AND COALESCE(IS_DELETED, FALSE) = FALSE
+                  AND {actual_key} IN (
+                      SELECT BLOCK_KEY FROM REQUESTED_BLOCKS
+                  )
+                GROUP BY {actual_key}
+            )
+            SELECT
+                REQUESTED.FULL_NAME,
+                BLOCKS.MINE_CODE,
+                BLOCKS.LOCATION_NO,
+                BLOCKS.PHASE,
+                BLOCKS.BLAST_RL,
+                BLOCKS.BLAST_NO,
+                BLOCKS.FLITCH_RL,
+                BLOCKS.GB_NAME,
+                BLOCKS.GB_WET_TONNES,
+                BLOCKS.GB_DRY_TONNES,
+                BLOCKS.GB_MATERIAL,
+                BLOCKS.IS_ORE,
+                BLOCKS.RECORD_CREATED_DT,
+                IFF(BLOCKS.FULL_NAME IS NOT NULL, TRUE, FALSE)
+                    AS GRADE_BLOCK_RECORD_FOUND,
+                ACTUAL.CUMULATIVE_ACTUAL_WMT,
+                ACTUAL.CUMULATIVE_FIRST_ACTUAL_DATETIME,
+                ACTUAL.CUMULATIVE_LAST_ACTUAL_DATETIME
+            FROM REQUESTED_BLOCKS AS REQUESTED
+            LEFT JOIN ACTIVE_BLOCKS AS BLOCKS
+                ON BLOCKS.BLOCK_KEY = REQUESTED.BLOCK_KEY
+            LEFT JOIN CUMULATIVE_ACTUAL AS ACTUAL
+                ON ACTUAL.BLOCK_KEY = REQUESTED.BLOCK_KEY
+            ORDER BY REQUESTED.FULL_NAME
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, parameters)
+                rows = cursor.fetchall()
+                columns = [item[0] for item in cursor.description]
+            combined = pd.DataFrame(rows, columns=columns)
+            if combined.empty:
+                return empty_blocks, empty_actual
+            found = combined.get(
+                "GRADE_BLOCK_RECORD_FOUND",
+                pd.Series(False, index=combined.index),
+            ).fillna(False).astype(bool)
+            geological = combined.loc[found, [
+                "FULL_NAME", "MINE_CODE", "LOCATION_NO", "PHASE",
+                "BLAST_RL", "BLAST_NO", "FLITCH_RL", "GB_NAME",
+                "GB_WET_TONNES", "GB_DRY_TONNES", "GB_MATERIAL",
+                "IS_ORE", "RECORD_CREATED_DT",
+            ]].copy()
+            cumulative = combined[[
+                "FULL_NAME", "CUMULATIVE_ACTUAL_WMT",
+                "CUMULATIVE_FIRST_ACTUAL_DATETIME",
+                "CUMULATIVE_LAST_ACTUAL_DATETIME",
+            ]].copy()
+            # The requested-block left join makes a missing aggregate an
+            # authoritative zero, rather than an unavailable actual balance.
+            cumulative["CUMULATIVE_ACTUAL_WMT"] = pd.to_numeric(
+                cumulative["CUMULATIVE_ACTUAL_WMT"], errors="coerce"
+            ).fillna(0.0)
+            return geological, cumulative
+        finally:
+            connection.close()
+
     def update_transactions(
         self,
         expit_payload_transactions,
@@ -2543,6 +2710,8 @@ class ExpitDataHandler:
         completion_tolerance_pct=10.0,
         actual_movements=None,
         geometry=None,
+        geological_blocks=None,
+        cumulative_actual=None,
     ):
         """Reconcile APS payloads to actual parent-block mining progress.
 
@@ -2601,6 +2770,33 @@ class ExpitDataHandler:
                 "connection was unavailable for ExPit actual movements."
             )
 
+        if (
+            geological_blocks is None
+            and cumulative_actual is None
+            and not snowflake_connection_unavailable
+        ):
+            block_names = list(transactions.get("source", []))
+            if not normalized_actual.empty:
+                block_names.extend(
+                    normalized_actual["parent_grade_block"].tolist()
+                )
+            try:
+                (
+                    geological_blocks,
+                    cumulative_actual,
+                ) = self.fetch_grade_block_geological_audit(block_names, now)
+            except Exception as exc:
+                geological_blocks = pd.DataFrame()
+                cumulative_actual = pd.DataFrame()
+                warnings.append(
+                    "Nominal grade-block tonnes unavailable: " + str(exc)
+                )
+        else:
+            if geological_blocks is None:
+                geological_blocks = pd.DataFrame()
+            if cumulative_actual is None:
+                cumulative_actual = pd.DataFrame()
+
         result = ExpitSequenceReconciler(
             completion_tolerance_pct,
             getattr(self, "source_property_kinds", {}),
@@ -2608,6 +2804,8 @@ class ExpitDataHandler:
             transactions,
             normalized_actual,
             geometry,
+            geological_blocks=geological_blocks,
+            cumulative_actual=cumulative_actual,
             schedule_start=planned_start,
             as_of=now,
         )
@@ -2615,6 +2813,7 @@ class ExpitDataHandler:
         attributes = {
             "expit_sequence_audit": result.audit,
             "expit_sequence_geometry": result.geometry,
+            "expit_sequence_geological_blocks": result.geological_blocks,
             "expit_sequence_actual_movements": result.actual_movements,
             "expit_sequence_summary": result.summary,
             "expit_sequence_warnings": warnings + result.warnings,

@@ -4112,6 +4112,9 @@ class UserInputs(QMainWindow):
             "geometry": transactions.attrs.get(
                 "expit_sequence_geometry", pd.DataFrame()
             ),
+            "geological_blocks": transactions.attrs.get(
+                "expit_sequence_geological_blocks", pd.DataFrame()
+            ),
             "actual_movements": transactions.attrs.get(
                 "expit_sequence_actual_movements", pd.DataFrame()
             ),
@@ -4132,7 +4135,8 @@ class UserInputs(QMainWindow):
         self.expit_sequence_refresh_in_progress = True
         self.expit_sequence_refresh_button.setEnabled(False)
         self.expit_sequence_status_label.setText(
-            "Refreshing actual ExPit movements and grade-block geometry..."
+            "Refreshing actual ExPit movements, nominal block tonnes, and "
+            "grade-block geometry..."
         )
         self.run_background_task(
             "Refreshing Expit sequence reconciliation...",
@@ -4152,6 +4156,9 @@ class UserInputs(QMainWindow):
             ),
             "expit_sequence_geometry": self.expit_sequence_snapshot.get(
                 "geometry", pd.DataFrame()
+            ),
+            "expit_sequence_geological_blocks": self.expit_sequence_snapshot.get(
+                "geological_blocks", pd.DataFrame()
             ),
             "expit_sequence_actual_movements": self.expit_sequence_snapshot.get(
                 "actual_movements", pd.DataFrame()
@@ -4232,9 +4239,24 @@ class UserInputs(QMainWindow):
                 },
                 text=(
                     f"{block.get('parent_grade_block')}<br>"
-                    f"{status}<br>Planned {numeric(block.get('planned_wmt')) or 0:,.0f} t"
-                    f"<br>Actual {numeric(block.get('actual_wmt')) or 0:,.0f} t"
-                    f"<br>Remaining {numeric(block.get('remaining_wmt')) or 0:,.0f} t"
+                    f"{status}<br>APS planned {numeric(block.get('aps_planned_wmt')) or 0:,.0f} t"
+                    f"<br>Actual against schedule {numeric(block.get('actual_schedule_wmt')) or 0:,.0f} t"
+                    f"<br>APS remaining {numeric(block.get('aps_remaining_wmt')) or 0:,.0f} t"
+                    + (
+                        f"<br>Nominal geological {numeric(block.get('nominal_geological_wmt')):,.0f} t"
+                        if numeric(block.get("nominal_geological_wmt")) is not None
+                        else "<br>Nominal geological unavailable"
+                    )
+                    + (
+                        f"<br>Cumulative actual {numeric(block.get('cumulative_actual_wmt')):,.0f} t"
+                        if numeric(block.get("cumulative_actual_wmt")) is not None
+                        else ""
+                    )
+                    + (
+                        f"<br>Estimated geological remaining {numeric(block.get('estimated_geological_remaining_wmt')):,.0f} t"
+                        if numeric(block.get("estimated_geological_remaining_wmt")) is not None
+                        else ""
+                    )
                 ),
                 hovertemplate="%{text}<extra></extra>",
             ))
@@ -4348,9 +4370,16 @@ class UserInputs(QMainWindow):
             f"{'Applied' if agent_summary.get('course_correction_applied') else 'Not required'}"
             f"{(' (' + str(agent_summary.get('course_correction_reason')) + ')') if agent_summary.get('course_correction_reason') else ''} | "
             f"Geometry coverage: {float(agent_summary.get('geometry_coverage_pct', 0) or 0):.1f}% | "
+            f"Geological coverage: {float(agent_summary.get('geological_coverage_pct', 0) or 0):.1f}% | "
             f"Confidence: {agent_summary.get('confidence', 'Unknown')}"
         )
         agent_audit = audit[audit["agent"].astype(str) == agent].copy()
+        # The legacy fields remain in SQLite for downstream compatibility, but
+        # their explicit APS-labelled equivalents prevent ambiguous duplicate
+        # columns in the interactive audit.
+        agent_audit = agent_audit.drop(columns=[
+            "planned_wmt", "actual_wmt", "remaining_wmt", "completion_ratio",
+        ], errors="ignore")
         self.populate_dataframe_table(
             self.expit_sequence_audit_table,
             agent_audit,
@@ -5564,6 +5593,9 @@ class UserInputs(QMainWindow):
                 ),
                 "geometry": expit_attributes.get(
                     "expit_sequence_geometry", pd.DataFrame()
+                ),
+                "geological_blocks": expit_attributes.get(
+                    "expit_sequence_geological_blocks", pd.DataFrame()
                 ),
                 "actual_movements": expit_attributes.get(
                     "expit_sequence_actual_movements", pd.DataFrame()
