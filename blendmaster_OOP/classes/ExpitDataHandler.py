@@ -22,6 +22,11 @@ from classes.SourcePropertyMappings import (
     normalise_aps_source_property_mappings,
 )
 from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.ExpitSequenceReconciler import (
+    ExpitSequenceReconciler,
+    grade_block_key,
+    polygon_lookup_name,
+)
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 3
@@ -30,6 +35,7 @@ class ExpitDataHandler:
         "Source.Type",
         "Source.FullName",
         "Source.Pit",
+        "MutexParcel.ORETYPE",
         "Time.StartTime",
         "Time.EndTime",
         "Mining.wetTonnes",
@@ -69,6 +75,7 @@ class ExpitDataHandler:
         configured_product_brands=None,
         source_property_kinds=None,
         source_property_weights=None,
+        preserve_source_payloads_for_reconciliation=False,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
@@ -100,6 +107,9 @@ class ExpitDataHandler:
         self.configured_product_brands = configured_product_brands or []
         self.source_property_kinds = dict(source_property_kinds or {})
         self.source_property_weights = dict(source_property_weights or {})
+        self.preserve_source_payloads_for_reconciliation = bool(
+            preserve_source_payloads_for_reconciliation
+        )
         self.grade_field_mappings = normalise_aps_grade_field_mappings(
             grade_field_mappings, self.configured_product_brands
         )
@@ -1428,12 +1438,21 @@ class ExpitDataHandler:
         destination_type = (
             data["Destination.Type"].astype("string").str.strip().str.lower()
         )
+        route_only_waste = (
+            source_type.eq("waste")
+            | data.get(
+                "MutexParcel.ORETYPE",
+                pd.Series("", index=data.index),
+            ).astype(str).str.contains("waste", case=False, na=False)
+        )
+        waste_rows = data[route_only_waste].copy()
         movements = data[
             (source_type == "reserve")
+            & ~route_only_waste
             & destination_type.isin({"stockpile", "crusher"})
         ].copy()
         if movements.empty:
-            return movements
+            return waste_rows.reset_index(drop=True)
         if "Source.Pit" not in movements.columns:
             movements["Source.Pit"] = ""
 
@@ -1511,15 +1530,23 @@ class ExpitDataHandler:
                     if resolution == "exact_2wp" else None
                 )
                 expanded_rows.append(split_row)
-        if not expanded_rows:
-            return movements.iloc[0:0].copy()
-        return pd.DataFrame(expanded_rows).reset_index(drop=True)
+        guided_rows = (
+            pd.DataFrame(expanded_rows)
+            if expanded_rows else movements.iloc[0:0].copy()
+        )
+        if not waste_rows.empty:
+            guided_rows = pd.concat(
+                [guided_rows, waste_rows], ignore_index=True, sort=False
+            )
+        return guided_rows.reset_index(drop=True)
 
     def _preprocess_data(self):
         if "Destination.Name" not in self.data.columns:
             self.data["Destination.Name"] = self.data.get("Destination.FullName", "")
         if "Source.Pit" not in self.data.columns:
             self.data["Source.Pit"] = ""
+        if "MutexParcel.ORETYPE" not in self.data.columns:
+            self.data["MutexParcel.ORETYPE"] = ""
         selected_agent_names = getattr(self, "selected_agent_names", set())
         if selected_agent_names:
             self.data = self.data[
@@ -1602,9 +1629,25 @@ class ExpitDataHandler:
 
         # Stockpile destinations remain the planned APS builds. Selected crusher
         # destinations are added as re-evaluable direct-tip candidates.
+        source_type = self.data["Source.Type"].astype(str).str.strip().str.lower()
+        route_only_waste = (
+            source_type.eq("waste")
+            | self.data["MutexParcel.ORETYPE"].astype(str)
+              .str.contains("waste", case=False, na=False)
+        )
         transaction_mask = (
-            (self.data["Source.Type"] == "Reserve")
-            & (stockpile_destination_mask | crusher_destination_mask)
+            (
+                source_type.eq("reserve")
+                & (stockpile_destination_mask | crusher_destination_mask)
+            )
+            | (
+                route_only_waste
+                & bool(getattr(
+                    self,
+                    "preserve_source_payloads_for_reconciliation",
+                    False,
+                ))
+            )
         )
         self.data = self.data[transaction_mask].sort_values(
             by=["Agent.Name", "Time.StartTime", "Source.FullName", "Destination.FullName"]
@@ -1771,6 +1814,15 @@ class ExpitDataHandler:
         return False
 
     def _group_data(self):
+        # Preserve non-contiguous returns to the same grade block. Grouping on
+        # source/destination alone previously collapsed A > B > A into one A
+        # record and removed the evidence needed to detect face reversals.
+        sequence_identity = self.data[[
+            "Agent.Name", "Source.FullName", "Destination.FullName"
+        ]].astype(str).agg("|".join, axis=1)
+        self.data["__sequence_segment"] = (
+            sequence_identity.ne(sequence_identity.shift()).cumsum()
+        )
         # Create WeightedRate column without directly inserting into the fragmented DataFrame
         weighted_rate = self.data["HaulageResult.LoaderProductionRate.Wtph"] * self.data["Mining.wetTonnes"]
 
@@ -1934,6 +1986,8 @@ class ExpitDataHandler:
                 "two_wp_turnover_guidance_applicable",
                 "two_wp_first_reclaim_datetime",
                 "two_wp_destination_turnover_priority",
+                "MutexParcel.ORETYPE",
+                "__sequence_segment",
             ],
             as_index=False,
             dropna=False,
@@ -2069,6 +2123,17 @@ class ExpitDataHandler:
                     row_source_properties = self._payload_source_properties(
                         row, payload, tonnes
                     )
+                    route_material = str(
+                        row.get("MutexParcel.ORETYPE", "") or ""
+                    ).strip()
+                    if not route_material:
+                        route_material = str(
+                            row.get("Source.Type", "") or ""
+                        ).strip()
+                    route_only_waste = (
+                        str(row.get("Source.Type", "")).strip().lower() == "waste"
+                        or "waste" in route_material.lower()
+                    )
                     row_grade_streams = reweight_grade_streams_from_properties(
                         row_grade_streams, row_source_properties
                     )
@@ -2110,6 +2175,9 @@ class ExpitDataHandler:
                             "grade_streams": row_grade_streams,
                             "source_properties": dict(row_source_properties),
                             "delivered_datetime": delivery_time,
+                            "route_material": route_material,
+                            "route_only_waste": route_only_waste,
+                            "route_segment": row.get("__sequence_segment"),
                             **destination_metadata,
                         })
 
@@ -2134,7 +2202,18 @@ class ExpitDataHandler:
                             next_start_time = next_row["Time.StartTime"]
                             next_destination = next_row["Destination.FullName"]
 
-                            if next_start_time == row["Time.EndTime"] and next_destination == destination:
+                            same_source = (
+                                str(next_row.get("Source.FullName", ""))
+                                == str(source_name)
+                            )
+                            if (
+                                next_start_time == row["Time.EndTime"]
+                                and next_destination == destination
+                                and (
+                                    not self.preserve_source_payloads_for_reconciliation
+                                    or same_source
+                                )
+                            ):
                                 top_up_tonnes = min(payload - fractional_tonnes, group.at[i + 1, "Mining.wetTonnes"])
                                 fractional_tonnes += top_up_tonnes
 
@@ -2268,6 +2347,9 @@ class ExpitDataHandler:
                             "grade_streams": weighted_grade_streams,
                             "source_properties": weighted_source_properties,
                             "delivered_datetime": delivery_time,
+                            "route_material": route_material,
+                            "route_only_waste": route_only_waste,
+                            "route_segment": row.get("__sequence_segment"),
                             **destination_metadata,
                         })
 
@@ -2355,83 +2437,190 @@ class ExpitDataHandler:
             if 'conn' in locals() and conn:
                 conn.close()
 
-    def update_transactions(self, expit_payload_transactions, now):
-       
-        if not self.data.empty:   
-            
-            updated_transactions = expit_payload_transactions
-            
-            # Process transactions grouped by `agent`
-            grouped = updated_transactions.groupby("agent")
-            
-            updated_groups = []  # Store updated groups here
-            
-            for agent, group in grouped:
-                # Get latest block info for the agent
-                current_block_name, current_block_mined_tonnes = self.get_latest_block_and_mined_tonnes(agent)
+    @staticmethod
+    def _expit_agent_predicate(agents, parameters):
+        clauses = []
+        for index, agent in enumerate(agents or []):
+            parameter = f"agent_{index}"
+            parameters[parameter] = str(agent).strip()
+            clauses.append(
+                f"CONTAINS(UPPER(LOAD_EQUIPMENT), UPPER(%({parameter})s))"
+            )
+        return "(" + " OR ".join(clauses) + ")" if clauses else "1 = 1"
 
-                if current_block_mined_tonnes and current_block_name:
+    def fetch_actual_expit_movements(self, agents, context_start, as_of):
+        """Fetch chronological actual ExPit movements for selected agents."""
+        connection = self.connect_snowflake_with_service_account()
+        if connection is None:
+            raise ConnectionError(
+                "Snowflake connection unavailable for Expit sequence reconciliation."
+            )
+        parameters = {
+            "context_start": pd.Timestamp(context_start).to_pydatetime(),
+            "as_of": pd.Timestamp(as_of).to_pydatetime(),
+        }
+        agent_predicate = self._expit_agent_predicate(agents, parameters)
+        query = f"""
+            SELECT
+                LOAD_EQUIPMENT AS AGENT,
+                SOURCE AS SOURCE_ACTUAL,
+                SOURCE_FMS,
+                TRANSACTION_DATETIME,
+                WMT_REPORTING AS ACTUAL_WMT,
+                MOVEMENT_TYPE
+            FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
+            WHERE MOVEMENT_TYPE = 'ExPit'
+              AND TRANSACTION_DATETIME >= %(context_start)s
+              AND TRANSACTION_DATETIME <= %(as_of)s
+              AND {agent_predicate}
+              AND COALESCE(IS_DELETED, FALSE) = FALSE
+            ORDER BY LOAD_EQUIPMENT, TRANSACTION_DATETIME, SOURCE_FMS
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, parameters)
+                rows = cursor.fetchall()
+                columns = [item[0] for item in cursor.description]
+            return pd.DataFrame(rows, columns=columns)
+        finally:
+            connection.close()
 
-                    # Sort transactions for the agent
-                    group = group.sort_values(by=["start_datetime"]).reset_index()
+    def fetch_grade_block_geometry(self, block_names):
+        """Fetch polygon vertices for parent grade blocks used by the route."""
+        names = sorted({polygon_lookup_name(name) for name in block_names})
+        names = [name for name in names if name]
+        if not names:
+            return pd.DataFrame()
+        connection = self.connect_snowflake_with_service_account()
+        if connection is None:
+            raise ConnectionError(
+                "Snowflake connection unavailable for grade-block geometry."
+            )
+        parameters = {f"block_{index}": name for index, name in enumerate(names)}
+        placeholders = ", ".join(f"%(block_{index})s" for index in range(len(names)))
+        # Build the underscore-delimited parent identity explicitly from the
+        # columns in the supplied catalog query. This avoids depending on a
+        # SELECT alias named FULL_NAME being available in the base table and
+        # normalizes numeric components whose stored values omit leading zeroes.
+        full_name = """
+            CONCAT(
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(LOCATION_NO)), '[^A-Z0-9]', ''), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(PHASE)), UPPER(TO_VARCHAR(PHASE))), 2, '0'), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_RL)), UPPER(TO_VARCHAR(BLAST_RL))), 4, '0'), '_',
+                COALESCE(TO_VARCHAR(TRY_TO_NUMBER(BLAST_NO)), UPPER(TO_VARCHAR(BLAST_NO))), '_',
+                LPAD(COALESCE(TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL)), UPPER(TO_VARCHAR(FLITCH_RL))), 4, '0'), '_',
+                REGEXP_REPLACE(UPPER(TO_VARCHAR(GB_NAME)), '[^A-Z0-9]', '')
+            )
+        """
+        query = f"""
+            SELECT
+                {full_name} AS FULL_NAME,
+                GB_NAME,
+                POINT,
+                EASTING,
+                NORTHING,
+                ELEVATION,
+                FLITCH_RL AS ELEVATION_NAME,
+                RECORD_CREATED_DT
+            FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCK_POLYGON_POINTS
+            WHERE {full_name} IN ({placeholders})
+              AND RECORD_ACTIVE_FLAG = 'Y'
+            ORDER BY FULL_NAME, POINT
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, parameters)
+                rows = cursor.fetchall()
+                columns = [item[0] for item in cursor.description]
+            return pd.DataFrame(rows, columns=columns)
+        finally:
+            connection.close()
 
-                    # Find the first row where `current_block_name` matches
-                    filtered_rows = group[group["source"].str.contains(current_block_name, na=False)]
-                        
-                    if not filtered_rows.empty:
-                        block_row = filtered_rows.iloc[0]
-                        block_index = block_row.name  # Get index of the matching row
+    def update_transactions(
+        self,
+        expit_payload_transactions,
+        now,
+        completion_tolerance_pct=10.0,
+        actual_movements=None,
+        geometry=None,
+    ):
+        """Reconcile APS payloads to actual parent-block mining progress.
 
-                        # Skip rows until payload sum meets or exceeds `current_block_mined_tonnes`
-                        cumulative_payload = 0
-                        skip_until_index = None
-                        
-                        for idx in range(block_index, len(group)):
-                            cumulative_payload += group.at[idx, "payload"]
-                            if cumulative_payload >= current_block_mined_tonnes:
-                                skip_until_index = idx
-                                break
-                        
-                        # Keep only the rows after `skip_until_index`
-                        if skip_until_index is not None:
-                            group = group.iloc[skip_until_index:]
-                            
-                            # Calculate time difference and update `delivered_datetime`
-                            for idx, row in group.iterrows():
-                                if idx == skip_until_index:
-                                    # Compute time difference
-                                    time_diff = now - row["start_datetime"]
+        Every APS slice and payload remains intact internally. Actual movements
+        deduct tonnes at parent-grade-block level and determine route position;
+        unmatched actual blocks are audit/directional evidence only.
+        """
+        transactions = (
+            expit_payload_transactions.copy()
+            if isinstance(expit_payload_transactions, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if transactions.empty:
+            return transactions
 
-                                # Update `delivered_datetime`
-                                if time_diff.total_seconds() > 0:
-                                    updated_delivery_time = row["delivered_datetime"] + time_diff
-                                    updated_mining_start_time = row["start_datetime"] + time_diff
-                                else:
-                                    updated_delivery_time = row["delivered_datetime"] - abs(time_diff)
-                                    updated_mining_start_time = row["start_datetime"] - abs(time_diff)
+        planned_start = pd.to_datetime(
+            transactions["start_datetime"], errors="coerce"
+        ).min()
+        if pd.isna(planned_start):
+            planned_start = pd.Timestamp(now)
+        context_start = planned_start - pd.Timedelta(hours=24)
+        agents = list(dict.fromkeys(transactions["agent"].dropna().astype(str)))
+        warnings = []
 
-                                group.at[idx, "delivered_datetime"] = updated_delivery_time
-                                group.at[idx, "start_datetime"] = updated_mining_start_time
-            
-                        print(fr"Expit payload transactions updated for {agent}.")
-                    
-                    else:
-                        print(fr"Current block not found for {agent}. Original expit payload transactions will be executed for this agent.")
-                        block_row = None
-                        block_index = None
+        if actual_movements is None:
+            try:
+                actual_movements = self.fetch_actual_expit_movements(
+                    agents, context_start, now
+                )
+            except Exception as exc:
+                actual_movements = pd.DataFrame()
+                warnings.append(str(exc))
 
-                    # Append the updated group
-                    updated_groups.append(group)
+        normalized_actual = ExpitSequenceReconciler.normalize_actual_movements(
+            actual_movements
+        )
+        if geometry is None:
+            block_names = list(transactions.get("source", []))
+            if not normalized_actual.empty:
+                block_names.extend(
+                    normalized_actual["parent_grade_block"].tolist()
+                )
+            try:
+                geometry = self.fetch_grade_block_geometry(block_names)
+            except Exception as exc:
+                geometry = pd.DataFrame()
+                warnings.append(str(exc))
 
-                else: continue
-
-            # Concatenate all updated groups into one DataFrame
-            if not updated_groups:
-                return updated_transactions.reset_index(drop=True)
-
-            updated_transactions = pd.concat(updated_groups, ignore_index=True)
-            
-            return updated_transactions
+        result = ExpitSequenceReconciler(
+            completion_tolerance_pct,
+            getattr(self, "source_property_kinds", {}),
+        ).reconcile(
+            transactions,
+            normalized_actual,
+            geometry,
+            schedule_start=planned_start,
+            as_of=now,
+        )
+        updated = result.transactions
+        attributes = {
+            "expit_sequence_audit": result.audit,
+            "expit_sequence_geometry": result.geometry,
+            "expit_sequence_actual_movements": result.actual_movements,
+            "expit_sequence_summary": result.summary,
+            "expit_sequence_warnings": warnings + result.warnings,
+        }
+        for agent, summary in result.summary.get("agents", {}).items():
+            print(
+                f"Expit sequence reconciled for {agent}: "
+                f"{summary.get('completed_parent_blocks', 0)} complete, "
+                f"{summary.get('partial_parent_blocks', 0)} partial, "
+                f"{summary.get('remaining_parent_blocks', 0)} remaining; "
+                f"direction {summary.get('direction', 'unknown')}; "
+                f"confidence {summary.get('confidence', 'unknown')}."
+            )
+        updated = updated.reset_index(drop=True)
+        updated.attrs.update(attributes)
+        return updated
 
     def connect_snowflake_with_service_account(self):
         try:

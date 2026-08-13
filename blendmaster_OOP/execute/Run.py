@@ -98,6 +98,11 @@ class Run:
                 ExpitDataHandler.build_2wp_destination_guidance(reference_path)
             )
 
+        try:
+            interaction_mode = int(expit_mode)
+        except (TypeError, ValueError):
+            interaction_mode = 1
+
         handler = ExpitDataHandler(
             file_path,
             include_crusher_destinations=reevaluate_aps_direct_tip,
@@ -131,20 +136,30 @@ class Run:
                 and row.get("name")
                 and row.get("weight_field")
             },
+            preserve_source_payloads_for_reconciliation=(
+                interaction_mode == 2
+            ),
         )
         transactions = handler.process_transactions()
         transactions = self._ensure_direct_tip_ids(transactions)
-
-        try:
-            interaction_mode = int(expit_mode)
-        except (TypeError, ValueError):
-            interaction_mode = 1
         if interaction_mode == 2:
             transactions = handler.update_transactions(
-                transactions, start_time
+                transactions,
+                start_time,
+                (site_context or {}).get(
+                    "expit_completion_tolerance_pct", 10.0
+                ),
             )
+            reconciliation_attributes = dict(transactions.attrs)
             transactions = self._ensure_direct_tip_ids(transactions)
+            transactions.attrs.update(reconciliation_attributes)
+        elif "route_only_waste" in transactions:
+            transactions = transactions[
+                ~transactions["route_only_waste"].astype(bool)
+            ].reset_index(drop=True)
         if transactions is not None:
+            # DataFrame operations may drop attrs, so merge rather than
+            # replacing the reconciliation audit attached above.
             transactions.attrs["source_property_warnings"] = list(
                 getattr(handler, "property_warnings", []) or []
             )

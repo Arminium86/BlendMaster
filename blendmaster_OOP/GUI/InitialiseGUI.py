@@ -33,6 +33,10 @@ from classes.SpreadsheetReportExporter import (
     SpreadsheetReportExportError,
 )
 from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.ExpitSequenceReconciler import (
+    ExpitSequenceReconciler,
+    agent_matches,
+)
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
 from datetime import datetime, timedelta
@@ -402,6 +406,11 @@ class UserInputs(QMainWindow):
         self.setup_map_fields()
         self.setup_data_streams()
 
+        # Live audit of APS-versus-actual Expit dig progression. It remains
+        # opt-in and is populated only when current-time reconciliation is in
+        # use, so ordinary setup and solver paths incur no polling cost.
+        self.setup_expit_sequence_tab()
+
         # Add AMT Stockpile Tab
         self.AMT_stockpile_tab = QWidget()
         self.AMT_stockpile_tab.setObjectName("amtStockpileTab")
@@ -694,6 +703,11 @@ class UserInputs(QMainWindow):
         self.manual_gantt_poll_timer.setInterval(500)
         self.manual_gantt_poll_timer.timeout.connect(self.poll_manual_gantt_updates)
         self.manual_gantt_poll_timer.start()
+        self.expit_sequence_refresh_timer = QTimer(self)
+        self.expit_sequence_refresh_timer.timeout.connect(
+            self.refresh_expit_sequence_live
+        )
+        self.update_expit_sequence_timer()
 
         # Disable tabs initially
         for page_id in (
@@ -1342,11 +1356,31 @@ class UserInputs(QMainWindow):
             "data_stream_planning_categories": copy.deepcopy(getattr(
                 self, "data_stream_planning_categories", {}
             )),
+            "expit_completion_tolerance_pct": float(getattr(
+                self, "expit_completion_tolerance_pct", 10.0
+            ) or 10.0),
+            "expit_live_refresh_enabled": bool(getattr(
+                self, "expit_live_refresh_enabled", False
+            )),
+            "expit_live_refresh_minutes": max(int(getattr(
+                self, "expit_live_refresh_minutes", 5
+            ) or 5), 1),
         }
 
     def capture_scenario_state(self):
         self.capture_stockpile_table_choices()
         self.capture_active_manual_plan_state()
+        if hasattr(self, "expit_completion_tolerance_input"):
+            self.expit_completion_tolerance_pct = float(
+                self.expit_completion_tolerance_input.value()
+            )
+        if hasattr(self, "expit_sequence_live_checkbox"):
+            self.expit_live_refresh_enabled = bool(
+                self.expit_sequence_live_checkbox.isChecked()
+            )
+            self.expit_live_refresh_minutes = max(
+                int(self.expit_sequence_interval_input.value()), 1
+            )
         # During project restore the authoritative values have already been
         # read from the project file, but the setup widgets still contain the
         # previous/default session until finish_site_config_submit hydrates
@@ -1397,7 +1431,9 @@ class UserInputs(QMainWindow):
             "direct_tip_grade_block_sources", "direct_tip_crusher_destinations",
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
             "planning_period_count_choice",
-            "expit_mode_choice", "file_path_choice", "file_path_24hr_choice",
+            "expit_mode_choice", "expit_completion_tolerance_pct",
+            "expit_live_refresh_enabled", "expit_live_refresh_minutes",
+            "file_path_choice", "file_path_24hr_choice",
             "two_wp_closing_stocks_path_choice",
             "two_wp_closing_stock_balances",
             "available_24hr_expit_agents", "selected_24hr_expit_agents",
@@ -1558,6 +1594,11 @@ class UserInputs(QMainWindow):
             self.scenario_report_refresh_pending = False
             QTimer.singleShot(0, self.refresh_sqlite_reports)
 
+        if tab_index == getattr(self, "expit_sequence_tab_index", None):
+            snapshot = getattr(self, "expit_sequence_snapshot", {}) or {}
+            if snapshot:
+                QTimer.singleShot(0, self.render_expit_sequence_snapshot)
+
     def refresh_manual_scenario_views(self, tab_states):
         def is_enabled(index):
             return bool(self.normalized_page_states(tab_states).get(index, False))
@@ -1615,6 +1656,15 @@ class UserInputs(QMainWindow):
                 state.get("planning_period_count_choice", 3)
             )
             self.expit_mode_choice = state.get("expit_mode_choice") or 1
+            self.expit_completion_tolerance_pct = float(
+                state.get("expit_completion_tolerance_pct", 10.0) or 10.0
+            )
+            self.expit_live_refresh_enabled = bool(
+                state.get("expit_live_refresh_enabled", False)
+            )
+            self.expit_live_refresh_minutes = max(
+                int(state.get("expit_live_refresh_minutes", 5) or 5), 1
+            )
             self.file_path_choice = state.get("file_path_choice") or ""
             self.file_path_24hr_choice = (
                 state.get("file_path_24hr_choice")
@@ -1852,6 +1902,17 @@ class UserInputs(QMainWindow):
             self.database_view_refresh_generation = (
                 getattr(self, "database_view_refresh_generation", 0) + 1
             )
+            # A live reconciliation belongs to one scenario/as-of snapshot.
+            # Never display another scenario's agent position after switching.
+            self.expit_sequence_snapshot = {}
+            if hasattr(self, "expit_sequence_agent_selector"):
+                self.expit_sequence_agent_selector.clear()
+                self.expit_sequence_map.setHtml("")
+                self.expit_sequence_audit_table.clear()
+                self.expit_sequence_metrics_label.setText("")
+                self.expit_sequence_status_label.setText(
+                    "Select Refresh Now to query the current ExPit sequence."
+                )
             if hasattr(self, "database_view_table"):
                 self.database_view_table.clearContents()
                 self.database_view_table.setRowCount(0)
@@ -1954,6 +2015,18 @@ class UserInputs(QMainWindow):
                 start_time.second,
             ))
             self.expit_mode.setCurrentIndex(max(self.expit_mode_choice - 1, 0))
+            self.expit_completion_tolerance_input.setValue(int(round(
+                float(getattr(
+                    self, "expit_completion_tolerance_pct", 10.0
+                ) or 10.0)
+            )))
+            self.expit_sequence_live_checkbox.setChecked(bool(
+                getattr(self, "expit_live_refresh_enabled", False)
+            ))
+            self.expit_sequence_interval_input.setValue(max(int(
+                getattr(self, "expit_live_refresh_minutes", 5) or 5
+            ), 1))
+            self.update_expit_sequence_timer()
             self.blend_mode.setCurrentIndex(max(self.blend_mode_choice - 1, 0))
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
             stream_index = self.data_stream_selector.findData(self.selected_data_stream)
@@ -3845,6 +3918,414 @@ class UserInputs(QMainWindow):
             }
         """)
 
+    def setup_expit_sequence_tab(self):
+        self.expit_sequence_tab = QWidget()
+        self.expit_sequence_tab_index = self.register_page(
+            "expit_sequence",
+            self.workspace_tabs,
+            self.expit_sequence_tab,
+            "Expit Sequence",
+            position=1,
+        )
+        layout = QVBoxLayout(self.expit_sequence_tab)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("Expit Sequence Reconciliation")
+        title.setStyleSheet(
+            "font-weight: 750; font-size: 20px; color: #172033;"
+        )
+        layout.addWidget(title)
+        subtitle = QLabel(
+            "Compare the original APS parent-block route with actual ExPit "
+            "progress and the corrected future sequence. Waste contributes "
+            "to route inference but is not sent to the optimiser."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #64748b;")
+        layout.addWidget(subtitle)
+
+        controls = QHBoxLayout()
+        self.expit_sequence_refresh_button = QPushButton("Refresh Now")
+        self.expit_sequence_refresh_button.clicked.connect(
+            self.refresh_expit_sequence_live
+        )
+        controls.addWidget(self.expit_sequence_refresh_button)
+        self.expit_sequence_live_checkbox = QCheckBox("Enable live refresh")
+        self.expit_sequence_live_checkbox.setChecked(bool(
+            getattr(self, "expit_live_refresh_enabled", False)
+        ))
+        self.expit_sequence_live_checkbox.toggled.connect(
+            self.update_expit_sequence_timer
+        )
+        controls.addWidget(self.expit_sequence_live_checkbox)
+        controls.addWidget(QLabel("Interval:"))
+        self.expit_sequence_interval_input = QSpinBox()
+        self.expit_sequence_interval_input.setRange(1, 60)
+        self.expit_sequence_interval_input.setSuffix(" min")
+        self.expit_sequence_interval_input.setValue(max(int(
+            getattr(self, "expit_live_refresh_minutes", 5) or 5
+        ), 1))
+        self.expit_sequence_interval_input.valueChanged.connect(
+            self.update_expit_sequence_timer
+        )
+        controls.addWidget(self.expit_sequence_interval_input)
+        controls.addWidget(QLabel("Agent:"))
+        self.expit_sequence_agent_selector = QComboBox()
+        self.expit_sequence_agent_selector.setMinimumWidth(160)
+        self.expit_sequence_agent_selector.currentTextChanged.connect(
+            self.render_expit_sequence_snapshot
+        )
+        controls.addWidget(self.expit_sequence_agent_selector)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.expit_sequence_status_label = QLabel(
+            "Use Update Transactions on Current Time, then select Refresh Now."
+        )
+        self.expit_sequence_status_label.setWordWrap(True)
+        layout.addWidget(self.expit_sequence_status_label)
+
+        self.expit_sequence_metrics_label = QLabel("")
+        self.expit_sequence_metrics_label.setWordWrap(True)
+        self.expit_sequence_metrics_label.setStyleSheet(
+            "background: #f1f5f9; border: 1px solid #d8e0ea; padding: 8px;"
+        )
+        layout.addWidget(self.expit_sequence_metrics_label)
+
+        self.expit_sequence_map = CustomWebEngineView()
+        self.expit_sequence_map.setMinimumHeight(360)
+        layout.addWidget(self.expit_sequence_map, stretch=2)
+        self.expit_sequence_audit_table = CustomTableWidget()
+        self.expit_sequence_audit_table.setEditTriggers(
+            QTableWidget.NoEditTriggers
+        )
+        self.expit_sequence_audit_table.setAlternatingRowColors(True)
+        layout.addWidget(self.expit_sequence_audit_table, stretch=1)
+
+        self.expit_sequence_snapshot = {}
+        self.expit_sequence_refresh_in_progress = False
+
+    def update_expit_sequence_timer(self, *_args):
+        if not hasattr(self, "expit_sequence_refresh_timer"):
+            return
+        self.expit_live_refresh_enabled = bool(
+            hasattr(self, "expit_sequence_live_checkbox")
+            and self.expit_sequence_live_checkbox.isChecked()
+        )
+        self.expit_live_refresh_minutes = max(
+            int(self.expit_sequence_interval_input.value())
+            if hasattr(self, "expit_sequence_interval_input") else 5,
+            1,
+        )
+        self.expit_sequence_refresh_timer.setInterval(
+            self.expit_live_refresh_minutes * 60 * 1000
+        )
+        if self.expit_live_refresh_enabled:
+            self.expit_sequence_refresh_timer.start()
+        else:
+            self.expit_sequence_refresh_timer.stop()
+
+    def expit_sequence_refresh_inputs(self):
+        schedule_path = str(
+            getattr(self, "file_path_24hr_choice", "") or ""
+        ).strip()
+        if not schedule_path or not os.path.isfile(schedule_path):
+            raise ValueError("Select an available 24HR Mining.csv first.")
+        if int(getattr(self, "expit_mode_choice", 1) or 1) != 2:
+            raise ValueError(
+                "Select Update Transactions on Current Time in Guidance Schedules."
+            )
+        return {
+            "start_time": datetime.now(),
+            "schedule_path": schedule_path,
+            "context": copy.deepcopy(self.active_site_context()),
+            "two_wp": str(getattr(self, "file_path_choice", "") or ""),
+            "agents": list(
+                getattr(self, "selected_24hr_expit_agents", []) or []
+            ),
+        }
+
+    def prepare_expit_sequence_live_snapshot(self, inputs):
+        transactions = self.run_program.prepare_expit_payload_transactions(
+            inputs["start_time"],
+            2,
+            inputs["schedule_path"],
+            getattr(self, "reevaluate_aps_direct_tip_choice", False),
+            getattr(self, "aps_direct_tip_crusher_choice", []),
+            inputs["context"],
+            inputs["two_wp"],
+            inputs["agents"],
+        )
+        return {
+            "transactions": transactions,
+            "audit": transactions.attrs.get(
+                "expit_sequence_audit", pd.DataFrame()
+            ),
+            "geometry": transactions.attrs.get(
+                "expit_sequence_geometry", pd.DataFrame()
+            ),
+            "actual_movements": transactions.attrs.get(
+                "expit_sequence_actual_movements", pd.DataFrame()
+            ),
+            "summary": transactions.attrs.get("expit_sequence_summary", {}),
+            "warnings": transactions.attrs.get(
+                "expit_sequence_warnings", []
+            ),
+        }
+
+    def refresh_expit_sequence_live(self):
+        if getattr(self, "expit_sequence_refresh_in_progress", False):
+            return
+        try:
+            inputs = self.expit_sequence_refresh_inputs()
+        except ValueError as exc:
+            self.expit_sequence_status_label.setText(str(exc))
+            return
+        self.expit_sequence_refresh_in_progress = True
+        self.expit_sequence_refresh_button.setEnabled(False)
+        self.expit_sequence_status_label.setText(
+            "Refreshing actual ExPit movements and grade-block geometry..."
+        )
+        self.run_background_task(
+            "Refreshing Expit sequence reconciliation...",
+            lambda: self.prepare_expit_sequence_live_snapshot(inputs),
+            self.finish_expit_sequence_live_refresh,
+            self.handle_expit_sequence_live_error,
+            show_progress=False,
+        )
+
+    def finish_expit_sequence_live_refresh(self, snapshot):
+        self.expit_sequence_refresh_in_progress = False
+        self.expit_sequence_refresh_button.setEnabled(True)
+        self.expit_sequence_snapshot = snapshot or {}
+        DatabaseManager().write_expit_sequence_reconciliation({
+            "expit_sequence_audit": self.expit_sequence_snapshot.get(
+                "audit", pd.DataFrame()
+            ),
+            "expit_sequence_geometry": self.expit_sequence_snapshot.get(
+                "geometry", pd.DataFrame()
+            ),
+            "expit_sequence_actual_movements": self.expit_sequence_snapshot.get(
+                "actual_movements", pd.DataFrame()
+            ),
+            "expit_sequence_summary": self.expit_sequence_snapshot.get(
+                "summary", {}
+            ),
+        })
+        summary = self.expit_sequence_snapshot.get("summary", {}) or {}
+        agents = list((summary.get("agents") or {}).keys())
+        selected = self.expit_sequence_agent_selector.currentText()
+        self.expit_sequence_agent_selector.blockSignals(True)
+        self.expit_sequence_agent_selector.clear()
+        self.expit_sequence_agent_selector.addItems(agents)
+        if selected in agents:
+            self.expit_sequence_agent_selector.setCurrentText(selected)
+        self.expit_sequence_agent_selector.blockSignals(False)
+        warnings = self.expit_sequence_snapshot.get("warnings", []) or []
+        refreshed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.expit_sequence_status_label.setText(
+            f"Last refreshed: {refreshed}"
+            + (" | " + " | ".join(map(str, warnings)) if warnings else "")
+        )
+        self.render_expit_sequence_snapshot()
+
+    def handle_expit_sequence_live_error(self, error):
+        self.expit_sequence_refresh_in_progress = False
+        self.expit_sequence_refresh_button.setEnabled(True)
+        message = (
+            error.get("message", str(error))
+            if isinstance(error, dict) else str(error)
+        )
+        self.expit_sequence_status_label.setText(
+            "Expit sequence refresh failed: " + message
+        )
+
+    def expit_sequence_figure(
+        self, agent, audit, geometry, actual_movements=None
+    ):
+        figure = go.Figure()
+        if audit.empty:
+            figure.update_layout(
+                template="plotly_white",
+                title="No reconciliation data",
+            )
+            return figure
+        agent_audit = audit[audit["agent"].astype(str) == str(agent)].copy()
+        geometry = ExpitSequenceReconciler.normalize_geometry(geometry)
+        status_colours = {
+            "Complete": "#94a3b8",
+            "Partial": "#f59e0b",
+            "Not started": "#60a5fa",
+            "Actual only - route evidence": "#ef4444",
+        }
+        for _, block in agent_audit.iterrows():
+            key = block.get("grade_block_key")
+            points = geometry[geometry["grade_block_key"] == key]
+            if points.empty:
+                continue
+            x = points["easting"].tolist()
+            y = points["northing"].tolist()
+            if x and y:
+                x.append(x[0])
+                y.append(y[0])
+            status = str(block.get("completion_status") or "")
+            figure.add_trace(go.Scatter(
+                x=x,
+                y=y,
+                mode="lines",
+                fill="toself",
+                fillcolor=status_colours.get(status, "#cbd5e1"),
+                line=dict(color="#475569", width=1),
+                opacity=0.55,
+                name=status,
+                legendgroup=status,
+                showlegend=status not in {
+                    trace.name for trace in figure.data
+                },
+                text=(
+                    f"{block.get('parent_grade_block')}<br>"
+                    f"{status}<br>Planned {numeric(block.get('planned_wmt')) or 0:,.0f} t"
+                    f"<br>Actual {numeric(block.get('actual_wmt')) or 0:,.0f} t"
+                    f"<br>Remaining {numeric(block.get('remaining_wmt')) or 0:,.0f} t"
+                ),
+                hovertemplate="%{text}<extra></extra>",
+            ))
+
+        original = agent_audit[
+            agent_audit["original_sequence"].notna()
+            & agent_audit["centroid_easting"].notna()
+        ].sort_values("original_sequence")
+        updated = agent_audit[
+            agent_audit["updated_sequence"].notna()
+            & agent_audit["centroid_easting"].notna()
+        ].sort_values("updated_sequence")
+        for frame, name, colour, dash in (
+            (original, "Original APS route", "#64748b", "dot"),
+            (updated, "Corrected future route", "#16a34a", "dash"),
+        ):
+            if not frame.empty:
+                figure.add_trace(go.Scatter(
+                    x=frame["centroid_easting"],
+                    y=frame["centroid_northing"],
+                    mode="lines+markers",
+                    name=name,
+                    line=dict(color=colour, width=3, dash=dash),
+                ))
+
+        actual = ExpitSequenceReconciler.normalize_actual_movements(
+            actual_movements
+        )
+        if not actual.empty:
+            actual = actual[
+                actual["agent"].map(
+                    lambda value: agent_matches(value, agent)
+                )
+            ].sort_values("transaction_datetime")
+        centroids = ExpitSequenceReconciler.centroids(geometry)
+        actual_route = []
+        for _, movement in actual.iterrows():
+            key = movement.get("grade_block_key")
+            if key not in centroids:
+                continue
+            if actual_route and actual_route[-1][0] == key:
+                actual_route[-1] = (
+                    key,
+                    movement.get("parent_grade_block"),
+                    movement.get("transaction_datetime"),
+                    centroids[key],
+                )
+                continue
+            actual_route.append((
+                key,
+                movement.get("parent_grade_block"),
+                movement.get("transaction_datetime"),
+                centroids[key],
+            ))
+        if actual_route:
+            figure.add_trace(go.Scatter(
+                x=[item[3][0] for item in actual_route],
+                y=[item[3][1] for item in actual_route],
+                mode="lines+markers",
+                name="Actual route",
+                line=dict(color="#ef4444", width=3),
+                text=[
+                    f"{item[1]}<br>{item[2]}" for item in actual_route
+                ],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+            latest = actual_route[-1]
+            figure.add_trace(go.Scatter(
+                x=[latest[3][0]],
+                y=[latest[3][1]],
+                mode="markers+text",
+                text=["Latest agent block"],
+                textposition="top center",
+                marker=dict(size=16, color="#111827", symbol="star"),
+                name="Latest agent block",
+            ))
+        figure.update_layout(
+            title=f"{agent} Expit Face and Sequence",
+            xaxis_title="Easting",
+            yaxis_title="Northing",
+            yaxis=dict(scaleanchor="x", scaleratio=1),
+            template="plotly_white",
+            hovermode="closest",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(l=50, r=20, t=85, b=45),
+        )
+        return figure
+
+    def render_expit_sequence_snapshot(self, *_args):
+        snapshot = getattr(self, "expit_sequence_snapshot", {}) or {}
+        audit = snapshot.get("audit")
+        geometry = snapshot.get("geometry")
+        actual_movements = snapshot.get("actual_movements")
+        summary = snapshot.get("summary", {}) or {}
+        agent = self.expit_sequence_agent_selector.currentText()
+        if not isinstance(audit, pd.DataFrame) or audit.empty or not agent:
+            self.expit_sequence_map.setHtml("")
+            self.expit_sequence_audit_table.clear()
+            self.expit_sequence_metrics_label.setText("")
+            return
+        agent_summary = (summary.get("agents") or {}).get(agent, {}) or {}
+        self.expit_sequence_metrics_label.setText(
+            f"Latest block: {agent_summary.get('latest_actual_parent') or 'Unavailable'} | "
+            f"Last actual: {agent_summary.get('last_actual_transaction') or 'Unavailable'} | "
+            f"Complete: {agent_summary.get('completed_parent_blocks', 0)} | "
+            f"Partial: {agent_summary.get('partial_parent_blocks', 0)} | "
+            f"Remaining: {agent_summary.get('remaining_parent_blocks', 0)} | "
+            f"Unmatched actual: {agent_summary.get('unmatched_actual_blocks', 0)} | "
+            f"Direction: {agent_summary.get('direction', 'Unknown')} | "
+            f"Course correction: "
+            f"{'Applied' if agent_summary.get('course_correction_applied') else 'Not required'}"
+            f"{(' (' + str(agent_summary.get('course_correction_reason')) + ')') if agent_summary.get('course_correction_reason') else ''} | "
+            f"Geometry coverage: {float(agent_summary.get('geometry_coverage_pct', 0) or 0):.1f}% | "
+            f"Confidence: {agent_summary.get('confidence', 'Unknown')}"
+        )
+        agent_audit = audit[audit["agent"].astype(str) == agent].copy()
+        self.populate_dataframe_table(
+            self.expit_sequence_audit_table,
+            agent_audit,
+        )
+        figure = self.expit_sequence_figure(
+            agent, audit, geometry, actual_movements
+        )
+        chart_directory = os.path.join(
+            getattr(self, "scenario_session_directory", tempfile.gettempdir()),
+            "charts",
+        )
+        os.makedirs(chart_directory, exist_ok=True)
+        path = os.path.join(
+            chart_directory,
+            f"expit_sequence_{re.sub(r'[^A-Za-z0-9_-]+', '_', agent)}.html",
+        )
+        pio.write_html(
+            figure, file=path, include_plotlyjs=True,
+            full_html=True, auto_open=False,
+        )
+        self.expit_sequence_map.setUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
     def setup_database_view(self):
         """Set up an auditable view of every source supplied to the run."""
         self.database_view_tab = QWidget()
@@ -3970,6 +4451,9 @@ class UserInputs(QMainWindow):
             "start_time": str(getattr(self, "start_time_choice", "") or ""),
             "period_count": self.planning_period_count(),
             "expit_mode": getattr(self, "expit_mode_choice", None),
+            "expit_completion_tolerance_pct": float(getattr(
+                self, "expit_completion_tolerance_pct", 10.0
+            ) or 10.0),
             "24hr_file": str(getattr(self, "file_path_24hr_choice", "") or ""),
             "2wp_file": str(getattr(self, "file_path_choice", "") or ""),
             "agents": list(getattr(self, "selected_24hr_expit_agents", []) or []),
@@ -5018,6 +5502,35 @@ class UserInputs(QMainWindow):
         self.database_view_expit_payload_transactions = result.get(
             "transactions", pd.DataFrame()
         )
+        expit_attributes = dict(
+            getattr(
+                self.database_view_expit_payload_transactions,
+                "attrs",
+                {},
+            ) or {}
+        )
+        if expit_attributes.get("expit_sequence_summary"):
+            self.expit_sequence_snapshot = {
+                "transactions": self.database_view_expit_payload_transactions,
+                "audit": expit_attributes.get(
+                    "expit_sequence_audit", pd.DataFrame()
+                ),
+                "geometry": expit_attributes.get(
+                    "expit_sequence_geometry", pd.DataFrame()
+                ),
+                "actual_movements": expit_attributes.get(
+                    "expit_sequence_actual_movements", pd.DataFrame()
+                ),
+                "summary": expit_attributes.get(
+                    "expit_sequence_summary", {}
+                ),
+                "warnings": expit_attributes.get(
+                    "expit_sequence_warnings", []
+                ),
+            }
+            DatabaseManager().write_expit_sequence_reconciliation(
+                expit_attributes
+            )
         self.database_view_snapshot_signature = result.get("signature")
         self.database_view_refresh_pending = False
         warnings = result.get("warnings", []) or []
@@ -8843,6 +9356,27 @@ class UserInputs(QMainWindow):
         ])
         self.expit_mode.setFixedWidth(300)
         guidance_layout.addRow(expit_label, self.expit_mode)
+        self.expit_completion_tolerance_input = QSpinBox()
+        self.expit_completion_tolerance_input.setRange(0, 50)
+        self.expit_completion_tolerance_input.setSuffix(" %")
+        self.expit_completion_tolerance_input.setValue(int(round(float(
+            getattr(self, "expit_completion_tolerance_pct", 10.0) or 10.0
+        ))))
+        self.expit_sequence_live_checkbox.setChecked(bool(
+            getattr(self, "expit_live_refresh_enabled", False)
+        ))
+        self.expit_sequence_interval_input.setValue(max(int(
+            getattr(self, "expit_live_refresh_minutes", 5) or 5
+        ), 1))
+        self.update_expit_sequence_timer()
+        self.expit_completion_tolerance_input.setToolTip(
+            "A parent grade block is complete once actual ExPit WMT reaches "
+            "planned WMT less this tolerance."
+        )
+        guidance_layout.addRow(
+            QLabel("Grade Block Completion Tolerance:"),
+            self.expit_completion_tolerance_input,
+        )
         self.update_expit_mode_state()
 
         self.expit_agent_button = QPushButton("Get Agent Names")
@@ -9121,6 +9655,9 @@ class UserInputs(QMainWindow):
         )
         self.file_path_24hr.textChanged.connect(self.update_expit_mode_state)
         self.file_path_24hr.textChanged.connect(self.validate_form)
+        self.expit_mode.currentIndexChanged.connect(
+            self.update_expit_mode_state
+        )
         self.expit_agent_input.itemSelectionChanged.connect(self.validate_form)
         self.haul_cycle_file_path.textChanged.connect(self.validate_form)
         self.haul_cycle_crusher_input.itemSelectionChanged.connect(
@@ -9220,6 +9757,10 @@ class UserInputs(QMainWindow):
         )
         enabled = has_24hr_schedule and starts_now
         self.expit_mode.setEnabled(enabled)
+        if hasattr(self, "expit_completion_tolerance_input"):
+            self.expit_completion_tolerance_input.setEnabled(
+                enabled and self.expit_mode.currentIndex() == 1
+            )
         if not enabled:
             self.expit_mode.setCurrentIndex(0)
 
@@ -9276,8 +9817,12 @@ class UserInputs(QMainWindow):
         dialog_width = min(max(text_width + 110, 360), 900)
         self.progress_dialog.setFixedWidth(dialog_width)
 
-    def run_background_task(self, message, work_fn, on_success, on_error=None, cancel_callback=None):
-        self.show_progress_dialog(message, cancel_callback)
+    def run_background_task(
+        self, message, work_fn, on_success, on_error=None,
+        cancel_callback=None, show_progress=True,
+    ):
+        if show_progress:
+            self.show_progress_dialog(message, cancel_callback)
 
         thread = QThread(self)
         worker = BackgroundWorker(work_fn)
@@ -9292,14 +9837,16 @@ class UserInputs(QMainWindow):
                 pass
 
         def handle_success(result):
-            self.close_progress_dialog()
+            if show_progress:
+                self.close_progress_dialog()
             try:
                 on_success(result)
             except Exception:
                 self.show_error_popup(traceback.format_exc())
 
         def handle_error(error_message):
-            self.close_progress_dialog()
+            if show_progress:
+                self.close_progress_dialog()
             if on_error:
                 on_error(error_message)
             else:
@@ -10523,6 +11070,9 @@ class UserInputs(QMainWindow):
         self.expit_mode_choice = (
             self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
         )
+        self.expit_completion_tolerance_pct = float(
+            self.expit_completion_tolerance_input.value()
+        )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
         self.two_wp_closing_stocks_path_choice = (
@@ -10580,6 +11130,9 @@ class UserInputs(QMainWindow):
             self.expit_mode.currentIndex() + 1
             if self.expit_mode.isEnabled()
             else 1
+        )
+        self.expit_completion_tolerance_pct = float(
+            self.expit_completion_tolerance_input.value()
         )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
@@ -10697,6 +11250,9 @@ class UserInputs(QMainWindow):
             start_time.second,
         ))
         self.expit_mode.setCurrentIndex(max(int(self.expit_mode_choice or 1) - 1, 0))
+        self.expit_completion_tolerance_input.setValue(int(round(float(
+            getattr(self, "expit_completion_tolerance_pct", 10.0) or 10.0
+        ))))
         self.reevaluate_aps_direct_tip_checkbox.setChecked(
             bool(getattr(self, "reevaluate_aps_direct_tip_choice", False))
         )
@@ -21742,6 +22298,9 @@ class UserInputs(QMainWindow):
                     and row.get("name")
                     and row.get("weight_field")
                 },
+                preserve_source_payloads_for_reconciliation=(
+                    int(getattr(self, "expit_mode_choice", 1) or 1) == 2
+                ),
             )
             transactions = handler.process_transactions()
             if (
@@ -21752,7 +22311,11 @@ class UserInputs(QMainWindow):
                 ) == 2
             ):
                 transactions = handler.update_transactions(
-                    transactions, self.start_time_choice
+                    transactions,
+                    self.start_time_choice,
+                    float(getattr(
+                        self, "expit_completion_tolerance_pct", 10.0
+                    ) or 10.0),
                 )
 
         if transactions is None or transactions.empty:
@@ -22381,6 +22944,10 @@ class UserInputs(QMainWindow):
             self.start_time_choice = datetime.now()
         if hasattr(self, "expit_mode"):
             self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+        if hasattr(self, "expit_completion_tolerance_input"):
+            self.expit_completion_tolerance_pct = float(
+                self.expit_completion_tolerance_input.value()
+            )
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
             self.file_path_24hr_choice = self.file_path_24hr.text()
@@ -22493,6 +23060,9 @@ class UserInputs(QMainWindow):
                 "default_start_datetime": self.default_start_datetime,
                 "default_start_datetime_str": self.default_start_datetime_str,
                 "expit_mode_choice": self.expit_mode_choice,
+                "expit_completion_tolerance_pct": self.expit_completion_tolerance_pct,
+                "expit_live_refresh_enabled": self.expit_live_refresh_enabled,
+                "expit_live_refresh_minutes": self.expit_live_refresh_minutes,
                 "file_path_choice": self.file_path_choice,
                 "file_path_24hr_choice": self.file_path_24hr_choice,
                 "available_24hr_expit_agents": self.available_24hr_expit_agents,
@@ -22844,6 +23414,15 @@ class UserInputs(QMainWindow):
         self.default_start_datetime = loaded_state.get("default_start_datetime", None)
         self.default_start_datetime_str = loaded_state.get("default_start_datetime_str", "")
         self.expit_mode_choice = loaded_state.get("expit_mode_choice", None)
+        self.expit_completion_tolerance_pct = float(
+            loaded_state.get("expit_completion_tolerance_pct", 10.0) or 10.0
+        )
+        self.expit_live_refresh_enabled = bool(
+            loaded_state.get("expit_live_refresh_enabled", False)
+        )
+        self.expit_live_refresh_minutes = max(
+            int(loaded_state.get("expit_live_refresh_minutes", 5) or 5), 1
+        )
         self.file_path_choice = loaded_state.get("file_path_choice", "")
         self.file_path_24hr_choice = (
             loaded_state.get("file_path_24hr_choice")
@@ -23247,6 +23826,9 @@ class UserInputs(QMainWindow):
         self.default_start_datetime = None
         self.default_start_datetime_str = None
         self.expit_mode_choice = None
+        self.expit_completion_tolerance_pct = 10.0
+        self.expit_live_refresh_enabled = False
+        self.expit_live_refresh_minutes = 5
         self.file_path_choice = None
         self.file_path_24hr_choice = None
         self.two_wp_closing_stocks_path_choice = None

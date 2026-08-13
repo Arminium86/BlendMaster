@@ -84,6 +84,50 @@ Mining.wetTonnes
 The normalized rows are stored in the project, so an already-prepared project
 does not depend on rereading the workbook simply to run its reports.
 
+### Current-time ExPit sequence reconciliation
+
+When **Update Transactions on Current Time** is selected, BlendMaster no
+longer assumes that the load agent followed APS merely because a cumulative
+tonnage threshold was reached. It queries
+`AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS`
+for `MOVEMENT_TYPE = 'ExPit'`, matching the selected load agent and resolving
+the parent grade block from `SOURCE_FMS` (or `SOURCE` when required).
+
+Actual WMT between the earliest selected APS 24HR `Time.StartTime` and the
+scenario start is deducted from the future APS sequence. The immediately
+preceding 24 hours is retained only as route/direction context and is never
+deducted from the current plan. Snowflake actuals identify parent blocks,
+whereas APS may contain operational slices. BlendMaster therefore determines
+completion and remaining WMT at parent level, but preserves the APS slice and
+payload rows internally so their timing, grades, destinations and haulage
+properties remain authoritative for the solver.
+
+The **Grade Block Completion Tolerance** defaults to 10%. A parent is complete
+when actual WMT is at least 90% of planned WMT; an overrun above 110% is also
+complete. A partial parent retains `max(planned WMT - actual WMT, 0)`, consumed
+from its original slices and payloads in time order. Actual blocks absent from
+the APS sequence are retained as historical route evidence only: BlendMaster
+does not manufacture future payloads, grades, destinations or tonnes for them.
+
+Waste rows in the APS route contribute to direction, reversals, future timing
+and the reconstructed face, but are removed before the payload population is
+sent to the ore/direct-tip optimiser. If no usable actual rows are returned
+for one agent, that agent's original APS payload sequence is retained with an
+explicit fallback warning; it is not silently dropped.
+
+The **Workspace > Expit Sequence** tab shows the original APS parent route,
+the complete chronological actual route (including returns to earlier blocks),
+the corrected future route, polygon geometry from
+`DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCK_POLYGON_POINTS`, the latest agent
+block, completion metrics, inferred direction/reversals and confidence. It has
+**Refresh Now** plus opt-in live refresh, disabled by default with a five-minute
+default interval. The corresponding SQLite audit tables are:
+
+- `expit_sequence_reconciliation_audit`;
+- `expit_sequence_reconciliation_summary`;
+- `expit_sequence_actual_movements`; and
+- `expit_sequence_geometry`.
+
 After an optimised, contingency or manual plan is produced, **Closing ROM
 Stocks Compliance** appears directly after **Build and Depletion Profiles** in
 Results. For every BlendMaster period boundary it compares physical remaining

@@ -1053,6 +1053,7 @@ class DatabaseManager:
     ):
         # Connect to the SQLite database or create it
         database_name = get_database_path()
+        reconciliation_attributes = dict(getattr(results, "attrs", {}) or {})
         results = results.copy()
         conn = sqlite3.connect(database_name)
         cursor = conn.cursor()
@@ -1224,8 +1225,71 @@ class DatabaseManager:
         self.write_two_wp_grade_block_turnover_audit(
             results, solver_config, database_name
         )
+        self.write_expit_sequence_reconciliation(
+            reconciliation_attributes, database_name
+        )
 
         print(f"Expit payload transactions saved to database {database_name}")
+
+    def write_expit_sequence_reconciliation(
+        self, attributes, database_name=None
+    ):
+        """Persist the parent-block route audit and live-map source data."""
+        attributes = dict(attributes or {})
+        audit = attributes.get("expit_sequence_audit")
+        geometry = attributes.get("expit_sequence_geometry")
+        actual = attributes.get("expit_sequence_actual_movements")
+        summary = attributes.get("expit_sequence_summary") or {}
+        if not any(
+            isinstance(frame, pd.DataFrame)
+            for frame in (audit, geometry, actual)
+        ):
+            return
+
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            for table_name, frame in (
+                ("expit_sequence_reconciliation_audit", audit),
+                ("expit_sequence_geometry", geometry),
+                ("expit_sequence_actual_movements", actual),
+            ):
+                if isinstance(frame, pd.DataFrame):
+                    writable = frame.copy()
+                    for column in writable.columns:
+                        if pd.api.types.is_datetime64_any_dtype(writable[column]):
+                            writable[column] = writable[column].astype(str)
+                    writable.to_sql(
+                        table_name, connection, if_exists="replace", index=False
+                    )
+
+            agent_rows = []
+            common = {
+                "as_of": str(summary.get("as_of") or ""),
+                "schedule_start": str(summary.get("schedule_start") or ""),
+                "context_start": str(summary.get("context_start") or ""),
+                "completion_tolerance_pct": summary.get(
+                    "completion_tolerance_pct"
+                ),
+            }
+            for agent, values in (summary.get("agents") or {}).items():
+                agent_rows.append({"agent": agent, **common, **dict(values or {})})
+            summary_columns = [
+                "agent", "as_of", "schedule_start", "context_start",
+                "completion_tolerance_pct",
+            ]
+            summary_frame = pd.DataFrame(agent_rows)
+            if summary_frame.empty:
+                summary_frame = pd.DataFrame(columns=summary_columns)
+            summary_frame.to_sql(
+                "expit_sequence_reconciliation_summary",
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
     def write_optimised_stockpile_depletion_report_to_database(self, blend_report: pd.DataFrame):
         # Connect to the SQLite database or create it
