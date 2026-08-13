@@ -1639,6 +1639,9 @@ class UserInputs(QMainWindow):
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
             self.reset_workflow_tabs_for_scenario()
             self.is_project_loaded = False
+            refreshed_current_time = bool(
+                state.get("project_load_refresh_current_time", False)
+            )
 
             self.hub_input_choice = state.get("hub_input_choice")
             self.mine_input_choice = state.get("mine_input_choice")
@@ -1849,6 +1852,41 @@ class UserInputs(QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(
                 state.get("hex_sequence_table_argument") or self.hex_sequence_table
             )
+            if refreshed_current_time:
+                # Sibling scenarios saved in Now mode are refreshed lazily
+                # when first selected after the project load. They must not
+                # expose sources or results from their saved timestamp.
+                self.stockpile_data = None
+                self.inventory_data_request_signature = ""
+                self.stockpile_data_use_column = {}
+                self.stockpile_data_AMT_column = {}
+                self.updated_stockpile_data = None
+                self.updated_stockpile_data_keys = {}.keys()
+                self.AMT_stockpile_data = {}
+                self.AMT_data_request_signature = ""
+                self.AMT_enrichment_signature = ""
+                self.AMT_chunk_reconciliation_signature = ""
+                self.AMT_chunk_settings = {}
+                self.hex_sequence_table = []
+                self.hex_sequence_table_argument = []
+                state["project_load_refresh_current_time"] = False
+                state["stockpile_data"] = None
+                state["updated_stockpile_data"] = None
+                state["stockpile_data_use_column"] = {}
+                state["stockpile_data_AMT_column"] = {}
+                state["AMT_stockpile_data"] = {}
+                state["AMT_chunk_settings"] = {}
+                state["hex_sequence_table"] = []
+                state["hex_sequence_table_argument"] = []
+                state["calendar_inputs"] = {}
+                state["product_build_settings"] = []
+                state["saved_blends_for_schedule"] = []
+                state["stored_blend_sequence_table_for_gantt"] = []
+                state["stored_blend_sequence_table_for_gantt_default"] = []
+                state["manual_direct_tip_allocations"] = {}
+                state["manual_steady_states"] = []
+                state["manual_plan_states"] = {}
+                DatabaseManager.clear_all_tables(get_database_path())
             self.database_view_selected_columns = copy.deepcopy(
                 state.get("database_view_selected_columns")
             )
@@ -2108,6 +2146,15 @@ class UserInputs(QMainWindow):
                 # otherwise the table restores but the dig path is absent.
                 refresh_amt_map=True,
             )
+            if refreshed_current_time:
+                self.site_scenarios[self.active_scenario_id] = state
+                QMessageBox.information(
+                    self,
+                    "Project Start Time",
+                    "This scenario was saved with Time Starts At set to Now. "
+                    "Its start time has been refreshed; submit Site "
+                    "Configuration to fetch its current opening inventory.",
+                )
         finally:
             self.scenario_switch_in_progress = False
             self.refresh_scenario_selector()
@@ -11320,6 +11367,8 @@ class UserInputs(QMainWindow):
             self.finish_site_config_submit(self.stockpile_data)
             return
 
+        if restoring_project:
+            self.project_load_waiting_for_inventory = True
         self.submit_button.setEnabled(False)
         progress_message = "Fetching stockpile inventories from Snowflake..."
         self.run_background_task(
@@ -11476,6 +11525,12 @@ class UserInputs(QMainWindow):
         fresh_site_configuration = (
             isinstance(stockpile_data, dict) and "stockpile_data" in stockpile_data
         )
+        preserved_use_selection = copy.deepcopy(
+            getattr(self, "project_load_saved_stockpile_use_column", {}) or {}
+        )
+        preserved_amt_selection = copy.deepcopy(
+            getattr(self, "project_load_saved_stockpile_AMT_column", {}) or {}
+        )
         if fresh_site_configuration:
             build_targets = stockpile_data.get("build_targets") or {}
             target_errors = stockpile_data.get("target_errors") or {}
@@ -11490,6 +11545,52 @@ class UserInputs(QMainWindow):
             self.reset_downstream_inputs_for_new_site_configuration()
             self.inventory_data_request_signature = inventory_signature
         self.stockpile_data = stockpile_data
+        refreshed_current_time = bool(
+            restoring_project
+            and getattr(self, "project_load_refresh_current_time", False)
+            and fresh_site_configuration
+        )
+        if refreshed_current_time:
+            saved_use = {
+                str(name).strip().upper(): bool(selected)
+                for name, selected in preserved_use_selection.items()
+            }
+            saved_amt = {
+                str(name).strip().upper(): bool(selected)
+                for name, selected in preserved_amt_selection.items()
+            }
+            self.stockpile_data_use_column = {
+                name: saved_use.get(str(name).strip().upper(), False)
+                for name in self.stockpile_data
+            }
+            self.stockpile_data_AMT_column = {
+                name: (
+                    self.stockpile_data_use_column.get(name, False)
+                    and saved_amt.get(str(name).strip().upper(), False)
+                )
+                for name in self.stockpile_data
+            }
+            self.updated_stockpile_data = None
+            self.AMT_stockpile_data = {}
+            self.AMT_data_request_signature = ""
+            self.AMT_enrichment_signature = ""
+            self.AMT_chunk_reconciliation_signature = ""
+            self.AMT_chunk_settings = {}
+            self.hex_sequence_table = []
+            self.hex_sequence_table_argument = []
+            self.calendar_inputs = {}
+            self.product_build_settings = []
+            self.saved_blends_for_schedule = []
+            self.stored_blend_sequence_table_for_gantt = []
+            self.stored_blend_sequence_table_for_gantt_default = []
+            self.manual_direct_tip_allocations = {}
+            self.manual_steady_states = []
+            self.manual_plan_states = {}
+            self.populate_product_build_table()
+            DatabaseManager.clear_all_tables(get_database_path())
+            self.opening_stockpile_inventories.save_to_database(
+                self.stockpile_data
+            )
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
         # Project restore must hydrate Data Streams before capturing the active
@@ -11505,7 +11606,7 @@ class UserInputs(QMainWindow):
             self.refresh_haul_cycle_routes(show_errors=True)
         else:
             self.apply_haul_cycle_routes_to_stockpile_data()
-        if build_targets:
+        if build_targets and not refreshed_current_time:
             self.register_submitted_site_scenarios(build_targets)
         else:
             self.save_active_scenario_state()
@@ -11558,6 +11659,30 @@ class UserInputs(QMainWindow):
             self.apply_canonical_field_mappings()
             self.apply_grade_streams_to_inventory()
         self.validate_form()
+
+        if restoring_project and getattr(
+            self, "project_load_waiting_for_inventory", False
+        ):
+            self.project_load_waiting_for_inventory = False
+            if getattr(self, "project_load_refresh_current_time", False):
+                # A new opening timestamp invalidates AMT chunks, calendars
+                # and results. Keep matching saved selections visible, then
+                # return control to the user before any downstream work runs.
+                self.project_load_restore_in_progress = False
+                self.project_load_continuation_pending = False
+                self.reset_workflow_tabs_for_scenario()
+                self.set_page_enabled(self.site_config_tab_index, True)
+                self.set_page_enabled(self.guidance_schedules_tab_index, True)
+                self.set_page_enabled(self.stockpile_tab_index, True)
+                self.save_active_scenario_state()
+                self.finish_project_load_ui(success=True)
+                self.show_page(self.stockpile_tab_index, force=True)
+                return
+
+            self.store_stockpile_table()
+            if getattr(self, "project_load_waiting_for_AMT", False):
+                return
+            self.continue_project_load_after_stockpile_setup()
 
         if getattr(self, "agent_workflow_after_site_config", False):
             self.agent_workflow_after_data_streams = True
@@ -11637,6 +11762,10 @@ class UserInputs(QMainWindow):
 
     def handle_site_config_error(self, error_message):
         self.submit_button.setEnabled(True)
+        if getattr(self, "project_load_waiting_for_inventory", False):
+            self.project_load_waiting_for_inventory = False
+            self.project_load_restore_in_progress = False
+            self.finish_project_load_ui(success=False)
         if getattr(self, "agent_workflow_after_site_config", False):
             self.agent_workflow_after_site_config = False
             self.stop_agent_workflow_apply(f"Agent workflow stopped on Site Configuration fetch: {error_message}")
@@ -13817,7 +13946,11 @@ class UserInputs(QMainWindow):
                 return False
 
             loaded_state = self.normalized_agent_project_state(loaded_state)
-            self.restore_loaded_state(loaded_state, source_label=source_label, show_success=False)
+            if not self.restore_loaded_state(
+                loaded_state, source_label=source_label, show_success=False
+            ):
+                self.restore_agent_panel_state(agent_panel_state)
+                return False
             # The project result changes the modelling state, not the active
             # conversation which led to it. Only Clear Agent Output should
             # remove Story, Instructions, Console, or proposal rows.
@@ -13842,6 +13975,109 @@ class UserInputs(QMainWindow):
             with open(project_path, "r", encoding="utf-8") as file:
                 return json.load(file)
         raise ValueError("Agent project_file must point to a .prj or .json project-state file.")
+
+    @staticmethod
+    def loaded_project_now_states(loaded_state):
+        """Return saved scenario records whose timing selector was ``Now``."""
+        if not isinstance(loaded_state, dict):
+            return []
+
+        records = [loaded_state]
+        scenarios = loaded_state.get("site_scenarios")
+        if isinstance(scenarios, dict):
+            records.extend(
+                state for state in scenarios.values()
+                if isinstance(state, dict)
+            )
+
+        result = []
+        seen = set()
+        for state in records:
+            state_id = id(state)
+            if state_id in seen:
+                continue
+            seen.add(state_id)
+            try:
+                saved_mode = int(state.get("time_mode_choice"))
+            except (TypeError, ValueError):
+                continue
+            if saved_mode == 1:
+                result.append(state)
+        return result
+
+    @staticmethod
+    def apply_loaded_project_now_time_choice(
+        loaded_state, use_current_time, current_time=None
+    ):
+        """Resolve saved ``Now`` scenarios to either current or saved time."""
+        now_states = UserInputs.loaded_project_now_states(loaded_state)
+        if not now_states:
+            return 0
+
+        if use_current_time:
+            resolved_time = current_time or datetime.now()
+            if isinstance(resolved_time, pd.Timestamp):
+                resolved_time = resolved_time.to_pydatetime()
+            for state in now_states:
+                state["time_mode_choice"] = 1
+                state["start_time_choice"] = resolved_time
+                state["project_load_refresh_current_time"] = True
+
+                # Every item below was calculated for the saved timestamp.
+                # Retain configuration and mappings, but force the opening
+                # source data to be fetched again before scheduling continues.
+                state["inventory_data_request_signature"] = ""
+                state["AMT_data_request_signature"] = ""
+                state["AMT_enrichment_signature"] = ""
+                state["AMT_chunk_reconciliation_signature"] = ""
+                state["data_stream_input_cache_signature"] = ""
+                state["data_stream_input_cache_result"] = {}
+        else:
+            for state in now_states:
+                # The project retains the concrete timestamp captured when
+                # Site Configuration was submitted, so expose it explicitly.
+                state["time_mode_choice"] = 2
+                state.pop("project_load_refresh_current_time", None)
+        return len(now_states)
+
+    def prompt_loaded_project_start_time(self, loaded_state):
+        """Ask how a project saved in ``Now`` mode should be reopened."""
+        now_states = self.loaded_project_now_states(loaded_state)
+        if not now_states:
+            return True
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("Project Start Time")
+        dialog.setText(
+            "This project was saved with Time Starts At set to Now."
+        )
+        dialog.setInformativeText(
+            "Use Current Time to refresh the scenario start and its "
+            "timestamp-dependent opening data, or Use Saved Timestamp to "
+            "reproduce the time captured when Site Configuration was "
+            "submitted. A current-time refresh returns to Stockpile "
+            "Inventories for review."
+        )
+        current_button = dialog.addButton(
+            "Use Current Time", QMessageBox.AcceptRole
+        )
+        saved_button = dialog.addButton(
+            "Use Saved Timestamp", QMessageBox.ActionRole
+        )
+        cancel_button = dialog.addButton(QMessageBox.Cancel)
+        dialog.setDefaultButton(current_button)
+        dialog.setEscapeButton(cancel_button)
+        dialog.exec_()
+
+        selected_button = dialog.clickedButton()
+        if selected_button is cancel_button or selected_button is None:
+            return False
+        self.apply_loaded_project_now_time_choice(
+            loaded_state,
+            use_current_time=selected_button is current_button,
+        )
+        return selected_button in (current_button, saved_button)
 
     def normalized_agent_project_state(self, loaded_state):
         if not isinstance(loaded_state, dict):
@@ -14034,13 +14270,19 @@ class UserInputs(QMainWindow):
             loaded_state["file_path_24hr_choice"] = loaded_state["file_path_choice"]
         if loaded_state.get("solver_config") is None:
             loaded_state["solver_config"] = {}
-        # "Now" is resolved to a concrete timestamp when Site Configuration
-        # is submitted and that instant is what the project saves. On load it
-        # must become an explicit Set Time; leaving the selector on Now would
-        # make the restored timestamp look inactive and a later submit would
-        # replace it with the current clock time.
+        # Preserve an explicit saved timing mode.  Projects saved with Now
+        # carry both mode 1 and the concrete submission timestamp; the load
+        # path uses both values to ask whether to refresh or reproduce it.
+        # Legacy/agent states without a mode remain reproducible by treating a
+        # supplied timestamp as Set Time.
+        try:
+            saved_time_mode = int(loaded_state.get("time_mode_choice"))
+        except (TypeError, ValueError):
+            saved_time_mode = None
         loaded_state["time_mode_choice"] = (
-            2 if loaded_state.get("start_time_choice") else 1
+            saved_time_mode
+            if saved_time_mode in (1, 2)
+            else (2 if loaded_state.get("start_time_choice") else 1)
         )
         if loaded_state.get("expit_mode_choice") is None:
             loaded_state["expit_mode_choice"] = 1
@@ -23367,17 +23609,22 @@ class UserInputs(QMainWindow):
 
     def restore_loaded_state(self, loaded_state, source_label=None, show_success=False):
         """Restore app state using the same path as Load Project."""
+        if not isinstance(loaded_state, dict):
+            raise ValueError("Project state must be a dictionary.")
+        if not self.prompt_loaded_project_start_time(loaded_state):
+            self.is_project_loaded = False
+            return False
         self.is_project_loaded = True
         self.project_load_keep_site_configuration_visible = bool(show_success)
         self.project_load_show_success = bool(show_success)
         self.project_load_source_label = str(source_label or "")
         if show_success:
             self.show_page(self.site_config_tab_index)
-        loaded_state = self.normalized_agent_project_state(loaded_state)
         if not self.resolve_missing_aps_mining_csv_paths(loaded_state):
             self.is_project_loaded = False
             self.finish_project_load_ui(success=False)
             return False
+        loaded_state = self.normalized_agent_project_state(loaded_state)
         loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
         # Unpack loaded state into variables
@@ -23589,14 +23836,32 @@ class UserInputs(QMainWindow):
             loaded_state.get("planning_period_count_choice", 3)
         )
         self.stockpile_data = loaded_state.get("stockpile_data", None)
-        self.inventory_data_request_signature = str(
-            (
-                loaded_state.get("inventory_data_request_signature")
-                or self.inventory_opening_request_signature()
+        self.project_load_refresh_current_time = bool(
+            loaded_state.get("project_load_refresh_current_time", False)
+        )
+        self.inventory_data_request_signature = (
+            ""
+            if self.project_load_refresh_current_time
+            else str(
+                (
+                    loaded_state.get("inventory_data_request_signature")
+                    or self.inventory_opening_request_signature()
+                )
+                if self.stockpile_data else ""
             )
-            if self.stockpile_data else ""
         )
         self.stockpile_data_use_column = loaded_state.get("stockpile_data_use_column", {})
+        self.project_load_saved_stockpile_use_column = copy.deepcopy(
+            self.stockpile_data_use_column or {}
+        )
+        self.project_load_saved_stockpile_AMT_column = copy.deepcopy(
+            loaded_state.get("stockpile_data_AMT_column", {}) or {}
+        )
+        if self.project_load_refresh_current_time:
+            # A restored database snapshot belongs to the saved timestamp.
+            # Keep it only long enough to restore project metadata, then clear
+            # it before the current-time inventory query can complete.
+            DatabaseManager.clear_all_tables(get_database_path())
         self.stored_blend_sequence_table_for_gantt = (
             loaded_state.get("stored_blend_sequence_table_for_gantt") or []
         )
@@ -23723,10 +23988,13 @@ class UserInputs(QMainWindow):
 
         self.project_load_restore_in_progress = True
         self.handle_site_config_submit()
+        if getattr(self, "project_load_waiting_for_inventory", False):
+            return True
         self.store_stockpile_table()
         if getattr(self, "project_load_waiting_for_AMT", False):
             return
         self.continue_project_load_after_stockpile_setup()
+        return True
 
     def continue_project_load_after_stockpile_setup(self):
         self.project_load_restore_in_progress = False
@@ -23941,6 +24209,10 @@ class UserInputs(QMainWindow):
         self.project_load_continuation_pending = False
         self.project_load_restore_in_progress = False
         self.project_load_waiting_for_AMT = False
+        self.project_load_waiting_for_inventory = False
+        self.project_load_refresh_current_time = False
+        self.project_load_saved_stockpile_use_column = {}
+        self.project_load_saved_stockpile_AMT_column = {}
 
     def clear_sqlite_session_data(self):
         try:
