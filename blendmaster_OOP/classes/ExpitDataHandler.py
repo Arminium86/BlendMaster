@@ -3,7 +3,6 @@ import pandas as pd
 import re
 from bisect import bisect_right
 from datetime import timedelta
-import snowflake.connector
 from datetime import datetime
 from pandas import DataFrame
 from classes.PeriodManager import PeriodManager
@@ -27,6 +26,7 @@ from classes.ExpitSequenceReconciler import (
     grade_block_key,
     polygon_lookup_name,
 )
+from setup.OpeningStockpileInventories import OpeningStockpileInventories
 
 class ExpitDataHandler:
     DESTINATION_GUIDANCE_VERSION = 3
@@ -2566,6 +2566,7 @@ class ExpitDataHandler:
         context_start = planned_start - pd.Timedelta(hours=24)
         agents = list(dict.fromkeys(transactions["agent"].dropna().astype(str)))
         warnings = []
+        snowflake_connection_unavailable = False
 
         if actual_movements is None:
             try:
@@ -2575,11 +2576,14 @@ class ExpitDataHandler:
             except Exception as exc:
                 actual_movements = pd.DataFrame()
                 warnings.append(str(exc))
+                snowflake_connection_unavailable = isinstance(
+                    exc, ConnectionError
+                )
 
         normalized_actual = ExpitSequenceReconciler.normalize_actual_movements(
             actual_movements
         )
-        if geometry is None:
+        if geometry is None and not snowflake_connection_unavailable:
             block_names = list(transactions.get("source", []))
             if not normalized_actual.empty:
                 block_names.extend(
@@ -2590,6 +2594,12 @@ class ExpitDataHandler:
             except Exception as exc:
                 geometry = pd.DataFrame()
                 warnings.append(str(exc))
+        elif geometry is None:
+            geometry = pd.DataFrame()
+            warnings.append(
+                "Grade-block geometry was not queried because the Snowflake "
+                "connection was unavailable for ExPit actual movements."
+            )
 
         result = ExpitSequenceReconciler(
             completion_tolerance_pct,
@@ -2623,28 +2633,11 @@ class ExpitDataHandler:
         return updated
 
     def connect_snowflake_with_service_account(self):
-        try:
-            # Connect to Snowflake using service account credentials
-            conn = snowflake.connector.connect(
-                user='SVC_APS',  
-                password='AlastriSnowflake123',  
-                account='wn74261.ap-southeast-2',  
-                warehouse='WH_EDW_SELFSERVICE', 
-                database='AA_OPERATIONS_MANAGEMENT',  
-                schema='SELFSERVICE',  
-                role='SVC_APS',  
-                login_timeout=60,  
-                network_timeout=300 
-            )
+        """Use BlendMaster's shared JWT/key-pair Snowflake connection.
 
-            # Confirm the connection is open
-            if conn.is_closed():
-                print("Failed to connect to Snowflake.")
-                return None
-
-            print("Connection established successfully.")
-            return conn
-
-        except snowflake.connector.errors.Error as e:
-            print(f"Error connecting to Snowflake: {e}")
-            return None
+        The former implementation used an obsolete hard-coded password and
+        therefore failed even while inventory and reconciliation queries were
+        successfully authenticating with the SVC_APS private key.
+        """
+        return OpeningStockpileInventories(
+        ).connect_snowflake_with_service_account()

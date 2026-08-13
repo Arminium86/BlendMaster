@@ -9362,13 +9362,6 @@ class UserInputs(QMainWindow):
         self.expit_completion_tolerance_input.setValue(int(round(float(
             getattr(self, "expit_completion_tolerance_pct", 10.0) or 10.0
         ))))
-        self.expit_sequence_live_checkbox.setChecked(bool(
-            getattr(self, "expit_live_refresh_enabled", False)
-        ))
-        self.expit_sequence_interval_input.setValue(max(int(
-            getattr(self, "expit_live_refresh_minutes", 5) or 5
-        ), 1))
-        self.update_expit_sequence_timer()
         self.expit_completion_tolerance_input.setToolTip(
             "A parent grade block is complete once actual ExPit WMT reaches "
             "planned WMT less this tolerance."
