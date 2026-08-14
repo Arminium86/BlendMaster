@@ -1,5 +1,7 @@
 import sqlite3
 import json
+import pickle
+import zlib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -11,6 +13,103 @@ from classes.ReportColumns import order_balance_triplets
 from database.DatabaseContext import get_database_path
 
 class DatabaseManager:
+    EXPIT_INPUT_CACHE_TABLE = "expit_input_cache"
+
+    def write_expit_input_cache(
+        self,
+        transactions,
+        signature,
+        metadata=None,
+        database_name=None,
+    ):
+        """Persist an exact solver-ready Expit payload snapshot.
+
+        The ordinary ``expit_payload_transactions`` table is deliberately a
+        readable report and therefore does not retain every internal column
+        or DataFrame attribute required by DataLoader.  This cache is a
+        lossless project-local snapshot used only when its complete input
+        signature matches.
+        """
+        if not signature or transactions is None:
+            return False
+        try:
+            payload = zlib.compress(
+                pickle.dumps(
+                    transactions, protocol=pickle.HIGHEST_PROTOCOL
+                ),
+                level=6,
+            )
+        except (pickle.PickleError, TypeError, AttributeError):
+            return False
+        metadata_json = json.dumps(
+            metadata or {}, sort_keys=True, default=str
+        )
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            try:
+                connection.execute(
+                    f'''CREATE TABLE IF NOT EXISTS "{self.EXPIT_INPUT_CACHE_TABLE}" (
+                        cache_id INTEGER PRIMARY KEY CHECK (cache_id = 1),
+                        signature TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload_blob BLOB NOT NULL,
+                        metadata_json TEXT NOT NULL
+                    )'''
+                )
+                connection.execute(
+                    f'''INSERT OR REPLACE INTO "{self.EXPIT_INPUT_CACHE_TABLE}"
+                        (cache_id, signature, created_at, payload_blob, metadata_json)
+                        VALUES (1, ?, ?, ?, ?)''',
+                    (
+                        str(signature),
+                        datetime.now().isoformat(timespec="seconds"),
+                        sqlite3.Binary(payload),
+                        metadata_json,
+                    ),
+                )
+                connection.commit()
+            except sqlite3.Error:
+                return False
+        finally:
+            connection.close()
+        return True
+
+    def read_expit_input_cache(self, signature, database_name=None):
+        """Return ``(transactions, metadata)`` for an exact signature hit."""
+        if not signature:
+            return None, {}
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            try:
+                table_exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (self.EXPIT_INPUT_CACHE_TABLE,),
+                ).fetchone()
+                if not table_exists:
+                    return None, {}
+                row = connection.execute(
+                    f'''SELECT payload_blob, metadata_json
+                        FROM "{self.EXPIT_INPUT_CACHE_TABLE}"
+                        WHERE cache_id = 1 AND signature = ?''',
+                    (str(signature),),
+                ).fetchone()
+            except sqlite3.Error:
+                return None, {}
+        finally:
+            connection.close()
+        if row is None:
+            return None, {}
+        try:
+            transactions = pickle.loads(zlib.decompress(bytes(row[0])))
+            metadata = json.loads(row[1] or "{}")
+        except (pickle.PickleError, zlib.error, EOFError, ValueError, TypeError):
+            return None, {}
+        if not isinstance(transactions, pd.DataFrame):
+            return None, {}
+        return transactions, metadata
+
     @staticmethod
     def clear_all_tables(database_name=None):
         database_name = database_name or get_database_path()

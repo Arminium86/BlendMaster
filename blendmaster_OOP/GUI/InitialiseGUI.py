@@ -129,6 +129,8 @@ APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
 AMT_OPENING_CACHE_VERSION = 1
 AMT_CHUNK_RECONCILIATION_VERSION = 1
+EXPIT_INPUT_CACHE_VERSION = 1
+APS_GUIDANCE_CACHE_VERSION = 1
 
 SITE_OPF_OPTIONS = {
     "CC": ["CC OPF01", "CC OPF02"],
@@ -1468,6 +1470,7 @@ class UserInputs(QMainWindow):
             "reevaluate_aps_direct_tip_choice", "aps_direct_tip_crusher_choice",
             "aps_stockpile_brand_map", "aps_stockpile_timing_guidance",
             "aps_active_blend_guidance", "aps_destination_guidance",
+            "aps_guidance_request_signature",
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "inventory_data_request_signature",
@@ -1825,6 +1828,9 @@ class UserInputs(QMainWindow):
             )
             self.aps_destination_guidance = copy.deepcopy(
                 state.get("aps_destination_guidance") or {}
+            )
+            self.aps_guidance_request_signature = str(
+                state.get("aps_guidance_request_signature") or ""
             )
             self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
             self.inventory_data_request_signature = str(
@@ -4156,27 +4162,51 @@ class UserInputs(QMainWindow):
             self.current_site_start_time()
             if set_time_mode else datetime.now()
         )
+        context = copy.deepcopy(self.active_site_context())
+        two_wp_path = str(getattr(self, "file_path_choice", "") or "")
+        selected_agents = list(
+            getattr(self, "selected_24hr_expit_agents", []) or []
+        )
+        cache_signature = UserInputs.expit_input_cache_signature(
+            self,
+            start_time=reconciliation_time,
+            site_context=context,
+            schedule_path=schedule_path,
+            two_wp_path=two_wp_path,
+            selected_agents=selected_agents,
+            expit_mode=2,
+        )
         return {
             "start_time": reconciliation_time,
             "schedule_path": schedule_path,
-            "context": copy.deepcopy(self.active_site_context()),
-            "two_wp": str(getattr(self, "file_path_choice", "") or ""),
-            "agents": list(
-                getattr(self, "selected_24hr_expit_agents", []) or []
-            ),
+            "context": context,
+            "two_wp": two_wp_path,
+            "agents": selected_agents,
+            "cache_signature": cache_signature,
+            "cache_allowed": bool(set_time_mode),
         }
 
     def prepare_expit_sequence_live_snapshot(self, inputs):
-        transactions = self.run_program.prepare_expit_payload_transactions(
-            inputs["start_time"],
-            2,
-            inputs["schedule_path"],
-            getattr(self, "reevaluate_aps_direct_tip_choice", False),
-            getattr(self, "aps_direct_tip_crusher_choice", []),
-            inputs["context"],
-            inputs["two_wp"],
-            inputs["agents"],
-        )
+        transactions = None
+        cache_hit = False
+        if inputs.get("cache_allowed"):
+            transactions, _cache_metadata = (
+                DatabaseManager().read_expit_input_cache(
+                    inputs.get("cache_signature")
+                )
+            )
+            cache_hit = transactions is not None
+        if transactions is None:
+            transactions = self.run_program.prepare_expit_payload_transactions(
+                inputs["start_time"],
+                2,
+                inputs["schedule_path"],
+                getattr(self, "reevaluate_aps_direct_tip_choice", False),
+                getattr(self, "aps_direct_tip_crusher_choice", []),
+                inputs["context"],
+                inputs["two_wp"],
+                inputs["agents"],
+            )
         return {
             "transactions": transactions,
             "audit": transactions.attrs.get(
@@ -4195,6 +4225,10 @@ class UserInputs(QMainWindow):
             "warnings": transactions.attrs.get(
                 "expit_sequence_warnings", []
             ),
+            "cache_signature": inputs.get("cache_signature"),
+            "cache_hit": cache_hit,
+            "cache_persist": bool(inputs.get("cache_allowed")),
+            "start_time": inputs.get("start_time"),
         }
 
     def refresh_expit_sequence_live(self):
@@ -4223,6 +4257,21 @@ class UserInputs(QMainWindow):
         self.expit_sequence_refresh_in_progress = False
         self.expit_sequence_refresh_button.setEnabled(True)
         self.expit_sequence_snapshot = snapshot or {}
+        if (
+            not self.expit_sequence_snapshot.get("cache_hit", False)
+            and self.expit_sequence_snapshot.get("cache_persist", False)
+            and self.expit_sequence_snapshot.get("cache_signature")
+        ):
+            DatabaseManager().write_expit_input_cache(
+                self.expit_sequence_snapshot.get("transactions"),
+                self.expit_sequence_snapshot.get("cache_signature"),
+                metadata={
+                    "source": "expit_sequence",
+                    "scenario_start": self.expit_signature_datetime(
+                        self.expit_sequence_snapshot.get("start_time")
+                    ),
+                },
+            )
         DatabaseManager().write_expit_sequence_reconciliation({
             "expit_sequence_audit": self.expit_sequence_snapshot.get(
                 "audit", pd.DataFrame()
@@ -4251,8 +4300,13 @@ class UserInputs(QMainWindow):
         self.expit_sequence_agent_selector.blockSignals(False)
         warnings = self.expit_sequence_snapshot.get("warnings", []) or []
         refreshed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        refresh_caption = (
+            "Restored saved historical reconciliation"
+            if self.expit_sequence_snapshot.get("cache_hit", False)
+            else f"Last refreshed: {refreshed}"
+        )
         self.expit_sequence_status_label.setText(
-            f"Last refreshed: {refreshed}"
+            refresh_caption
             + (" | " + " | ".join(map(str, warnings)) if warnings else "")
         )
         self.render_expit_sequence_snapshot()
@@ -4811,22 +4865,122 @@ class UserInputs(QMainWindow):
 
     def database_view_input_signature(self):
         """Return the inputs that determine the APS payload snapshot."""
-        context = self.active_site_context()
         signature = {
-            "start_time": str(getattr(self, "start_time_choice", "") or ""),
             "period_count": self.planning_period_count(),
-            "expit_mode": getattr(self, "expit_mode_choice", None),
-            "expit_completion_tolerance_pct": float(getattr(
-                self, "expit_completion_tolerance_pct", 10.0
-            ) or 10.0),
-            "24hr_file": str(getattr(self, "file_path_24hr_choice", "") or ""),
-            "2wp_file": str(getattr(self, "file_path_choice", "") or ""),
-            "agents": list(getattr(self, "selected_24hr_expit_agents", []) or []),
-            "reevaluate_direct_tip": bool(
-                getattr(self, "reevaluate_aps_direct_tip_choice", False)
+            "expit_inputs": self.expit_input_cache_signature(),
+        }
+        return json.dumps(signature, sort_keys=True, default=str)
+
+    @staticmethod
+    def expit_input_file_fingerprint(file_path):
+        """Return a cheap content-change fingerprint for a schedule input."""
+        raw_path = str(file_path or "").strip()
+        if not raw_path:
+            return {"path": "", "exists": False}
+        normalized_path = os.path.normcase(os.path.abspath(raw_path))
+        try:
+            stats = os.stat(normalized_path)
+        except OSError:
+            return {"path": normalized_path, "exists": False}
+        return {
+            "path": normalized_path,
+            "exists": True,
+            "size": int(stats.st_size),
+            "modified_ns": int(stats.st_mtime_ns),
+        }
+
+    @staticmethod
+    def expit_signature_datetime(value):
+        if value is None or value == "":
+            return ""
+        try:
+            timestamp = pd.Timestamp(value)
+            if pd.isna(timestamp):
+                return ""
+            return timestamp.isoformat()
+        except (TypeError, ValueError):
+            return str(value)
+
+    def expit_input_cache_signature(
+        self,
+        start_time=None,
+        site_context=None,
+        schedule_path=None,
+        two_wp_path=None,
+        selected_agents=None,
+        expit_mode=None,
+        reevaluate_direct_tip=None,
+        selected_crusher=None,
+    ):
+        """Identify every input capable of changing solver-ready payloads."""
+        context = site_context or self.active_site_context()
+        schedule_path = (
+            schedule_path
+            if schedule_path is not None
+            else getattr(self, "file_path_24hr_choice", "")
+        )
+        two_wp_path = (
+            two_wp_path
+            if two_wp_path is not None
+            else getattr(self, "file_path_choice", "")
+        )
+        selected_agents = (
+            selected_agents
+            if selected_agents is not None
+            else getattr(self, "selected_24hr_expit_agents", [])
+        )
+        expit_mode = (
+            expit_mode
+            if expit_mode is not None
+            else getattr(self, "expit_mode_choice", 1)
+        )
+        reevaluate_direct_tip = (
+            reevaluate_direct_tip
+            if reevaluate_direct_tip is not None
+            else getattr(self, "reevaluate_aps_direct_tip_choice", False)
+        )
+        selected_crusher = (
+            selected_crusher
+            if selected_crusher is not None
+            else getattr(self, "aps_direct_tip_crusher_choice", [])
+        )
+        definitions = normalize_field_definitions(
+            context.get("field_definitions")
+        )
+        signature = {
+            "cache_version": EXPIT_INPUT_CACHE_VERSION,
+            "destination_guidance_version": (
+                ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
             ),
-            "selected_crusher": getattr(
-                self, "aps_direct_tip_crusher_choice", []
+            "start_time": UserInputs.expit_signature_datetime(
+                start_time
+                if start_time is not None
+                else getattr(self, "start_time_choice", None)
+            ),
+            "expit_mode": int(expit_mode or 1),
+            "completion_tolerance_pct": float(
+                context.get(
+                    "expit_completion_tolerance_pct",
+                    getattr(self, "expit_completion_tolerance_pct", 10.0),
+                )
+                or 10.0
+            ),
+            "24hr_file": UserInputs.expit_input_file_fingerprint(schedule_path),
+            "2wp_file": UserInputs.expit_input_file_fingerprint(two_wp_path),
+            "agents": sorted(
+                str(value).strip().upper()
+                for value in selected_agents or []
+                if str(value).strip()
+            ),
+            "reevaluate_direct_tip": bool(reevaluate_direct_tip),
+            "selected_crusher": sorted(
+                str(value).strip().upper()
+                for value in (
+                    selected_crusher
+                    if isinstance(selected_crusher, (list, tuple, set))
+                    else [selected_crusher]
+                )
+                if str(value).strip()
             ),
             "site": {
                 key: context.get(key)
@@ -4837,10 +4991,31 @@ class UserInputs(QMainWindow):
             "property_mappings": context.get(
                 "aps_source_property_field_mappings", {}
             ),
+            "field_definitions": definitions,
             "cb_lump_fines_mode": context.get("cb_lump_fines_mode"),
             "cb_lump_percentage": context.get("cb_lump_percentage"),
         }
         return json.dumps(signature, sort_keys=True, default=str)
+
+    def expit_input_cache_allowed(self, time_mode=None, expit_mode=None):
+        """Live current-time reconciliation must always inspect new actuals."""
+        try:
+            time_mode = int(
+                time_mode
+                if time_mode is not None
+                else getattr(self, "time_mode_choice", 1)
+            )
+        except (TypeError, ValueError):
+            time_mode = 1
+        try:
+            expit_mode = int(
+                expit_mode
+                if expit_mode is not None
+                else getattr(self, "expit_mode_choice", 1)
+            )
+        except (TypeError, ValueError):
+            expit_mode = 1
+        return not (time_mode == 1 and expit_mode == 2)
 
     def database_view_is_current(self):
         if getattr(self, "database_view_refresh_in_progress", False):
@@ -5539,6 +5714,13 @@ class UserInputs(QMainWindow):
         schedule_path = str(
             getattr(self, "file_path_24hr_choice", "") or ""
         ).strip()
+        expit_cache_signature = getattr(
+            self, "database_view_expit_cache_signature_snapshot", ""
+        )
+        expit_cache_allowed = bool(getattr(
+            self, "database_view_expit_cache_allowed_snapshot", False
+        ))
+        expit_cache_hit = False
         if schedule_path:
             try:
                 site_context = copy.deepcopy(
@@ -5549,17 +5731,25 @@ class UserInputs(QMainWindow):
                     )
                     or self.active_site_context()
                 )
-                transactions = self.run_program.prepare_expit_payload_transactions(
-                    getattr(self, "database_view_start_time_snapshot", None)
-                    or self.start_time_choice,
-                    self.expit_mode_choice,
-                    schedule_path,
-                    getattr(self, "reevaluate_aps_direct_tip_choice", False),
-                    getattr(self, "aps_direct_tip_crusher_choice", []),
-                    site_context,
-                    getattr(self, "file_path_choice", ""),
-                    getattr(self, "selected_24hr_expit_agents", []),
-                )
+                if expit_cache_allowed:
+                    transactions, _cache_metadata = (
+                        DatabaseManager().read_expit_input_cache(
+                            expit_cache_signature
+                        )
+                    )
+                    expit_cache_hit = transactions is not None
+                if transactions is None or not expit_cache_hit:
+                    transactions = self.run_program.prepare_expit_payload_transactions(
+                        getattr(self, "database_view_start_time_snapshot", None)
+                        or self.start_time_choice,
+                        self.expit_mode_choice,
+                        schedule_path,
+                        getattr(self, "reevaluate_aps_direct_tip_choice", False),
+                        getattr(self, "aps_direct_tip_crusher_choice", []),
+                        site_context,
+                        getattr(self, "file_path_choice", ""),
+                        getattr(self, "selected_24hr_expit_agents", []),
+                    )
                 warnings.extend(
                     transactions.attrs.get(
                         "source_property_warnings", []
@@ -5615,6 +5805,8 @@ class UserInputs(QMainWindow):
                 request_signature
                 or self.database_view_input_signature()
             ),
+            "expit_cache_signature": expit_cache_signature,
+            "expit_cache_hit": expit_cache_hit,
             "refresh_generation": refresh_generation,
         }
 
@@ -5825,6 +6017,15 @@ class UserInputs(QMainWindow):
             self.start_time_choice or datetime.now()
         )
         self.database_view_site_context_snapshot = self.active_site_context()
+        self.database_view_expit_cache_signature_snapshot = (
+            self.expit_input_cache_signature(
+                start_time=self.database_view_start_time_snapshot,
+                site_context=self.database_view_site_context_snapshot,
+            )
+        )
+        self.database_view_expit_cache_allowed_snapshot = (
+            self.expit_input_cache_allowed()
+        )
         self.database_view_signature_snapshot = (
             self.database_view_input_signature()
         )
@@ -5867,6 +6068,24 @@ class UserInputs(QMainWindow):
         self.database_view_expit_payload_transactions = result.get(
             "transactions", pd.DataFrame()
         )
+        expit_cache_signature = str(
+            result.get("expit_cache_signature") or ""
+        )
+        if (
+            expit_cache_signature
+            and not result.get("expit_cache_hit", False)
+            and self.database_view_expit_payload_transactions is not None
+        ):
+            DatabaseManager().write_expit_input_cache(
+                self.database_view_expit_payload_transactions,
+                expit_cache_signature,
+                metadata={
+                    "source": "database_view",
+                    "scenario_start": self.expit_signature_datetime(
+                        getattr(self, "database_view_start_time_snapshot", None)
+                    ),
+                },
+            )
         expit_attributes = dict(
             getattr(
                 self.database_view_expit_payload_transactions,
@@ -5921,6 +6140,11 @@ class UserInputs(QMainWindow):
             f"Planning window: {result.get('window_start')} to "
             f"{result.get('window_end')} | {count_text} | "
             f"Total audited source tonnes: {tonnes:,.0f}"
+            + (
+                " | Expit inputs: restored from saved project"
+                if result.get("expit_cache_hit", False)
+                else ""
+            )
         )
 
     def handle_database_view_error(
@@ -11026,30 +11250,64 @@ class UserInputs(QMainWindow):
                 self.direct_tip_movement_rules.pop(row)
         self.refresh_direct_tip_rule_list()
 
+    def aps_guidance_input_signature(self):
+        signature = {
+            "cache_version": APS_GUIDANCE_CACHE_VERSION,
+            "destination_guidance_version": (
+                ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+            ),
+            "2wp_file": self.expit_input_file_fingerprint(
+                getattr(self, "file_path_choice", "")
+            ),
+            "start_time": self.expit_signature_datetime(
+                getattr(self, "start_time_choice", None)
+            ),
+            "mine": str(
+                getattr(self, "mine_input_choice", "") or ""
+            ).strip().upper(),
+            "opf": str(
+                getattr(self, "opf_input_choice", "") or ""
+            ).strip().upper(),
+            "crusher": str(
+                getattr(self, "crusher_input_choice", "") or ""
+            ).strip().upper(),
+            "product_crushers": sorted(
+                str(value).strip().upper()
+                for value in self.selected_two_wp_product_crusher_names()
+                if str(value).strip()
+            ),
+            "brands": list(self.product_brand_options()),
+        }
+        return json.dumps(signature, sort_keys=True, default=str)
+
     def refresh_aps_stockpile_brand_map(self):
+        file_path = getattr(self, "file_path_choice", "") or ""
+        if not file_path:
+            self.aps_stockpile_brand_map = {}
+            self.aps_stockpile_timing_guidance = {}
+            self.aps_active_blend_guidance = []
+            self.aps_destination_guidance = {}
+            self.aps_guidance_request_signature = ""
+            return
+        request_signature = self.aps_guidance_input_signature()
+        destination_version_matches = (
+            (getattr(self, "aps_destination_guidance", {}) or {}).get(
+                "matching_version"
+            )
+            == ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
+        )
+        if (
+            getattr(self, "aps_guidance_request_signature", "")
+            == request_signature
+            and destination_version_matches
+        ):
+            return
+
         self.aps_stockpile_brand_map = {}
         self.aps_stockpile_timing_guidance = {}
         self.aps_active_blend_guidance = []
         self.aps_destination_guidance = {}
-        file_path = getattr(self, "file_path_choice", "") or ""
-        if not file_path:
-            return
-        try:
-            file_stamp = os.path.getmtime(file_path)
-        except OSError:
-            file_stamp = None
-        cache_key = (
-            os.path.normcase(os.path.abspath(file_path)),
-            file_stamp,
-            str(getattr(self, "mine_input_choice", "") or "").strip().upper(),
-            str(getattr(self, "opf_input_choice", "") or "").strip().upper(),
-            str(getattr(self, "crusher_input_choice", "") or "").strip().upper(),
-            tuple(
-                str(value).strip().upper()
-                for value in self.selected_two_wp_product_crusher_names()
-            ),
-            tuple(self.product_brand_options()),
-        )
+        cache_key = request_signature
         cached_map = getattr(self, "aps_brand_guidance_cache", {}).get(cache_key)
         if (
             cached_map is not None
@@ -11077,6 +11335,7 @@ class UserInputs(QMainWindow):
             else:
                 # Compatibility with caches created before dual ingestion.
                 self.aps_stockpile_brand_map = cached_guidance
+            self.aps_guidance_request_signature = request_signature
             return
         try:
             guidance = ExpitDataHandler.get_2wp_schedule_guidance(
@@ -11105,11 +11364,13 @@ class UserInputs(QMainWindow):
             self.aps_active_blend_guidance = guidance["active_blend_guidance"]
             self.aps_destination_guidance = guidance["destination_guidance"]
             self.aps_brand_guidance_cache[cache_key] = copy.deepcopy(guidance)
+            self.aps_guidance_request_signature = request_signature
         except Exception as exc:
             self.aps_stockpile_brand_map = {}
             self.aps_stockpile_timing_guidance = {}
             self.aps_active_blend_guidance = []
             self.aps_destination_guidance = {}
+            self.aps_guidance_request_signature = ""
             print(f"Warning: unable to derive 2WP schedule guidance: {exc}")
 
     def aps_brand_info_for_stockpile(self, stockpile_name):
@@ -18746,8 +19007,12 @@ class UserInputs(QMainWindow):
         if self.calendar_inputs is not None:
             self.calendar_inputs["solver_config"] = copy.deepcopy(active_solver_config)
 
+        expit_cache_signature = self.expit_input_cache_signature()
+        expit_cache_allowed = self.expit_input_cache_allowed()
         prepared_transactions = None
         if (
+            expit_cache_allowed
+            and
             getattr(self, "database_view_snapshot_signature", None)
             == self.database_view_input_signature()
             and getattr(
@@ -18756,6 +19021,12 @@ class UserInputs(QMainWindow):
         ):
             prepared_transactions = copy.deepcopy(
                 self.database_view_expit_payload_transactions
+            )
+        elif expit_cache_allowed and self.file_path_24hr_choice:
+            prepared_transactions, _cache_metadata = (
+                DatabaseManager().read_expit_input_cache(
+                    expit_cache_signature
+                )
             )
 
         return self.run_program.execute(
@@ -18777,6 +19048,7 @@ class UserInputs(QMainWindow):
             getattr(self, "selected_24hr_expit_agents", []),
             self.planning_period_count(),
             prepared_transactions,
+            expit_cache_signature,
         )
 
     def finish_project_load_ui(self, success):
@@ -19876,6 +20148,7 @@ class UserInputs(QMainWindow):
                 FROM sqlite_master
                 WHERE type = 'table'
                   AND name NOT LIKE 'sqlite_%'
+                  AND name <> 'expit_input_cache'
                 ORDER BY name
             """
             tables = pd.read_sql(query, conn)["name"].tolist()
@@ -23747,6 +24020,9 @@ class UserInputs(QMainWindow):
                 "aps_destination_guidance": getattr(
                     self, "aps_destination_guidance", {}
                 ),
+                "aps_guidance_request_signature": getattr(
+                    self, "aps_guidance_request_signature", ""
+                ),
                 "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
                 "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
                 "mine_input_choice": self.mine_input_choice,
@@ -24189,6 +24465,9 @@ class UserInputs(QMainWindow):
         self.aps_destination_guidance = (
             loaded_state.get("aps_destination_guidance", {}) or {}
         )
+        self.aps_guidance_request_signature = str(
+            loaded_state.get("aps_guidance_request_signature") or ""
+        )
         self.reevaluate_aps_direct_tip_choice = loaded_state.get(
             "reevaluate_aps_direct_tip_choice", False
         )
@@ -24541,6 +24820,7 @@ class UserInputs(QMainWindow):
         self.aps_stockpile_timing_guidance = {}
         self.aps_active_blend_guidance = []
         self.aps_destination_guidance = {}
+        self.aps_guidance_request_signature = ""
         self.aps_brand_guidance_cache = {}
         self.scenario_report_refresh_pending = False
         self.reevaluate_aps_direct_tip_choice = False

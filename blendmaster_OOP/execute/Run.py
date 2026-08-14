@@ -288,6 +288,7 @@ class Run:
         selected_24hr_agents=None,
         planning_period_count=3,
         prepared_expit_payload_transactions=None,
+        expit_input_cache_signature=None,
     ):
         self.abort_requested = False
         self.case_bridge.print(
@@ -307,10 +308,21 @@ class Run:
         # Database View prepares this same payload population for audit. Reuse
         # it so the inspected records and the subsequent run cannot diverge.
         if prepared_expit_payload_transactions is not None:
+            self.case_bridge.print(
+                "Reusing saved Expit payloads and sequence reconciliation."
+            )
             expit_payload_transactions = copy.deepcopy(
                 prepared_expit_payload_transactions
             )
         elif file_path:
+            self.case_bridge.print(
+                "Preparing Expit payloads"
+                + (
+                    " and refreshing actual sequence reconciliation..."
+                    if str(expit_mode or 1).strip() == "2"
+                    else "..."
+                )
+            )
             expit_payload_transactions = self.prepare_expit_payload_transactions(
                 start_time,
                 expit_mode,
@@ -323,6 +335,24 @@ class Run:
             )
         else:
             expit_payload_transactions = DataFrame()
+
+        # Store the exact, solver-ready frame immediately after preparation.
+        # This is intentionally separate from the readable reporting table,
+        # which omits internal columns and DataFrame reconciliation attrs.
+        if (
+            file_path
+            and expit_input_cache_signature
+            and prepared_expit_payload_transactions is None
+        ):
+            DatabaseManager().write_expit_input_cache(
+                expit_payload_transactions,
+                expit_input_cache_signature,
+                metadata={
+                    "source": "solver_preparation",
+                    "scenario_start": str(start_time),
+                    "expit_mode": expit_mode,
+                },
+            )
 
         # User interaction required to choose between original time and updated time methods
         user_interaction_mode = expit_mode
