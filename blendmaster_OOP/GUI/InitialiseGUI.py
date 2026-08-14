@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QCompleter
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QSlider, QCompleter
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -1365,6 +1365,9 @@ class UserInputs(QMainWindow):
             "expit_live_refresh_minutes": max(int(getattr(
                 self, "expit_live_refresh_minutes", 5
             ) or 5), 1),
+            "expit_excavator_size_pct": max(10, min(100, int(getattr(
+                self, "expit_excavator_size_pct", 55
+            ) or 55))),
         }
 
     def capture_scenario_state(self):
@@ -1380,6 +1383,10 @@ class UserInputs(QMainWindow):
             )
             self.expit_live_refresh_minutes = max(
                 int(self.expit_sequence_interval_input.value()), 1
+            )
+        if hasattr(self, "expit_excavator_size_slider"):
+            self.expit_excavator_size_pct = int(
+                self.expit_excavator_size_slider.value()
             )
         # During project restore the authoritative values have already been
         # read from the project file, but the setup widgets still contain the
@@ -1433,6 +1440,7 @@ class UserInputs(QMainWindow):
             "planning_period_count_choice",
             "expit_mode_choice", "expit_completion_tolerance_pct",
             "expit_live_refresh_enabled", "expit_live_refresh_minutes",
+            "expit_excavator_size_pct",
             "file_path_choice", "file_path_24hr_choice",
             "two_wp_closing_stocks_path_choice",
             "two_wp_closing_stock_balances",
@@ -1668,6 +1676,9 @@ class UserInputs(QMainWindow):
             self.expit_live_refresh_minutes = max(
                 int(state.get("expit_live_refresh_minutes", 5) or 5), 1
             )
+            self.expit_excavator_size_pct = max(10, min(100, int(
+                state.get("expit_excavator_size_pct", 55) or 55
+            )))
             self.file_path_choice = state.get("file_path_choice") or ""
             self.file_path_24hr_choice = (
                 state.get("file_path_24hr_choice")
@@ -2064,6 +2075,9 @@ class UserInputs(QMainWindow):
             self.expit_sequence_interval_input.setValue(max(int(
                 getattr(self, "expit_live_refresh_minutes", 5) or 5
             ), 1))
+            self.expit_excavator_size_slider.setValue(max(10, min(100, int(
+                getattr(self, "expit_excavator_size_pct", 55) or 55
+            ))))
             self.update_expit_sequence_timer()
             self.blend_mode.setCurrentIndex(max(self.blend_mode_choice - 1, 0))
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
@@ -4024,6 +4038,26 @@ class UserInputs(QMainWindow):
             self.render_expit_sequence_snapshot
         )
         controls.addWidget(self.expit_sequence_agent_selector)
+        controls.addWidget(QLabel("Excavator size:"))
+        self.expit_excavator_size_slider = QSlider(Qt.Horizontal)
+        self.expit_excavator_size_slider.setRange(10, 100)
+        self.expit_excavator_size_slider.setSingleStep(5)
+        self.expit_excavator_size_slider.setPageStep(10)
+        self.expit_excavator_size_slider.setMinimumWidth(120)
+        self.expit_excavator_size_slider.setValue(max(10, min(100, int(
+            getattr(self, "expit_excavator_size_pct", 55) or 55
+        ))))
+        self.expit_excavator_size_slider.setToolTip(
+            "Excavator marker width as a percentage of the average grade-block width."
+        )
+        self.expit_excavator_size_value_label = QLabel(
+            f"{self.expit_excavator_size_slider.value()}%"
+        )
+        self.expit_excavator_size_slider.valueChanged.connect(
+            self.update_expit_excavator_size
+        )
+        controls.addWidget(self.expit_excavator_size_slider)
+        controls.addWidget(self.expit_excavator_size_value_label)
         controls.addStretch()
         layout.addLayout(controls)
 
@@ -4035,6 +4069,7 @@ class UserInputs(QMainWindow):
             ("waste_blocks", "Waste blocks"),
             ("actual_only_blocks", "Actual-only blocks"),
             ("completed_blocks", "Completed blocks"),
+            ("excavator_marker", "Excavator marker"),
             ("original_route", "Original APS route"),
             ("corrected_route", "Corrected future route"),
             ("actual_route", "Actual route"),
@@ -4072,6 +4107,14 @@ class UserInputs(QMainWindow):
 
         self.expit_sequence_snapshot = {}
         self.expit_sequence_refresh_in_progress = False
+
+    def update_expit_excavator_size(self, value):
+        self.expit_excavator_size_pct = max(10, min(100, int(value)))
+        if hasattr(self, "expit_excavator_size_value_label"):
+            self.expit_excavator_size_value_label.setText(
+                f"{self.expit_excavator_size_pct}%"
+            )
+        self.render_expit_sequence_snapshot()
 
     def update_expit_sequence_timer(self, *_args):
         if not hasattr(self, "expit_sequence_refresh_timer"):
@@ -4221,7 +4264,7 @@ class UserInputs(QMainWindow):
         ) or {}
         defaults = {
             "ore_blocks", "waste_blocks", "actual_only_blocks",
-            "completed_blocks",
+            "completed_blocks", "excavator_marker",
             "original_route", "corrected_route", "actual_route",
         }
         if not checkboxes:
@@ -4457,47 +4500,52 @@ class UserInputs(QMainWindow):
                 movement.get("transaction_datetime"),
                 centroids[key],
             ))
-        if actual_route and "actual_route" in visible_layers:
-            figure.add_trace(go.Scatter(
-                x=[item[3][0] for item in actual_route],
-                y=[item[3][1] for item in actual_route],
-                mode="lines+markers",
-                name="Actual route",
-                line=dict(color="#ef4444", width=3),
-                text=[
-                    f"{item[1]}<br>{item[2]}" for item in actual_route
-                ],
-                hovertemplate="%{text}<extra></extra>",
-            ))
-            latest = actual_route[-1]
-            figure.add_trace(go.Scatter(
-                x=[latest[3][0]],
-                y=[latest[3][1]],
-                mode="markers+text",
-                text=["Latest agent block"],
-                textposition="top center",
-                marker=dict(
-                    size=30, color="rgba(250,204,21,0.01)",
-                    line=dict(width=0),
-                ),
-                name="Latest agent block",
-                showlegend=False,
-                hovertext=[f"Latest agent block<br>{latest[1]}<br>{latest[2]}"],
-                hovertemplate="%{hovertext}<extra></extra>",
-            ))
-            icon_source = self.expit_excavator_icon_source()
-            if icon_source:
-                # Size from block geometry (not total map extent) and keep the
-                # marker below the average equivalent block width.
-                icon_size = self.expit_average_block_size(geometry) * 0.55
-                figure.add_layout_image(dict(
-                    source=icon_source,
-                    xref="x", yref="y",
-                    x=latest[3][0], y=latest[3][1],
-                    sizex=icon_size, sizey=icon_size,
-                    xanchor="center", yanchor="middle",
-                    sizing="contain", opacity=1.0, layer="above",
+        if actual_route:
+            if "actual_route" in visible_layers:
+                figure.add_trace(go.Scatter(
+                    x=[item[3][0] for item in actual_route],
+                    y=[item[3][1] for item in actual_route],
+                    mode="lines+markers",
+                    name="Actual route",
+                    line=dict(color="#ef4444", width=3),
+                    text=[
+                        f"{item[1]}<br>{item[2]}" for item in actual_route
+                    ],
+                    hovertemplate="%{text}<extra></extra>",
                 ))
+            latest = actual_route[-1]
+            if "excavator_marker" in visible_layers:
+                figure.add_trace(go.Scatter(
+                    x=[latest[3][0]],
+                    y=[latest[3][1]],
+                    mode="markers+text",
+                    text=["Latest agent block"],
+                    textposition="top center",
+                    marker=dict(
+                        size=30, color="rgba(250,204,21,0.01)",
+                        line=dict(width=0),
+                    ),
+                    name="Latest agent block",
+                    showlegend=False,
+                    hovertext=[f"Latest agent block<br>{latest[1]}<br>{latest[2]}"],
+                    hovertemplate="%{hovertext}<extra></extra>",
+                ))
+                icon_source = self.expit_excavator_icon_source()
+                if icon_source:
+                    # Size from block geometry (not total map extent) and keep
+                    # the marker below the average equivalent block width.
+                    icon_scale = max(10, min(100, int(
+                        self.__dict__.get("expit_excavator_size_pct", 55) or 55
+                    ))) / 100.0
+                    icon_size = self.expit_average_block_size(geometry) * icon_scale
+                    figure.add_layout_image(dict(
+                        source=icon_source,
+                        xref="x", yref="y",
+                        x=latest[3][0], y=latest[3][1],
+                        sizex=icon_size, sizey=icon_size,
+                        xanchor="center", yanchor="middle",
+                        sizing="contain", opacity=1.0, layer="above",
+                    ))
         figure.update_layout(
             title=f"{agent} Expit Face and Sequence",
             xaxis_title="Easting",

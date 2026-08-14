@@ -146,11 +146,13 @@ the corrected future route, polygon geometry from
 `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCK_POLYGON_POINTS`, the latest agent
 block, completion metrics, inferred direction/reversals and confidence. It has
 **Refresh Now** plus opt-in live refresh, disabled by default with a five-minute
-default interval. Ore, waste, actual-only and completed polygons and each of the
-original, corrected and actual routes can be toggled independently. Completed
+default interval. Ore, waste, actual-only and completed polygons, the excavator
+marker, and each original, corrected and actual route can be toggled independently. Completed
 blocks are visible by default as muted dotted audit footprints and can be hidden.
 The latest agent block uses the transparent PNG excavator marker, sized below the
-average equivalent block width. The corresponding SQLite audit tables are:
+average equivalent block width by default. The **Excavator size** slider adjusts
+the marker from 10% to 100% of that average width and is stored with the project.
+The corresponding SQLite audit tables are:
 
 - `expit_sequence_reconciliation_audit`;
 - `expit_sequence_reconciliation_summary`;
