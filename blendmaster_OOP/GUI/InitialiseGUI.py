@@ -4084,7 +4084,7 @@ class UserInputs(QMainWindow):
         layout.addLayout(layer_controls)
 
         self.expit_sequence_status_label = QLabel(
-            "Use Update Transactions on Current Time, then select Refresh Now."
+            "Use Update Transactions at Scenario Start, then select Refresh Now."
         )
         self.expit_sequence_status_label.setWordWrap(True)
         layout.addWidget(self.expit_sequence_status_label)
@@ -4145,10 +4145,19 @@ class UserInputs(QMainWindow):
             raise ValueError("Select an available 24HR Mining.csv first.")
         if int(getattr(self, "expit_mode_choice", 1) or 1) != 2:
             raise ValueError(
-                "Select Update Transactions on Current Time in Guidance Schedules."
+                "Select Update Transactions at Scenario Start in Guidance Schedules."
             )
+        set_time_mode = (
+            self.time_mode.currentIndex() == 1
+            if hasattr(self, "time_mode")
+            else int(getattr(self, "time_mode_choice", 1) or 1) == 2
+        )
+        reconciliation_time = (
+            self.current_site_start_time()
+            if set_time_mode else datetime.now()
+        )
         return {
-            "start_time": datetime.now(),
+            "start_time": reconciliation_time,
             "schedule_path": schedule_path,
             "context": copy.deepcopy(self.active_site_context()),
             "two_wp": str(getattr(self, "file_path_choice", "") or ""),
@@ -9699,9 +9708,9 @@ class UserInputs(QMainWindow):
         self.expit_mode = QComboBox()
         self.expit_mode.addItems([
             "Use Original Expit Transactions",
-            "Update Transactions on Current Time",
+            "Update Transactions at Scenario Start",
         ])
-        self.expit_mode.setFixedWidth(300)
+        self.expit_mode.setFixedWidth(330)
         guidance_layout.addRow(expit_label, self.expit_mode)
         self.expit_completion_tolerance_input = QSpinBox()
         self.expit_completion_tolerance_input.setRange(0, 50)
@@ -10091,11 +10100,7 @@ class UserInputs(QMainWindow):
             hasattr(self, "file_path_24hr")
             and self.file_path_24hr.text().strip()
         )
-        starts_now = (
-            not hasattr(self, "time_mode")
-            or self.time_mode.currentIndex() == 0
-        )
-        enabled = has_24hr_schedule and starts_now
+        enabled = has_24hr_schedule
         self.expit_mode.setEnabled(enabled)
         if hasattr(self, "expit_completion_tolerance_input"):
             self.expit_completion_tolerance_input.setEnabled(

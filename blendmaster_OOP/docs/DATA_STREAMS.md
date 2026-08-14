@@ -84,9 +84,9 @@ Mining.wetTonnes
 The normalized rows are stored in the project, so an already-prepared project
 does not depend on rereading the workbook simply to run its reports.
 
-### Current-time ExPit sequence reconciliation
+### As-of ExPit sequence reconciliation
 
-When **Update Transactions on Current Time** is selected, BlendMaster no
+When **Update Transactions at Scenario Start** is selected, BlendMaster no
 longer assumes that the load agent followed APS merely because a cumulative
 tonnage threshold was reached. It queries
 `AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS`
@@ -102,6 +102,12 @@ completion and remaining WMT at parent level, but preserves the APS slice and
 payload rows internally so their timing, grades, destinations and haulage
 properties remain authoritative for the solver.
 
+For **Set Time**, every reconciliation query is fixed to the selected scenario
+start, allowing a historical "would have been" replay without later movements.
+For **Now**, Workspace live refresh continues advancing its as-of timestamp to
+the real current time. Geological cumulative tonnes have no lower lookback but
+are always capped at the applicable as-of timestamp.
+
 The parent audit also queries the latest active matching record in
 `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS`, using only the parent identity,
 `GB_WET_TONNES`, `GB_DRY_TONNES`, `GB_MATERIAL`, `IS_ORE` and record timestamp.
@@ -114,7 +120,8 @@ the APS schedule. The displayed measures distinguish:
 - `nominal_geological_wmt` / `nominal_geological_dmt`: original active grade-
   block model tonnes;
 - `cumulative_actual_wmt`: all available non-deleted ExPit WMT for the parent
-  across the full transaction table, with no time predicate;
+  across its full transaction history through the scenario-start timestamp,
+  with no lower lookback limit;
 - `estimated_geological_remaining_wmt`: nominal WMT less cumulative actual WMT,
   clamped at zero;
 - `aps_share_of_nominal_pct`: scheduled APS WMT as a share of nominal WMT; and
