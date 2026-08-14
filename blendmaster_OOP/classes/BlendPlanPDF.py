@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import math
 import os
+from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
@@ -99,6 +100,42 @@ class BlendPlanPDF:
             bands.append(current)
         return bands
 
+    @staticmethod
+    def _logo_icon_buffer(logo_path):
+        """Crop the icon from the full application branding image."""
+        try:
+            from PIL import Image, ImageChops
+        except ImportError as exc:
+            raise BlendPlanPDFError(
+                "PDF logo rendering requires Pillow. Install the project "
+                "requirements and try again."
+            ) from exc
+
+        with Image.open(str(logo_path)) as source:
+            image = source.convert("RGB")
+            width, height = image.size
+            # The supplied application artwork contains the icon in its upper
+            # section and the product captions below it.  Keep those captions
+            # as native PDF text so they remain sharp and can differ from the
+            # Site Configuration artwork.
+            upper = image.crop((0, 0, width, max(1, int(height * 0.76))))
+            background = Image.new("RGB", upper.size, "white")
+            difference = ImageChops.difference(upper, background).convert("L")
+            foreground = difference.point(lambda value: 255 if value > 18 else 0)
+            bounds = foreground.getbbox()
+            if bounds:
+                padding = max(4, int(min(width, height) * 0.012))
+                left = max(0, bounds[0] - padding)
+                top = max(0, bounds[1] - padding)
+                right = min(upper.width, bounds[2] + padding)
+                bottom = min(upper.height, bounds[3] + padding)
+                upper = upper.crop((left, top, right, bottom))
+
+            output = BytesIO()
+            upper.save(output, format="PNG", optimize=True)
+            output.seek(0)
+            return output
+
     @classmethod
     def export(
         cls,
@@ -181,26 +218,41 @@ class BlendPlanPDF:
         styles = getSampleStyleSheet()
         styles.add(ParagraphStyle(
             name="BlendPlanTitle", parent=styles["Title"], fontName="Helvetica-Bold",
-            fontSize=18, leading=21, textColor=colors.HexColor("#17365d"),
-            spaceAfter=4,
+            fontSize=22, leading=25, textColor=colors.HexColor("#17365d"),
+            spaceAfter=5,
+        ))
+        styles.add(ParagraphStyle(
+            name="BlendPlanBrand", parent=styles["Title"],
+            fontName="Helvetica-Bold", fontSize=14, leading=16,
+            textColor=colors.HexColor("#202020"), spaceAfter=0,
+        ))
+        styles.add(ParagraphStyle(
+            name="BlendPlanTagline", parent=styles["Title"],
+            fontName="Helvetica", fontSize=8.5, leading=10,
+            textColor=colors.HexColor("#303030"), spaceAfter=4,
+        ))
+        styles.add(ParagraphStyle(
+            name="BlendPlanMetadata", parent=styles["BodyText"],
+            fontName="Helvetica", fontSize=9, leading=11,
+            alignment=TA_LEFT, textColor=colors.HexColor("#303b46"),
         ))
         styles.add(ParagraphStyle(
             name="BlendPlanSection", parent=styles["Heading2"],
-            fontName="Helvetica-Bold", fontSize=12, leading=14,
-            textColor=colors.HexColor("#17365d"), spaceAfter=6,
+            fontName="Helvetica-Bold", fontSize=15, leading=18,
+            textColor=colors.HexColor("#17365d"), spaceAfter=7,
         ))
         styles.add(ParagraphStyle(
-            name="BlendPlanCell", parent=styles["BodyText"], fontSize=6.5,
-            leading=8, alignment=TA_LEFT, wordWrap="CJK",
+            name="BlendPlanCell", parent=styles["BodyText"], fontSize=7.2,
+            leading=8.8, alignment=TA_LEFT, wordWrap="CJK",
         ))
         styles.add(ParagraphStyle(
             name="BlendPlanHeader", parent=styles["BodyText"],
-            fontName="Helvetica-Bold", fontSize=6.4, leading=7.5,
+            fontName="Helvetica-Bold", fontSize=7, leading=8.2,
             alignment=TA_CENTER, textColor=colors.white, wordWrap="CJK",
         ))
         styles.add(ParagraphStyle(
-            name="BlendPlanLegend", parent=styles["BodyText"], fontSize=7,
-            leading=8.5, alignment=TA_LEFT,
+            name="BlendPlanLegend", parent=styles["BodyText"], fontSize=8.5,
+            leading=10.2, alignment=TA_LEFT,
         ))
         cell_style = styles["BlendPlanCell"]
         header_style = styles["BlendPlanHeader"]
@@ -270,7 +322,7 @@ class BlendPlanPDF:
                 tick_time = start_all + (end_all - start_all) * fraction
                 drawing.add(String(
                     x, 7.0, tick_time.strftime("%d %b %H:%M"),
-                    fontName="Helvetica", fontSize=6.5, textAnchor="middle",
+                    fontName="Helvetica", fontSize=7.5, textAnchor="middle",
                     fillColor=colors.HexColor("#4d5b6a"),
                 ))
 
@@ -306,7 +358,7 @@ class BlendPlanPDF:
                 label = f"Bar {bar_number} | Blend {blend_id}"
                 drawing.add(String(
                     label_width - 4.0, y + max(lane_height - 2.0, 4.0) / 2.0 - 2.2,
-                    label, fontName="Helvetica", fontSize=max(5.2, min(7.0, lane_height * 0.42)),
+                    label, fontName="Helvetica", fontSize=max(6.2, min(8.4, lane_height * 0.48)),
                     textAnchor="end", fillColor=colors.HexColor("#273444"),
                 ))
             return drawing
@@ -320,7 +372,7 @@ class BlendPlanPDF:
             lines = [
                 f"<b>Bar {html.escape(cls._text(summary.get('Bar')))} - Blend "
                 f"{html.escape(cls._text(summary.get('Blend ID')))}</b>",
-                f"{html.escape(cls._text(summary.get('Start Datetime')))} → "
+                f"{html.escape(cls._text(summary.get('Start Datetime')))} to "
                 f"{html.escape(cls._text(summary.get('End Datetime')))}",
                 f"<b>Stream:</b> {html.escape(cls._text(summary.get('Optimiser Grade Stream')))}",
             ]
@@ -396,31 +448,39 @@ class BlendPlanPDF:
 
         story = []
         if logo_path and os.path.isfile(str(logo_path)):
-            image_width, image_height = ImageReader(str(logo_path)).getSize()
-            max_width = 55 * mm
-            max_height = 42 * mm
+            logo_buffer = cls._logo_icon_buffer(logo_path)
+            image_width, image_height = ImageReader(logo_buffer).getSize()
+            logo_buffer.seek(0)
+            max_width = 64 * mm
+            max_height = 45 * mm
             scale = min(
                 max_width / max(float(image_width), 1.0),
                 max_height / max(float(image_height), 1.0),
             )
             logo = ReportLabImage(
-                str(logo_path),
+                logo_buffer,
                 width=float(image_width) * scale,
                 height=float(image_height) * scale,
             )
             logo.hAlign = "CENTER"
-            story.extend([logo, Spacer(1, 4)])
+            story.extend([
+                logo,
+                Spacer(1, 2),
+                Paragraph("Fortescue BlendMaster", styles["BlendPlanBrand"]),
+                Paragraph("Ultimate Product Streams", styles["BlendPlanTagline"]),
+            ])
         story.extend([
             Paragraph(html.escape(title), styles["BlendPlanTitle"]),
-            paragraph(
+            Paragraph(
                 f"Plan: {plan_id} | Report date and time: "
-                f"{report_datetime.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"{report_datetime.strftime('%Y-%m-%d %H:%M:%S')}",
+                styles["BlendPlanMetadata"],
             ),
-            Spacer(1, 6),
+            Spacer(1, 8),
             Paragraph("Manual Blend Gantt", styles["BlendPlanSection"]),
             make_gantt(),
-            Spacer(1, 7),
-            Paragraph("Gantt Legend", styles["BlendPlanSection"]),
+            Spacer(1, 9),
+            Paragraph("Blend Details", styles["BlendPlanSection"]),
             make_legend_grid(),
             PageBreak(),
             Paragraph("Blend Summary", styles["BlendPlanSection"]),

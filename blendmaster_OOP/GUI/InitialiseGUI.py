@@ -20100,7 +20100,7 @@ class UserInputs(QMainWindow):
                 widths=getattr(
                     self, "manual_blend_plan_column_widths", {}
                 ) or {},
-                title="BlendMaster - Manual Blend Plan",
+                title="Blend Plan",
                 plan_id=str(
                     getattr(self, "active_manual_plan_id", "Primary")
                     or "Primary"
