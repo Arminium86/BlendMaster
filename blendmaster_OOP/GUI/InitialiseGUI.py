@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTabWidget, QTabBar,
-    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QSlider, QCompleter
+    QFormLayout, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QGridLayout, QLabel, QMessageBox, QDateTimeEdit, QFileDialog, QTextEdit, QFrame, QCheckBox, QProgressDialog, QAbstractItemView, QSizePolicy, QListWidget, QListWidgetItem, QSplashScreen, QScrollArea, QDialog, QSpinBox, QSlider, QCompleter, QSplitter
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
@@ -4012,12 +4012,35 @@ class UserInputs(QMainWindow):
         subtitle.setStyleSheet("color: #64748b;")
         layout.addWidget(subtitle)
 
-        controls = QHBoxLayout()
+        upper_splitter = QSplitter(Qt.Horizontal)
+        upper_splitter.setChildrenCollapsible(False)
+
+        controls_panel = QFrame()
+        controls_panel.setObjectName("expitSequenceControlsPanel")
+        controls_panel.setMinimumWidth(320)
+        controls_panel.setMaximumWidth(460)
+        controls_panel.setStyleSheet("""
+            QFrame#expitSequenceControlsPanel {
+                background: #f8fafc;
+                border: 1px solid #d8e0ea;
+                border-radius: 5px;
+            }
+            QFrame#expitSequenceControlsPanel QLabel,
+            QFrame#expitSequenceControlsPanel QCheckBox {
+                border: none;
+                background: transparent;
+            }
+        """)
+        controls_panel_layout = QVBoxLayout(controls_panel)
+        controls_panel_layout.setContentsMargins(12, 12, 12, 12)
+        controls_panel_layout.setSpacing(9)
+
+        refresh_controls = QHBoxLayout()
         self.expit_sequence_refresh_button = QPushButton("Refresh Now")
         self.expit_sequence_refresh_button.clicked.connect(
             self.refresh_expit_sequence_live
         )
-        controls.addWidget(self.expit_sequence_refresh_button)
+        refresh_controls.addWidget(self.expit_sequence_refresh_button)
         self.expit_sequence_live_checkbox = QCheckBox("Enable live refresh")
         self.expit_sequence_live_checkbox.setChecked(bool(
             getattr(self, "expit_live_refresh_enabled", False)
@@ -4025,8 +4048,13 @@ class UserInputs(QMainWindow):
         self.expit_sequence_live_checkbox.toggled.connect(
             self.update_expit_sequence_timer
         )
-        controls.addWidget(self.expit_sequence_live_checkbox)
-        controls.addWidget(QLabel("Interval:"))
+        refresh_controls.addWidget(self.expit_sequence_live_checkbox)
+        refresh_controls.addStretch()
+        controls_panel_layout.addLayout(refresh_controls)
+
+        selector_controls = QGridLayout()
+        selector_controls.setColumnStretch(1, 1)
+        selector_controls.addWidget(QLabel("Interval:"), 0, 0)
         self.expit_sequence_interval_input = QSpinBox()
         self.expit_sequence_interval_input.setRange(1, 60)
         self.expit_sequence_interval_input.setSuffix(" min")
@@ -4036,20 +4064,21 @@ class UserInputs(QMainWindow):
         self.expit_sequence_interval_input.valueChanged.connect(
             self.update_expit_sequence_timer
         )
-        controls.addWidget(self.expit_sequence_interval_input)
-        controls.addWidget(QLabel("Agent:"))
+        selector_controls.addWidget(self.expit_sequence_interval_input, 0, 1)
+        selector_controls.addWidget(QLabel("Agent:"), 1, 0)
         self.expit_sequence_agent_selector = QComboBox()
-        self.expit_sequence_agent_selector.setMinimumWidth(160)
+        self.expit_sequence_agent_selector.setMinimumWidth(180)
         self.expit_sequence_agent_selector.currentTextChanged.connect(
             self.render_expit_sequence_snapshot
         )
-        controls.addWidget(self.expit_sequence_agent_selector)
-        controls.addWidget(QLabel("Excavator size:"))
+        selector_controls.addWidget(self.expit_sequence_agent_selector, 1, 1)
+        selector_controls.addWidget(QLabel("Excavator size:"), 2, 0)
+        excavator_size_controls = QHBoxLayout()
         self.expit_excavator_size_slider = QSlider(Qt.Horizontal)
         self.expit_excavator_size_slider.setRange(10, 100)
         self.expit_excavator_size_slider.setSingleStep(5)
         self.expit_excavator_size_slider.setPageStep(10)
-        self.expit_excavator_size_slider.setMinimumWidth(120)
+        self.expit_excavator_size_slider.setMinimumWidth(140)
         self.expit_excavator_size_slider.setValue(max(10, min(100, int(
             getattr(self, "expit_excavator_size_pct", 55) or 55
         ))))
@@ -4062,15 +4091,19 @@ class UserInputs(QMainWindow):
         self.expit_excavator_size_slider.valueChanged.connect(
             self.update_expit_excavator_size
         )
-        controls.addWidget(self.expit_excavator_size_slider)
-        controls.addWidget(self.expit_excavator_size_value_label)
-        controls.addStretch()
-        layout.addLayout(controls)
+        excavator_size_controls.addWidget(self.expit_excavator_size_slider)
+        excavator_size_controls.addWidget(self.expit_excavator_size_value_label)
+        selector_controls.addLayout(excavator_size_controls, 2, 1)
+        controls_panel_layout.addLayout(selector_controls)
 
-        layer_controls = QHBoxLayout()
-        layer_controls.addWidget(QLabel("Map layers:"))
+        layer_title = QLabel("Map layers")
+        layer_title.setStyleSheet("font-weight: 650; color: #334155;")
+        controls_panel_layout.addWidget(layer_title)
+        layer_controls = QGridLayout()
+        layer_controls.setHorizontalSpacing(12)
+        layer_controls.setVerticalSpacing(5)
         self.expit_sequence_layer_checkboxes = {}
-        for key, caption in (
+        for index, (key, caption) in enumerate((
             ("ore_blocks", "Ore blocks"),
             ("waste_blocks", "Waste blocks"),
             ("actual_only_blocks", "Actual-only blocks"),
@@ -4080,37 +4113,96 @@ class UserInputs(QMainWindow):
             ("original_route", "Original APS route"),
             ("corrected_route", "Corrected future route"),
             ("actual_route", "Actual route"),
-        ):
+        )):
             checkbox = QCheckBox(caption)
             checkbox.setChecked(key != "depleted_portions")
             checkbox.toggled.connect(self.render_expit_sequence_snapshot)
             self.expit_sequence_layer_checkboxes[key] = checkbox
-            layer_controls.addWidget(checkbox)
-        layer_controls.addStretch()
-        layout.addLayout(layer_controls)
+            layer_controls.addWidget(checkbox, index // 2, index % 2)
+        controls_panel_layout.addLayout(layer_controls)
 
         self.expit_sequence_status_label = QLabel(
             "Use Update Transactions at Scenario Start, then select Refresh Now."
         )
         self.expit_sequence_status_label.setWordWrap(True)
-        layout.addWidget(self.expit_sequence_status_label)
+        self.expit_sequence_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        controls_panel_layout.addWidget(self.expit_sequence_status_label)
 
         self.expit_sequence_metrics_label = QLabel("")
         self.expit_sequence_metrics_label.setWordWrap(True)
+        self.expit_sequence_metrics_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
         self.expit_sequence_metrics_label.setStyleSheet(
             "background: #f1f5f9; border: 1px solid #d8e0ea; padding: 8px;"
         )
-        layout.addWidget(self.expit_sequence_metrics_label)
+        controls_panel_layout.addWidget(self.expit_sequence_metrics_label)
+        controls_panel_layout.addStretch()
 
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setWidget(controls_panel)
+        controls_scroll.setMinimumWidth(330)
+        controls_scroll.setMaximumWidth(470)
+        upper_splitter.addWidget(controls_scroll)
+
+        map_panel = QFrame()
+        map_panel.setObjectName("expitSequenceMapPanel")
+        map_panel.setStyleSheet("""
+            QFrame#expitSequenceMapPanel {
+                background: #ffffff;
+                border: 1px solid #d8e0ea;
+                border-radius: 5px;
+            }
+        """)
+        map_panel_layout = QHBoxLayout(map_panel)
+        map_panel_layout.setContentsMargins(6, 6, 6, 6)
+        map_panel_layout.addStretch()
         self.expit_sequence_map = CustomWebEngineView()
-        self.expit_sequence_map.setMinimumHeight(360)
-        layout.addWidget(self.expit_sequence_map, stretch=2)
+        self.expit_sequence_map.setMinimumSize(650, 500)
+        self.expit_sequence_map.setMaximumWidth(1200)
+        self.expit_sequence_map.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        map_panel_layout.addWidget(self.expit_sequence_map, stretch=1)
+        upper_splitter.addWidget(map_panel)
+        upper_splitter.setStretchFactor(0, 0)
+        upper_splitter.setStretchFactor(1, 1)
+        upper_splitter.setSizes([390, 1100])
+
         self.expit_sequence_audit_table = CustomTableWidget()
         self.expit_sequence_audit_table.setEditTriggers(
             QTableWidget.NoEditTriggers
         )
         self.expit_sequence_audit_table.setAlternatingRowColors(True)
-        layout.addWidget(self.expit_sequence_audit_table, stretch=1)
+        self.expit_sequence_audit_table.setMinimumHeight(180)
+        self.expit_sequence_audit_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
+        )
+        self.expit_sequence_audit_table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollPerPixel
+        )
+        self.expit_sequence_audit_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self.expit_sequence_audit_table.horizontalHeader().setStretchLastSection(
+            False
+        )
+
+        self.expit_sequence_vertical_splitter = QSplitter(Qt.Vertical)
+        self.expit_sequence_vertical_splitter.setChildrenCollapsible(False)
+        self.expit_sequence_vertical_splitter.addWidget(upper_splitter)
+        self.expit_sequence_vertical_splitter.addWidget(
+            self.expit_sequence_audit_table
+        )
+        self.expit_sequence_vertical_splitter.setStretchFactor(0, 3)
+        self.expit_sequence_vertical_splitter.setStretchFactor(1, 2)
+        self.expit_sequence_vertical_splitter.setSizes([560, 280])
+        layout.addWidget(self.expit_sequence_vertical_splitter, stretch=1)
 
         self.expit_sequence_snapshot = {}
         self.expit_sequence_refresh_in_progress = False
