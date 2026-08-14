@@ -927,6 +927,20 @@ class CaseModeller:
         blend_option_timeout_seconds = self.configured_blend_option_timeout_seconds()
         max_decision_blend_options = self.configured_max_decision_blend_options()
         step_solver_config = self.solver_config_for_current_step()
+        events, unavailable_grade_block_windows = (
+            self.filter_grade_block_events_by_pair_duration(
+                events, initial_steady_state_duration
+            )
+        )
+        if unavailable_grade_block_windows:
+            preview = "; ".join(unavailable_grade_block_windows[:8])
+            remainder = len(unavailable_grade_block_windows) - 8
+            if remainder > 0:
+                preview += f"; and {remainder} more"
+            print(
+                "Excluded direct-tip parent grade block(s) that cannot meet "
+                f"Min Grade Block Pair Duration: {preview}."
+            )
         enumerate_stockpile_mixes_only = (
             bool(self.reserved_blend_signatures)
             and self.configured_contingency_distinctness_mode()
@@ -1776,6 +1790,86 @@ class CaseModeller:
             return None
         return value if value > Optimizer.SOLUTION_TOLERANCE else None
 
+    def filter_grade_block_events_by_pair_duration(
+        self, events, steady_state_duration
+    ):
+        """Remove parent blocks whose complete delivery window is too short.
+
+        The post-solve guardrail evaluates every payload row belonging to a
+        selected parent block, including zero-selected sibling slices.  Its
+        maximum possible window is therefore known before solving. Excluding
+        an inevitably invalid parent here lets an optional-direct-tip period
+        fall back cleanly to another parent or to stockpile-only feed.
+        """
+        required_duration = (
+            self.configured_min_grade_block_pair_duration_hours()
+        )
+        try:
+            steady_state_duration = float(steady_state_duration or 0.0)
+        except (TypeError, ValueError):
+            steady_state_duration = 0.0
+        if (
+            required_duration is None
+            or steady_state_duration + Optimizer.SOLUTION_TOLERANCE
+            < required_duration
+        ):
+            return list(events or []), []
+
+        parent_deliveries = {}
+        for event in events or []:
+            if not getattr(event, "is_grade_block", False):
+                continue
+            parent_source = parent_grade_block_name(
+                getattr(event, "source_name", None)
+                or getattr(event, "grade_block", None)
+            )
+            if not parent_source:
+                continue
+            parent_deliveries.setdefault(parent_source, []).append(
+                getattr(event, "delivered_datetime", None)
+            )
+
+        invalid_parents = {}
+        for parent_source, delivered_datetimes in parent_deliveries.items():
+            available_duration = (
+                Optimizer.calculate_grouped_payload_depletion_duration(
+                    delivered_datetimes,
+                    getattr(self, "current_time", None),
+                )
+            )
+            if (
+                available_duration is None
+                or available_duration + Optimizer.SOLUTION_TOLERANCE
+                < required_duration
+            ):
+                invalid_parents[parent_source] = available_duration
+
+        if not invalid_parents:
+            return list(events or []), []
+
+        filtered_events = [
+            event
+            for event in events or []
+            if not (
+                getattr(event, "is_grade_block", False)
+                and parent_grade_block_name(
+                    getattr(event, "source_name", None)
+                    or getattr(event, "grade_block", None)
+                ) in invalid_parents
+            )
+        ]
+        descriptions = [
+            (
+                f"{parent_source} has no valid delivery window"
+                if available_duration is None
+                else f"{parent_source} {available_duration:.2f} hrs"
+            )
+            for parent_source, available_duration in sorted(
+                invalid_parents.items()
+            )
+        ]
+        return filtered_events, descriptions
+
     def grade_block_pair_duration_issues_from_result(self, result):
         required_duration = self.configured_min_grade_block_pair_duration_hours()
         if required_duration is None:
@@ -2041,7 +2135,17 @@ class CaseModeller:
                 if transaction.get("source_type") == "grade_block":
                     active_source_ids.append(transaction.get("source") or transaction.get("source_id"))
                 else:
-                    active_source_ids.append(transaction.get("source_id") or transaction.get("source"))
+                    # Optimizer source-selection binaries identify stockpiles
+                    # by their physical parent. AMT reports identify the
+                    # active chunk as source_id, so use the balance-tracking
+                    # parent here to ensure rejected-candidate cuts actually
+                    # exclude the solution that was just returned.
+                    active_source_ids.append(
+                        transaction.get("balance_tracker_source_id")
+                        or transaction.get("parent_stockpile")
+                        or transaction.get("source_id")
+                        or transaction.get("source")
+                    )
         return sorted(source for source in set(active_source_ids) if source)
 
     def active_source_names_from_result(self, result):
