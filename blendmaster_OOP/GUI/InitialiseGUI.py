@@ -4034,6 +4034,7 @@ class UserInputs(QMainWindow):
             ("ore_blocks", "Ore blocks"),
             ("waste_blocks", "Waste blocks"),
             ("actual_only_blocks", "Actual-only blocks"),
+            ("completed_blocks", "Completed blocks"),
             ("original_route", "Original APS route"),
             ("corrected_route", "Corrected future route"),
             ("actual_route", "Actual route"),
@@ -4220,6 +4221,7 @@ class UserInputs(QMainWindow):
         ) or {}
         defaults = {
             "ore_blocks", "waste_blocks", "actual_only_blocks",
+            "completed_blocks",
             "original_route", "corrected_route", "actual_route",
         }
         if not checkboxes:
@@ -4231,20 +4233,28 @@ class UserInputs(QMainWindow):
 
     @staticmethod
     def expit_excavator_icon_source():
-        svg = """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 96">
-          <rect x="23" y="70" width="62" height="14" rx="7" fill="#1f2937"/>
-          <rect x="31" y="74" width="46" height="6" rx="3" fill="#64748b"/>
-          <path d="M30 66h54l-7-20H46z" fill="#facc15" stroke="#713f12" stroke-width="3"/>
-          <path d="M48 46V25h24l9 21" fill="#fde047" stroke="#713f12" stroke-width="3"/>
-          <path d="M55 29h13l6 14H55z" fill="#bfdbfe" stroke="#713f12" stroke-width="2"/>
-          <path d="M78 48L97 25l12 7-16 26" fill="none" stroke="#facc15" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M105 30l9 4 7 24-18-3z" fill="#f59e0b" stroke="#713f12" stroke-width="3"/>
-          <circle cx="43" cy="69" r="5" fill="#713f12"/>
-        </svg>
-        """
-        encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-        return "data:image/svg+xml;base64," + encoded
+        path = preferred_resource_path("expit_excavator.png")
+        if not os.path.isfile(path):
+            return ""
+        with open(path, "rb") as handle:
+            encoded = base64.b64encode(handle.read()).decode("ascii")
+        return "data:image/png;base64," + encoded
+
+    @staticmethod
+    def expit_average_block_size(geometry):
+        sizes = []
+        for _, points in geometry.groupby("grade_block_key", sort=False):
+            polygon = list(zip(points["easting"], points["northing"]))
+            area = ExpitSequenceReconciler._polygon_area(polygon)
+            if area > 1e-12:
+                sizes.append(math.sqrt(area))
+                continue
+            width = numeric(points["easting"].max() - points["easting"].min())
+            height = numeric(points["northing"].max() - points["northing"].min())
+            fallback = max(width or 0.0, height or 0.0)
+            if fallback > 0:
+                sizes.append(fallback)
+        return float(sum(sizes) / len(sizes)) if sizes else 1.0
 
     @staticmethod
     def expit_geological_block_complete(block):
@@ -4293,11 +4303,13 @@ class UserInputs(QMainWindow):
             "Actual only - route evidence": "#ef4444",
         }
         for _, block in agent_audit.iterrows():
-            if self.expit_geological_block_complete(block):
-                continue
+            is_completed = self.expit_geological_block_complete(block)
             record_type = str(block.get("record_type") or "").lower()
             material = str(block.get("material_class") or "").upper()
-            if record_type == "unmatched_actual_context":
+            if is_completed:
+                block_layer = "completed_blocks"
+                block_type = "Completed"
+            elif record_type == "unmatched_actual_context":
                 block_layer = "actual_only_blocks"
                 block_type = "Actual only"
             elif "WASTE" in material:
@@ -4325,9 +4337,17 @@ class UserInputs(QMainWindow):
                     if remaining is not None and nominal is not None
                     and nominal > 0 else 1.0
                 )
-            remaining_polygon = ExpitSequenceReconciler.remaining_polygon(
-                list(zip(points["easting"], points["northing"])),
-                remaining_fraction,
+            source_polygon = list(zip(
+                points["easting"], points["northing"]
+            ))
+            # A completed block keeps its original footprint as a muted audit
+            # outline. Active blocks show only their estimated remaining area.
+            remaining_polygon = (
+                source_polygon
+                if is_completed
+                else ExpitSequenceReconciler.remaining_polygon(
+                    source_polygon, remaining_fraction,
+                )
             )
             if not remaining_polygon:
                 continue
@@ -4343,9 +4363,17 @@ class UserInputs(QMainWindow):
                 y=y,
                 mode="lines",
                 fill="toself",
-                fillcolor=status_colours.get(status, "#cbd5e1"),
-                line=dict(color="#475569", width=1),
-                opacity=0.55,
+                fillcolor=(
+                    "rgba(148,163,184,0.16)"
+                    if is_completed
+                    else status_colours.get(status, "#cbd5e1")
+                ),
+                line=dict(
+                    color="#64748b" if is_completed else "#475569",
+                    width=1,
+                    dash="dot" if is_completed else "solid",
+                ),
+                opacity=0.45 if is_completed else 0.55,
                 name=trace_name,
                 legendgroup=trace_name,
                 showlegend=trace_name not in {
@@ -4376,8 +4404,8 @@ class UserInputs(QMainWindow):
                 hovertemplate="%{text}<extra></extra>",
             ))
 
-        # Geological completion removes the block polygon, while route layers
-        # remain complete, separately toggleable audit trails.
+        # Route layers remain complete, separately toggleable audit trails;
+        # the completed-block layer controls only the muted polygon footprints.
         route_audit = agent_audit.copy()
         original = route_audit[
             route_audit["original_sequence"].notna()
@@ -4457,23 +4485,19 @@ class UserInputs(QMainWindow):
                 hovertext=[f"Latest agent block<br>{latest[1]}<br>{latest[2]}"],
                 hovertemplate="%{hovertext}<extra></extra>",
             ))
-            x_span = (
-                float(geometry["easting"].max() - geometry["easting"].min())
-                if not geometry.empty else 1.0
-            )
-            y_span = (
-                float(geometry["northing"].max() - geometry["northing"].min())
-                if not geometry.empty else 1.0
-            )
-            icon_size = max(x_span, y_span, 1.0) * 0.065
-            figure.add_layout_image(dict(
-                source=self.expit_excavator_icon_source(),
-                xref="x", yref="y",
-                x=latest[3][0], y=latest[3][1],
-                sizex=icon_size, sizey=icon_size * 0.75,
-                xanchor="center", yanchor="middle",
-                sizing="contain", opacity=1.0, layer="above",
-            ))
+            icon_source = self.expit_excavator_icon_source()
+            if icon_source:
+                # Size from block geometry (not total map extent) and keep the
+                # marker below the average equivalent block width.
+                icon_size = self.expit_average_block_size(geometry) * 0.55
+                figure.add_layout_image(dict(
+                    source=icon_source,
+                    xref="x", yref="y",
+                    x=latest[3][0], y=latest[3][1],
+                    sizex=icon_size, sizey=icon_size,
+                    xanchor="center", yanchor="middle",
+                    sizing="contain", opacity=1.0, layer="above",
+                ))
         figure.update_layout(
             title=f"{agent} Expit Face and Sequence",
             xaxis_title="Easting",

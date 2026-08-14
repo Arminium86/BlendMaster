@@ -123,10 +123,9 @@ the APS schedule. The displayed measures distinguish:
 Schedule completion alone controls APS payload removal. Geological completion
 is an audit/map signal and may exceed 100% where surveyed/transaction precision
 or model revisions differ; that condition does not change scheduled payloads.
-The map hides blocks whose estimated geological balance is within the configured
-completion tolerance. For other blocks, the displayed polygon area represents
-the estimated remaining geological fraction and is clipped progressively from
-north to south.
+For active blocks, the displayed polygon area represents the estimated remaining
+geological fraction and is clipped progressively from north to south. Completed
+blocks remain available as a separately toggleable, muted footprint layer.
 
 The **Grade Block Completion Tolerance** defaults to 10%. A parent is complete
 when actual WMT is at least 90% of planned WMT; an overrun above 110% is also
@@ -147,9 +146,11 @@ the corrected future route, polygon geometry from
 `DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCK_POLYGON_POINTS`, the latest agent
 block, completion metrics, inferred direction/reversals and confidence. It has
 **Refresh Now** plus opt-in live refresh, disabled by default with a five-minute
-default interval. Ore, waste and actual-only polygons and each of the original,
-corrected and actual routes can be toggled independently. The latest agent block
-uses the yellow excavator marker. The corresponding SQLite audit tables are:
+default interval. Ore, waste, actual-only and completed polygons and each of the
+original, corrected and actual routes can be toggled independently. Completed
+blocks are visible by default as muted dotted audit footprints and can be hidden.
+The latest agent block uses the transparent PNG excavator marker, sized below the
+average equivalent block width. The corresponding SQLite audit tables are:
 
 - `expit_sequence_reconciliation_audit`;
 - `expit_sequence_reconciliation_summary`;
