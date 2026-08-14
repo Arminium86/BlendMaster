@@ -11931,9 +11931,10 @@ class UserInputs(QMainWindow):
         inventory_signature = self.inventory_opening_request_signature()
         if (
             self.is_project_loaded
-            and str(getattr(
-                self, "inventory_data_request_signature", ""
-            ) or "") == inventory_signature
+            and self.opening_request_signatures_match(
+                getattr(self, "inventory_data_request_signature", ""),
+                inventory_signature,
+            )
         ):
             if not self.stockpile_data:
                 QMessageBox.warning(
@@ -11967,10 +11968,6 @@ class UserInputs(QMainWindow):
         start_time = getattr(self, "start_time_choice", None)
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
-        if isinstance(start_time, pd.Timestamp):
-            start_time = start_time.to_pydatetime()
-        if isinstance(start_time, datetime):
-            start_time = start_time.isoformat(timespec="microseconds")
         payload = {
             "cache_version": 1,
             "hub": str(getattr(
@@ -11985,7 +11982,7 @@ class UserInputs(QMainWindow):
             "crusher": str(getattr(
                 self, "crusher_input_choice", ""
             ) or "").strip().upper(),
-            "start_time": str(start_time or "").strip(),
+            "start_time": self.AMT_opening_timestamp_key(start_time),
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -16747,11 +16744,83 @@ class UserInputs(QMainWindow):
     @staticmethod
     def AMT_opening_timestamp_key(value):
         """Return a stable cache key for a scenario opening timestamp."""
+        if hasattr(value, "toPyDateTime"):
+            value = value.toPyDateTime()
         if isinstance(value, pd.Timestamp):
             value = value.to_pydatetime()
         if isinstance(value, datetime):
-            return value.isoformat(timespec="microseconds")
+            # The Site Configuration control and saved project state retain
+            # whole seconds.  A Now-mode start was previously allowed to keep
+            # incidental Python microseconds in the cache signature, so an
+            # otherwise unchanged loaded project appeared to have a different
+            # timestamp and unnecessarily refetched inventory and AMT data.
+            return value.replace(microsecond=0).isoformat(timespec="seconds")
         return str(value or "").strip()
+
+    @classmethod
+    def opening_request_signatures_match(cls, cached_signature, request_signature):
+        """Compare opening-data signatures while migrating sub-second keys."""
+        cached_text = str(cached_signature or "")
+        request_text = str(request_signature or "")
+        if cached_text == request_text:
+            return bool(request_text)
+        if not cached_text or not request_text:
+            return False
+
+        def normalized_payload(raw_signature):
+            try:
+                payload = json.loads(raw_signature)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict):
+                return None
+            payload = copy.deepcopy(payload)
+            start_time = payload.get("start_time")
+            if start_time:
+                try:
+                    parsed = pd.Timestamp(start_time)
+                except (TypeError, ValueError):
+                    parsed = None
+                if parsed is not None and not pd.isna(parsed):
+                    payload["start_time"] = cls.AMT_opening_timestamp_key(parsed)
+            return payload
+
+        cached_payload = normalized_payload(cached_text)
+        request_payload = normalized_payload(request_text)
+        return (
+            cached_payload is not None
+            and request_payload is not None
+            and cached_payload == request_payload
+        )
+
+    @classmethod
+    def opening_request_signature_changes(cls, cached_signature, request_signature):
+        """Describe material cache-key changes for console diagnostics."""
+        try:
+            cached = json.loads(str(cached_signature or ""))
+            requested = json.loads(str(request_signature or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ["the saved cache key is unavailable or unreadable"]
+        if not isinstance(cached, dict) or not isinstance(requested, dict):
+            return ["the saved cache key has an unsupported format"]
+
+        changes = []
+        for field in ("cache_version", "hub", "mine", "opf", "crusher"):
+            if cached.get(field) != requested.get(field):
+                changes.append(field)
+
+        cached_time = cls.AMT_opening_timestamp_key(cached.get("start_time"))
+        requested_time = cls.AMT_opening_timestamp_key(requested.get("start_time"))
+        try:
+            cached_time = cls.AMT_opening_timestamp_key(pd.Timestamp(cached_time))
+            requested_time = cls.AMT_opening_timestamp_key(pd.Timestamp(requested_time))
+        except (TypeError, ValueError):
+            pass
+        if cached_time != requested_time:
+            changes.append(f"timestamp ({cached_time} -> {requested_time})")
+        if cached.get("selections") != requested.get("selections"):
+            changes.append("selected footprint/build set")
+        return changes or ["an unrecognised cache-key field"]
 
     def AMT_opening_request_signature(self, data_source):
         """Identify the Snowflake inputs that determine an AMT snapshot."""
@@ -16922,7 +16991,9 @@ class UserInputs(QMainWindow):
             cached_signature = str(
                 getattr(self, "AMT_data_request_signature", "") or ""
             )
-            signature_matches = cached_signature == request_signature
+            signature_matches = self.opening_request_signatures_match(
+                cached_signature, request_signature
+            )
             compatibility_issue = self.AMT_data_compatibility_issue(data_source)
             if (
                 not force_refresh
@@ -16947,12 +17018,17 @@ class UserInputs(QMainWindow):
                 cache_miss_reason = "a manual refresh was requested"
                 cache_status = "Refreshing the AMT opening snapshot from Snowflake..."
             elif not signature_matches:
+                changed_inputs = ", ".join(
+                    self.opening_request_signature_changes(
+                        cached_signature, request_signature
+                    )
+                )
                 cache_miss_reason = (
-                    "the site, timestamp or selected footprint/build set changed"
+                    f"the AMT request changed: {changed_inputs}"
                 )
                 cache_status = (
                     "Fetching the AMT opening snapshot from Snowflake because the "
-                    "site, timestamp or selected builds changed..."
+                    f"request changed ({changed_inputs})..."
                 )
             else:
                 cache_miss_reason = compatibility_issue or (
@@ -17050,8 +17126,10 @@ class UserInputs(QMainWindow):
         # complete saved-timestamp project restore.
         request_signature = self.AMT_opening_request_signature(data_source)
         exact_saved_snapshot = (
-            str(getattr(self, "AMT_data_request_signature", "") or "")
-            == request_signature
+            self.opening_request_signatures_match(
+                getattr(self, "AMT_data_request_signature", ""),
+                request_signature,
+            )
         )
         compatible = self.has_compatible_AMT_data(data_source)
         if not compatible and exact_saved_snapshot:
