@@ -16448,7 +16448,28 @@ class UserInputs(QMainWindow):
         return True
 
     def restore_loaded_AMT_data_to_database(self, data_source):
-        if not self.has_compatible_AMT_data(data_source):
+        # An exact saved request signature is authoritative even when a
+        # selected AMT footprint returned no rows. Requiring every selected
+        # footprint to exist in the row dictionary caused valid negative
+        # results to trigger a needless Snowflake refresh and interrupt a
+        # complete saved-timestamp project restore.
+        request_signature = self.AMT_opening_request_signature(data_source)
+        exact_saved_snapshot = (
+            str(getattr(self, "AMT_data_request_signature", "") or "")
+            == request_signature
+        )
+        compatible = self.has_compatible_AMT_data(data_source)
+        if not compatible and exact_saved_snapshot:
+            saved_rows = getattr(self, "AMT_stockpile_data", {}) or {}
+            present_data = {
+                name: values
+                for name, values in (data_source or {}).items()
+                if saved_rows.get(name)
+            }
+            compatible = bool(present_data) and self.has_compatible_AMT_data(
+                present_data
+            )
+        if not compatible:
             return False
         self.opening_stockpile_inventories.save_AMT_to_database(
             self.AMT_stockpile_data
@@ -21438,6 +21459,15 @@ class UserInputs(QMainWindow):
 
         self.on_blend_data_change()
 
+    @staticmethod
+    def safe_manual_max_duration_hours(value):
+        """Floor a duration to the one-decimal precision used by the UI."""
+        try:
+            duration = max(float(value), 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        return math.floor(duration * 10.0 + 1e-9) / 10.0
+
     def update_blend_results(self):
         """
         Recalculate and update the Blend Results Table, ensuring unused Blend IDs are cleared.
@@ -21605,6 +21635,12 @@ class UserInputs(QMainWindow):
                         balance / self.crusher_rate
                         if self.crusher_rate > 0 else 0
                     )
+                # The value is displayed and scheduled at one-decimal-hour
+                # precision. Nearest rounding can exceed the true inventory
+                # limit, so publish the largest safe one-decimal duration.
+                max_duration = self.safe_manual_max_duration_hours(
+                    max_duration
+                )
                 available_status = "Now"
                 if any(avail != "Now" for avail in data["available"]):
                     datetime_values = [avail for avail in data["available"] if avail != "Now"]
@@ -22276,6 +22312,8 @@ class UserInputs(QMainWindow):
         metadata_keys = {
             "_optimised_steady_state", "_fixed_steady_state",
             "_crusher_rate", "_period_name", "_exact_start", "_exact_end",
+            "_physical_feed_tonnes", "_stockpile_source_tonnes",
+            "_product_build_actual_tonnes",
             "Direct Tip Tonnes", "Direct Tip Ratio",
         }
         for index, row in enumerate(rows or []):

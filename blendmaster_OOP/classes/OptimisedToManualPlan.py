@@ -282,6 +282,21 @@ class OptimisedToManualPlan:
             direct_tip_state_tonnes = float(
                 grade_blocks["_tonnes"].sum()
             )
+            physical_feed_tonnes = float(group["_tonnes"].sum())
+            stockpile_source_tonnes = {
+                str(source): float(tonnes)
+                for source, tonnes in stockpile_rows.groupby(
+                    "_source_name", sort=True
+                )["_tonnes"].sum().items()
+            }
+            product_build_actual_tonnes = None
+            if "product_build_source_tonnes" in group.columns:
+                product_build_actual_tonnes = float(
+                    pd.to_numeric(
+                        group["product_build_source_tonnes"],
+                        errors="coerce",
+                    ).fillna(0).sum()
+                )
             original_blend_key = raw_blend_key(
                 first.get("blend_ID")
             )
@@ -354,6 +369,15 @@ class OptimisedToManualPlan:
                 "_period_name": period_name,
                 "_exact_start": start.strftime("%Y-%m-%d %H:%M:%S"),
                 "_exact_end": end.strftime("%Y-%m-%d %H:%M:%S"),
+                # Preserve the optimiser's physical and mapped quantity
+                # totals.  A configured crusher/product field is not
+                # necessarily ROM WMT, so duration * crusher rate cannot be
+                # used as a physical stockpile depletion quantity.
+                "_physical_feed_tonnes": physical_feed_tonnes,
+                "_stockpile_source_tonnes": stockpile_source_tonnes,
+                "_product_build_actual_tonnes": (
+                    product_build_actual_tonnes
+                ),
                 "Direct Tip Tonnes": direct_tip_state_tonnes,
                 "Direct Tip Ratio": (
                     direct_tip_state_tonnes / crusher_tonnes

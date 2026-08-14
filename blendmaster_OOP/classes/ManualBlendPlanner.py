@@ -458,6 +458,75 @@ class ManualBlendPlanner:
                 return running - produced_tonnes
         return None
 
+    def _chunk_quantity_coefficient(self, chunk, field, source):
+        """Return mapped quantity tonnes per physical ROM WMT for a chunk."""
+        balance = max(self._number((chunk or {}).get("balance")), 0.0)
+        if balance <= 1e-12:
+            return 0.0
+        properties = (chunk or {}).get("source_properties") or {}
+        value = properties.get(field)
+        if value is None:
+            if (
+                field in {"modelled_rom_wmt", "modelled_product_wmt"}
+                and not self.strict_mapped_fields
+            ):
+                return 1.0
+            raise ManualBlendPlanningError(
+                f"{source}: required quantity field '{field}' is unmapped."
+            )
+        return max(self._number(value), 0.0) / balance
+
+    def _blend_quantity_coefficient(self, inventory, blend, field):
+        """Return blended mapped quantity tonnes per physical ROM WMT."""
+        coefficient = 0.0
+        for source, ratio in zip(blend["_sources"], blend["_ratios"]):
+            if ratio <= 0:
+                continue
+            chunk = self._current_chunk(inventory.get(source))
+            if chunk is None:
+                raise ManualBlendPlanningError(
+                    f"{source} does not have enough inventory for the "
+                    "scheduled manual blend."
+                )
+            coefficient += ratio * self._chunk_quantity_coefficient(
+                chunk, field, source
+            )
+        return coefficient
+
+    def _physical_feed_rate(self, inventory, blend, crusher_rate):
+        """Convert crusher-quantity capacity to physical ROM WMT per hour."""
+        coefficient = self._blend_quantity_coefficient(
+            inventory, blend, self.crusher_tonnes_stream
+        )
+        if coefficient <= 1e-12:
+            raise ManualBlendPlanningError(
+                f"The selected blend has no positive '{self.crusher_tonnes_stream}' "
+                "quantity with which to calculate crusher capacity."
+            )
+        return crusher_rate / coefficient
+
+    def _consumed_quantity(self, consumed, field):
+        """Return one mapped additive quantity for consumed chunk fractions."""
+        total = 0.0
+        for chunk, opening, consumed_tonnes in consumed:
+            properties = chunk.get("source_properties") or {}
+            raw_value = properties.get(field)
+            if raw_value is None:
+                if (
+                    field in {"modelled_rom_wmt", "modelled_product_wmt"}
+                    and not self.strict_mapped_fields
+                ):
+                    total += consumed_tonnes
+                    continue
+                raise ManualBlendPlanningError(
+                    f"{chunk.get('source_id') or 'source'}: required quantity "
+                    f"field '{field}' is unmapped."
+                )
+            total += max(self._number(raw_value), 0.0) * (
+                consumed_tonnes / opening if opening > 0 else 0.0
+            )
+        return total
+
     @staticmethod
     def _current_chunk(source_chunks):
         for chunk in source_chunks or []:
@@ -491,7 +560,22 @@ class ManualBlendPlanner:
                 )
                 if state_crusher_rate <= 0:
                     state_crusher_rate = self._crusher_rate_for(current)
-                feed_tonnes = duration_hours * state_crusher_rate
+                saved_physical_tonnes = sequence_row.get(
+                    "_physical_feed_tonnes"
+                )
+                if saved_physical_tonnes is not None:
+                    feed_tonnes = max(
+                        self._number(saved_physical_tonnes), 0.0
+                    )
+                else:
+                    # Backward compatibility for projects saved before exact
+                    # optimiser handover quantities were persisted.
+                    feed_tonnes = duration_hours * self._physical_feed_rate(
+                        inventory, blend, state_crusher_rate
+                    )
+                fixed_source_tonnes = sequence_row.get(
+                    "_stockpile_source_tonnes"
+                )
                 states.append({
                     "steady_state_number": len(states) + 1,
                     "state_key": self.state_key(
@@ -508,12 +592,65 @@ class ManualBlendPlanner:
                     "optimised_steady_state_number": sequence_row.get(
                         "_optimised_steady_state"
                     ),
+                    "stockpile_source_tonnes": deepcopy(
+                        fixed_source_tonnes
+                    ) if isinstance(fixed_source_tonnes, Mapping) else None,
                 })
-                produced_tonnes += feed_tonnes
+                consumed_product_tonnes = 0.0
+                direct_tip_tonnes = max(
+                    self._number(sequence_row.get("Direct Tip Tonnes")), 0.0
+                )
+                if isinstance(fixed_source_tonnes, Mapping):
+                    for source in blend["_sources"]:
+                        amount = max(
+                            self._number(
+                                fixed_source_tonnes.get(
+                                    source,
+                                    fixed_source_tonnes.get(
+                                        str(source).upper(), 0.0
+                                    ),
+                                )
+                            ),
+                            0.0,
+                        )
+                        if amount <= 0:
+                            continue
+                        consumed = self._consume_inventory(
+                            inventory, source, amount
+                        )
+                        consumed_product_tonnes += self._consumed_quantity(
+                            consumed, self.product_build_tonnes_stream
+                        )
+                else:
+                    stockpile_tonnes = max(
+                        feed_tonnes - direct_tip_tonnes, 0.0
+                    )
+                    for source, ratio in zip(
+                        blend["_sources"], blend["_ratios"]
+                    ):
+                        if ratio <= 0:
+                            continue
+                        consumed = self._consume_inventory(
+                            inventory, source, stockpile_tonnes * ratio
+                        )
+                        consumed_product_tonnes += self._consumed_quantity(
+                            consumed, self.product_build_tonnes_stream
+                        )
+                exact_product_tonnes = sequence_row.get(
+                    "_product_build_actual_tonnes"
+                )
+                produced_tonnes += (
+                    max(self._number(exact_product_tonnes), 0.0)
+                    if exact_product_tonnes is not None
+                    else consumed_product_tonnes + direct_tip_tonnes
+                )
                 continue
 
             while current < blend_end - timedelta(microseconds=1):
                 current_crusher_rate = self._crusher_rate_for(current)
+                physical_feed_rate = self._physical_feed_rate(
+                    inventory, blend, current_crusher_rate
+                )
                 candidates = [(blend_end, "Blend completion")]
                 for boundary in period_boundaries:
                     if current < boundary < blend_end:
@@ -523,13 +660,18 @@ class ManualBlendPlanner:
                     produced_tonnes
                 )
                 if remaining_build is not None:
-                    build_end = current + timedelta(
-                        hours=remaining_build / current_crusher_rate
+                    product_coefficient = self._blend_quantity_coefficient(
+                        inventory, blend, self.product_build_tonnes_stream
                     )
-                    if current < build_end < blend_end:
-                        candidates.append(
-                            (build_end, "Product build completion")
+                    product_rate = physical_feed_rate * product_coefficient
+                    if product_rate > 1e-12:
+                        build_end = current + timedelta(
+                            hours=remaining_build / product_rate
                         )
+                        if current < build_end < blend_end:
+                            candidates.append(
+                                (build_end, "Product build completion")
+                            )
 
                 for source, ratio in zip(
                     blend["_sources"], blend["_ratios"]
@@ -544,7 +686,7 @@ class ManualBlendPlanner:
                         )
                     depletion_end = current + timedelta(
                         hours=chunk["balance"] / (
-                            current_crusher_rate * ratio
+                            physical_feed_rate * ratio
                         )
                     )
                     if current < depletion_end < blend_end:
@@ -561,7 +703,7 @@ class ManualBlendPlanner:
                 duration_hours = (
                     state_end - current
                 ).total_seconds() / 3600
-                feed_tonnes = duration_hours * current_crusher_rate
+                feed_tonnes = duration_hours * physical_feed_rate
                 state = {
                     "steady_state_number": len(states) + 1,
                     "state_key": self.state_key(
@@ -578,13 +720,17 @@ class ManualBlendPlanner:
                 }
                 states.append(state)
 
+                state_product_tonnes = 0.0
                 for source, ratio in zip(
                     blend["_sources"], blend["_ratios"]
                 ):
-                    self._consume_inventory(
+                    consumed = self._consume_inventory(
                         inventory, source, feed_tonnes * ratio
                     )
-                produced_tonnes += feed_tonnes
+                    state_product_tonnes += self._consumed_quantity(
+                        consumed, self.product_build_tonnes_stream
+                    )
+                produced_tonnes += state_product_tonnes
                 current = state_end
 
         self.attach_direct_tip_candidates(states)
@@ -711,8 +857,14 @@ class ManualBlendPlanner:
             opening = chunk["balance"]
             amount = min(opening, remaining)
             if amount > 0:
+                consumed_chunk = deepcopy(chunk)
                 chunk["balance"] -= amount
-                consumed.append((chunk, opening, amount))
+                chunk["source_properties"] = scale_additive_source_properties(
+                    chunk.get("source_properties"),
+                    chunk["balance"] / opening if opening > 0 else 0.0,
+                    self.source_property_kinds,
+                )
+                consumed.append((consumed_chunk, opening, amount))
                 remaining -= amount
         if remaining > 1e-5:
             raise ManualBlendPlanningError(
@@ -788,7 +940,18 @@ class ManualBlendPlanner:
         )
         calendar_brands = self.calendar_inputs.get("crusher_brand", {})
         if isinstance(calendar_brands, Mapping):
-            return str(calendar_brands.get(period_name) or "").strip().upper()
+            calendar_brand = str(
+                calendar_brands.get(period_name) or ""
+            ).strip().upper()
+            if calendar_brand:
+                return calendar_brand
+        # A manual sequence can extend beyond the final configured build
+        # target. Retain its last explicit brand for grade-stream selection;
+        # the completed build itself does not accumulate any further tonnes.
+        if self.product_build_settings:
+            return str(
+                self.product_build_settings[-1].get("brand") or ""
+            ).strip().upper()
         return ""
 
     def _selected_source_fields(
@@ -977,10 +1140,25 @@ class ManualBlendPlanner:
             source_rows = []
             active_brand = self._active_brand(produced_tonnes, state)
 
+            fixed_source_tonnes = state.get("stockpile_source_tonnes")
             for source, ratio in zip(
                 blend["_sources"], blend["_ratios"]
             ):
-                amount = stockpile_tonnes * ratio
+                amount = (
+                    max(
+                        self._number(
+                            fixed_source_tonnes.get(
+                                source,
+                                fixed_source_tonnes.get(
+                                    str(source).upper(), 0.0
+                                ),
+                            )
+                        ),
+                        0.0,
+                    )
+                    if isinstance(fixed_source_tonnes, Mapping)
+                    else stockpile_tonnes * ratio
+                )
                 source_opening = sum(
                     chunk["balance"]
                     for chunk in inventory.get(source, [])
@@ -1295,7 +1473,10 @@ class ManualBlendPlanner:
                     for name, chunks in inventory.items()
                 },
             })
-            produced_tonnes += total_tonnes
+            produced_tonnes += sum(
+                self._number(item.get("product_build_source_tonnes"))
+                for item in source_rows
+            )
 
         custom_columns = self.custom_constraint_report_columns()
         source_property_columns = sorted({
