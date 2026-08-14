@@ -524,6 +524,32 @@ class ExpitSequenceReconciler:
             previous_inside = current_inside
         return clipped
 
+    @staticmethod
+    def _clip_polygon_north_of(points, northing):
+        """Clip a polygon to y >= northing (the already-depleted portion)."""
+        if len(points) < 3:
+            return []
+        clipped = []
+        previous = points[-1]
+        previous_inside = previous[1] >= northing - 1e-9
+        for current in points:
+            current_inside = current[1] >= northing - 1e-9
+            if current_inside != previous_inside:
+                dy = current[1] - previous[1]
+                ratio = (
+                    (northing - previous[1]) / dy
+                    if abs(dy) > 1e-12 else 0.0
+                )
+                clipped.append((
+                    previous[0] + ratio * (current[0] - previous[0]),
+                    northing,
+                ))
+            if current_inside:
+                clipped.append(current)
+            previous = current
+            previous_inside = current_inside
+        return clipped
+
     @classmethod
     def remaining_polygon(cls, points, remaining_fraction):
         """Return the southern polygon area representing geological balance."""
@@ -555,6 +581,39 @@ class ExpitSequenceReconciler:
             else:
                 north = boundary
         return cls._clip_polygon_south_of(cleaned, north)
+
+    @classmethod
+    def depleted_polygon(cls, points, remaining_fraction):
+        """Return the northern polygon area already depleted geologically."""
+        cleaned = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if len(point) >= 2
+            and math.isfinite(_finite(point[0], float("nan")))
+            and math.isfinite(_finite(point[1], float("nan")))
+        ]
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1]:
+            cleaned = cleaned[:-1]
+        fraction = min(max(_finite(remaining_fraction, 1.0), 0.0), 1.0)
+        depleted_fraction = 1.0 - fraction
+        if len(cleaned) < 3 or depleted_fraction <= 1e-9:
+            return []
+        if depleted_fraction >= 1.0 - 1e-9:
+            return cleaned
+        full_area = cls._polygon_area(cleaned)
+        if full_area <= 1e-12:
+            return []
+        south = min(point[1] for point in cleaned)
+        north = max(point[1] for point in cleaned)
+        target_area = full_area * depleted_fraction
+        for _ in range(50):
+            boundary = (south + north) / 2.0
+            candidate = cls._clip_polygon_north_of(cleaned, boundary)
+            if cls._polygon_area(candidate) > target_area:
+                south = boundary
+            else:
+                north = boundary
+        return cls._clip_polygon_north_of(cleaned, north)
 
     @staticmethod
     def _direction(actual_keys, planned_positions, centroids):

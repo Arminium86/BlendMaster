@@ -149,6 +149,10 @@ block, completion metrics, inferred direction/reversals and confidence. It has
 default interval. Ore, waste, actual-only and completed polygons, the excavator
 marker, and each original, corrected and actual route can be toggled independently. Completed
 blocks are visible by default as muted dotted audit footprints and can be hidden.
+**Display depleted portions** is off by default; when enabled it overlays the
+northern area already depleted from every partially mined polygon, proportional
+to cumulative actual WMT divided by nominal geological WMT. The remaining block
+continues to be represented by the complementary southern polygon.
 The latest agent block uses the transparent PNG excavator marker, sized below the
 average equivalent block width by default. The **Excavator size** slider adjusts
 the marker from 10% to 100% of that average width and is stored with the project.

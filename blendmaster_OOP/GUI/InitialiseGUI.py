@@ -4069,13 +4069,14 @@ class UserInputs(QMainWindow):
             ("waste_blocks", "Waste blocks"),
             ("actual_only_blocks", "Actual-only blocks"),
             ("completed_blocks", "Completed blocks"),
+            ("depleted_portions", "Display depleted portions"),
             ("excavator_marker", "Excavator marker"),
             ("original_route", "Original APS route"),
             ("corrected_route", "Corrected future route"),
             ("actual_route", "Actual route"),
         ):
             checkbox = QCheckBox(caption)
-            checkbox.setChecked(True)
+            checkbox.setChecked(key != "depleted_portions")
             checkbox.toggled.connect(self.render_expit_sequence_snapshot)
             self.expit_sequence_layer_checkboxes[key] = checkbox
             layer_controls.addWidget(checkbox)
@@ -4361,7 +4362,11 @@ class UserInputs(QMainWindow):
             else:
                 block_layer = "ore_blocks"
                 block_type = "Ore"
-            if block_layer not in visible_layers:
+            show_remaining = block_layer in visible_layers
+            show_depleted = (
+                not is_completed and "depleted_portions" in visible_layers
+            )
+            if not show_remaining and not show_depleted:
                 continue
             key = block.get("grade_block_key")
             points = geometry[geometry["grade_block_key"] == key]
@@ -4400,52 +4405,101 @@ class UserInputs(QMainWindow):
                 x.append(x[0])
                 y.append(y[0])
             status = str(block.get("completion_status") or "")
-            trace_name = f"{block_type} - {status}"
-            figure.add_trace(go.Scatter(
-                x=x,
-                y=y,
-                mode="lines",
-                fill="toself",
-                fillcolor=(
-                    "rgba(148,163,184,0.16)"
-                    if is_completed
-                    else status_colours.get(status, "#cbd5e1")
-                ),
-                line=dict(
-                    color="#64748b" if is_completed else "#475569",
-                    width=1,
-                    dash="dot" if is_completed else "solid",
-                ),
-                opacity=0.45 if is_completed else 0.55,
-                name=trace_name,
-                legendgroup=trace_name,
-                showlegend=trace_name not in {
-                    trace.name for trace in figure.data
-                },
-                text=(
-                    f"{block.get('parent_grade_block')}<br>"
-                    f"{status}<br>APS planned {numeric(block.get('aps_planned_wmt')) or 0:,.0f} t"
-                    f"<br>Actual against schedule {numeric(block.get('actual_schedule_wmt')) or 0:,.0f} t"
-                    f"<br>APS remaining {numeric(block.get('aps_remaining_wmt')) or 0:,.0f} t"
-                    + (
-                        f"<br>Nominal geological {numeric(block.get('nominal_geological_wmt')):,.0f} t"
-                        if numeric(block.get("nominal_geological_wmt")) is not None
-                        else "<br>Nominal geological unavailable"
-                    )
-                    + (
-                        f"<br>Cumulative actual {numeric(block.get('cumulative_actual_wmt')):,.0f} t"
-                        if numeric(block.get("cumulative_actual_wmt")) is not None
-                        else ""
-                    )
-                    + (
-                        f"<br>Estimated geological remaining {numeric(block.get('estimated_geological_remaining_wmt')):,.0f} t"
-                        if numeric(block.get("estimated_geological_remaining_wmt")) is not None
-                        else ""
-                    )
-                    + f"<br>Displayed geological balance {max(min(remaining_fraction, 1.0), 0.0) * 100:.1f}%"
-                ),
-                hovertemplate="%{text}<extra></extra>",
-            ))
+            status_key = status.strip().lower()
+            if is_completed and status_key == "complete":
+                trace_name = "Geologically complete — APS complete"
+            elif is_completed and status_key == "not started":
+                trace_name = (
+                    "Geologically complete — APS not started "
+                    "(completed earlier than APS schedule window)"
+                )
+            elif block_type == "Ore" and status_key == "partial":
+                trace_name = "Active ore block — APS planned tonnes partially mined"
+            elif is_completed:
+                trace_name = f"Geologically complete — APS {status.lower()}"
+            elif block_type in {"Ore", "Waste"}:
+                trace_name = (
+                    f"Active {block_type.lower()} block — APS {status.lower()}"
+                )
+            else:
+                trace_name = f"{block_type} — {status}"
+            hover_text = (
+                f"{block.get('parent_grade_block')}<br>"
+                f"{status}<br>APS planned {numeric(block.get('aps_planned_wmt')) or 0:,.0f} t"
+                f"<br>Actual against schedule {numeric(block.get('actual_schedule_wmt')) or 0:,.0f} t"
+                f"<br>APS remaining {numeric(block.get('aps_remaining_wmt')) or 0:,.0f} t"
+                + (
+                    f"<br>Nominal geological {numeric(block.get('nominal_geological_wmt')):,.0f} t"
+                    if numeric(block.get("nominal_geological_wmt")) is not None
+                    else "<br>Nominal geological unavailable"
+                )
+                + (
+                    f"<br>Cumulative actual {numeric(block.get('cumulative_actual_wmt')):,.0f} t"
+                    if numeric(block.get("cumulative_actual_wmt")) is not None
+                    else ""
+                )
+                + (
+                    f"<br>Estimated geological remaining {numeric(block.get('estimated_geological_remaining_wmt')):,.0f} t"
+                    if numeric(block.get("estimated_geological_remaining_wmt")) is not None
+                    else ""
+                )
+                + f"<br>Displayed geological balance {max(min(remaining_fraction, 1.0), 0.0) * 100:.1f}%"
+            )
+            if show_remaining:
+                figure.add_trace(go.Scatter(
+                    x=x,
+                    y=y,
+                    mode="lines",
+                    fill="toself",
+                    fillcolor=(
+                        "rgba(148,163,184,0.16)"
+                        if is_completed
+                        else status_colours.get(status, "#cbd5e1")
+                    ),
+                    line=dict(
+                        color="#64748b" if is_completed else "#475569",
+                        width=1,
+                        dash="dot" if is_completed else "solid",
+                    ),
+                    opacity=0.45 if is_completed else 0.55,
+                    name=trace_name,
+                    legendgroup=trace_name,
+                    showlegend=trace_name not in {
+                        trace.name for trace in figure.data
+                    },
+                    text=hover_text,
+                    hovertemplate="%{text}<extra></extra>",
+                ))
+            if show_depleted:
+                depleted_polygon = ExpitSequenceReconciler.depleted_polygon(
+                    source_polygon, remaining_fraction,
+                )
+                if depleted_polygon:
+                    depleted_x = [point[0] for point in depleted_polygon]
+                    depleted_y = [point[1] for point in depleted_polygon]
+                    depleted_x.append(depleted_x[0])
+                    depleted_y.append(depleted_y[0])
+                    depleted_name = "Estimated depleted portion (north to south)"
+                    figure.add_trace(go.Scatter(
+                        x=depleted_x,
+                        y=depleted_y,
+                        mode="lines",
+                        fill="toself",
+                        fillcolor="rgba(71,85,105,0.28)",
+                        line=dict(color="#475569", width=1, dash="dot"),
+                        opacity=0.65,
+                        name=depleted_name,
+                        legendgroup="depleted_portions",
+                        showlegend=depleted_name not in {
+                            trace.name for trace in figure.data
+                        },
+                        text=(
+                            hover_text
+                            + f"<br>Estimated depleted area "
+                            f"{(1.0 - max(min(remaining_fraction, 1.0), 0.0)) * 100:.1f}%"
+                        ),
+                        hovertemplate="%{text}<extra></extra>",
+                    ))
 
         # Route layers remain complete, separately toggleable audit trails;
         # the completed-block layer controls only the muted polygon footprints.
