@@ -4610,14 +4610,26 @@ class UserInputs(QMainWindow):
                         sizing="contain", opacity=1.0, layer="above",
                     ))
         figure.update_layout(
-            title=f"{agent} Expit Face and Sequence",
+            title=dict(
+                text=f"{agent} Expit Face and Sequence",
+                x=0.01,
+                xanchor="left",
+                y=0.99,
+                yanchor="top",
+            ),
             xaxis_title="Easting",
             yaxis_title="Northing",
             yaxis=dict(scaleanchor="x", scaleratio=1),
             template="plotly_white",
             hovermode="closest",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(l=50, r=20, t=85, b=45),
+            legend=dict(
+                orientation="h",
+                x=0.0,
+                xanchor="left",
+                y=1.08,
+                yanchor="bottom",
+            ),
+            margin=dict(l=50, r=20, t=175, b=45),
         )
         return figure
 
@@ -16646,11 +16658,15 @@ class UserInputs(QMainWindow):
                 )
                 return
 
+            cached_signature = str(
+                getattr(self, "AMT_data_request_signature", "") or ""
+            )
+            signature_matches = cached_signature == request_signature
+            compatibility_issue = self.AMT_data_compatibility_issue(data_source)
             if (
                 not force_refresh
-                and str(getattr(self, "AMT_data_request_signature", "") or "")
-                == request_signature
-                and self.has_compatible_AMT_data(data_source)
+                and signature_matches
+                and not compatibility_issue
             ):
                 self.set_AMT_cache_status(
                     "Reused the cached AMT opening snapshot because the site, "
@@ -16666,11 +16682,27 @@ class UserInputs(QMainWindow):
             if getattr(self, "project_load_restore_in_progress", False):
                 self.project_load_waiting_for_AMT = True
 
-            self.set_AMT_cache_status(
-                "Refreshing the AMT opening snapshot from Snowflake..."
-                if force_refresh else
-                "Fetching the AMT opening snapshot from Snowflake..."
-            )
+            if force_refresh:
+                cache_miss_reason = "a manual refresh was requested"
+                cache_status = "Refreshing the AMT opening snapshot from Snowflake..."
+            elif not signature_matches:
+                cache_miss_reason = (
+                    "the site, timestamp or selected footprint/build set changed"
+                )
+                cache_status = (
+                    "Fetching the AMT opening snapshot from Snowflake because the "
+                    "site, timestamp or selected builds changed..."
+                )
+            else:
+                cache_miss_reason = compatibility_issue or (
+                    "the cached AMT snapshot is incompatible"
+                )
+                cache_status = (
+                    "Fetching the AMT opening snapshot from Snowflake because "
+                    f"{cache_miss_reason}..."
+                )
+            print(f"AMT cache miss: {cache_miss_reason}.")
+            self.set_AMT_cache_status(cache_status, warning=True)
 
             self.run_background_task(
                 "Fetching AMT stockpile data from Snowflake...",
@@ -16691,34 +16723,63 @@ class UserInputs(QMainWindow):
         self.set_AMT_cache_status("No AMT stockpiles are selected.")
         self.finish_AMT_stockpile_table(data_source, {}, reuse_prepared=True)
 
-    def has_compatible_AMT_data(self, data_source):
-        AMT_stockpile_data = getattr(self, "AMT_stockpile_data", {}) or {}
-        if not isinstance(AMT_stockpile_data, dict) or not AMT_stockpile_data:
+    @staticmethod
+    def AMT_row_has_lineage_marker(row):
+        """Recognise lineage columns regardless of Snowflake/SQLite casing."""
+        if not isinstance(row, dict):
             return False
+        column_names = {
+            str(column_name).strip().upper()
+            for column_name in row
+        }
+        return bool({
+            "GRADE_BLOCK_LINEAGE_JSON",
+            "LINEAGE_ENTRY_COUNT",
+        } & column_names)
 
-        selected_footprints = {str(stockpile_name).upper() for stockpile_name in data_source}
+    def AMT_data_compatibility_issue(self, data_source):
+        """Return why cached AMT rows cannot be reused, or an empty string."""
+        AMT_stockpile_data = getattr(self, "AMT_stockpile_data", {}) or {}
+        if not isinstance(AMT_stockpile_data, dict):
+            return "the cached AMT snapshot is not a footprint dictionary"
+        if not AMT_stockpile_data:
+            return "no cached AMT opening snapshot is available"
+
+        selected_footprints = {
+            str(stockpile_name).strip().upper()
+            for stockpile_name in (data_source or {})
+        }
         saved_footprints = {
-            str(footprint).upper()
+            str(footprint).strip().upper()
             for footprint, rows in AMT_stockpile_data.items()
             if rows
         }
         if not selected_footprints.issubset(saved_footprints):
-            return False
+            missing = sorted(selected_footprints - saved_footprints)
+            return (
+                "the cached AMT snapshot is missing selected footprint(s): "
+                + ", ".join(missing)
+            )
 
         # Saved AMT rows created before grade-block lineage still carry the
         # retired inventory-derived blend/upgrade streams.  Refresh those
         # projects from Snowflake instead of silently mixing both models.
         for footprint, rows in AMT_stockpile_data.items():
-            if str(footprint).upper() not in selected_footprints:
+            footprint_key = str(footprint).strip().upper()
+            if footprint_key not in selected_footprints:
                 continue
             if not any(
-                "GRADE_BLOCK_LINEAGE_JSON" in (row or {})
-                or "LINEAGE_ENTRY_COUNT" in (row or {})
+                self.AMT_row_has_lineage_marker(row)
                 for row in rows or []
             ):
-                return False
+                return (
+                    f"cached AMT rows for {footprint_key} predate grade-block lineage"
+                )
 
-        return True
+        return ""
+
+    def has_compatible_AMT_data(self, data_source):
+        return not self.AMT_data_compatibility_issue(data_source)
 
     def restore_loaded_AMT_data_to_database(self, data_source):
         # An exact saved request signature is authoritative even when a
