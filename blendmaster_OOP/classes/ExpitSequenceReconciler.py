@@ -39,6 +39,8 @@ AUDIT_COLUMNS = [
     "nominal_geological_dmt",
     "cumulative_actual_wmt",
     "estimated_geological_remaining_wmt",
+    "geological_remaining_fraction",
+    "geological_completion_status",
     "aps_share_of_nominal_pct",
     "geological_depletion_pct",
     "geological_material",
@@ -401,9 +403,8 @@ class ExpitSequenceReconciler:
             "cumulative_last_actual_datetime": "max",
         })[columns]
 
-    @staticmethod
     def _geological_audit_values(
-        grade_block_key_value, aps_planned_wmt, geological_lookup,
+        self, grade_block_key_value, aps_planned_wmt, geological_lookup,
         cumulative_actual_lookup,
     ):
         geological = geological_lookup.get(grade_block_key_value)
@@ -432,6 +433,20 @@ class ExpitSequenceReconciler:
             if math.isfinite(nominal_wmt) and math.isfinite(cumulative_wmt)
             else None
         )
+        remaining_fraction = (
+            min(max(estimated_remaining / nominal_wmt, 0.0), 1.0)
+            if estimated_remaining is not None
+            and math.isfinite(nominal_wmt) and nominal_wmt > 0
+            else None
+        )
+        if remaining_fraction is None:
+            geological_status = "Unavailable"
+        elif remaining_fraction <= self.tolerance + 1e-12:
+            geological_status = "Complete"
+        elif remaining_fraction < 1.0 - 1e-12:
+            geological_status = "Partial"
+        else:
+            geological_status = "Not started"
         return {
             "geological_data_available": bool(
                 geological is not None and math.isfinite(nominal_wmt)
@@ -441,6 +456,8 @@ class ExpitSequenceReconciler:
             "nominal_geological_dmt": nominal_dmt if math.isfinite(nominal_dmt) else None,
             "cumulative_actual_wmt": cumulative_wmt if math.isfinite(cumulative_wmt) else None,
             "estimated_geological_remaining_wmt": estimated_remaining,
+            "geological_remaining_fraction": remaining_fraction,
+            "geological_completion_status": geological_status,
             "aps_share_of_nominal_pct": (
                 aps_planned_wmt / nominal_wmt * 100.0
                 if math.isfinite(nominal_wmt) and nominal_wmt > 0 else None
@@ -471,6 +488,73 @@ class ExpitSequenceReconciler:
             key: (float(group["easting"].mean()), float(group["northing"].mean()))
             for key, group in geometry.groupby("grade_block_key", sort=False)
         }
+
+    @staticmethod
+    def _polygon_area(points):
+        if len(points) < 3:
+            return 0.0
+        return abs(sum(
+            left[0] * right[1] - right[0] * left[1]
+            for left, right in zip(points, points[1:] + points[:1])
+        )) / 2.0
+
+    @staticmethod
+    def _clip_polygon_south_of(points, northing):
+        """Clip a polygon to y <= northing (depletion proceeds north-south)."""
+        if len(points) < 3:
+            return []
+        clipped = []
+        previous = points[-1]
+        previous_inside = previous[1] <= northing + 1e-9
+        for current in points:
+            current_inside = current[1] <= northing + 1e-9
+            if current_inside != previous_inside:
+                dy = current[1] - previous[1]
+                ratio = (
+                    (northing - previous[1]) / dy
+                    if abs(dy) > 1e-12 else 0.0
+                )
+                clipped.append((
+                    previous[0] + ratio * (current[0] - previous[0]),
+                    northing,
+                ))
+            if current_inside:
+                clipped.append(current)
+            previous = current
+            previous_inside = current_inside
+        return clipped
+
+    @classmethod
+    def remaining_polygon(cls, points, remaining_fraction):
+        """Return the southern polygon area representing geological balance."""
+        cleaned = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if len(point) >= 2
+            and math.isfinite(_finite(point[0], float("nan")))
+            and math.isfinite(_finite(point[1], float("nan")))
+        ]
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1]:
+            cleaned = cleaned[:-1]
+        fraction = min(max(_finite(remaining_fraction, 1.0), 0.0), 1.0)
+        if len(cleaned) < 3 or fraction <= 1e-9:
+            return []
+        if fraction >= 1.0 - 1e-9:
+            return cleaned
+        full_area = cls._polygon_area(cleaned)
+        if full_area <= 1e-12:
+            return cleaned
+        south = min(point[1] for point in cleaned)
+        north = max(point[1] for point in cleaned)
+        target_area = full_area * fraction
+        for _ in range(50):
+            boundary = (south + north) / 2.0
+            candidate = cls._clip_polygon_south_of(cleaned, boundary)
+            if cls._polygon_area(candidate) < target_area:
+                south = boundary
+            else:
+                north = boundary
+        return cls._clip_polygon_south_of(cleaned, north)
 
     @staticmethod
     def _direction(actual_keys, planned_positions, centroids):

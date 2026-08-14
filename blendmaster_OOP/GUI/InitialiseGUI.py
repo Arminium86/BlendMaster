@@ -1,4 +1,4 @@
-import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv, re
+import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv, re, base64
 import plotly.graph_objects as go
 import plotly.io as pio
 from PyQt5.QtWidgets import (
@@ -4027,6 +4027,25 @@ class UserInputs(QMainWindow):
         controls.addStretch()
         layout.addLayout(controls)
 
+        layer_controls = QHBoxLayout()
+        layer_controls.addWidget(QLabel("Map layers:"))
+        self.expit_sequence_layer_checkboxes = {}
+        for key, caption in (
+            ("ore_blocks", "Ore blocks"),
+            ("waste_blocks", "Waste blocks"),
+            ("actual_only_blocks", "Actual-only blocks"),
+            ("original_route", "Original APS route"),
+            ("corrected_route", "Corrected future route"),
+            ("actual_route", "Actual route"),
+        ):
+            checkbox = QCheckBox(caption)
+            checkbox.setChecked(True)
+            checkbox.toggled.connect(self.render_expit_sequence_snapshot)
+            self.expit_sequence_layer_checkboxes[key] = checkbox
+            layer_controls.addWidget(checkbox)
+        layer_controls.addStretch()
+        layout.addLayout(layer_controls)
+
         self.expit_sequence_status_label = QLabel(
             "Use Update Transactions on Current Time, then select Refresh Now."
         )
@@ -4195,8 +4214,63 @@ class UserInputs(QMainWindow):
             "Expit sequence refresh failed: " + message
         )
 
+    def expit_sequence_visible_layers(self):
+        checkboxes = getattr(
+            self, "expit_sequence_layer_checkboxes", {}
+        ) or {}
+        defaults = {
+            "ore_blocks", "waste_blocks", "actual_only_blocks",
+            "original_route", "corrected_route", "actual_route",
+        }
+        if not checkboxes:
+            return defaults
+        return {
+            key for key, checkbox in checkboxes.items()
+            if checkbox.isChecked()
+        }
+
+    @staticmethod
+    def expit_excavator_icon_source():
+        svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 96">
+          <rect x="23" y="70" width="62" height="14" rx="7" fill="#1f2937"/>
+          <rect x="31" y="74" width="46" height="6" rx="3" fill="#64748b"/>
+          <path d="M30 66h54l-7-20H46z" fill="#facc15" stroke="#713f12" stroke-width="3"/>
+          <path d="M48 46V25h24l9 21" fill="#fde047" stroke="#713f12" stroke-width="3"/>
+          <path d="M55 29h13l6 14H55z" fill="#bfdbfe" stroke="#713f12" stroke-width="2"/>
+          <path d="M78 48L97 25l12 7-16 26" fill="none" stroke="#facc15" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M105 30l9 4 7 24-18-3z" fill="#f59e0b" stroke="#713f12" stroke-width="3"/>
+          <circle cx="43" cy="69" r="5" fill="#713f12"/>
+        </svg>
+        """
+        encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+        return "data:image/svg+xml;base64," + encoded
+
+    @staticmethod
+    def expit_geological_block_complete(block):
+        raw_status = block.get("geological_completion_status")
+        try:
+            missing_status = pd.isna(raw_status)
+        except (TypeError, ValueError):
+            missing_status = False
+        status = (
+            "" if missing_status else str(raw_status or "")
+        ).strip().lower()
+        if status:
+            return status == "complete"
+        remaining = numeric(
+            block.get("estimated_geological_remaining_wmt")
+        )
+        nominal = numeric(block.get("nominal_geological_wmt"))
+        tolerance = numeric(block.get("completion_tolerance_pct"))
+        return bool(
+            remaining is not None and nominal is not None and nominal > 0
+            and remaining <= nominal * max(tolerance or 0.0, 0.0) / 100.0
+        )
+
     def expit_sequence_figure(
-        self, agent, audit, geometry, actual_movements=None
+        self, agent, audit, geometry, actual_movements=None,
+        visible_layers=None,
     ):
         figure = go.Figure()
         if audit.empty:
@@ -4207,6 +4281,11 @@ class UserInputs(QMainWindow):
             return figure
         agent_audit = audit[audit["agent"].astype(str) == str(agent)].copy()
         geometry = ExpitSequenceReconciler.normalize_geometry(geometry)
+        visible_layers = set(
+            visible_layers
+            if visible_layers is not None
+            else self.expit_sequence_visible_layers()
+        )
         status_colours = {
             "Complete": "#94a3b8",
             "Partial": "#f59e0b",
@@ -4214,16 +4293,51 @@ class UserInputs(QMainWindow):
             "Actual only - route evidence": "#ef4444",
         }
         for _, block in agent_audit.iterrows():
+            if self.expit_geological_block_complete(block):
+                continue
+            record_type = str(block.get("record_type") or "").lower()
+            material = str(block.get("material_class") or "").upper()
+            if record_type == "unmatched_actual_context":
+                block_layer = "actual_only_blocks"
+                block_type = "Actual only"
+            elif "WASTE" in material:
+                block_layer = "waste_blocks"
+                block_type = "Waste"
+            else:
+                block_layer = "ore_blocks"
+                block_type = "Ore"
+            if block_layer not in visible_layers:
+                continue
             key = block.get("grade_block_key")
             points = geometry[geometry["grade_block_key"] == key]
             if points.empty:
                 continue
-            x = points["easting"].tolist()
-            y = points["northing"].tolist()
+            remaining_fraction = numeric(
+                block.get("geological_remaining_fraction")
+            )
+            if remaining_fraction is None:
+                remaining = numeric(
+                    block.get("estimated_geological_remaining_wmt")
+                )
+                nominal = numeric(block.get("nominal_geological_wmt"))
+                remaining_fraction = (
+                    remaining / nominal
+                    if remaining is not None and nominal is not None
+                    and nominal > 0 else 1.0
+                )
+            remaining_polygon = ExpitSequenceReconciler.remaining_polygon(
+                list(zip(points["easting"], points["northing"])),
+                remaining_fraction,
+            )
+            if not remaining_polygon:
+                continue
+            x = [point[0] for point in remaining_polygon]
+            y = [point[1] for point in remaining_polygon]
             if x and y:
                 x.append(x[0])
                 y.append(y[0])
             status = str(block.get("completion_status") or "")
+            trace_name = f"{block_type} - {status}"
             figure.add_trace(go.Scatter(
                 x=x,
                 y=y,
@@ -4232,9 +4346,9 @@ class UserInputs(QMainWindow):
                 fillcolor=status_colours.get(status, "#cbd5e1"),
                 line=dict(color="#475569", width=1),
                 opacity=0.55,
-                name=status,
-                legendgroup=status,
-                showlegend=status not in {
+                name=trace_name,
+                legendgroup=trace_name,
+                showlegend=trace_name not in {
                     trace.name for trace in figure.data
                 },
                 text=(
@@ -4257,23 +4371,27 @@ class UserInputs(QMainWindow):
                         if numeric(block.get("estimated_geological_remaining_wmt")) is not None
                         else ""
                     )
+                    + f"<br>Displayed geological balance {max(min(remaining_fraction, 1.0), 0.0) * 100:.1f}%"
                 ),
                 hovertemplate="%{text}<extra></extra>",
             ))
 
-        original = agent_audit[
-            agent_audit["original_sequence"].notna()
-            & agent_audit["centroid_easting"].notna()
+        # Geological completion removes the block polygon, while route layers
+        # remain complete, separately toggleable audit trails.
+        route_audit = agent_audit.copy()
+        original = route_audit[
+            route_audit["original_sequence"].notna()
+            & route_audit["centroid_easting"].notna()
         ].sort_values("original_sequence")
-        updated = agent_audit[
-            agent_audit["updated_sequence"].notna()
-            & agent_audit["centroid_easting"].notna()
+        updated = route_audit[
+            route_audit["updated_sequence"].notna()
+            & route_audit["centroid_easting"].notna()
         ].sort_values("updated_sequence")
-        for frame, name, colour, dash in (
-            (original, "Original APS route", "#64748b", "dot"),
-            (updated, "Corrected future route", "#16a34a", "dash"),
+        for frame, layer, name, colour, dash in (
+            (original, "original_route", "Original APS route", "#64748b", "dot"),
+            (updated, "corrected_route", "Corrected future route", "#16a34a", "dash"),
         ):
-            if not frame.empty:
+            if layer in visible_layers and not frame.empty:
                 figure.add_trace(go.Scatter(
                     x=frame["centroid_easting"],
                     y=frame["centroid_northing"],
@@ -4311,7 +4429,7 @@ class UserInputs(QMainWindow):
                 movement.get("transaction_datetime"),
                 centroids[key],
             ))
-        if actual_route:
+        if actual_route and "actual_route" in visible_layers:
             figure.add_trace(go.Scatter(
                 x=[item[3][0] for item in actual_route],
                 y=[item[3][1] for item in actual_route],
@@ -4330,8 +4448,31 @@ class UserInputs(QMainWindow):
                 mode="markers+text",
                 text=["Latest agent block"],
                 textposition="top center",
-                marker=dict(size=16, color="#111827", symbol="star"),
+                marker=dict(
+                    size=30, color="rgba(250,204,21,0.01)",
+                    line=dict(width=0),
+                ),
                 name="Latest agent block",
+                showlegend=False,
+                hovertext=[f"Latest agent block<br>{latest[1]}<br>{latest[2]}"],
+                hovertemplate="%{hovertext}<extra></extra>",
+            ))
+            x_span = (
+                float(geometry["easting"].max() - geometry["easting"].min())
+                if not geometry.empty else 1.0
+            )
+            y_span = (
+                float(geometry["northing"].max() - geometry["northing"].min())
+                if not geometry.empty else 1.0
+            )
+            icon_size = max(x_span, y_span, 1.0) * 0.065
+            figure.add_layout_image(dict(
+                source=self.expit_excavator_icon_source(),
+                xref="x", yref="y",
+                x=latest[3][0], y=latest[3][1],
+                sizex=icon_size, sizey=icon_size * 0.75,
+                xanchor="center", yanchor="middle",
+                sizing="contain", opacity=1.0, layer="above",
             ))
         figure.update_layout(
             title=f"{agent} Expit Face and Sequence",
@@ -4385,7 +4526,8 @@ class UserInputs(QMainWindow):
             agent_audit,
         )
         figure = self.expit_sequence_figure(
-            agent, audit, geometry, actual_movements
+            agent, audit, geometry, actual_movements,
+            self.expit_sequence_visible_layers(),
         )
         chart_directory = os.path.join(
             getattr(self, "scenario_session_directory", tempfile.gettempdir()),

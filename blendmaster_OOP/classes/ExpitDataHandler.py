@@ -2536,12 +2536,14 @@ class ExpitDataHandler:
         finally:
             connection.close()
 
-    def fetch_grade_block_geological_audit(self, block_names, as_of):
-        """Fetch nominal block tonnes and lifetime ExPit progress for auditing.
+    def fetch_grade_block_geological_audit(self, block_names, as_of=None):
+        """Fetch nominal block tonnes and unbounded ExPit progress for auditing.
 
         This snapshot is deliberately separate from APS payload construction:
         GRADE_BLOCKS supplies geological context only, while APS remains the
         authority for scheduled tonnes, timing, destinations, and properties.
+        ``as_of`` is retained for API compatibility but deliberately does not
+        constrain the cumulative transaction aggregate.
         """
         names = sorted({polygon_lookup_name(name) for name in block_names})
         names = [name for name in names if name]
@@ -2554,7 +2556,7 @@ class ExpitDataHandler:
             raise ConnectionError(
                 "Snowflake connection unavailable for nominal grade-block tonnes."
             )
-        parameters = {"as_of": pd.Timestamp(as_of).to_pydatetime()}
+        parameters = {}
         requested_rows = []
         for index, name in enumerate(names):
             parameters[f"block_{index}"] = name
@@ -2638,7 +2640,6 @@ class ExpitDataHandler:
                     MAX(TRANSACTION_DATETIME) AS CUMULATIVE_LAST_ACTUAL_DATETIME
                 FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS
                 WHERE MOVEMENT_TYPE = 'ExPit'
-                  AND TRANSACTION_DATETIME <= %(as_of)s
                   AND COALESCE(IS_DELETED, FALSE) = FALSE
                   AND {actual_key} IN (
                       SELECT BLOCK_KEY FROM REQUESTED_BLOCKS
