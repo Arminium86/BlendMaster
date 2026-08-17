@@ -754,6 +754,192 @@ class ExpitSequenceReconciler:
             current_key = candidate
         return ordered
 
+    @staticmethod
+    def _spatial_faces(route_keys, centroids):
+        """Cluster nearby route blocks into faces without external ML libraries."""
+        keys = [key for key in dict.fromkeys(route_keys) if key in centroids]
+        if len(keys) < 4:
+            return {key: 0 for key in keys}
+        nearest = []
+        for key in keys:
+            point = centroids[key]
+            distances = [
+                math.hypot(
+                    centroids[other][0] - point[0],
+                    centroids[other][1] - point[1],
+                )
+                for other in keys if other != key
+            ]
+            positive = [distance for distance in distances if distance > 0]
+            if positive:
+                nearest.append(min(positive))
+        if not nearest:
+            return {key: 0 for key in keys}
+        characteristic = float(pd.Series(nearest).median())
+        # Adjacent blocks on one face are normally separated by roughly one
+        # block width. A relocation to another face/pit is materially larger.
+        threshold = max(characteristic * 3.0, 30.0)
+        parent = {key: key for key in keys}
+
+        def find(key):
+            while parent[key] != key:
+                parent[key] = parent[parent[key]]
+                key = parent[key]
+            return key
+
+        def union(left, right):
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for index, left in enumerate(keys):
+            for right in keys[index + 1:]:
+                distance = math.hypot(
+                    centroids[right][0] - centroids[left][0],
+                    centroids[right][1] - centroids[left][1],
+                )
+                if distance <= threshold:
+                    union(left, right)
+        roots = {}
+        result = {}
+        for key in keys:
+            root = find(key)
+            roots.setdefault(root, len(roots))
+            result[key] = roots[root]
+        return result
+
+    @classmethod
+    def _alternating_face_order(
+        cls, remaining_keys, actual_keys, latest_key, planned_positions,
+        centroids, direction_sign, direction_vector,
+    ):
+        """Project a recurring relocation pattern between distant dig faces."""
+        face_by_key = cls._spatial_faces(
+            list(planned_positions) + list(actual_keys), centroids
+        )
+        actual_with_faces = [
+            (key, face_by_key.get(key)) for key in actual_keys
+            if face_by_key.get(key) is not None
+        ]
+        face_visits = []
+        for _, face in actual_with_faces:
+            if not face_visits or face_visits[-1] != face:
+                face_visits.append(face)
+        # One revisit after leaving a face is the minimum defensible evidence
+        # of an alternating day/night relocation pattern.
+        relocation_detected = bool(
+            len(set(face_visits)) >= 2
+            and any(
+                face in face_visits[:index - 1]
+                for index, face in enumerate(face_visits)
+                if index >= 2
+            )
+        )
+        if not relocation_detected:
+            return [], {
+                "detected": False,
+                "face_count": len(set(face_visits)),
+                "observed_pattern": face_visits,
+            }
+
+        run_lengths = {}
+        current_face = None
+        current_keys = []
+        for key, face in actual_with_faces:
+            if face != current_face:
+                if current_face is not None:
+                    run_lengths.setdefault(current_face, []).append(
+                        len(dict.fromkeys(current_keys))
+                    )
+                current_face, current_keys = face, []
+            current_keys.append(key)
+        if current_face is not None:
+            run_lengths.setdefault(current_face, []).append(
+                len(dict.fromkeys(current_keys))
+            )
+        typical_run = {
+            face: max(1, int(round(float(pd.Series(lengths).median()))))
+            for face, lengths in run_lengths.items()
+        }
+
+        queues = {}
+        unclustered = []
+        for key in remaining_keys:
+            face = face_by_key.get(key)
+            if face is None:
+                unclustered.append(key)
+            else:
+                queues.setdefault(face, []).append(key)
+        for face, keys in list(queues.items()):
+            queues[face] = cls._spatial_order(
+                keys, latest_key, planned_positions, centroids,
+                direction_sign, direction_vector,
+            )
+
+        # Preserve the observed visit cycle, starting with the current face.
+        cycle = []
+        for face in reversed(face_visits):
+            if face not in cycle:
+                cycle.insert(0, face)
+        if face_visits and face_visits[-1] in cycle:
+            current_index = cycle.index(face_visits[-1])
+            cycle = cycle[current_index:] + cycle[:current_index]
+        ordered = []
+        current_visit_keys = []
+        if actual_with_faces:
+            latest_face = actual_with_faces[-1][1]
+            for key, face in reversed(actual_with_faces):
+                if face != latest_face:
+                    break
+                current_visit_keys.append(key)
+        first_face_remaining = max(
+            typical_run.get(cycle[0], 1)
+            - len(dict.fromkeys(current_visit_keys)),
+            0,
+        ) if cycle else 0
+        first_pass = True
+        while any(queues.get(face) for face in cycle):
+            progressed = False
+            for face in cycle:
+                queue = queues.get(face, [])
+                if not queue:
+                    continue
+                take = (
+                    first_face_remaining
+                    if first_pass and face == cycle[0]
+                    else typical_run.get(face, 1)
+                )
+                first_pass = False
+                if take <= 0:
+                    continue
+                ordered.extend(queue[:take])
+                del queue[:take]
+                progressed = True
+            if not progressed:
+                # The current visit already reached its typical length; move
+                # to the next face rather than looping indefinitely.
+                first_pass = False
+                for face in cycle[1:] + cycle[:1]:
+                    queue = queues.get(face, [])
+                    if queue:
+                        take = typical_run.get(face, 1)
+                        ordered.extend(queue[:take])
+                        del queue[:take]
+                        progressed = True
+                        break
+            if not progressed:
+                break
+        ordered.extend(cls._spatial_order(
+            unclustered, latest_key, planned_positions, centroids,
+            direction_sign, direction_vector,
+        ))
+        return ordered, {
+            "detected": True,
+            "face_count": len(set(face_visits)),
+            "observed_pattern": face_visits,
+            "typical_blocks_per_visit": typical_run,
+        }
+
     def _consume_parent_payloads(self, group, actual_wmt, force_complete):
         group = group.sort_values(
             ["start_datetime", "delivered_datetime"], na_position="last"
@@ -1040,10 +1226,29 @@ class ExpitSequenceReconciler:
                 correction_reasons.append("non-adjacent route jump")
             if incomplete_behind:
                 correction_reasons.append("incomplete block behind agent")
+            relocation_order, relocation = self._alternating_face_order(
+                remaining_keys,
+                actual_keys,
+                (
+                    latest_actual_route_key
+                    if latest_actual_route_key in direction_centroids
+                    else latest_actual_geometry_key
+                    if latest_actual_geometry_key in direction_centroids
+                    else latest_matched_key
+                ),
+                planned_positions,
+                direction_centroids,
+                sign,
+                vector,
+            )
+            if relocation.get("detected"):
+                correction_reasons.append(
+                    "alternating relocation between distant dig faces"
+                )
             needs_course_correction = bool(correction_reasons)
 
             if needs_course_correction:
-                updated_order = self._spatial_order(
+                updated_order = relocation_order or self._spatial_order(
                     remaining_keys,
                     (
                         latest_actual_route_key
@@ -1233,6 +1438,18 @@ class ExpitSequenceReconciler:
                 "unmatched_actual_blocks": len(unmatched_keys),
                 "direction": direction,
                 "direction_reversals": reversals,
+                "relocation_pattern_detected": bool(
+                    relocation.get("detected")
+                ),
+                "relocation_face_count": int(
+                    relocation.get("face_count", 0) or 0
+                ),
+                "relocation_observed_pattern": relocation.get(
+                    "observed_pattern", []
+                ),
+                "relocation_typical_blocks_per_visit": relocation.get(
+                    "typical_blocks_per_visit", {}
+                ),
                 "course_correction_applied": needs_course_correction,
                 "course_correction_reason": "; ".join(correction_reasons),
                 "geometry_coverage_pct": geometry_coverage * 100.0,

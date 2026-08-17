@@ -49,6 +49,7 @@ class SteadyStateInfeasible(Exception):
         super().__init__(detail)
         self.user_message = detail
         self.title = "Partial Plan - Infeasible Steady State"
+        self.steady_state_number = steady_state
 
 class ProductBuildCapacityComplete(Exception):
     def __init__(self):
@@ -918,7 +919,11 @@ class CaseModeller:
         # This method will be ultimately redundant as stockpile balances are updated in the is_stockpile_ready method of EventPoolGenerator and the same can be done for grade blocks (at which point this method is no longer required)
         self.event_pool.update_event_balances(events, self.balance_tracker)
         
-        period_crusher_target = CrusherTarget(self.crusher_targets).get_targets(self.period_tracker)
+        period_crusher_target = copy.deepcopy(
+            CrusherTarget(self.crusher_targets).get_targets(
+                self.period_tracker
+            )
+        )
         candidate_source_sets = []
         excluded_source_sets = []
         excluded_stockpile_sets = []
@@ -948,6 +953,8 @@ class CaseModeller:
         )
         last_solver_result = None
         no_selected_blend_message = "No feasible blend found."
+        stockpile_only_guardrail_fallback = False
+        guardrail_rejections = []
 
         if not events:
             result = {
@@ -1007,6 +1014,9 @@ class CaseModeller:
             self.check_abort_requested()
 
             if not result['Linprog_result_object'].success:
+                result.setdefault("diagnostics", {}).setdefault(
+                    "guardrail_rejections", []
+                ).extend(guardrail_rejections)
                 solver_status = getattr(result.get("Linprog_result_object"), "status", "")
                 if not candidate_source_sets:
                     self.register_optimization_diagnostic(result, events, "No feasible blend found.")
@@ -1060,10 +1070,50 @@ class CaseModeller:
                         )
                         excluded_source_sets.append(set(active_source_ids))
                         candidate_source_signatures.add(active_source_signature)
+                        guardrail_rejections.extend(
+                            grade_block_duration_issues
+                        )
                         print(
                             f"Rejected blend option {self.blend_option} because grade block pair "
                             f"duration is too short: {'; '.join(grade_block_duration_issues)}."
                         )
+                        try:
+                            direct_tip_minimum = float(
+                                period_crusher_target.get(
+                                    "direct_feed_ratio_min", 0
+                                ) or 0
+                            )
+                            direct_tip_maximum = float(
+                                period_crusher_target.get(
+                                    "direct_feed_ratio_max", 0
+                                ) or 0
+                            )
+                        except (TypeError, ValueError):
+                            direct_tip_minimum = direct_tip_maximum = 0.0
+                        if (
+                            not candidate_source_sets
+                            and not stockpile_only_guardrail_fallback
+                            and direct_tip_minimum
+                            <= Optimizer.SOLUTION_TOLERANCE
+                            and direct_tip_maximum
+                            > Optimizer.SOLUTION_TOLERANCE
+                            and any(event.is_stockpile for event in events)
+                        ):
+                            # A voluntary direct-tip choice can be rejected by
+                            # a post-solve operational guardrail even when the
+                            # Calendar minimum is zero. Explicitly try the
+                            # valid stockpile-only domain before declaring the
+                            # steady state infeasible.
+                            period_crusher_target[
+                                "direct_feed_ratio_max"
+                            ] = 0.0
+                            stockpile_only_guardrail_fallback = True
+                            print(
+                                "Calendar Direct Tip Ratio Min is 0; retrying "
+                                "with Direct Tip Ratio Max temporarily set to "
+                                "0 after the voluntary direct-tip option was "
+                                "rejected by Min Grade Block Pair Duration."
+                            )
                         continue
 
                     potential_feed_duration = self.candidate_potential_feed_duration(result)
@@ -1128,6 +1178,15 @@ class CaseModeller:
             print(f"Stopped after {max_decision_blend_options} feasible blend options.")
 
         if events and self.decision_point_results.empty:
+            if last_solver_result is not None:
+                last_solver_result.setdefault("diagnostics", {}).setdefault(
+                    "guardrail_rejections", []
+                ).extend(
+                    issue for issue in guardrail_rejections
+                    if issue not in last_solver_result.get(
+                        "diagnostics", {}
+                    ).get("guardrail_rejections", [])
+                )
             self.record_no_selected_blend(
                 last_solver_result,
                 events,
@@ -2498,6 +2557,63 @@ class CaseModeller:
             }
         )
         self.optimization_diagnostics.append(diagnostics)
+        print(self.format_optimization_diagnostic(diagnostics))
+
+    @staticmethod
+    def format_optimization_diagnostic(diagnostics):
+        """Return a concise, actionable Decision Point diagnostic."""
+        lines = [
+            "Optimisation diagnostic:",
+            f"  Solver status: {diagnostics.get('solver_status', 'unknown')}",
+            (
+                "  Sources: "
+                f"{diagnostics.get('positive_source_count', 0)} positive "
+                f"({diagnostics.get('positive_stockpile_count', 0)} stockpile, "
+                f"{diagnostics.get('positive_grade_block_count', 0)} direct-tip)"
+            ),
+            (
+                "  Crusher: "
+                f"{float(diagnostics.get('crusher_rate') or 0):,.0f} t/h; "
+                f"window target {float(diagnostics.get('target_tonnes') or 0):,.0f} t"
+            ),
+            (
+                "  Direct Tip Ratio submitted to solver: "
+                f"{float(diagnostics.get('direct_feed_ratio_min') or 0):g} to "
+                f"{float(diagnostics.get('direct_feed_ratio_max') if diagnostics.get('direct_feed_ratio_max') is not None else 1):g}"
+            ),
+            (
+                "  Stockpile selection: "
+                f"minimum {diagnostics.get('min_stockpiles')}, "
+                f"maximum {diagnostics.get('max_stockpiles')}, "
+                f"minimum contribution "
+                f"{float(diagnostics.get('min_stockpile_contribution_ratio') or 0):g}"
+            ),
+        ]
+        for build in diagnostics.get("product_build_targets") or []:
+            bounds = []
+            for grade, values in (build.get("grade_targets") or {}).items():
+                bounds.append(
+                    f"{grade} {float(values.get('target_min') or 0):g}-"
+                    f"{float(values.get('target_max') if values.get('target_max') is not None else 100):g}"
+                )
+            lines.append(
+                f"  Product build {build.get('name')} [{build.get('brand') or 'unbranded'}]: "
+                + ", ".join(bounds)
+            )
+        for custom in diagnostics.get("custom_constraint_ranges") or []:
+            lines.append(
+                f"  Custom constraint {custom.get('name')}: "
+                f"{custom.get('target_min')} to {custom.get('target_max')}"
+            )
+        causes = diagnostics.get("likely_causes") or []
+        if causes:
+            lines.append("  Likely causes / useful changes:")
+            lines.extend(f"    - {cause}" for cause in causes[:10])
+        rejections = diagnostics.get("guardrail_rejections") or []
+        if rejections:
+            lines.append("  Post-solve guardrail rejections:")
+            lines.extend(f"    - {reason}" for reason in rejections[:10])
+        return "\n".join(lines)
 
     def record_no_selected_blend(
         self,

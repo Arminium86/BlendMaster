@@ -575,9 +575,18 @@ class Run:
             SteadyStateInfeasible,
         ) as outcome:
             primary_outcome_error = outcome
-            self.case_bridge.print(
-                f"{outcome.title}: {outcome.user_message}"
-            )
+            if isinstance(outcome, SteadyStateInfeasible):
+                diagnostic = self._first_optimization_diagnostic(
+                    getattr(outcome, "steady_state_number", None)
+                ) or self._first_optimization_diagnostic()
+                self.case_bridge.print(self._format_infeasible_run_message(
+                    f"{outcome.title}: {outcome.user_message}",
+                    diagnostic,
+                ))
+            else:
+                self.case_bridge.print(
+                    f"{outcome.title}: {outcome.user_message}"
+                )
         except Exception as error:
             stockpile_selection_error = self._stockpile_selection_error(error)
             if stockpile_selection_error is not None:
@@ -1237,6 +1246,15 @@ class Run:
                 lines.extend(["", "Useful checks:"])
                 lines.extend(f"- {cause}" for cause in likely_causes[:6])
 
+            guardrail_rejections = diagnostics.get(
+                "guardrail_rejections"
+            ) or []
+            if guardrail_rejections:
+                lines.extend(["", "Post-solve guardrail rejections:"])
+                lines.extend(
+                    f"- {reason}" for reason in guardrail_rejections[:10]
+                )
+
             grade_ranges = diagnostics.get("grade_ranges") or {}
             if grade_ranges:
                 lines.extend(["", "Grade target vs available range:"])
@@ -1244,6 +1262,49 @@ class Run:
                     lines.append(
                         f"- {grade_name}: target {values['target_min']:g} to {values['target_max']:g}; "
                         f"available {values['available_min']:g} to {values['available_max']:g}"
+                    )
+
+            product_builds = diagnostics.get("product_build_targets") or []
+            if product_builds:
+                lines.extend(["", "Active product-build constraints:"])
+                for build in product_builds:
+                    lines.append(
+                        f"- {build.get('name')} [{build.get('brand') or 'unbranded'}], "
+                        f"opening {float(build.get('opening_tonnes') or 0):,.1f} t / "
+                        f"target {float(build.get('target_tonnes') or 0):,.1f} t"
+                    )
+                    for grade_name, values in (
+                        build.get("grade_targets") or {}
+                    ).items():
+                        current = values.get("current_grade")
+                        current_text = (
+                            f"; current {float(current):g}"
+                            if current is not None else ""
+                        )
+                        available_min = values.get("available_min")
+                        available_max = values.get("available_max")
+                        available_text = (
+                            f"; available {float(available_min):g} to "
+                            f"{float(available_max):g}"
+                            if available_min is not None
+                            and available_max is not None else ""
+                        )
+                        lines.append(
+                            f"  - {grade_name}: target "
+                            f"{float(values.get('target_min') or 0):g} to "
+                            f"{float(values.get('target_max') if values.get('target_max') is not None else 100):g}"
+                            f"{current_text}{available_text}"
+                        )
+
+            custom_constraints = diagnostics.get("custom_constraint_ranges") or []
+            if custom_constraints:
+                lines.extend(["", "Active custom constraints:"])
+                for custom in custom_constraints:
+                    lines.append(
+                        f"- {custom.get('name')}: target "
+                        f"{custom.get('target_min')} to {custom.get('target_max')}; "
+                        f"available coefficient range "
+                        f"{custom.get('available_min')} to {custom.get('available_max')}"
                     )
 
         if extra_detail:

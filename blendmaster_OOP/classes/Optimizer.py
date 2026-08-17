@@ -35,7 +35,10 @@ from pulp import (
 from classes.StockpileData import StockpileData
 from classes.EventData import EventData
 from classes.GradeStreams import DEFAULT_STREAM, apply_selected_stream
-from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.GradeBlockIdentity import (
+    grade_block_material_type,
+    parent_grade_block_name,
+)
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
     PRODUCT_LANE,
@@ -543,6 +546,18 @@ class Optimizer:
             )
 
         target_product_brand = str(solver_config.get("target_product_brand") or "").strip().upper()
+        expit_material_brand_incentives = {
+            (
+                str(item.get("material_type") or "").strip().upper(),
+                str(item.get("brand") or "").strip().upper(),
+            ): safe_float(item.get("incentive_per_tonne"), 0.0)
+            for item in (
+                period_crusher_target.get(
+                    "expit_material_brand_incentives", []
+                ) or []
+            )
+            if isinstance(item, dict)
+        }
         selected_data_stream = str(
             solver_config.get("selected_data_stream") or DEFAULT_STREAM
         ).strip().lower()
@@ -1093,6 +1108,18 @@ class Optimizer:
                     destination_turnover_incentive,
                     event.two_wp_destination_turnover_priority,
                 )
+            material_type = (
+                grade_block_material_type(
+                    event.source_name or event.grade_block
+                )
+                if event.is_grade_block else ""
+            )
+            material_brand_adjustment = (
+                expit_material_brand_incentives.get(
+                    (material_type, target_product_brand), 0.0
+                )
+                if target_product_brand else 0.0
+            )
             continuity_reward = (
                 stay_on_same_blend_incentive
                 if event.is_stockpile and str(event.stockpile) in previous_blend_stockpile_source_ids
@@ -1140,6 +1167,7 @@ class Optimizer:
                 + timing_guidance_cost
                 - preference_reward - direct_tip_reward - continuity_reward
                 - grade_block_pair_reward - destination_turnover_adjustment
+                - material_brand_adjustment
             )
 
         throughput_incentive_per_tonne = max(
@@ -2037,6 +2065,22 @@ class Optimizer:
                                 and event.two_wp_turnover_guidance_applicable
                                 else 0.0
                             ),
+                            "expit_material_type": (
+                                grade_block_material_type(source_name)
+                                if event.is_grade_block else ""
+                            ),
+                            "expit_material_target_brand": (
+                                target_product_brand
+                                if event.is_grade_block else ""
+                            ),
+                            "expit_material_brand_incentive_applied": (
+                                expit_material_brand_incentives.get((
+                                    grade_block_material_type(source_name),
+                                    target_product_brand,
+                                ), 0.0)
+                                if event.is_grade_block
+                                and target_product_brand else 0.0
+                            ),
                             "source_properties": deepcopy(
                                 visible_source_properties
                             ),
@@ -2423,6 +2467,83 @@ class Optimizer:
                 )
             custom_constraint_ranges.append(diagnostic)
 
+        product_build_targets = []
+        target_builds = dict(
+            solver_config.get("target_product_builds") or {}
+        )
+        target_states = dict(
+            solver_config.get("target_product_build_states") or {}
+        )
+        if not target_builds and solver_config.get("target_product_build"):
+            target_builds = {
+                "product": solver_config.get("target_product_build") or {}
+            }
+            target_states = {
+                "product": solver_config.get("target_product_build_state") or {}
+            }
+        for lane, build in target_builds.items():
+            state = target_states.get(lane) or {}
+            grade_targets = {}
+            for grade_key, label in grade_names.items():
+                target_min = safe_float(
+                    build.get(f"target_{grade_key}_min"), 0.0
+                )
+                target_max = safe_float(
+                    build.get(f"target_{grade_key}_max"), 100.0
+                )
+                values = [
+                    source[f"grade_{grade_key}"] for source in positive_sources
+                ]
+                available_min = min(values) if values else None
+                available_max = max(values) if values else None
+                current_weight = safe_float(
+                    state.get(f"grade_{grade_key}_weight"),
+                    safe_float(state.get("tonnes"), 0.0),
+                )
+                current_grade = None
+                if current_weight > Optimizer.SOLUTION_TOLERANCE:
+                    current_grade = (
+                        safe_float(state.get(f"grade_{grade_key}_metal"), 0.0)
+                        / current_weight
+                    )
+                grade_targets[label] = {
+                    "target_min": target_min,
+                    "target_max": target_max,
+                    "available_min": available_min,
+                    "available_max": available_max,
+                    "current_grade": current_grade,
+                }
+                if values and (
+                    target_min > available_max + Optimizer.SOLUTION_TOLERANCE
+                    or target_max < available_min - Optimizer.SOLUTION_TOLERANCE
+                ):
+                    likely_causes.append(
+                        f"Product build '{build.get('name') or lane}' {label} "
+                        f"target {target_min:g} to {target_max:g} does not overlap "
+                        f"the available selected-stream range "
+                        f"({available_min:g} to {available_max:g})."
+                    )
+            product_build_targets.append({
+                "lane": lane,
+                "name": build.get("name") or str(lane),
+                "brand": build.get("brand") or "",
+                "opening_tonnes": safe_float(state.get("tonnes"), 0.0),
+                "target_tonnes": safe_float(build.get("target_tonnes"), 0.0),
+                "grade_targets": grade_targets,
+            })
+
+        if (
+            solver_status == "Infeasible"
+            and positive_sources
+            and not likely_causes
+        ):
+            likely_causes.append(
+                "Each bound may overlap the available range independently, but "
+                "no common blend satisfied all active grade, quantity, source-count, "
+                "direct-tip, product-build and custom constraints together. Review "
+                "the narrowest product-build/custom bounds and source availability."
+            )
+
         if not likely_causes and selected_tonnes <= Optimizer.SOLUTION_TOLERANCE:
             likely_causes.append(
                 "The solver returned zero crusher feed. Check stockpile State, Max Quantity, "
@@ -2443,6 +2564,7 @@ class Optimizer:
             "grade_ranges": grade_ranges,
             "stockpile_grade_ranges": stockpile_grade_ranges,
             "custom_constraint_ranges": custom_constraint_ranges,
+            "product_build_targets": product_build_targets,
             "likely_causes": likely_causes,
             "min_stockpiles": min_stockpiles,
             "max_stockpiles": max_stockpiles,

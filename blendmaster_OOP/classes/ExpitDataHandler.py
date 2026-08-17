@@ -20,7 +20,10 @@ from classes.CustomConstraints import (
 from classes.SourcePropertyMappings import (
     normalise_aps_source_property_mappings,
 )
-from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.GradeBlockIdentity import (
+    grade_block_material_type,
+    parent_grade_block_name,
+)
 from classes.ExpitSequenceReconciler import (
     ExpitSequenceReconciler,
     grade_block_key,
@@ -55,6 +58,38 @@ class ExpitDataHandler:
         "HaulageResult.TruckPayload",
         "HaulageResult.NumberOfTrips",
     }
+
+    @staticmethod
+    def distinct_expit_material_types(input_data):
+        """Read only APS source identity columns and return material codes."""
+        if not input_data:
+            return []
+        data = pd.read_csv(
+            input_data,
+            usecols=lambda column: column in {
+                "Source.FullName", "Source.Type"
+            },
+        )
+        if "Source.FullName" not in data:
+            return []
+        if "Source.Type" in data:
+            source_type = data["Source.Type"].astype(str).str.upper()
+            grade_block_mask = source_type.str.contains(
+                "GRADE|RESERVE|BLOCK", regex=True, na=False
+            )
+            if grade_block_mask.any():
+                data = data[grade_block_mask]
+        reserve_mask = data["Source.FullName"].astype(str).str.contains(
+            r"(?:^|[\\/])RESERVES?[\\/]", case=False, regex=True, na=False
+        )
+        if reserve_mask.any():
+            data = data[reserve_mask]
+        values = {
+            grade_block_material_type(value)
+            for value in data["Source.FullName"].dropna().unique()
+            if str(value).strip()
+        }
+        return sorted(value for value in values if value)
 
     def property_kind(self, value):
         return source_property_kind(value, self.source_property_kinds)
@@ -2816,6 +2851,12 @@ class ExpitDataHandler:
         )
         updated = result.transactions
         attributes = {
+            # Retain the sliced APS route for map presentation and audit. The
+            # reconciliation and optimiser continue to operate at their
+            # existing parent/payload granularities respectively.
+            "expit_sequence_planned_transactions": transactions.reset_index(
+                drop=True
+            ),
             "expit_sequence_audit": result.audit,
             "expit_sequence_geometry": result.geometry,
             "expit_sequence_geological_blocks": result.geological_blocks,

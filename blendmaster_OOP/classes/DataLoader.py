@@ -215,6 +215,36 @@ class DataLoader:
                         f"{definition['name']} Min cannot be greater than Max."
                     )
                 target["custom_constraints"].append(item)
+            target["expit_material_brand_incentives"] = []
+            for key, pair in (
+                (self.calendar_inputs.get(
+                    "expit_material_brand_pairs", {}
+                ) or {}).items()
+            ):
+                if not isinstance(pair, dict):
+                    continue
+                raw_value = (self.calendar_inputs.get(key, {}) or {}).get(
+                    period_label, 0
+                )
+                try:
+                    incentive = float(raw_value or 0)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        f"{pair.get('material_type')} → {pair.get('brand')} "
+                        "incentive must be a signed numeric $/t value."
+                    ) from error
+                if not math.isfinite(incentive):
+                    raise ValueError(
+                        f"{pair.get('material_type')} → {pair.get('brand')} "
+                        "incentive must be finite."
+                    )
+                target["expit_material_brand_incentives"].append({
+                    "material_type": str(
+                        pair.get("material_type") or ""
+                    ).strip().upper(),
+                    "brand": str(pair.get("brand") or "").strip().upper(),
+                    "incentive_per_tonne": incentive,
+                })
             crusher_target_data[period_key] = target
 
         for target in crusher_target_data.values():

@@ -15,3 +15,11 @@ def parent_grade_block_name(value):
     prefix, separator, final_part = source.rpartition("/")
     parent_part = re.sub(r"_\d+$", "", final_part)
     return f"{prefix}{separator}{parent_part}" if separator else parent_part
+
+
+def grade_block_material_type(value):
+    """Return the leading material code from a sliced or parent block name."""
+    parent = parent_grade_block_name(value)
+    final_part = parent.rsplit("/", 1)[-1].strip().upper()
+    match = re.match(r"([A-Z]+)", final_part)
+    return match.group(1) if match else ""

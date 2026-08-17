@@ -36,6 +36,7 @@ from classes.GradeBlockIdentity import parent_grade_block_name
 from classes.ExpitSequenceReconciler import (
     ExpitSequenceReconciler,
     agent_matches,
+    grade_block_key,
 )
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
@@ -697,6 +698,8 @@ class UserInputs(QMainWindow):
         self.stockpile_data_AMT_column = {}
         self.AMT_chunk_settings = {}
         self.AMT_chunk_reconciliation_signature = ""
+        self.AMT_refresh_tolerance_minutes = 30
+        self.AMT_last_refresh_datetime = None
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
         self.start_dash_AMT_map_thread_first_call = True
@@ -1219,6 +1222,9 @@ class UserInputs(QMainWindow):
         captured["solver_config"] = copy.deepcopy(self.solver_config or {})
         captured["product_build_settings"] = copy.deepcopy(self.product_build_settings or [])
         captured["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        captured["expit_material_brand_pairs"] = copy.deepcopy(
+            getattr(self, "calendar_expit_material_brand_rows", {})
+        )
         captured["site_context"] = self.active_site_context()
         return captured
 
@@ -1361,6 +1367,9 @@ class UserInputs(QMainWindow):
             "expit_completion_tolerance_pct": float(getattr(
                 self, "expit_completion_tolerance_pct", 10.0
             ) or 10.0),
+            "expit_refresh_tolerance_minutes": max(0, int(getattr(
+                self, "expit_refresh_tolerance_minutes", 30
+            ) or 0)),
             "expit_live_refresh_enabled": bool(getattr(
                 self, "expit_live_refresh_enabled", False
             )),
@@ -1378,6 +1387,10 @@ class UserInputs(QMainWindow):
         if hasattr(self, "expit_completion_tolerance_input"):
             self.expit_completion_tolerance_pct = float(
                 self.expit_completion_tolerance_input.value()
+            )
+        if hasattr(self, "expit_refresh_tolerance_input"):
+            self.expit_refresh_tolerance_minutes = int(
+                self.expit_refresh_tolerance_input.value()
             )
         if hasattr(self, "expit_sequence_live_checkbox"):
             self.expit_live_refresh_enabled = bool(
@@ -1441,6 +1454,7 @@ class UserInputs(QMainWindow):
             "direct_tip_movement_rules", "time_mode_choice", "start_time_choice",
             "planning_period_count_choice",
             "expit_mode_choice", "expit_completion_tolerance_pct",
+            "expit_refresh_tolerance_minutes",
             "expit_live_refresh_enabled", "expit_live_refresh_minutes",
             "expit_excavator_size_pct",
             "file_path_choice", "file_path_24hr_choice",
@@ -1476,6 +1490,7 @@ class UserInputs(QMainWindow):
             "inventory_data_request_signature",
             "AMT_data_request_signature", "AMT_enrichment_signature",
             "AMT_chunk_reconciliation_signature",
+            "AMT_refresh_tolerance_minutes", "AMT_last_refresh_datetime",
             "data_stream_input_cache_signature", "data_stream_input_cache_result",
             "AMT_chunk_settings",
             "hex_sequence_table", "hex_sequence_table_argument",
@@ -1673,6 +1688,9 @@ class UserInputs(QMainWindow):
             self.expit_completion_tolerance_pct = float(
                 state.get("expit_completion_tolerance_pct", 10.0) or 10.0
             )
+            self.expit_refresh_tolerance_minutes = max(0, int(
+                state.get("expit_refresh_tolerance_minutes", 30) or 0
+            ))
             self.expit_live_refresh_enabled = bool(
                 state.get("expit_live_refresh_enabled", False)
             )
@@ -1856,6 +1874,16 @@ class UserInputs(QMainWindow):
             self.AMT_chunk_reconciliation_signature = str(
                 state.get("AMT_chunk_reconciliation_signature") or ""
             )
+            self.AMT_refresh_tolerance_minutes = max(0, int(
+                state.get("AMT_refresh_tolerance_minutes", 30) or 0
+            ))
+            self.AMT_last_refresh_datetime = state.get(
+                "AMT_last_refresh_datetime"
+            )
+            if hasattr(self, "AMT_refresh_tolerance_input"):
+                self.AMT_refresh_tolerance_input.setValue(
+                    self.AMT_refresh_tolerance_minutes
+                )
             self.data_stream_input_cache_signature = str(
                 state.get("data_stream_input_cache_signature") or ""
             )
@@ -2074,6 +2102,9 @@ class UserInputs(QMainWindow):
                 float(getattr(
                     self, "expit_completion_tolerance_pct", 10.0
                 ) or 10.0)
+            )))
+            self.expit_refresh_tolerance_input.setValue(max(0, int(
+                getattr(self, "expit_refresh_tolerance_minutes", 30) or 0
             )))
             self.expit_sequence_live_checkbox.setChecked(bool(
                 getattr(self, "expit_live_refresh_enabled", False)
@@ -3992,7 +4023,10 @@ class UserInputs(QMainWindow):
             self.workspace_tabs,
             self.expit_sequence_tab,
             "Expit Sequence",
-            position=1,
+            # AMT Stockpiles and Product Build Settings are inserted ahead of
+            # this later during startup, leaving Expit Sequence immediately
+            # before the Auto Blending Dashboard in the final Workspace order.
+            position=0,
         )
         layout = QVBoxLayout(self.expit_sequence_tab)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -4275,15 +4309,20 @@ class UserInputs(QMainWindow):
             "two_wp": two_wp_path,
             "agents": selected_agents,
             "cache_signature": cache_signature,
-            "cache_allowed": bool(set_time_mode),
+            "cache_allowed": UserInputs.expit_input_cache_allowed(
+                self,
+                time_mode=2 if set_time_mode else 1,
+                expit_mode=2,
+            ),
         }
 
     def prepare_expit_sequence_live_snapshot(self, inputs):
         transactions = None
         cache_hit = False
+        _cache_metadata = {}
         if inputs.get("cache_allowed"):
             transactions, _cache_metadata = (
-                DatabaseManager().read_expit_input_cache(
+                self.read_reusable_expit_input_cache(
                     inputs.get("cache_signature")
                 )
             )
@@ -4301,6 +4340,9 @@ class UserInputs(QMainWindow):
             )
         return {
             "transactions": transactions,
+            "planned_transactions": transactions.attrs.get(
+                "expit_sequence_planned_transactions", pd.DataFrame()
+            ),
             "audit": transactions.attrs.get(
                 "expit_sequence_audit", pd.DataFrame()
             ),
@@ -4319,6 +4361,7 @@ class UserInputs(QMainWindow):
             ),
             "cache_signature": inputs.get("cache_signature"),
             "cache_hit": cache_hit,
+            "cache_metadata": _cache_metadata if cache_hit else {},
             "cache_persist": bool(inputs.get("cache_allowed")),
             "start_time": inputs.get("start_time"),
         }
@@ -4365,6 +4408,9 @@ class UserInputs(QMainWindow):
                 },
             )
         DatabaseManager().write_expit_sequence_reconciliation({
+            "expit_sequence_planned_transactions": self.expit_sequence_snapshot.get(
+                "planned_transactions", pd.DataFrame()
+            ),
             "expit_sequence_audit": self.expit_sequence_snapshot.get(
                 "audit", pd.DataFrame()
             ),
@@ -4392,11 +4438,19 @@ class UserInputs(QMainWindow):
         self.expit_sequence_agent_selector.blockSignals(False)
         warnings = self.expit_sequence_snapshot.get("warnings", []) or []
         refreshed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        refresh_caption = (
-            "Restored saved historical reconciliation"
-            if self.expit_sequence_snapshot.get("cache_hit", False)
-            else f"Last refreshed: {refreshed}"
-        )
+        cache_metadata = self.expit_sequence_snapshot.get(
+            "cache_metadata", {}
+        ) or {}
+        if cache_metadata.get("cache_match") == "fresh_current_time":
+            refresh_caption = (
+                "Reused Expit sequence reconciliation refreshed "
+                f"{float(cache_metadata.get('cache_age_minutes') or 0):.1f} "
+                "minutes ago"
+            )
+        elif self.expit_sequence_snapshot.get("cache_hit", False):
+            refresh_caption = "Restored saved Expit sequence reconciliation"
+        else:
+            refresh_caption = f"Last refreshed: {refreshed}"
         self.expit_sequence_status_label.setText(
             refresh_caption
             + (" | " + " | ".join(map(str, warnings)) if warnings else "")
@@ -4477,9 +4531,82 @@ class UserInputs(QMainWindow):
             and remaining <= nominal * max(tolerance or 0.0, 0.0) / 100.0
         )
 
+    @staticmethod
+    def expit_slice_route_points(
+        transactions, agent, centroids, average_block_size,
+    ):
+        """Return display points for sliced APS rows within parent geometry."""
+        if not isinstance(transactions, pd.DataFrame) or transactions.empty:
+            return []
+        frame = transactions.copy()
+        if "agent" in frame:
+            frame = frame[frame["agent"].astype(str) == str(agent)]
+        if frame.empty or "source" not in frame:
+            return []
+        sort_columns = [
+            column for column in (
+                "start_datetime", "delivered_datetime",
+                "updated_parent_sequence", "original_parent_sequence",
+            ) if column in frame
+        ]
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, na_position="last")
+        route = []
+        seen_slices = {}
+        previous_source = None
+        for _, row in frame.iterrows():
+            source = str(row.get("source") or "").strip()
+            if not source or source == previous_source:
+                continue
+            previous_source = source
+            key = grade_block_key(source)
+            if key not in centroids:
+                continue
+            occurrence = seen_slices.get((key, source))
+            if occurrence is None:
+                sibling_count = sum(
+                    1 for existing_key, _ in seen_slices if existing_key == key
+                )
+                occurrence = sibling_count
+                seen_slices[(key, source)] = occurrence
+            # The authoritative geometry is parent-level. A small, stable
+            # radial offset exposes distinct APS slices without pretending a
+            # slice polygon exists or changing backend reconciliation.
+            angle = occurrence * (math.pi * (3.0 - math.sqrt(5.0)))
+            radius = min(average_block_size * 0.18, average_block_size * 0.06 * occurrence)
+            centre = centroids[key]
+            route.append({
+                "source": source,
+                "key": key,
+                "x": centre[0] + math.cos(angle) * radius,
+                "y": centre[1] + math.sin(angle) * radius,
+                "time": row.get("start_datetime"),
+            })
+        return route
+
+    @staticmethod
+    def add_expit_route_arrows(figure, points, colour):
+        """Add capped data-coordinate arrows so long route direction is visible."""
+        if len(points) < 2:
+            return
+        stride = max(1, int(math.ceil((len(points) - 1) / 80.0)))
+        for index in range(0, len(points) - 1, stride):
+            left, right = points[index], points[index + 1]
+            if left["x"] == right["x"] and left["y"] == right["y"]:
+                continue
+            figure.add_annotation(
+                x=right["x"], y=right["y"],
+                ax=left["x"], ay=left["y"],
+                xref="x", yref="y", axref="x", ayref="y",
+                text="", showarrow=True, arrowhead=2,
+                arrowsize=0.8, arrowwidth=1.5, arrowcolor=colour,
+                opacity=0.75,
+            )
+
     def expit_sequence_figure(
         self, agent, audit, geometry, actual_movements=None,
-        visible_layers=None,
+        visible_layers=None, planned_transactions=None,
+        corrected_transactions=None,
     ):
         figure = go.Figure()
         if audit.empty:
@@ -4656,29 +4783,84 @@ class UserInputs(QMainWindow):
                         hovertemplate="%{text}<extra></extra>",
                     ))
 
-        # Route layers remain complete, separately toggleable audit trails;
-        # the completed-block layer controls only the muted polygon footprints.
-        route_audit = agent_audit.copy()
-        original = route_audit[
-            route_audit["original_sequence"].notna()
-            & route_audit["centroid_easting"].notna()
-        ].sort_values("original_sequence")
-        updated = route_audit[
-            route_audit["updated_sequence"].notna()
-            & route_audit["centroid_easting"].notna()
-        ].sort_values("updated_sequence")
-        for frame, layer, name, colour, dash in (
-            (original, "original_route", "Original APS route", "#64748b", "dot"),
-            (updated, "corrected_route", "Corrected future route", "#16a34a", "dash"),
-        ):
-            if layer in visible_layers and not frame.empty:
-                figure.add_trace(go.Scatter(
-                    x=frame["centroid_easting"],
-                    y=frame["centroid_northing"],
-                    mode="lines+markers",
-                    name=name,
-                    line=dict(color=colour, width=3, dash=dash),
-                ))
+        # Polygons and reconciliation remain parent-level, while route points
+        # use APS slices. Small display-only offsets prevent many slice visits
+        # from collapsing onto the same parent centroid.
+        centroids = ExpitSequenceReconciler.centroids(geometry)
+        average_block_size = self.expit_average_block_size(geometry)
+        slice_routes = (
+            (
+                planned_transactions,
+                "original_route", "Original APS sliced route",
+                "#64748b", "dot",
+            ),
+            (
+                corrected_transactions,
+                "corrected_route", "Corrected future sliced route",
+                "#16a34a", "dash",
+            ),
+        )
+        rendered_slice_layers = set()
+        for transactions, layer, name, colour, dash in slice_routes:
+            points = self.expit_slice_route_points(
+                transactions, agent, centroids, average_block_size
+            )
+            if layer not in visible_layers or not points:
+                continue
+            figure.add_trace(go.Scatter(
+                x=[point["x"] for point in points],
+                y=[point["y"] for point in points],
+                mode="lines+markers",
+                name=name,
+                line=dict(color=colour, width=3, dash=dash),
+                text=[
+                    f"{point['source']}<br>{point.get('time') or ''}"
+                    for point in points
+                ],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+            self.add_expit_route_arrows(figure, points, colour)
+            rendered_slice_layers.add(layer)
+
+        # Backward-compatible parent route fallback for projects saved before
+        # sliced route inputs were persisted.
+        if len(rendered_slice_layers) < 2:
+            route_audit = agent_audit.copy()
+            for sequence_column, layer, name, colour, dash in (
+                (
+                    "original_sequence", "original_route",
+                    "Original APS route", "#64748b", "dot",
+                ),
+                (
+                    "updated_sequence", "corrected_route",
+                    "Corrected future route", "#16a34a", "dash",
+                ),
+            ):
+                frame = route_audit[
+                    route_audit[sequence_column].notna()
+                    & route_audit["centroid_easting"].notna()
+                ].sort_values(sequence_column)
+                if (
+                    layer in visible_layers
+                    and layer not in rendered_slice_layers
+                    and not frame.empty
+                ):
+                    points = [
+                        {
+                            "x": row["centroid_easting"],
+                            "y": row["centroid_northing"],
+                            "source": row.get("parent_grade_block"),
+                            "time": "",
+                        }
+                        for _, row in frame.iterrows()
+                    ]
+                    figure.add_trace(go.Scatter(
+                        x=[point["x"] for point in points],
+                        y=[point["y"] for point in points],
+                        mode="lines+markers", name=name,
+                        line=dict(color=colour, width=3, dash=dash),
+                    ))
+                    self.add_expit_route_arrows(figure, points, colour)
 
         actual = ExpitSequenceReconciler.normalize_actual_movements(
             actual_movements
@@ -4689,7 +4871,6 @@ class UserInputs(QMainWindow):
                     lambda value: agent_matches(value, agent)
                 )
             ].sort_values("transaction_datetime")
-        centroids = ExpitSequenceReconciler.centroids(geometry)
         actual_route = []
         for _, movement in actual.iterrows():
             key = movement.get("grade_block_key")
@@ -4711,9 +4892,16 @@ class UserInputs(QMainWindow):
             ))
         if actual_route:
             if "actual_route" in visible_layers:
+                actual_points = [
+                    {
+                        "x": item[3][0], "y": item[3][1],
+                        "source": item[1], "time": item[2],
+                    }
+                    for item in actual_route
+                ]
                 figure.add_trace(go.Scatter(
-                    x=[item[3][0] for item in actual_route],
-                    y=[item[3][1] for item in actual_route],
+                    x=[point["x"] for point in actual_points],
+                    y=[point["y"] for point in actual_points],
                     mode="lines+markers",
                     name="Actual route",
                     line=dict(color="#ef4444", width=3),
@@ -4722,6 +4910,9 @@ class UserInputs(QMainWindow):
                     ],
                     hovertemplate="%{text}<extra></extra>",
                 ))
+                self.add_expit_route_arrows(
+                    figure, actual_points, "#ef4444"
+                )
             latest = actual_route[-1]
             if "excavator_marker" in visible_layers:
                 figure.add_trace(go.Scatter(
@@ -4800,6 +4991,8 @@ class UserInputs(QMainWindow):
             f"Remaining: {agent_summary.get('remaining_parent_blocks', 0)} | "
             f"Unmatched actual: {agent_summary.get('unmatched_actual_blocks', 0)} | "
             f"Direction: {agent_summary.get('direction', 'Unknown')} | "
+            f"Relocation pattern: "
+            f"{'Detected' if agent_summary.get('relocation_pattern_detected') else 'Not detected'} | "
             f"Course correction: "
             f"{'Applied' if agent_summary.get('course_correction_applied') else 'Not required'}"
             f"{(' (' + str(agent_summary.get('course_correction_reason')) + ')') if agent_summary.get('course_correction_reason') else ''} | "
@@ -4821,6 +5014,8 @@ class UserInputs(QMainWindow):
         figure = self.expit_sequence_figure(
             agent, audit, geometry, actual_movements,
             self.expit_sequence_visible_layers(),
+            snapshot.get("planned_transactions"),
+            snapshot.get("transactions"),
         )
         chart_directory = os.path.join(
             getattr(self, "scenario_session_directory", tempfile.gettempdir()),
@@ -5090,7 +5285,7 @@ class UserInputs(QMainWindow):
         return json.dumps(signature, sort_keys=True, default=str)
 
     def expit_input_cache_allowed(self, time_mode=None, expit_mode=None):
-        """Live current-time reconciliation must always inspect new actuals."""
+        """Return whether an Expit snapshot may be reused for this run."""
         try:
             time_mode = int(
                 time_mode
@@ -5107,7 +5302,95 @@ class UserInputs(QMainWindow):
             )
         except (TypeError, ValueError):
             expit_mode = 1
-        return not (time_mode == 1 and expit_mode == 2)
+        if not (time_mode == 1 and expit_mode == 2):
+            return True
+        return max(int(getattr(
+            self, "expit_refresh_tolerance_minutes", 0
+        ) or 0), 0) > 0
+
+    @staticmethod
+    def expit_signatures_match_except_start_time(left, right):
+        try:
+            left_payload = json.loads(str(left or ""))
+            right_payload = json.loads(str(right or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(left_payload, dict) or not isinstance(
+            right_payload, dict
+        ):
+            return False
+        left_payload.pop("start_time", None)
+        right_payload.pop("start_time", None)
+        return left_payload == right_payload
+
+    def read_reusable_expit_input_cache(self, signature):
+        """Read an exact cache hit or a fresh current-time equivalent."""
+        manager = DatabaseManager()
+        transactions, metadata = manager.read_expit_input_cache(signature)
+        current_time_reconciliation = (
+            int(getattr(self, "time_mode_choice", 1) or 1) == 1
+            and int(getattr(self, "expit_mode_choice", 1) or 1) == 2
+        )
+        tolerance = max(int(getattr(
+            self, "expit_refresh_tolerance_minutes", 0
+        ) or 0), 0)
+        if transactions is not None and not current_time_reconciliation:
+            metadata = dict(metadata or {})
+            metadata["cache_match"] = "exact"
+            return transactions, metadata
+        if transactions is not None and current_time_reconciliation:
+            created_at = pd.to_datetime(
+                (metadata or {}).get("cache_created_at"),
+                errors="coerce", utc=True,
+            )
+            age_minutes = (
+                max(
+                    (
+                        pd.Timestamp.now(tz="UTC") - created_at
+                    ).total_seconds() / 60.0,
+                    0.0,
+                )
+                if not pd.isna(created_at) else float("inf")
+            )
+            if tolerance > 0 and age_minutes <= tolerance:
+                metadata = dict(metadata or {})
+                metadata.update({
+                    "cache_match": "fresh_current_time",
+                    "cache_age_minutes": age_minutes,
+                    "cache_tolerance_minutes": tolerance,
+                })
+                return transactions, metadata
+        if not current_time_reconciliation or tolerance <= 0:
+            return None, {}
+
+        latest, latest_signature, metadata = (
+            manager.read_latest_expit_input_cache()
+        )
+        if latest is None or not self.expit_signatures_match_except_start_time(
+            latest_signature, signature
+        ):
+            return None, {}
+        created_at = pd.to_datetime(
+            (metadata or {}).get("cache_created_at"), errors="coerce",
+            utc=True,
+        )
+        if pd.isna(created_at):
+            return None, {}
+        age_minutes = max(
+            (
+                pd.Timestamp.now(tz="UTC") - created_at
+            ).total_seconds() / 60.0,
+            0.0,
+        )
+        if age_minutes > tolerance:
+            return None, {}
+        metadata = dict(metadata or {})
+        metadata.update({
+            "cache_match": "fresh_current_time",
+            "cache_age_minutes": age_minutes,
+            "cache_tolerance_minutes": tolerance,
+        })
+        return latest, metadata
 
     def database_view_is_current(self):
         if getattr(self, "database_view_refresh_in_progress", False):
@@ -5391,26 +5674,109 @@ class UserInputs(QMainWindow):
             )
         return fields
 
+    @staticmethod
+    def amt_chunk_footprint(chunk):
+        """Return a stable parent footprint from current or legacy chunk rows."""
+        if not isinstance(chunk, dict):
+            return ""
+        footprint = str(
+            chunk.get("footprint")
+            or chunk.get("FOOTPRINT")
+            or chunk.get("parent_stockpile")
+            or chunk.get("PARENT_STOCKPILE")
+            or ""
+        ).strip()
+        if not footprint:
+            source_id = str(
+                chunk.get("hex")
+                or chunk.get("HEX")
+                or chunk.get("chunk_id")
+                or chunk.get("CHUNK_ID")
+                or chunk.get("source_id")
+                or chunk.get("SOURCE_ID")
+                or ""
+            ).strip()
+            footprint = re.sub(
+                r"_CHUNK_\d+$", "", source_id, flags=re.IGNORECASE
+            )
+        return footprint.strip().upper()
+
+    def selected_amt_footprints(self):
+        """Return the selected inventory footprints represented spatially."""
+        selected = {
+            str(name).strip().upper()
+            for name, enabled in (
+                vars(self).get("stockpile_data_AMT_column", {}) or {}
+            ).items()
+            if bool(enabled) and str(name).strip()
+        }
+        for name, attributes in (
+            vars(self).get("updated_stockpile_data", {}) or {}
+        ).items():
+            if not isinstance(attributes, dict):
+                continue
+            raw_flag = attributes.get("amt", attributes.get("AMT"))
+            if isinstance(raw_flag, str):
+                raw_flag = raw_flag.strip().lower() in {
+                    "1", "true", "yes", "y", "amt"
+                }
+            if raw_flag and str(name).strip():
+                selected.add(str(name).strip().upper())
+        return selected
+
+    def submitted_amt_chunks(self):
+        """Merge canonical, solver-snapshot and current-map AMT chunk rows.
+
+        The Qt state is authoritative after submission, but a Dash callback can
+        finish just after that snapshot is captured.  Including the live map
+        rows prevents Database View from temporarily presenting a valid chunked
+        footprint as a weighted-average stockpile.  Canonical rows win when the
+        same chunk exists in more than one source.
+        """
+        sources = [
+            vars(self).get("hex_sequence_table", []) or [],
+            vars(self).get("hex_sequence_table_argument", []) or [],
+        ]
+        draw_amt = vars(self).get("draw_AMT_map")
+        if draw_amt is not None:
+            sources.append(getattr(draw_amt, "selected_points", []) or [])
+
+        chunks = []
+        seen = set()
+        for source in sources:
+            for chunk in source:
+                if not isinstance(chunk, dict):
+                    continue
+                footprint = self.amt_chunk_footprint(chunk)
+                chunk_id = str(
+                    chunk.get("hex")
+                    or chunk.get("HEX")
+                    or chunk.get("chunk_id")
+                    or chunk.get("CHUNK_ID")
+                    or chunk.get("source_id")
+                    or chunk.get("SOURCE_ID")
+                    or ""
+                ).strip().upper()
+                sequence = numeric(
+                    chunk.get("sequence", chunk.get("SEQUENCE"))
+                )
+                identity = chunk_id or (footprint, sequence)
+                if not footprint or identity in seen:
+                    continue
+                seen.add(identity)
+                chunks.append(copy.deepcopy(chunk))
+        return chunks
+
     def database_view_stockpile_rows(self):
         records = []
         selected_stockpiles = copy.deepcopy(
             getattr(self, "updated_stockpile_data", {}) or {}
         )
-        selected_chunks = copy.deepcopy(
-            getattr(self, "hex_sequence_table", [])
-            or getattr(self, "hex_sequence_table_argument", [])
-            or []
-        )
+        selected_chunks = self.submitted_amt_chunks()
 
         chunks_by_footprint = {}
         for chunk in selected_chunks:
-            if not isinstance(chunk, dict):
-                continue
-            footprint_key = str(
-                chunk.get("footprint")
-                or chunk.get("parent_stockpile")
-                or ""
-            ).strip().upper()
+            footprint_key = self.amt_chunk_footprint(chunk)
             if footprint_key:
                 chunks_by_footprint.setdefault(footprint_key, []).append(chunk)
 
@@ -5451,7 +5817,11 @@ class UserInputs(QMainWindow):
                         attributes.get("grade_streams")
                         or attributes.get("GRADE_STREAMS"),
                         attributes,
-                        ["Selected as AMT but no selected chunks were found."],
+                        [
+                            "Selected as AMT but no submitted chunk matching "
+                            f"{stockpile_name} was found. Return to AMT "
+                            "Stockpiles and regenerate or resubmit this footprint."
+                        ],
                     ))
                     continue
 
@@ -5825,7 +6195,7 @@ class UserInputs(QMainWindow):
                 )
                 if expit_cache_allowed:
                     transactions, _cache_metadata = (
-                        DatabaseManager().read_expit_input_cache(
+                        self.read_reusable_expit_input_cache(
                             expit_cache_signature
                         )
                     )
@@ -6188,6 +6558,9 @@ class UserInputs(QMainWindow):
         if expit_attributes.get("expit_sequence_summary"):
             self.expit_sequence_snapshot = {
                 "transactions": self.database_view_expit_payload_transactions,
+                "planned_transactions": expit_attributes.get(
+                    "expit_sequence_planned_transactions", pd.DataFrame()
+                ),
                 "audit": expit_attributes.get(
                     "expit_sequence_audit", pd.DataFrame()
                 ),
@@ -10054,6 +10427,21 @@ class UserInputs(QMainWindow):
             QLabel("Grade Block Completion Tolerance:"),
             self.expit_completion_tolerance_input,
         )
+        self.expit_refresh_tolerance_input = QSpinBox()
+        self.expit_refresh_tolerance_input.setRange(0, 1440)
+        self.expit_refresh_tolerance_input.setSuffix(" min")
+        self.expit_refresh_tolerance_input.setValue(max(0, int(
+            getattr(self, "expit_refresh_tolerance_minutes", 30) or 0
+        )))
+        self.expit_refresh_tolerance_input.setToolTip(
+            "For current-time scenarios, reuse the most recently reconciled "
+            "Expit sequence while it is this fresh. Set 0 to recalculate on "
+            "every preparation step."
+        )
+        guidance_layout.addRow(
+            QLabel("Expit Sequence Refresh Tolerance:"),
+            self.expit_refresh_tolerance_input,
+        )
         self.update_expit_mode_state()
 
         self.expit_agent_button = QPushButton("Get Agent Names")
@@ -11844,6 +12232,9 @@ class UserInputs(QMainWindow):
         self.expit_completion_tolerance_pct = float(
             self.expit_completion_tolerance_input.value()
         )
+        self.expit_refresh_tolerance_minutes = int(
+            self.expit_refresh_tolerance_input.value()
+        )
         self.file_path_choice = self.file_path.text().strip()
         self.file_path_24hr_choice = self.file_path_24hr.text().strip()
         self.two_wp_closing_stocks_path_choice = (
@@ -11963,6 +12354,9 @@ class UserInputs(QMainWindow):
         self.expit_completion_tolerance_input.setValue(int(round(float(
             getattr(self, "expit_completion_tolerance_pct", 10.0) or 10.0
         ))))
+        self.expit_refresh_tolerance_input.setValue(max(0, int(
+            getattr(self, "expit_refresh_tolerance_minutes", 30) or 0
+        )))
         self.reevaluate_aps_direct_tip_checkbox.setChecked(
             bool(getattr(self, "reevaluate_aps_direct_tip_choice", False))
         )
@@ -16759,7 +17153,7 @@ class UserInputs(QMainWindow):
             "load_AMT_button",
             "submit_AMT_button",
         )
-        if all(getattr(self, name, None) is not None for name in required_widgets):
+        if all(vars(self).get(name) is not None for name in required_widgets):
             self.AMT_map_frame.show()
             self.AMT_map_view.show()
             self.AMT_cache_status_label.show()
@@ -16807,6 +17201,17 @@ class UserInputs(QMainWindow):
             self.refresh_AMT_data_from_snowflake
         )
 
+        self.AMT_refresh_tolerance_input = QSpinBox()
+        self.AMT_refresh_tolerance_input.setRange(0, 1440)
+        self.AMT_refresh_tolerance_input.setSuffix(" min")
+        self.AMT_refresh_tolerance_input.setValue(max(0, int(getattr(
+            self, "AMT_refresh_tolerance_minutes", 30
+        ) or 0)))
+        self.AMT_refresh_tolerance_input.setToolTip(
+            "In Now mode, reuse an otherwise identical AMT snapshot while it "
+            "is this fresh. Set to 0 to refetch whenever the Now timestamp changes."
+        )
+
         self.load_AMT_button = QPushButton("Load or Update AMT Map")
         self.load_AMT_button.setObjectName("loadAMTMapButton")
         self.style_green_action_button(self.load_AMT_button, 220)
@@ -16821,6 +17226,8 @@ class UserInputs(QMainWindow):
 
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addWidget(QLabel("AMT Refresh Tolerance:"))
+        button_layout.addWidget(self.AMT_refresh_tolerance_input)
         button_layout.addWidget(self.refresh_AMT_data_button)
         button_layout.addWidget(self.load_AMT_button)
         button_layout.addWidget(self.submit_AMT_button)
@@ -16937,6 +17344,57 @@ class UserInputs(QMainWindow):
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
+    def AMT_cached_snapshot_is_reusable(
+        self, cached_signature, request_signature
+    ):
+        """Return whether an AMT opening snapshot can satisfy this request."""
+        if self.opening_request_signatures_match(
+            cached_signature, request_signature
+        ):
+            return True, "exact"
+        if int(getattr(self, "time_mode_choice", 1) or 1) != 1:
+            return False, ""
+        tolerance = max(0, int(getattr(
+            self, "AMT_refresh_tolerance_minutes", 30
+        ) or 0))
+        if tolerance <= 0:
+            return False, ""
+        refreshed_at = getattr(self, "AMT_last_refresh_datetime", None)
+        try:
+            refreshed_at = pd.Timestamp(refreshed_at).to_pydatetime()
+        except (TypeError, ValueError):
+            return False, ""
+        if refreshed_at.tzinfo is not None:
+            refreshed_at = refreshed_at.replace(tzinfo=None)
+        age_minutes = max(
+            0.0, (datetime.now() - refreshed_at).total_seconds() / 60.0
+        )
+        if age_minutes > tolerance:
+            return False, ""
+        try:
+            cached = json.loads(str(cached_signature or ""))
+            requested = json.loads(str(request_signature or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False, ""
+        if not isinstance(cached, dict) or not isinstance(requested, dict):
+            return False, ""
+        cached = copy.deepcopy(cached)
+        requested = copy.deepcopy(requested)
+        cached_time = cached.pop("start_time", None)
+        requested_time = requested.pop("start_time", None)
+        if cached != requested:
+            return False, ""
+        try:
+            scenario_shift_minutes = abs(
+                (pd.Timestamp(requested_time) - pd.Timestamp(cached_time))
+                .total_seconds()
+            ) / 60.0
+        except (TypeError, ValueError):
+            return False, ""
+        if scenario_shift_minutes > tolerance:
+            return False, ""
+        return True, f"fresh ({age_minutes:.1f} min old)"
+
     def AMT_enrichment_request_signature(self):
         """Identify inputs that change mapped or reconciled AMT hex values."""
         # Read instance state directly. Besides avoiding unnecessary Qt
@@ -17044,6 +17502,10 @@ class UserInputs(QMainWindow):
         # rows.  Build the host panel before either that restore or an async
         # Snowflake fetch so an interrupted load cannot leave the tab blank.
         self.ensure_AMT_map_panel(connect_table=False)
+        if hasattr(self, "AMT_refresh_tolerance_input"):
+            self.AMT_refresh_tolerance_minutes = int(
+                self.AMT_refresh_tolerance_input.value()
+            )
 
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_table.setColumnCount(len(headers))
@@ -17086,16 +17548,26 @@ class UserInputs(QMainWindow):
             signature_matches = self.opening_request_signatures_match(
                 cached_signature, request_signature
             )
+            cache_reusable, reuse_reason = self.AMT_cached_snapshot_is_reusable(
+                cached_signature, request_signature
+            )
             compatibility_issue = self.AMT_data_compatibility_issue(data_source)
             if (
                 not force_refresh
-                and signature_matches
+                and cache_reusable
                 and not compatibility_issue
             ):
-                self.set_AMT_cache_status(
-                    "Reused the cached AMT opening snapshot because the site, "
-                    "timestamp and selected builds are unchanged."
-                )
+                if reuse_reason == "exact":
+                    cache_message = (
+                        "Reused the cached AMT opening snapshot because the "
+                        "site, timestamp and selected builds are unchanged."
+                    )
+                else:
+                    cache_message = (
+                        "Reused the cached AMT opening snapshot within the "
+                        f"configured refresh tolerance ({reuse_reason})."
+                    )
+                self.set_AMT_cache_status(cache_message)
                 self.finish_AMT_stockpile_table(
                     data_source,
                     getattr(self, "AMT_stockpile_data", {}),
@@ -17245,6 +17717,7 @@ class UserInputs(QMainWindow):
         self, data_source, AMT_stockpile_data, request_signature=None
     ):
         self.AMT_data_request_signature = str(request_signature or "")
+        self.AMT_last_refresh_datetime = datetime.now()
         self.AMT_enrichment_signature = ""
         self.AMT_chunk_reconciliation_signature = ""
         self._available_mapping_fields_cache = {}
@@ -17926,7 +18399,39 @@ class UserInputs(QMainWindow):
         if not self.store_AMT_chunk_settings():
             return
 
-        self.hex_sequence_table = self.draw_AMT_map.return_hex_sequence()
+        candidate_chunks = copy.deepcopy(
+            self.draw_AMT_map.return_hex_sequence() or []
+        )
+
+        if any(not isinstance(item, dict) for item in candidate_chunks):
+            QMessageBox.warning(
+                self,
+                "BlendMaster",
+                "Invalid entries detected!\nPlease regenerate chunks for the "
+                "selected AMT stockpiles.",
+            )
+            return False
+
+        selected_footprints = self.selected_amt_footprints()
+        chunk_footprints = {
+            self.amt_chunk_footprint(chunk)
+            for chunk in candidate_chunks
+            if self.amt_chunk_footprint(chunk)
+        }
+        missing_footprints = sorted(
+            selected_footprints - chunk_footprints
+        )
+        if missing_footprints:
+            QMessageBox.warning(
+                self,
+                "AMT Stockpiles",
+                "No submitted AMT chunks were found for: "
+                + ", ".join(missing_footprints)
+                + ". Regenerate or resubmit these footprints before continuing.",
+            )
+            return False
+
+        self.hex_sequence_table = candidate_chunks
 
         if not any(not isinstance(item, dict) for item in self.hex_sequence_table):
             try:
@@ -18080,6 +18585,48 @@ class UserInputs(QMainWindow):
                         )
                     },
                 ])
+
+        self.calendar_expit_material_brand_rows = {}
+        try:
+            expit_material_types = (
+                ExpitDataHandler.distinct_expit_material_types(
+                    getattr(self, "file_path_24hr_choice", "")
+                )
+                if getattr(self, "file_path_24hr_choice", "") else []
+            )
+        except Exception as error:
+            expit_material_types = []
+            print(
+                "Unable to read APS material types for Calendar: "
+                f"{error}"
+            )
+        if expit_material_types and configured_calendar_brands:
+            self.calendar_rows.append((
+                "  Expit Material Type → Product Brand Incentive ($/t)",
+                [False] * period_count,
+                "blue",
+                [""] * period_count,
+            ))
+            for material_type in expit_material_types:
+                for brand in configured_calendar_brands:
+                    key = (
+                        "crusher_expit_material_brand_incentive_"
+                        f"{constraint_key(material_type)}_"
+                        f"{constraint_key(brand)}"
+                    )
+                    self.calendar_expit_material_brand_rows[key] = {
+                        "material_type": material_type,
+                        "brand": brand,
+                    }
+                    saved = (self.calendar_inputs or {}).get(key, {})
+                    self.calendar_rows.append({
+                        key: (
+                            f"    {material_type} → {brand}",
+                            [True] * period_count,
+                            "blue",
+                            [saved.get(label, 0) for label in period_labels],
+                        )
+                    })
 
         # Dynamically Add Stockpile Rows with default values
         self.calendar_rows.append(("Stockpiles", [False] * period_count, "red", [""] * period_count))
@@ -18510,6 +19057,9 @@ class UserInputs(QMainWindow):
         self.calendar_inputs["planning_period_count"] = self.planning_period_count()
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
+            getattr(self, "calendar_expit_material_brand_rows", {})
+        )
 
     def load_solver_config_inputs(self):
         if not hasattr(self, "min_stockpiles_input"):
@@ -19140,6 +19690,9 @@ class UserInputs(QMainWindow):
         self.calendar_inputs["planning_period_count"] = self.planning_period_count()
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
+            getattr(self, "calendar_expit_material_brand_rows", {})
+        )
         self.calendar_inputs["site_context"] = self.active_site_context()
         self.save_active_scenario_state()
 
@@ -19194,7 +19747,7 @@ class UserInputs(QMainWindow):
             )
         elif expit_cache_allowed and self.file_path_24hr_choice:
             prepared_transactions, _cache_metadata = (
-                DatabaseManager().read_expit_input_cache(
+                self.read_reusable_expit_input_cache(
                     expit_cache_signature
                 )
             )
@@ -24030,6 +24583,10 @@ class UserInputs(QMainWindow):
             self.expit_completion_tolerance_pct = float(
                 self.expit_completion_tolerance_input.value()
             )
+        if hasattr(self, "expit_refresh_tolerance_input"):
+            self.expit_refresh_tolerance_minutes = int(
+                self.expit_refresh_tolerance_input.value()
+            )
         if hasattr(self, "file_path"):
             self.file_path_choice = self.file_path.text()
             self.file_path_24hr_choice = self.file_path_24hr.text()
@@ -24143,6 +24700,7 @@ class UserInputs(QMainWindow):
                 "default_start_datetime_str": self.default_start_datetime_str,
                 "expit_mode_choice": self.expit_mode_choice,
                 "expit_completion_tolerance_pct": self.expit_completion_tolerance_pct,
+                "expit_refresh_tolerance_minutes": self.expit_refresh_tolerance_minutes,
                 "expit_live_refresh_enabled": self.expit_live_refresh_enabled,
                 "expit_live_refresh_minutes": self.expit_live_refresh_minutes,
                 "file_path_choice": self.file_path_choice,
@@ -24238,6 +24796,12 @@ class UserInputs(QMainWindow):
                 ),
                 'AMT_chunk_reconciliation_signature': getattr(
                     self, "AMT_chunk_reconciliation_signature", ""
+                ),
+                'AMT_refresh_tolerance_minutes': max(0, int(getattr(
+                    self, "AMT_refresh_tolerance_minutes", 30
+                ) or 0)),
+                'AMT_last_refresh_datetime': getattr(
+                    self, "AMT_last_refresh_datetime", None
                 ),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
                 "database_view_selected_columns": copy.deepcopy(
@@ -24507,6 +25071,9 @@ class UserInputs(QMainWindow):
         self.expit_completion_tolerance_pct = float(
             loaded_state.get("expit_completion_tolerance_pct", 10.0) or 10.0
         )
+        self.expit_refresh_tolerance_minutes = max(0, int(
+            loaded_state.get("expit_refresh_tolerance_minutes", 30) or 0
+        ))
         self.expit_live_refresh_enabled = bool(
             loaded_state.get("expit_live_refresh_enabled", False)
         )
@@ -24756,6 +25323,16 @@ class UserInputs(QMainWindow):
         self.AMT_chunk_reconciliation_signature = str(
             loaded_state.get("AMT_chunk_reconciliation_signature") or ""
         )
+        self.AMT_refresh_tolerance_minutes = max(0, int(
+            loaded_state.get("AMT_refresh_tolerance_minutes", 30) or 0
+        ))
+        self.AMT_last_refresh_datetime = loaded_state.get(
+            "AMT_last_refresh_datetime"
+        )
+        if hasattr(self, "AMT_refresh_tolerance_input"):
+            self.AMT_refresh_tolerance_input.setValue(
+                self.AMT_refresh_tolerance_minutes
+            )
         self.data_stream_input_cache_signature = ""
         self.data_stream_input_cache_result = {}
         self.data_stream_input_request_inflight = ""
@@ -24941,6 +25518,7 @@ class UserInputs(QMainWindow):
         self.default_start_datetime_str = None
         self.expit_mode_choice = None
         self.expit_completion_tolerance_pct = 10.0
+        self.expit_refresh_tolerance_minutes = 30
         self.expit_live_refresh_enabled = False
         self.expit_live_refresh_minutes = 5
         self.file_path_choice = None
@@ -25051,6 +25629,8 @@ class UserInputs(QMainWindow):
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
         self.AMT_chunk_reconciliation_signature = ""
+        self.AMT_refresh_tolerance_minutes = 30
+        self.AMT_last_refresh_datetime = None
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = {}
         self.solver_config = {}

@@ -90,7 +90,7 @@ class DatabaseManager:
                 if not table_exists:
                     return None, {}
                 row = connection.execute(
-                    f'''SELECT payload_blob, metadata_json
+                    f'''SELECT payload_blob, metadata_json, created_at
                         FROM "{self.EXPIT_INPUT_CACHE_TABLE}"
                         WHERE cache_id = 1 AND signature = ?''',
                     (str(signature),),
@@ -104,11 +104,39 @@ class DatabaseManager:
         try:
             transactions = pickle.loads(zlib.decompress(bytes(row[0])))
             metadata = json.loads(row[1] or "{}")
+            metadata["cache_created_at"] = row[2]
         except (pickle.PickleError, zlib.error, EOFError, ValueError, TypeError):
             return None, {}
         if not isinstance(transactions, pd.DataFrame):
             return None, {}
         return transactions, metadata
+
+    def read_latest_expit_input_cache(self, database_name=None):
+        """Return the latest project-local Expit snapshot and its signature."""
+        database_name = database_name or get_database_path()
+        connection = sqlite3.connect(database_name)
+        try:
+            try:
+                row = connection.execute(
+                    f'''SELECT signature, payload_blob, metadata_json, created_at
+                        FROM "{self.EXPIT_INPUT_CACHE_TABLE}"
+                        WHERE cache_id = 1'''
+                ).fetchone()
+            except sqlite3.Error:
+                return None, "", {}
+        finally:
+            connection.close()
+        if row is None:
+            return None, "", {}
+        try:
+            transactions = pickle.loads(zlib.decompress(bytes(row[1])))
+            metadata = json.loads(row[2] or "{}")
+            metadata["cache_created_at"] = row[3]
+        except (pickle.PickleError, zlib.error, EOFError, ValueError, TypeError):
+            return None, "", {}
+        if not isinstance(transactions, pd.DataFrame):
+            return None, "", {}
+        return transactions, str(row[0] or ""), metadata
 
     @staticmethod
     def clear_all_tables(database_name=None):
@@ -1335,6 +1363,9 @@ class DatabaseManager:
     ):
         """Persist the parent-block route audit and live-map source data."""
         attributes = dict(attributes or {})
+        planned_transactions = attributes.get(
+            "expit_sequence_planned_transactions"
+        )
         audit = attributes.get("expit_sequence_audit")
         geometry = attributes.get("expit_sequence_geometry")
         geological_blocks = attributes.get(
@@ -1344,7 +1375,10 @@ class DatabaseManager:
         summary = attributes.get("expit_sequence_summary") or {}
         if not any(
             isinstance(frame, pd.DataFrame)
-            for frame in (audit, geometry, geological_blocks, actual)
+            for frame in (
+                planned_transactions, audit, geometry,
+                geological_blocks, actual,
+            )
         ):
             return
 
@@ -1352,6 +1386,10 @@ class DatabaseManager:
         connection = sqlite3.connect(database_name)
         try:
             for table_name, frame in (
+                (
+                    "expit_sequence_planned_transactions",
+                    planned_transactions,
+                ),
                 ("expit_sequence_reconciliation_audit", audit),
                 ("expit_sequence_geometry", geometry),
                 ("expit_sequence_geological_blocks", geological_blocks),
@@ -1362,6 +1400,12 @@ class DatabaseManager:
                     for column in writable.columns:
                         if pd.api.types.is_datetime64_any_dtype(writable[column]):
                             writable[column] = writable[column].astype(str)
+                        elif writable[column].dtype == object:
+                            writable[column] = writable[column].map(
+                                lambda value: json.dumps(value, default=str)
+                                if isinstance(value, (dict, list, tuple, set))
+                                else value
+                            )
                     writable.to_sql(
                         table_name, connection, if_exists="replace", index=False
                     )
@@ -1384,6 +1428,13 @@ class DatabaseManager:
             summary_frame = pd.DataFrame(agent_rows)
             if summary_frame.empty:
                 summary_frame = pd.DataFrame(columns=summary_columns)
+            for column in summary_frame.columns:
+                if summary_frame[column].dtype == object:
+                    summary_frame[column] = summary_frame[column].map(
+                        lambda value: json.dumps(value, default=str)
+                        if isinstance(value, (dict, list, tuple, set))
+                        else value
+                    )
             summary_frame.to_sql(
                 "expit_sequence_reconciliation_summary",
                 connection,
