@@ -21162,6 +21162,18 @@ class UserInputs(QMainWindow):
                 getattr(self, "manual_gantt_legend_and_tooltip", []) or [],
             )
 
+    def report_save_file_name(self, caption, default_name, file_filter):
+        """Open a responsive report save dialog without Windows shell delays."""
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        return QFileDialog.getSaveFileName(
+            self,
+            caption,
+            default_name,
+            file_filter,
+            options=options,
+        )
+
     def export_manual_blend_plan_pdf(self):
         raw_report = self.fetch_manual_blend_plan_report()
         sequence = getattr(
@@ -21188,8 +21200,7 @@ class UserInputs(QMainWindow):
         ])
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         default_name = f"blend_plan_{timestamp}.pdf"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
+        file_path, _ = self.report_save_file_name(
             "Export Blend Plan PDF",
             default_name,
             "PDF Files (*.pdf)",
@@ -21297,8 +21308,7 @@ class UserInputs(QMainWindow):
 
         timestamp = datetime.now()
         default_name = timestamp.strftime("blend_plan_%Y%m%d_%H%M.xlsx")
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
+        file_path, _ = self.report_save_file_name(
             "Export Blend Plan XLSX",
             default_name,
             "Excel Workbooks (*.xlsx)",
@@ -21485,13 +21495,6 @@ class UserInputs(QMainWindow):
         return stem or "report"
 
     def export_current_sqlite_report(self, export_format):
-        try:
-            report = self.current_sqlite_report_frame()
-        except Exception as exc:
-            QMessageBox.warning(
-                self, "Export Database Report", f"Unable to run query: {exc}"
-            )
-            return
         table_name = self.sqlite_report_selector.currentText() or "sqlite_report"
         stem = self.report_export_stem(table_name)
         timestamp = datetime.now()
@@ -21500,8 +21503,7 @@ class UserInputs(QMainWindow):
             "Excel Workbooks (*.xlsx)" if suffix == "xlsx"
             else "CSV Files (*.csv)"
         )
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
+        file_path, _ = self.report_save_file_name(
             "Export Database Report",
             f"{stem}_{timestamp.strftime('%Y%m%d_%H%M')}.{suffix}",
             file_filter,
@@ -21510,6 +21512,13 @@ class UserInputs(QMainWindow):
             return
         if not file_path.lower().endswith(f".{suffix}"):
             file_path += f".{suffix}"
+        try:
+            report = self.current_sqlite_report_frame()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Export Database Report", f"Unable to run query: {exc}"
+            )
+            return
         try:
             if suffix == "xlsx":
                 SpreadsheetReportExporter.export_xlsx(
@@ -21539,8 +21548,7 @@ class UserInputs(QMainWindow):
             )
             return
         timestamp = datetime.now()
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
+        file_path, _ = self.report_save_file_name(
             "Export All Database Reports",
             timestamp.strftime("blendmaster_database_reports_%Y%m%d_%H%M.xlsx"),
             "Excel Workbooks (*.xlsx)",
