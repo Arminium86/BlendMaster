@@ -574,12 +574,20 @@ class BalanceTracker:
 
         if next_hex:
             self.balance_copy[name] = max(float(next_hex.get('balance', 0) or 0), 0)
-            for key, value in next_hex.items():
-                if key.startswith('grade_'):
-                    if hasattr(self, key) and isinstance(getattr(self, key), dict):
-                        getattr(self, key)[name] = value
-                    else:
-                        print(f"Warning: {key} is not a dictionary, skipping update")
+            # Only the five legacy selected-grade maps belong on the balance
+            # tracker.  Chunk audit fields such as grade_block_count and
+            # grade_stream_warnings happen to share the ``grade_`` prefix but
+            # are not mutable grade dictionaries; treating every prefixed key
+            # as one produced a warning for every AMT transaction without
+            # changing any state.
+            for analyte in ("fe", "si", "al", "p", "mn"):
+                key = f"grade_{analyte}"
+                if key not in next_hex:
+                    continue
+                grade_map = getattr(self, key)
+                grade_map[name] = self._numeric_grade(
+                    next_hex.get(key), grade_map.get(name, 0)
+                )
             self.grade_streams[name] = normalise_grade_streams(
                 next_hex.get("grade_streams"), next_hex
             )

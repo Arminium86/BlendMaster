@@ -4584,25 +4584,6 @@ class UserInputs(QMainWindow):
             })
         return route
 
-    @staticmethod
-    def add_expit_route_arrows(figure, points, colour):
-        """Add capped data-coordinate arrows so long route direction is visible."""
-        if len(points) < 2:
-            return
-        stride = max(1, int(math.ceil((len(points) - 1) / 80.0)))
-        for index in range(0, len(points) - 1, stride):
-            left, right = points[index], points[index + 1]
-            if left["x"] == right["x"] and left["y"] == right["y"]:
-                continue
-            figure.add_annotation(
-                x=right["x"], y=right["y"],
-                ax=left["x"], ay=left["y"],
-                xref="x", yref="y", axref="x", ayref="y",
-                text="", showarrow=True, arrowhead=2,
-                arrowsize=0.8, arrowwidth=1.5, arrowcolor=colour,
-                opacity=0.75,
-            )
-
     def expit_sequence_figure(
         self, agent, audit, geometry, actual_movements=None,
         visible_layers=None, planned_transactions=None,
@@ -4810,7 +4791,7 @@ class UserInputs(QMainWindow):
             figure.add_trace(go.Scatter(
                 x=[point["x"] for point in points],
                 y=[point["y"] for point in points],
-                mode="lines+markers",
+                mode="lines",
                 name=name,
                 line=dict(color=colour, width=3, dash=dash),
                 text=[
@@ -4819,7 +4800,6 @@ class UserInputs(QMainWindow):
                 ],
                 hovertemplate="%{text}<extra></extra>",
             ))
-            self.add_expit_route_arrows(figure, points, colour)
             rendered_slice_layers.add(layer)
 
         # Backward-compatible parent route fallback for projects saved before
@@ -4857,10 +4837,9 @@ class UserInputs(QMainWindow):
                     figure.add_trace(go.Scatter(
                         x=[point["x"] for point in points],
                         y=[point["y"] for point in points],
-                        mode="lines+markers", name=name,
+                        mode="lines", name=name,
                         line=dict(color=colour, width=3, dash=dash),
                     ))
-                    self.add_expit_route_arrows(figure, points, colour)
 
         actual = ExpitSequenceReconciler.normalize_actual_movements(
             actual_movements
@@ -4902,7 +4881,7 @@ class UserInputs(QMainWindow):
                 figure.add_trace(go.Scatter(
                     x=[point["x"] for point in actual_points],
                     y=[point["y"] for point in actual_points],
-                    mode="lines+markers",
+                    mode="lines",
                     name="Actual route",
                     line=dict(color="#ef4444", width=3),
                     text=[
@@ -4910,9 +4889,6 @@ class UserInputs(QMainWindow):
                     ],
                     hovertemplate="%{text}<extra></extra>",
                 ))
-                self.add_expit_route_arrows(
-                    figure, actual_points, "#ef4444"
-                )
             latest = actual_route[-1]
             if "excavator_marker" in visible_layers:
                 figure.add_trace(go.Scatter(
