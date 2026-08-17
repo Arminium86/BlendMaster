@@ -542,6 +542,31 @@ class CaseModeller:
         for attribute, value in checkpoint.items():
             setattr(self, attribute, value)
 
+    def restore_last_solved_checkpoint_for_reporting(self, checkpoint):
+        """Restore a consistent partial plan after repair attempts fail.
+
+        Product-build repair deliberately rewinds the modeller.  If every
+        repair path fails, leaving the modeller at that earlier checkpoint
+        discards steady states that were successfully completed before the
+        first repair was requested.  The caller supplies the furthest
+        internally consistent checkpoint captured at the *start* of a later
+        steady state, so the offending/off-spec transaction itself is not
+        included.
+        """
+        if not checkpoint:
+            return False
+        results = checkpoint.get("results")
+        if not isinstance(results, pd.DataFrame) or results.empty:
+            return False
+        self.restore_product_build_repair_checkpoint(checkpoint)
+        self.partial_plan_restored_after_repair = True
+        print(
+            "Product-build repair was unsuccessful. Restored the last "
+            f"successfully solved partial plan through steady state "
+            f"{max(int(self.steady_state_tracker) - 1, 0)} for reporting."
+        )
+        return True
+
     def product_build_offspec_steady_states(self, build_index):
         candidate_states = set()
         if self.results is not None and not self.results.empty:
@@ -781,6 +806,7 @@ class CaseModeller:
             self.previous_chemical_blend_signature = None
         if not hasattr(self, "product_build_hard_repair_from_states"):
             self.product_build_hard_repair_from_states = {}
+        self.partial_plan_restored_after_repair = False
         print(
             "Active solver configuration: "
             f"Min Grade Block Pair Duration = "
@@ -794,17 +820,34 @@ class CaseModeller:
         )
         repair_checkpoints = {}
         repair_attempts = 0
+        best_reporting_checkpoint = None
+        best_reporting_state = -1
         while self.current_time < self.planning_horizon_end():
             self.check_abort_requested()
             if self.product_build_settings and self.current_product_build_index() is None:
                 raise ProductBuildCapacityComplete()
             if self.product_build_repair_enabled():
-                repair_checkpoints[self.steady_state_tracker] = (
-                    self.capture_product_build_repair_checkpoint()
-                )
+                current_checkpoint = self.capture_product_build_repair_checkpoint()
+                repair_checkpoints[self.steady_state_tracker] = current_checkpoint
+                checkpoint_results = current_checkpoint.get("results")
+                if (
+                    isinstance(checkpoint_results, pd.DataFrame)
+                    and not checkpoint_results.empty
+                    and int(self.steady_state_tracker) > best_reporting_state
+                ):
+                    # Keep this independently from repair_checkpoints because
+                    # the bounded repair search intentionally removes later
+                    # checkpoints as it rewinds farther into the schedule.
+                    best_reporting_checkpoint = copy.deepcopy(current_checkpoint)
+                    best_reporting_state = int(self.steady_state_tracker)
             # Run optimization and only advance time if successful
             try:
                 self.run_optimization_step()
+            except ProductBuildRepairFailed:
+                self.restore_last_solved_checkpoint_for_reporting(
+                    best_reporting_checkpoint
+                )
+                raise
             except ProductBuildRepairRequired as repair:
                 current_repair_state = self.product_build_repair_from_states.get(
                     repair.build_index
@@ -868,7 +911,7 @@ class CaseModeller:
                             "forced on spec."
                         )
                         continue
-                    raise ProductBuildRepairFailed(
+                    failure = ProductBuildRepairFailed(
                         build_name,
                         (
                             f"{repair.reason} Cumulative repair and the final "
@@ -876,6 +919,10 @@ class CaseModeller:
                             "the saved checkpoints for this build."
                         ),
                     )
+                    self.restore_last_solved_checkpoint_for_reporting(
+                        best_reporting_checkpoint
+                    )
+                    raise failure
 
                 repair_state = max(candidate_states)
                 if expanded_search:

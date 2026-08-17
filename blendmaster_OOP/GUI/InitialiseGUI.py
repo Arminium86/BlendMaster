@@ -16472,25 +16472,47 @@ class UserInputs(QMainWindow):
         plan_id = str(plan_id or "Primary")
         connection = sqlite3.connect(get_database_path())
         try:
-            return pd.read_sql(
+            table_exists = connection.execute(
                 """
-                SELECT * FROM optimisation_plan_blend_report
-                WHERE plan_id = ?
-                ORDER BY steady_state_number, source
-                """,
-                connection,
-                params=(plan_id,),
-            ).drop(columns=["plan_id", "plan_rank"], errors="ignore")
-        except (sqlite3.Error, pd.errors.DatabaseError):
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'optimisation_plan_blend_report'
+                """
+            ).fetchone()
+            if table_exists:
+                columns = [
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(optimisation_plan_blend_report)"
+                    ).fetchall()
+                ]
+                if "plan_id" in columns:
+                    order_columns = [
+                        column
+                        for column in ("steady_state_number", "source")
+                        if column in columns
+                    ]
+                    order_clause = (
+                        " ORDER BY " + ", ".join(order_columns)
+                        if order_columns
+                        else ""
+                    )
+                    report = pd.read_sql(
+                        "SELECT * FROM optimisation_plan_blend_report "
+                        "WHERE plan_id = ?" + order_clause,
+                        connection,
+                        params=(plan_id,),
+                    ).drop(columns=["plan_id", "plan_rank"], errors="ignore")
+                    if not report.empty or plan_id != "Primary":
+                        return report
             if plan_id != "Primary":
                 return pd.DataFrame()
-            try:
-                return pd.read_sql(
-                    "SELECT * FROM optimised_blend_report",
-                    connection,
-                )
-            except (sqlite3.Error, pd.errors.DatabaseError):
-                return pd.DataFrame()
+            return pd.read_sql(
+                "SELECT * FROM optimised_blend_report",
+                connection,
+            )
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
         finally:
             connection.close()
 
@@ -19822,7 +19844,15 @@ class UserInputs(QMainWindow):
             off_spec_builds = (
                 run_outcome.get("off_spec_builds") or []
             )
-            if outcome_status == "off_spec" or off_spec_builds:
+            if run_outcome.get("partial_plan_restored"):
+                message += (
+                    "\n\nNo compliant product-build completion was found. "
+                    "The last internally consistent solved checkpoint "
+                    "before the unsuccessful repair is available in Results "
+                    "and Reports, but it is a partial plan and must not be "
+                    "released."
+                )
+            elif outcome_status == "off_spec" or off_spec_builds:
                 message += (
                     "\n\nThe completed build is off specification. "
                     "Do not release this plan."

@@ -374,6 +374,27 @@ class DatabaseManager:
                 """,
                 (table_name,),
             ).fetchone()
+            if frame.empty:
+                # Do not manufacture a metadata-only plan table.  Readers of
+                # blend results legitimately sort by steady_state_number and
+                # source; a zero-row table containing only plan_id/plan_rank
+                # makes those otherwise valid reads fail with "no such
+                # column".  If this plan previously existed, remove only its
+                # rows and preserve the established schema for other plans.
+                if table_exists:
+                    table_columns = {
+                        row[1]
+                        for row in connection.execute(
+                            f'PRAGMA table_info("{table_name}")'
+                        ).fetchall()
+                    }
+                    if "plan_id" in table_columns:
+                        connection.execute(
+                            f'DELETE FROM "{table_name}" WHERE plan_id = ?',
+                            (str(plan_id),),
+                        )
+                        connection.commit()
+                return
             existing = (
                 pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
                 if table_exists

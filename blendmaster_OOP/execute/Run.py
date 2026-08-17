@@ -719,6 +719,18 @@ class Run:
                 primary_status = "off_spec"
             else:
                 primary_status = "partial"
+        partial_plan_restored = bool(
+            getattr(
+                primary_case_modeller,
+                "partial_plan_restored_after_repair",
+                False,
+            )
+        )
+        if partial_plan_restored:
+            primary_message += (
+                " The last internally consistent solved checkpoint before "
+                "repair has been retained for Results and Reports."
+            )
 
         plan_status_rows = [{
             "plan_id": "Primary",
@@ -892,10 +904,19 @@ class Run:
 
         database_manager.write_optimisation_plan_status(plan_status_rows)
         self.case_modeller = primary_case_modeller
-        self.case_bridge.print(
-            "Database tables written successfully. "
-            f"{len(plan_status_rows) - 1} contingency plan(s) processed."
-        )
+        primary_result_row_count = len(primary_blend_report.index)
+        if primary_result_row_count:
+            self.case_bridge.print(
+                "Database tables written successfully. "
+                f"Primary report contains {primary_result_row_count} row(s); "
+                f"{len(plan_status_rows) - 1} contingency plan(s) processed."
+            )
+        else:
+            self.case_bridge.print(
+                "Database tables were written, but the primary plan contains "
+                "no successfully solved steady-state rows. Results and charts "
+                "will therefore be empty."
+            )
 
         periods.run_outcome = {
             "status": primary_status,
@@ -905,6 +926,8 @@ class Run:
             ),
             "message": primary_message,
             "off_spec_builds": completed_offspec_builds,
+            "partial_plan_restored": partial_plan_restored,
+            "result_row_count": primary_result_row_count,
         }
         return periods
 

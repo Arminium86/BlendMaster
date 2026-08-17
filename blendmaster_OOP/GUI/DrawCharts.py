@@ -1414,17 +1414,31 @@ class DrawGanttChart:
                 """
             ).fetchone()
             if table_exists:
-                data = pd.read_sql_query(
-                    """
-                    SELECT * FROM optimisation_plan_blend_report
-                    WHERE plan_id = ?
-                    ORDER BY steady_state_number, source
-                    """,
-                    connection,
-                    params=(plan_id,),
-                )
-                if not data.empty or plan_id != "Primary":
-                    return data
+                columns = [
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(optimisation_plan_blend_report)"
+                    ).fetchall()
+                ]
+                if "plan_id" in columns:
+                    order_columns = [
+                        column
+                        for column in ("steady_state_number", "source")
+                        if column in columns
+                    ]
+                    order_clause = (
+                        " ORDER BY " + ", ".join(order_columns)
+                        if order_columns
+                        else ""
+                    )
+                    data = pd.read_sql_query(
+                        "SELECT * FROM optimisation_plan_blend_report "
+                        "WHERE plan_id = ?" + order_clause,
+                        connection,
+                        params=(plan_id,),
+                    )
+                    if not data.empty or plan_id != "Primary":
+                        return data
             return pd.read_sql_query(
                 "SELECT * FROM optimised_blend_report",
                 connection,
