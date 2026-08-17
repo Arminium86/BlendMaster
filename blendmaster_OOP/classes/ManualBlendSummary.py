@@ -16,6 +16,7 @@ class ManualBlendSummary:
         "Blend ID",
         "Start Datetime",
         "End Datetime",
+        "Steady State Duration (hrs)",
         "Optimiser Grade Stream",
         "Grade Fe",
         "Grade Si",
@@ -360,6 +361,7 @@ class ManualBlendSummary:
                 "Blend ID": blend_id,
                 "Start Datetime": cls._text(sequence_row.get("Start Datetime")),
                 "End Datetime": cls._text(sequence_row.get("End Datetime")),
+                "Steady State Duration (hrs)": duration_hours,
                 "Optimiser Grade Stream": stream,
                 **{
                     f"Grade {grade.title() if grade != 'si' else 'Si'}": (

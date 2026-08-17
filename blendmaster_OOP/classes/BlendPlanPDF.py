@@ -50,6 +50,28 @@ class BlendPlanPDF:
         return pd.NaT
 
     @classmethod
+    def _detail_source_lines(cls, value):
+        """Return already-summarised blend sources as individual lines."""
+        if isinstance(value, (list, tuple)):
+            return [cls._text(item) for item in value if cls._text(item)]
+        return [
+            item.strip()
+            for item in cls._text(value).split(";")
+            if item.strip()
+        ]
+
+    @classmethod
+    def _duration_hours(cls, summary):
+        explicit = cls._number(summary.get("Steady State Duration (hrs)"))
+        if explicit is not None:
+            return max(explicit, 0.0)
+        start = cls._timestamp(summary, "Start Datetime")
+        end = cls._timestamp(summary, "End Datetime")
+        if pd.notna(start) and pd.notna(end) and end >= start:
+            return float((end - start).total_seconds() / 3600.0)
+        return None
+
+    @classmethod
     def _format_value(cls, column, value):
         text = cls._text(value)
         number = cls._number(value)
@@ -374,6 +396,10 @@ class BlendPlanPDF:
                 f"{html.escape(cls._text(summary.get('Blend ID')))}</b>",
                 f"{html.escape(cls._text(summary.get('Start Datetime')))} to "
                 f"{html.escape(cls._text(summary.get('End Datetime')))}",
+                f"<b>Steady-state duration:</b> "
+                f"{cls._duration_hours(summary):,.2f} hrs"
+                if cls._duration_hours(summary) is not None else
+                "<b>Steady-state duration:</b> Not available",
                 f"<b>Stream:</b> {html.escape(cls._text(summary.get('Optimiser Grade Stream')))}",
             ]
             if grades:
@@ -398,6 +424,80 @@ class BlendPlanPDF:
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]))
             return card
+
+        def detail_card(summary):
+            grades = " | ".join(
+                f"{grade.replace('Grade ', '')} "
+                f"{cls._format_value(grade, summary.get(grade))}"
+                for grade in (
+                    "Grade Fe", "Grade Si", "Grade Al", "Grade P", "Grade Mn"
+                )
+                if cls._text(summary.get(grade))
+            )
+            duration_hours = cls._duration_hours(summary)
+            stockpiles = cls._detail_source_lines(
+                summary.get("Sources and Ratios")
+            )
+            grade_blocks = cls._detail_source_lines(
+                summary.get("Direct Tip Grade Blocks")
+            )
+            lines = [
+                f"<b>Bar {html.escape(cls._text(summary.get('Bar')))} - Blend "
+                f"{html.escape(cls._text(summary.get('Blend ID')))}</b>",
+                f"{html.escape(cls._text(summary.get('Start Datetime')))} to "
+                f"{html.escape(cls._text(summary.get('End Datetime')))}",
+                "<b>Steady-state duration:</b> "
+                + (
+                    f"{duration_hours:,.2f} hrs"
+                    if duration_hours is not None else "Not available"
+                ),
+                f"<b>Optimiser grade stream:</b> "
+                f"{html.escape(cls._text(summary.get('Optimiser Grade Stream')))}",
+            ]
+            if grades:
+                lines.append(f"<b>Grades:</b> {html.escape(grades)}")
+            lines.append("<b>Stockpile sources:</b>")
+            lines.extend(
+                f"- {html.escape(source)}" for source in (stockpiles or ["None"])
+            )
+            lines.append("<b>Direct-tip grade blocks:</b>")
+            lines.extend(
+                f"- {html.escape(source)}" for source in (grade_blocks or ["None"])
+            )
+            card = Table(
+                [[Paragraph("<br/>".join(lines), styles["BlendPlanLegend"])]],
+                colWidths=[page_width - 4.0],
+                hAlign="LEFT",
+            )
+            card.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7f9fc")),
+                ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#8fa0b2")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            return card
+
+        def make_detail_cards():
+            if not summaries:
+                return paragraph("No blend detail entries are available.")
+            rows = [[detail_card(summary)] for summary in summaries]
+            grid = Table(
+                rows,
+                colWidths=[page_width],
+                hAlign="LEFT",
+                splitByRow=1,
+            )
+            grid.setStyle(TableStyle([
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            return grid
 
         def make_legend_grid():
             if not summaries:
@@ -446,38 +546,50 @@ class BlendPlanPDF:
             ]))
             return table
 
-        story = []
-        if logo_path and os.path.isfile(str(logo_path)):
-            logo_buffer = cls._logo_icon_buffer(logo_path)
-            image_width, image_height = ImageReader(logo_buffer).getSize()
-            logo_buffer.seek(0)
-            max_width = 64 * mm
-            max_height = 45 * mm
-            scale = min(
-                max_width / max(float(image_width), 1.0),
-                max_height / max(float(image_height), 1.0),
-            )
-            logo = ReportLabImage(
-                logo_buffer,
-                width=float(image_width) * scale,
-                height=float(image_height) * scale,
-            )
-            logo.hAlign = "CENTER"
-            story.extend([
-                logo,
-                Spacer(1, 2),
-                Paragraph("Fortescue BlendMaster", styles["BlendPlanBrand"]),
-                Paragraph("Ultimate Product Streams", styles["BlendPlanTagline"]),
+        def report_header():
+            header = []
+            if logo_path and os.path.isfile(str(logo_path)):
+                logo_buffer = cls._logo_icon_buffer(logo_path)
+                image_width, image_height = ImageReader(logo_buffer).getSize()
+                logo_buffer.seek(0)
+                max_width = 64 * mm
+                max_height = 45 * mm
+                scale = min(
+                    max_width / max(float(image_width), 1.0),
+                    max_height / max(float(image_height), 1.0),
+                )
+                logo = ReportLabImage(
+                    logo_buffer,
+                    width=float(image_width) * scale,
+                    height=float(image_height) * scale,
+                )
+                logo.hAlign = "CENTER"
+                header.extend([
+                    logo,
+                    Spacer(1, 2),
+                    Paragraph("Fortescue BlendMaster", styles["BlendPlanBrand"]),
+                    Paragraph("Ultimate Product Streams", styles["BlendPlanTagline"]),
+                ])
+            header.extend([
+                Paragraph(html.escape(title), styles["BlendPlanTitle"]),
+                Paragraph(
+                    f"Plan: {plan_id} | Report date and time: "
+                    f"{report_datetime.strftime('%Y-%m-%d %H:%M:%S')}",
+                    styles["BlendPlanMetadata"],
+                ),
+                Spacer(1, 8),
             ])
+            return header
+
+        story = report_header()
         story.extend([
-            Paragraph(html.escape(title), styles["BlendPlanTitle"]),
-            Paragraph(
-                f"Plan: {plan_id} | Report date and time: "
-                f"{report_datetime.strftime('%Y-%m-%d %H:%M:%S')}",
-                styles["BlendPlanMetadata"],
-            ),
-            Spacer(1, 8),
-            Paragraph("Manual Blend Gantt", styles["BlendPlanSection"]),
+            Paragraph("Blend Details", styles["BlendPlanSection"]),
+            make_detail_cards(),
+            PageBreak(),
+        ])
+        story.extend(report_header())
+        story.extend([
+            Paragraph("Blend Gantt", styles["BlendPlanSection"]),
             make_gantt(),
             Spacer(1, 9),
             Paragraph("Blend Details", styles["BlendPlanSection"]),
@@ -488,6 +600,7 @@ class BlendPlanPDF:
 
         summary_columns = [
             "Bar", "Blend ID", "Start Datetime", "End Datetime",
+            "Steady State Duration (hrs)",
             "Optimiser Grade Stream", "Grade Fe", "Grade Si", "Grade Al",
             "Grade P", "Grade Mn", "Sources and Ratios",
             "Direct Tip Grade Blocks",
@@ -499,7 +612,7 @@ class BlendPlanPDF:
                     paragraph(cls._format_value(column, summary.get(column)))
                     for column in summary_columns
                 ])
-            fixed = [28, 38, 72, 72, 76, 35, 35, 35, 35, 35]
+            fixed = [28, 38, 72, 72, 55, 76, 35, 35, 35, 35, 35]
             remainder = page_width - sum(fixed)
             summary_widths = fixed + [remainder * 0.43, remainder * 0.57]
             story.append(styled_long_table(summary_data, summary_widths, 6.2))

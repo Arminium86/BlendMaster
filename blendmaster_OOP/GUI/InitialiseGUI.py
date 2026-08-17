@@ -1192,6 +1192,8 @@ class UserInputs(QMainWindow):
         self.restore_site_scenario(self.site_scenarios.get(scenario_id, {}))
 
     def capture_calendar_table_inputs(self):
+        if getattr(self, "calendar_table_refresh_pending", False):
+            return copy.deepcopy(self.calendar_inputs or {})
         if not hasattr(self, "main_table") or not hasattr(self, "calendar_headers"):
             return copy.deepcopy(self.calendar_inputs or {})
         captured = copy.deepcopy(self.calendar_inputs or {})
@@ -1444,7 +1446,11 @@ class UserInputs(QMainWindow):
             self.store_solver_config_inputs(show_errors=False)
         if hasattr(self, "product_build_table"):
             self.store_product_build_settings(show_errors=False)
-        calendar_inputs = self.capture_calendar_table_inputs()
+        calendar_inputs = (
+            copy.deepcopy(getattr(self, "calendar_inputs", {}) or {})
+            if restoring_project
+            else self.capture_calendar_table_inputs()
+        )
         fields = [
             "hub_input_choice", "mine_input_choice", "opf_input_choice",
             "crusher_input_choice", "selected_site_crushers",
@@ -1923,7 +1929,10 @@ class UserInputs(QMainWindow):
                 state["AMT_chunk_settings"] = {}
                 state["hex_sequence_table"] = []
                 state["hex_sequence_table_argument"] = []
-                state["calendar_inputs"] = {}
+                # Calendar values are relative-period configuration. Moving a
+                # saved ``Now`` scenario to the current timestamp invalidates
+                # inventories, chunks and results, but not its rates, bounds,
+                # brands, custom constraints or stockpile-state preferences.
                 state["product_build_settings"] = []
                 state["saved_blends_for_schedule"] = []
                 state["stored_blend_sequence_table_for_gantt"] = []
@@ -2003,6 +2012,7 @@ class UserInputs(QMainWindow):
             if hasattr(self, "database_view_continue_button"):
                 self.database_view_continue_button.setEnabled(False)
             self.calendar_inputs = copy.deepcopy(state.get("calendar_inputs") or {})
+            self.calendar_table_refresh_pending = True
             self.solver_config = self.normalized_solver_config(state.get("solver_config") or {})
             self.min_stockpiles = state.get("min_stockpiles")
             self.max_stockpiles = state.get("max_stockpiles")
@@ -4584,6 +4594,21 @@ class UserInputs(QMainWindow):
             })
         return route
 
+    @staticmethod
+    def expit_parent_transition_route_points(points):
+        """Collapse slice-only movement inside one parent for a clean route."""
+        route = []
+        for point in points or []:
+            if route and point.get("key") == route[-1].get("key"):
+                # Slice offsets are useful for audit/hover positioning, but a
+                # line joining every sibling slice draws small chevrons that
+                # look like directional arrows. Keep the last slice as the
+                # representative point for this consecutive parent visit.
+                route[-1] = point
+            else:
+                route.append(point)
+        return route
+
     def expit_sequence_figure(
         self, agent, audit, geometry, actual_movements=None,
         visible_layers=None, planned_transactions=None,
@@ -4778,7 +4803,7 @@ class UserInputs(QMainWindow):
             (
                 corrected_transactions,
                 "corrected_route", "Corrected future sliced route",
-                "#16a34a", "dash",
+                "#16a34a", "solid",
             ),
         )
         rendered_slice_layers = set()
@@ -4786,6 +4811,7 @@ class UserInputs(QMainWindow):
             points = self.expit_slice_route_points(
                 transactions, agent, centroids, average_block_size
             )
+            points = self.expit_parent_transition_route_points(points)
             if layer not in visible_layers or not points:
                 continue
             figure.add_trace(go.Scatter(
@@ -4813,7 +4839,7 @@ class UserInputs(QMainWindow):
                 ),
                 (
                     "updated_sequence", "corrected_route",
-                    "Corrected future route", "#16a34a", "dash",
+                    "Corrected future route", "#16a34a", "solid",
                 ),
             ):
                 frame = route_audit[
@@ -12460,8 +12486,23 @@ class UserInputs(QMainWindow):
             "automatic_2wp_targets": self.auto_load_2wp_targets_choice,
         }
 
-    def reset_downstream_inputs_for_new_site_configuration(self):
+    def reset_downstream_inputs_for_new_site_configuration(
+        self, preserve_calendar=False
+    ):
         """Clear workflow state that is owned by the submitted site context."""
+        preserved_calendar_inputs = copy.deepcopy(
+            getattr(self, "calendar_inputs", {}) or {}
+        ) if preserve_calendar else {}
+        preserved_solver_config = copy.deepcopy(
+            getattr(self, "solver_config", {}) or {}
+        ) if preserve_calendar else {}
+        preserved_min_stockpiles = getattr(self, "min_stockpiles", None)
+        preserved_max_stockpiles = getattr(self, "max_stockpiles", None)
+        preserved_minimum_contribution = getattr(
+            self,
+            "min_stockpile_contribution_ratio",
+            Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO,
+        )
         self.stockpile_data_use_column = {}
         self.stockpile_data_AMT_column = {}
         # The table can still contain rows from the previously active site.
@@ -12491,11 +12532,36 @@ class UserInputs(QMainWindow):
         self.data_stream_input_request_inflight = ""
         self.hex_sequence_table = []
         self.hex_sequence_table_argument = []
-        self.calendar_inputs = {}
-        self.solver_config = self.normalized_solver_config({})
-        self.min_stockpiles = None
-        self.max_stockpiles = None
-        self.min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+        self.calendar_inputs = preserved_calendar_inputs
+        # The rendered Calendar may still belong to the previous timestamp or
+        # scenario. Until setup_calendar rebuilds it, the restored dictionary
+        # remains authoritative and must not be overwritten by stale widgets.
+        self.calendar_table_refresh_pending = True
+        self.solver_config = self.normalized_solver_config(
+            preserved_calendar_inputs.get(
+                "solver_config", preserved_solver_config
+            )
+        )
+        self.min_stockpiles = (
+            preserved_calendar_inputs.get(
+                "min_stockpiles", preserved_min_stockpiles
+            )
+            if preserve_calendar else None
+        )
+        self.max_stockpiles = (
+            preserved_calendar_inputs.get(
+                "max_stockpiles", preserved_max_stockpiles
+            )
+            if preserve_calendar else None
+        )
+        self.min_stockpile_contribution_ratio = (
+            preserved_calendar_inputs.get(
+                "min_stockpile_contribution_ratio",
+                preserved_minimum_contribution,
+            )
+            if preserve_calendar
+            else Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
+        )
         self.saved_blends_for_schedule = []
         self.stored_blend_sequence_table_for_gantt = []
         self.stored_blend_sequence_table_for_gantt_default = []
@@ -12562,6 +12628,53 @@ class UserInputs(QMainWindow):
         fresh_site_configuration = (
             isinstance(stockpile_data, dict) and "stockpile_data" in stockpile_data
         )
+        refreshed_current_time = bool(
+            restoring_project
+            and getattr(self, "project_load_refresh_current_time", False)
+            and fresh_site_configuration
+        )
+        previous_scenario = (
+            self.site_scenarios.get(self.active_scenario_id, {})
+            if isinstance(getattr(self, "site_scenarios", None), dict)
+            else {}
+        )
+        calendar_context = (
+            (getattr(self, "calendar_inputs", {}) or {}).get("site_context")
+            or previous_scenario
+            or {}
+        )
+        identity_fields = ("hub", "mine", "opf", "crusher")
+        current_identity = {
+            "hub": self.hub_input_choice,
+            "mine": self.mine_input_choice,
+            "opf": self.opf_input_choice,
+            "crusher": self.crusher_input_choice,
+        }
+        context_identity = {
+            field: (
+                calendar_context.get(field)
+                or previous_scenario.get(f"{field}_input_choice")
+            )
+            for field in identity_fields
+        }
+        same_calendar_context = all(
+            str(context_identity[field] or "").strip().upper()
+            == str(current_identity[field] or "").strip().upper()
+            for field in identity_fields
+        ) and PeriodManager.normalize_period_count(
+            calendar_context.get(
+                "planning_period_count",
+                previous_scenario.get(
+                    "planning_period_count_choice",
+                    self.planning_period_count(),
+                ),
+            )
+        ) == self.planning_period_count()
+        preserve_calendar_configuration = bool(
+            fresh_site_configuration
+            and getattr(self, "calendar_inputs", None)
+            and same_calendar_context
+        )
         preserved_use_selection = copy.deepcopy(
             getattr(self, "project_load_saved_stockpile_use_column", {}) or {}
         )
@@ -12579,14 +12692,11 @@ class UserInputs(QMainWindow):
                 or self.inventory_opening_request_signature()
             )
             stockpile_data = stockpile_data.get("stockpile_data") or {}
-            self.reset_downstream_inputs_for_new_site_configuration()
+            self.reset_downstream_inputs_for_new_site_configuration(
+                preserve_calendar=preserve_calendar_configuration
+            )
             self.inventory_data_request_signature = inventory_signature
         self.stockpile_data = stockpile_data
-        refreshed_current_time = bool(
-            restoring_project
-            and getattr(self, "project_load_refresh_current_time", False)
-            and fresh_site_configuration
-        )
         if refreshed_current_time:
             saved_use = {
                 str(name).strip().upper(): bool(selected)
@@ -12615,7 +12725,6 @@ class UserInputs(QMainWindow):
             self.AMT_chunk_settings = {}
             self.hex_sequence_table = []
             self.hex_sequence_table_argument = []
-            self.calendar_inputs = {}
             self.product_build_settings = []
             self.saved_blends_for_schedule = []
             self.stored_blend_sequence_table_for_gantt = []
@@ -18680,6 +18789,7 @@ class UserInputs(QMainWindow):
             self.setup_calendar_first_call = False
         
         self.load_calendar_inputs()
+        self.calendar_table_refresh_pending = False
     
     def populate_calendar(self):
         # Define Parent Colors
@@ -25069,6 +25179,7 @@ class UserInputs(QMainWindow):
         self.apply_app_theme()
         self.crusher_rate = loaded_state.get("crusher_rate", None)
         self.calendar_inputs = loaded_state.get("calendar_inputs", None)
+        self.calendar_table_refresh_pending = True
         self.default_end_datetime = loaded_state.get("default_end_datetime", None)
         self.default_end_datetime_str = loaded_state.get("default_end_datetime_str", "")
         self.default_start_datetime = loaded_state.get("default_start_datetime", None)
@@ -25517,6 +25628,7 @@ class UserInputs(QMainWindow):
         set_database_path(initial_database_path)
         self.blend_mode_choice = None
         self.calendar_inputs = None
+        self.calendar_table_refresh_pending = False
         self.crusher_rate = None
         self.default_end_datetime = None
         self.default_end_datetime_str = None
