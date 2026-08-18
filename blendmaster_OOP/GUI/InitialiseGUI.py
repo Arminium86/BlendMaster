@@ -17459,6 +17459,53 @@ class UserInputs(QMainWindow):
             cached_signature, request_signature
         ):
             return True, "exact"
+
+        try:
+            cached = json.loads(str(cached_signature or ""))
+            requested = json.loads(str(request_signature or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False, ""
+        if not isinstance(cached, dict) or not isinstance(requested, dict):
+            return False, ""
+
+        def selection_pairs(payload):
+            selections = payload.pop("selections", None)
+            if not isinstance(selections, list):
+                return None
+            pairs = set()
+            for selection in selections:
+                if not isinstance(selection, dict):
+                    return None
+                pairs.add((
+                    str(selection.get("footprint") or "").strip().upper(),
+                    str(selection.get("build") or "").strip().upper(),
+                ))
+            return pairs
+
+        cached = copy.deepcopy(cached)
+        requested = copy.deepcopy(requested)
+        cached_selections = selection_pairs(cached)
+        requested_selections = selection_pairs(requested)
+        if cached_selections is None or requested_selections is None:
+            return False, ""
+        selection_subset = requested_selections.issubset(cached_selections)
+
+        cached_time = self.AMT_opening_timestamp_key(cached.get("start_time"))
+        requested_time = self.AMT_opening_timestamp_key(
+            requested.get("start_time")
+        )
+        try:
+            cached_time = self.AMT_opening_timestamp_key(pd.Timestamp(cached_time))
+            requested_time = self.AMT_opening_timestamp_key(
+                pd.Timestamp(requested_time)
+            )
+        except (TypeError, ValueError):
+            pass
+        cached["start_time"] = cached_time
+        requested["start_time"] = requested_time
+
+        if cached == requested and selection_subset:
+            return True, "selection subset"
         if int(getattr(self, "time_mode_choice", 1) or 1) != 1:
             return False, ""
         tolerance = max(0, int(getattr(
@@ -17478,18 +17525,9 @@ class UserInputs(QMainWindow):
         )
         if age_minutes > tolerance:
             return False, ""
-        try:
-            cached = json.loads(str(cached_signature or ""))
-            requested = json.loads(str(request_signature or ""))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return False, ""
-        if not isinstance(cached, dict) or not isinstance(requested, dict):
-            return False, ""
-        cached = copy.deepcopy(cached)
-        requested = copy.deepcopy(requested)
-        cached_time = cached.pop("start_time", None)
-        requested_time = requested.pop("start_time", None)
-        if cached != requested:
+        cached.pop("start_time", None)
+        requested.pop("start_time", None)
+        if cached != requested or not selection_subset:
             return False, ""
         try:
             scenario_shift_minutes = abs(
@@ -17500,7 +17538,23 @@ class UserInputs(QMainWindow):
             return False, ""
         if scenario_shift_minutes > tolerance:
             return False, ""
-        return True, f"fresh ({age_minutes:.1f} min old)"
+        subset_label = (
+            " selection subset" if requested_selections != cached_selections else ""
+        )
+        return True, f"fresh{subset_label} ({age_minutes:.1f} min old)"
+
+    @staticmethod
+    def AMT_snapshot_for_selected_footprints(snapshot, data_source):
+        """Filter a cached AMT snapshot to the currently selected footprints."""
+        selected = {
+            str(footprint or "").strip().upper()
+            for footprint in (data_source or {})
+        }
+        return {
+            footprint: rows
+            for footprint, rows in (snapshot or {}).items()
+            if str(footprint or "").strip().upper() in selected
+        }
 
     def AMT_enrichment_request_signature(self):
         """Identify inputs that change mapped or reconciled AMT hex values."""
@@ -17664,7 +17718,30 @@ class UserInputs(QMainWindow):
                 and cache_reusable
                 and not compatibility_issue
             ):
-                if reuse_reason == "exact":
+                selection_subset_reuse = "selection subset" in reuse_reason
+                cached_AMT_data = getattr(self, "AMT_stockpile_data", {})
+                if selection_subset_reuse:
+                    cached_AMT_data = self.AMT_snapshot_for_selected_footprints(
+                        cached_AMT_data, data_source
+                    )
+                    self.AMT_stockpile_data = cached_AMT_data
+                    self.AMT_data_request_signature = request_signature
+                    # Removing a footprint does not alter the already-enriched
+                    # rows retained for the other footprints. Record the new
+                    # active request without rerunning grade derivation, and
+                    # force only the cheap chunk-selection reconciliation.
+                    self.AMT_enrichment_signature = (
+                        self.AMT_enrichment_request_signature()
+                    )
+                    self.AMT_chunk_reconciliation_signature = ""
+                    self.opening_stockpile_inventories.save_AMT_to_database(
+                        cached_AMT_data
+                    )
+                    cache_message = (
+                        "Reused the cached AMT opening snapshot and removed "
+                        "deselected footprints; Snowflake was not queried."
+                    )
+                elif reuse_reason == "exact":
                     cache_message = (
                         "Reused the cached AMT opening snapshot because the "
                         "site, timestamp and selected builds are unchanged."
@@ -17677,8 +17754,9 @@ class UserInputs(QMainWindow):
                 self.set_AMT_cache_status(cache_message)
                 self.finish_AMT_stockpile_table(
                     data_source,
-                    getattr(self, "AMT_stockpile_data", {}),
+                    cached_AMT_data,
                     reuse_prepared=True,
+                    refresh_prepared_map=selection_subset_reuse,
                 )
                 return
 
