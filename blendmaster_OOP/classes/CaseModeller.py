@@ -822,6 +822,7 @@ class CaseModeller:
         repair_attempts = 0
         best_reporting_checkpoint = None
         best_reporting_state = -1
+        best_reporting_progress = None
         while self.current_time < self.planning_horizon_end():
             self.check_abort_requested()
             if self.product_build_settings and self.current_product_build_index() is None:
@@ -833,13 +834,32 @@ class CaseModeller:
                 if (
                     isinstance(checkpoint_results, pd.DataFrame)
                     and not checkpoint_results.empty
-                    and int(self.steady_state_tracker) > best_reporting_state
                 ):
                     # Keep this independently from repair_checkpoints because
                     # the bounded repair search intentionally removes later
                     # checkpoints as it rewinds farther into the schedule.
-                    best_reporting_checkpoint = copy.deepcopy(current_checkpoint)
-                    best_reporting_state = int(self.steady_state_tracker)
+                    # Compare schedule time, not state count: repaired states
+                    # can have different durations, so more state numbers do
+                    # not necessarily mean a later valid plan boundary.
+                    checkpoint_progress = current_checkpoint.get("current_time")
+                    try:
+                        farther_than_saved = (
+                            best_reporting_progress is None
+                            or checkpoint_progress > best_reporting_progress
+                        )
+                    except TypeError:
+                        farther_than_saved = (
+                            int(self.steady_state_tracker)
+                            > best_reporting_state
+                        )
+                    if farther_than_saved:
+                        best_reporting_checkpoint = copy.deepcopy(
+                            current_checkpoint
+                        )
+                        best_reporting_state = int(self.steady_state_tracker)
+                        best_reporting_progress = copy.deepcopy(
+                            checkpoint_progress
+                        )
             # Run optimization and only advance time if successful
             try:
                 self.run_optimization_step()
@@ -847,6 +867,43 @@ class CaseModeller:
                 self.restore_last_solved_checkpoint_for_reporting(
                     best_reporting_checkpoint
                 )
+                raise
+            except SteadyStateInfeasible as infeasible:
+                # A repair can become ordinarily infeasible after it has
+                # rewound and changed the source/balance history. That path
+                # previously bypassed the repair-failure handler and silently
+                # replaced a later pre-repair prefix with a shorter schedule.
+                # Retain whichever internally consistent checkpoint reaches
+                # farther through calendar time.
+                restored = False
+                if repair_attempts and best_reporting_checkpoint:
+                    saved_progress = best_reporting_checkpoint.get(
+                        "current_time"
+                    )
+                    try:
+                        repair_ended_earlier = (
+                            saved_progress is not None
+                            and self.current_time < saved_progress
+                        )
+                    except TypeError:
+                        repair_ended_earlier = (
+                            int(self.steady_state_tracker)
+                            < best_reporting_state
+                        )
+                    if repair_ended_earlier:
+                        restored = self.restore_last_solved_checkpoint_for_reporting(
+                            best_reporting_checkpoint
+                        )
+                if restored:
+                    raise SteadyStateInfeasible(
+                        self.steady_state_tracker,
+                        (
+                            "No feasible repaired blend extended as far as "
+                            "the original solved prefix. The furthest "
+                            "internally consistent pre-repair checkpoint "
+                            "was restored."
+                        ),
+                    ) from infeasible
                 raise
             except ProductBuildRepairRequired as repair:
                 current_repair_state = self.product_build_repair_from_states.get(
