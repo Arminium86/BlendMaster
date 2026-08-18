@@ -1505,12 +1505,34 @@ class DatabaseManager:
         # Placeholder for second-level transactions
         second_transactions = []
 
+        def finite_number(value, default=0.0):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return float(default)
+            return number if np.isfinite(number) else float(default)
+
+        def report_datetime(value):
+            timestamp = pd.to_datetime(value, errors="coerce")
+            if pd.isna(timestamp):
+                raise ValueError(
+                    f"Invalid depletion-report datetime: {value!r}"
+                )
+            return timestamp.to_pydatetime()
+
+        def datetime_text(value):
+            # Preserve fractional steady-state boundaries while retaining the
+            # legacy whole-second representation for ordinary rows.
+            return value.strftime('%Y-%m-%d %H:%M:%S.%f').rstrip('0').rstrip('.')
+
         for _, steady_state in blend_report.iterrows():
             steady_state_number = steady_state['steady_state_number']
             period = steady_state['period']
             source = steady_state['source']
-            equipment_rate_output = steady_state['equipment_rate_output']
-            duration_seconds = steady_state['steady_state_duration'] * 3600
+            duration_seconds = max(
+                finite_number(steady_state['steady_state_duration']) * 3600.0,
+                0.0,
+            )
             grades = {
                 "fe": steady_state['source_grade_fe'],
                 "si": steady_state['source_grade_si'],
@@ -1518,31 +1540,86 @@ class DatabaseManager:
                 "p": steady_state['source_grade_p'],
                 "mn": steady_state['source_grade_mn'],
             }
-            source_opening_balance = steady_state['source_opening_balance']
-            source_closing_balance = steady_state['source_closing_balance']
+            source_opening_balance = finite_number(
+                steady_state['source_opening_balance']
+            )
+            source_actual_tonnes_total = max(
+                finite_number(steady_state['source_actual_tonnes']), 0.0
+            )
+            expected_source_closing_balance = finite_number(
+                steady_state['source_closing_balance']
+            )
             source_type = steady_state.get('source_type', 'stockpile')
 
-            # Calculate per-second depletion
-            source_actual_tonnes_per_second = equipment_rate_output / 3600
-
             # Initialize start_datetime for this steady state
-            start_datetime = datetime.strptime(steady_state['start_datetime'], '%Y-%m-%d %H:%M:%S')
+            start_datetime = report_datetime(steady_state['start_datetime'])
+
+            derived_source_closing_balance = (
+                source_opening_balance - source_actual_tonnes_total
+            )
+            if not np.isclose(
+                derived_source_closing_balance,
+                expected_source_closing_balance,
+                rtol=1e-9,
+                atol=1e-6,
+            ):
+                conn.rollback()
+                conn.close()
+                raise ValueError(
+                    "Optimised balance mismatch before depletion expansion for "
+                    f"steady state {steady_state_number} and source {source}: "
+                    f"opening {source_opening_balance:.9f} - actual "
+                    f"{source_actual_tonnes_total:.9f} = "
+                    f"{derived_source_closing_balance:.9f}, but the optimiser "
+                    f"reported {expected_source_closing_balance:.9f}."
+                )
+
+            if duration_seconds <= 0.0:
+                if source_actual_tonnes_total > 1e-9:
+                    conn.rollback()
+                    conn.close()
+                    raise ValueError(
+                        "Positive depletion has zero duration for steady state "
+                        f"{steady_state_number} and source {source}."
+                    )
+                continue
+
+            whole_seconds = int(duration_seconds)
+            fractional_second = duration_seconds - whole_seconds
+            interval_durations = [1.0] * whole_seconds
+            if fractional_second > 1e-9:
+                interval_durations.append(fractional_second)
+            elif not interval_durations:
+                interval_durations.append(duration_seconds)
 
             current_balance = source_opening_balance
-            for second in range(int(duration_seconds)):
-                end_datetime = start_datetime + timedelta(seconds=1)
-                
-                # Ensure balance integrity
-                source_actual_tonnes = (
-                    source_actual_tonnes_per_second if current_balance >= source_actual_tonnes_per_second 
-                    else current_balance
+            remaining_actual_tonnes = source_actual_tonnes_total
+            for interval_index, interval_duration in enumerate(interval_durations):
+                end_datetime = start_datetime + timedelta(
+                    seconds=interval_duration
                 )
-                source_closing_balance = current_balance - source_actual_tonnes
+
+                # The optimiser's explicit source tonnes are authoritative.
+                # Apportion them over the whole-second rows and preserve the
+                # final fractional interval so sub-second decision points do
+                # not disappear from the depletion report.
+                if interval_index == len(interval_durations) - 1:
+                    source_actual_tonnes = remaining_actual_tonnes
+                else:
+                    source_actual_tonnes = (
+                        source_actual_tonnes_total
+                        * interval_duration
+                        / duration_seconds
+                    )
+                    remaining_actual_tonnes -= source_actual_tonnes
+                source_closing_balance = (
+                    current_balance - source_actual_tonnes
+                )
 
                 # Append to transactions
                 second_transactions.append({
-                    "start_datetime": start_datetime.strftime('%Y-%m-%d %H:%M:%S'),
-                    "end_datetime": end_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                    "start_datetime": datetime_text(start_datetime),
+                    "end_datetime": datetime_text(end_datetime),
                     "steady_state_number": steady_state_number,
                     "period": period,
                     "source": source,
@@ -1557,9 +1634,20 @@ class DatabaseManager:
                 start_datetime = end_datetime
                 current_balance = source_closing_balance
 
-            # Check balance alignment with last transaction
-            assert abs(current_balance - source_closing_balance) < 1e-6, \
-                f"Balance mismatch for steady state {steady_state_number} and source {source}"
+            if not np.isclose(
+                current_balance,
+                expected_source_closing_balance,
+                rtol=1e-9,
+                atol=1e-6,
+            ):
+                conn.rollback()
+                conn.close()
+                raise ValueError(
+                    "Balance mismatch after depletion expansion for steady "
+                    f"state {steady_state_number} and source {source}: "
+                    f"expanded closing {current_balance:.9f}, expected "
+                    f"{expected_source_closing_balance:.9f}."
+                )
 
         # Convert transactions to DataFrame
         transactions_df = pd.DataFrame(second_transactions)

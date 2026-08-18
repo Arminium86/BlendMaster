@@ -692,6 +692,129 @@ class ExpitSequenceReconciler:
         return mapped
 
     @staticmethod
+    def _operational_slice_name(value):
+        """Return a stable APS operational-slice identity."""
+        return re.sub(
+            r"/+", "/", str(value or "").strip().replace("\\", "/")
+        ).rstrip("/").upper()
+
+    @classmethod
+    def _assign_route_occurrences(cls, agent_plan):
+        """Keep every APS operational-slice visit as a route occurrence.
+
+        Completion remains parent-based, but route inference must retain the
+        sliced APS pattern. Consecutive payload rows from the same slice share
+        one occurrence; a later revisit receives a new occurrence identity.
+        """
+        frame = agent_plan.copy()
+        counters = {}
+        occurrences = []
+        previous_base = None
+        current_occurrence = None
+        for _, row in frame.iterrows():
+            if bool(row.get("route_only_waste")):
+                base = str(row.get("route_identity") or "")
+            else:
+                base = "SLICE::" + cls._operational_slice_name(
+                    row.get("source")
+                )
+            if base != previous_base:
+                counters[base] = counters.get(base, 0) + 1
+                current_occurrence = (
+                    f"{base}::OCCURRENCE::{counters[base]}"
+                )
+            occurrences.append(current_occurrence)
+            previous_base = base
+        frame["route_occurrence"] = occurrences
+        return frame
+
+    @staticmethod
+    def _actual_occurrence_route(
+        actual_context,
+        schedule_start,
+        planned_positions,
+        occurrence_geometry_keys,
+        occurrence_planned_wmt,
+    ):
+        """Infer which APS slice occurrences each parent-level actual depleted.
+
+        Snowflake identifies only the parent block. Actual tonnes are therefore
+        allocated FIFO through that parent's APS operational occurrences while
+        retaining the chronological parent visits observed from the agent.
+        """
+        candidates = {}
+        for occurrence, geometry_key in occurrence_geometry_keys.items():
+            candidates.setdefault(geometry_key, []).append(occurrence)
+        for geometry_key in candidates:
+            candidates[geometry_key].sort(
+                key=lambda key: planned_positions.get(key, float("inf"))
+            )
+
+        remaining = {
+            occurrence: max(_finite(occurrence_planned_wmt.get(occurrence)), 0.0)
+            for occurrence in planned_positions
+        }
+        mapped = []
+        last_position = None
+        context = actual_context.sort_values(
+            "transaction_datetime", na_position="last", kind="mergesort"
+        )
+        for _, row in context.iterrows():
+            geometry_key = str(row.get("grade_block_key") or "")
+            options = candidates.get(geometry_key, [])
+            if not options:
+                mapped.append(geometry_key)
+                continue
+
+            timestamp = row.get("transaction_datetime")
+            within_schedule = (
+                pd.notna(timestamp) and timestamp >= schedule_start
+            )
+            if not within_schedule:
+                if last_position is None:
+                    occurrence = options[0]
+                else:
+                    occurrence = min(
+                        options,
+                        key=lambda key: (
+                            abs(
+                                planned_positions.get(key, last_position)
+                                - last_position
+                            ),
+                            planned_positions.get(key, float("inf")),
+                        ),
+                    )
+                mapped.append(occurrence)
+                last_position = planned_positions.get(
+                    occurrence, last_position
+                )
+                continue
+
+            actual_wmt = max(_finite(row.get("actual_wmt")), 0.0)
+            for occurrence in options:
+                if actual_wmt <= 1e-9:
+                    break
+                available = remaining.get(occurrence, 0.0)
+                if available <= 1e-9:
+                    continue
+                mapped.append(occurrence)
+                consumed = min(actual_wmt, available)
+                remaining[occurrence] = max(available - consumed, 0.0)
+                actual_wmt -= consumed
+                last_position = planned_positions.get(
+                    occurrence, last_position
+                )
+            if actual_wmt > 1e-9:
+                # Actual tonnes beyond APS coverage still belong to the last
+                # known occurrence, but never manufacture a new future slice.
+                occurrence = options[-1]
+                mapped.append(occurrence)
+                last_position = planned_positions.get(
+                    occurrence, last_position
+                )
+        return _compressed(mapped)
+
+    @staticmethod
     def _spatial_order(
         remaining_keys, latest_key, planned_positions, centroids,
         direction_sign, direction_vector,
@@ -942,7 +1065,9 @@ class ExpitSequenceReconciler:
 
     def _consume_parent_payloads(self, group, actual_wmt, force_complete):
         group = group.sort_values(
-            ["start_datetime", "delivered_datetime"], na_position="last"
+            ["start_datetime", "delivered_datetime"],
+            na_position="last",
+            kind="mergesort",
         ).copy()
         if force_complete:
             return group.iloc[0:0].copy()
@@ -1047,7 +1172,11 @@ class ExpitSequenceReconciler:
         planned_agents = list(dict.fromkeys(planned["agent"].astype(str)))
         for agent in planned_agents:
             agent_plan = planned[planned["agent"].astype(str) == agent].copy()
-            agent_plan = agent_plan.sort_values(["start_datetime", "delivered_datetime"])
+            agent_plan = agent_plan.sort_values(
+                ["start_datetime", "delivered_datetime"],
+                kind="mergesort",
+            )
+            agent_plan = self._assign_route_occurrences(agent_plan)
             context_mask = actual["agent"].map(
                 lambda value: _agent_matches(value, agent)
             ).astype(bool)
@@ -1057,14 +1186,19 @@ class ExpitSequenceReconciler:
             agent_actual_context = actual.loc[context_mask].copy()
             agent_actual = deduction_actual.loc[deduction_mask].copy()
 
-            # Reconciliation is at parent-grade-block level. Preserve the
-            # first planned position for an ore parent even if APS slices of
-            # that parent are non-contiguous. Synthetic waste identities stay
-            # occurrence-specific and therefore remain distinct.
-            original_keys = list(dict.fromkeys(
+            # Tonne completion stays at parent level, because Snowflake does
+            # not identify APS slices. Route progression remains at the APS
+            # operational-slice occurrence level so planned returns to a
+            # parent are not misclassified as reversals.
+            parent_keys = list(dict.fromkeys(
                 _compressed(agent_plan["route_identity"].tolist())
             ))
-            planned_positions = {key: index + 1 for index, key in enumerate(original_keys)}
+            original_keys = list(dict.fromkeys(
+                _compressed(agent_plan["route_occurrence"].tolist())
+            ))
+            planned_positions = {
+                key: index + 1 for index, key in enumerate(original_keys)
+            }
             actual_geometry_keys = _compressed(
                 agent_actual_context["grade_block_key"].tolist()
             )
@@ -1076,15 +1210,49 @@ class ExpitSequenceReconciler:
             planned_totals = agent_plan.groupby("route_identity")["payload"].sum().to_dict()
             parent_names = agent_plan.groupby("route_identity")["parent_grade_block"].first().to_dict()
             material = agent_plan.groupby("route_identity")["route_material"].first().to_dict()
-            geometry_keys = agent_plan.groupby("route_identity")["grade_block_key"].first().to_dict()
-            actual_keys = self._map_actual_route_keys(
-                actual_geometry_keys, planned_positions, geometry_keys
+            parent_geometry_keys = agent_plan.groupby(
+                "route_identity"
+            )["grade_block_key"].first().to_dict()
+            occurrence_geometry_keys = agent_plan.groupby(
+                "route_occurrence"
+            )["grade_block_key"].first().to_dict()
+            occurrence_parent_keys = agent_plan.groupby(
+                "route_occurrence"
+            )["route_identity"].first().to_dict()
+            occurrence_planned_wmt = agent_plan.groupby(
+                "route_occurrence"
+            )["payload"].sum().to_dict()
+            parent_occurrences = {}
+            for occurrence in original_keys:
+                parent_occurrences.setdefault(
+                    occurrence_parent_keys.get(occurrence), []
+                ).append(occurrence)
+            parent_positions = {
+                key: min(
+                    planned_positions[occurrence]
+                    for occurrence in occurrences
+                )
+                for key, occurrences in parent_occurrences.items()
+                if occurrences
+            }
+            actual_keys = self._actual_occurrence_route(
+                agent_actual_context,
+                schedule_start,
+                planned_positions,
+                occurrence_geometry_keys,
+                occurrence_planned_wmt,
             )
             actual_first = {}
             actual_last = {}
+            parent_actual_first = {}
+            parent_actual_last = {}
             for index, key in enumerate(actual_keys, start=1):
                 actual_first.setdefault(key, index)
                 actual_last[key] = index
+                parent_key = occurrence_parent_keys.get(key)
+                if parent_key is not None:
+                    parent_actual_first.setdefault(parent_key, index)
+                    parent_actual_last[parent_key] = index
 
             latest_actual_geometry_key = (
                 actual_geometry_keys[-1] if actual_geometry_keys else ""
@@ -1092,17 +1260,14 @@ class ExpitSequenceReconciler:
             latest_actual_route_key = actual_keys[-1] if actual_keys else ""
             matched_actual = [key for key in actual_keys if key in planned_positions]
             latest_matched_key = matched_actual[-1] if matched_actual else ""
-            unmatched_keys = [
-                geometry_key
-                for geometry_key, route_key in zip(
-                    actual_geometry_keys, actual_keys
-                )
-                if route_key not in planned_positions
-            ]
-            unmatched_keys = list(dict.fromkeys(unmatched_keys))
+            planned_geometry_keys = set(occurrence_geometry_keys.values())
+            unmatched_keys = list(dict.fromkeys(
+                geometry_key for geometry_key in actual_geometry_keys
+                if geometry_key not in planned_geometry_keys
+            ))
             route_centroids = {
                 route_key: centroids[geometry_key]
-                for route_key, geometry_key in geometry_keys.items()
+                for route_key, geometry_key in occurrence_geometry_keys.items()
                 if geometry_key in centroids
             }
             direction_centroids = dict(centroids)
@@ -1111,8 +1276,7 @@ class ExpitSequenceReconciler:
                 actual_keys, planned_positions, direction_centroids
             )
 
-            remaining_frames = {}
-            remaining_keys = []
+            remaining_parent_frames = {}
             completed = 0
             partial = 0
             actual_remaining = {
@@ -1121,14 +1285,16 @@ class ExpitSequenceReconciler:
             }
             geometry_occurrences = {
                 geometry_key: sum(
-                    1 for route_key in original_keys
-                    if geometry_keys.get(route_key, route_key) == geometry_key
+                    1 for parent_key in parent_keys
+                    if parent_geometry_keys.get(
+                        parent_key, parent_key
+                    ) == geometry_key
                 )
-                for geometry_key in set(geometry_keys.values())
+                for geometry_key in set(parent_geometry_keys.values())
             }
-            for key in original_keys:
+            for key in parent_keys:
                 parent_group = agent_plan[agent_plan["route_identity"] == key]
-                geometry_key = geometry_keys.get(key, key)
+                geometry_key = parent_geometry_keys.get(key, key)
                 planned_wmt = _finite(planned_totals.get(key))
                 available_actual = max(
                     _finite(actual_remaining.get(geometry_key)), 0.0
@@ -1166,17 +1332,16 @@ class ExpitSequenceReconciler:
                     cumulative_actual_lookup,
                 )
                 if not retained.empty and remaining_wmt > 0:
-                    remaining_frames[key] = retained
-                    remaining_keys.append(key)
+                    remaining_parent_frames[key] = retained
                 audit_rows.append({
                     "agent": agent,
                     "record_type": "planned_parent",
                     "parent_grade_block": parent_names.get(key, ""),
                     "grade_block_key": geometry_key,
                     "material_class": material.get(key, ""),
-                    "original_sequence": planned_positions.get(key),
-                    "actual_first_sequence": actual_first.get(key),
-                    "actual_last_sequence": actual_last.get(key),
+                    "original_sequence": parent_positions.get(key),
+                    "actual_first_sequence": parent_actual_first.get(key),
+                    "actual_last_sequence": parent_actual_last.get(key),
                     "updated_sequence": None,
                     "aps_planned_wmt": planned_wmt,
                     "actual_schedule_wmt": actual_wmt,
@@ -1194,10 +1359,35 @@ class ExpitSequenceReconciler:
                     "geometry_available": geometry_key in centroids,
                     "centroid_easting": centroids.get(geometry_key, (None, None))[0],
                     "centroid_northing": centroids.get(geometry_key, (None, None))[1],
-                    "is_latest_actual_block": key == latest_actual_route_key,
+                    "is_latest_actual_block": (
+                        key
+                        == occurrence_parent_keys.get(latest_actual_route_key)
+                    ),
                     "reconciliation_confidence": "",
                     "warning": "",
                 })
+
+            retained_rows = (
+                pd.concat(
+                    list(remaining_parent_frames.values()),
+                    ignore_index=True,
+                )
+                if remaining_parent_frames
+                else agent_plan.iloc[0:0].copy()
+            )
+            retained_occurrences = set(
+                retained_rows.get("route_occurrence", pd.Series(dtype=str))
+                .dropna().astype(str)
+            )
+            remaining_keys = [
+                key for key in original_keys if key in retained_occurrences
+            ]
+            remaining_frames = {
+                key: retained_rows[
+                    retained_rows["route_occurrence"].eq(key)
+                ].copy()
+                for key in remaining_keys
+            }
 
             matched_positions = [
                 planned_positions[key] for key in actual_keys
@@ -1287,27 +1477,40 @@ class ExpitSequenceReconciler:
                 ).sort_values(
                     ["start_datetime", "delivered_datetime"],
                     na_position="last",
+                    kind="mergesort",
                 )] if remaining_frames else []
 
             for frame in frame_sequence:
                 frame["original_parent_sequence"] = frame[
-                    "route_identity"
+                    "route_occurrence"
                 ].map(planned_positions)
                 frame["updated_parent_sequence"] = frame[
-                    "route_identity"
+                    "route_occurrence"
                 ].map(updated_positions)
                 frame["expit_reconciliation_status"] = "reconciled"
                 ordered_frames.append(frame)
-            for key, sequence in updated_positions.items():
-                for row in reversed(audit_rows):
-                    if (
-                        row["agent"] == agent
-                        and row["parent_grade_block"] == parent_names.get(key, "")
-                        and row["original_sequence"] == planned_positions.get(key)
-                        and row["record_type"] == "planned_parent"
-                    ):
-                        row["updated_sequence"] = sequence
-                        break
+            parent_updated_positions = {}
+            for occurrence, sequence in updated_positions.items():
+                parent_key = occurrence_parent_keys.get(occurrence)
+                if parent_key is not None:
+                    parent_updated_positions.setdefault(
+                        parent_key, sequence
+                    )
+            for row in reversed(audit_rows):
+                if (
+                    row["agent"] == agent
+                    and row["record_type"] == "planned_parent"
+                ):
+                    matching_key = next((
+                        key for key, name in parent_names.items()
+                        if name == row["parent_grade_block"]
+                        and parent_positions.get(key)
+                        == row["original_sequence"]
+                    ), None)
+                    if matching_key is not None:
+                        row["updated_sequence"] = (
+                            parent_updated_positions.get(matching_key)
+                        )
 
             for key in unmatched_keys:
                 rows = agent_actual_context[agent_actual_context["grade_block_key"] == key]
@@ -1348,7 +1551,7 @@ class ExpitSequenceReconciler:
 
             geometry_coverage = (
                 sum(
-                    geometry_keys.get(key, key) in centroids
+                    occurrence_geometry_keys.get(key, key) in centroids
                     for key in original_keys
                 ) / len(original_keys)
                 if original_keys else 0.0
@@ -1356,7 +1559,8 @@ class ExpitSequenceReconciler:
             geological_coverage = (
                 sum(
                     bool(self._geological_audit_values(
-                        geometry_keys.get(key, key), 0.0, geological_lookup,
+                        occurrence_geometry_keys.get(key, key), 0.0,
+                        geological_lookup,
                         cumulative_actual_lookup,
                     )["geological_data_available"])
                     for key in original_keys
@@ -1371,7 +1575,9 @@ class ExpitSequenceReconciler:
                 )
                 warnings.append(f"{agent}: {warning}")
                 fallback = agent_plan.copy()
-                fallback["original_parent_sequence"] = fallback["grade_block_key"].map(planned_positions)
+                fallback["original_parent_sequence"] = fallback[
+                    "route_occurrence"
+                ].map(planned_positions)
                 fallback["updated_parent_sequence"] = fallback["original_parent_sequence"]
                 fallback["expit_reconciliation_status"] = "fallback_original"
                 ordered_frames = [fallback]
@@ -1430,10 +1636,15 @@ class ExpitSequenceReconciler:
                 )
 
             agent_summaries[agent] = {
-                "planned_parent_blocks": len(original_keys),
+                "planned_parent_blocks": len(parent_keys),
                 "completed_parent_blocks": completed,
                 "partial_parent_blocks": partial,
-                "remaining_parent_blocks": len(updated_order),
+                "remaining_parent_blocks": len({
+                    occurrence_parent_keys.get(key) for key in updated_order
+                    if occurrence_parent_keys.get(key) is not None
+                }),
+                "planned_operational_occurrences": len(original_keys),
+                "remaining_operational_occurrences": len(updated_order),
                 "actual_route_blocks": len(actual_geometry_keys),
                 "unmatched_actual_blocks": len(unmatched_keys),
                 "direction": direction,
