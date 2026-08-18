@@ -3040,7 +3040,10 @@ class UserInputs(QMainWindow):
         self.product_build_count_button.clicked.connect(self.set_product_build_count_from_input)
         self.product_build_2wp_button = QPushButton("Load 2WP Targets")
         self.product_build_2wp_button.setToolTip(
-            "Load tonnes and grade targets from the latest Wednesday 2WP scenario for the active mine and crusher."
+            "Load tonnes and grade targets from the latest Wednesday 2WP "
+            "scenario for the active mine and crusher. On Wednesdays, the "
+            "previous week's scenario is used only when the current plan has "
+            "no published rows."
         )
         self.product_build_2wp_button.clicked.connect(self.load_2wp_product_build_targets)
         self.group_2wp_build_targets_checkbox = QCheckBox(
@@ -3061,6 +3064,13 @@ class UserInputs(QMainWindow):
         top_layout.addWidget(self.group_2wp_build_targets_checkbox)
         top_layout.addStretch()
         self.product_build_layout.addLayout(top_layout)
+
+        self.product_build_plan_scenario_label = QLabel()
+        self.product_build_plan_scenario_label.setWordWrap(True)
+        self.product_build_plan_scenario_label.setVisible(False)
+        self.product_build_layout.addWidget(
+            self.product_build_plan_scenario_label
+        )
 
         self.product_build_table = CustomTableWidget()
         self.product_build_table.setAlternatingRowColors(True)
@@ -3194,6 +3204,49 @@ class UserInputs(QMainWindow):
             self.populate_product_build_table_row(row_idx, setting)
         self.renumber_product_build_rows()
         self.resize_product_build_table()
+        self.refresh_product_build_plan_scenario_label()
+
+    @staticmethod
+    def product_build_plan_scenario_summary(settings):
+        scenarios = []
+        fallback = False
+        for setting in settings or []:
+            if not isinstance(setting, dict):
+                continue
+            scenario = str(
+                setting.get("planning_scenario") or ""
+            ).strip()
+            if scenario and scenario not in scenarios:
+                scenarios.append(scenario)
+            fallback = fallback or bool(setting.get(
+                "planning_scenario_previous_week_fallback", False
+            ))
+        if not scenarios:
+            return "", False
+        return ", ".join(scenarios), fallback
+
+    def refresh_product_build_plan_scenario_label(self):
+        if not hasattr(self, "product_build_plan_scenario_label"):
+            return
+        scenario, fallback = self.product_build_plan_scenario_summary(
+            getattr(self, "product_build_settings", []) or []
+        )
+        if not scenario:
+            self.product_build_plan_scenario_label.clear()
+            self.product_build_plan_scenario_label.setVisible(False)
+            return
+        suffix = " (previous-week fallback)" if fallback else ""
+        self.product_build_plan_scenario_label.setText(
+            f"2WP Plan Scenario Used: {scenario}{suffix}"
+        )
+        colour = "#9a5b00" if fallback else "#1e4f8a"
+        background = "#fff7df" if fallback else "#edf6ff"
+        self.product_build_plan_scenario_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 700; color: {colour}; "
+            f"background-color: {background}; border: 1px solid {colour}; "
+            "border-radius: 4px; padding: 6px 8px;"
+        )
+        self.product_build_plan_scenario_label.setVisible(True)
 
     def populate_product_build_table_row(self, row_idx, setting=None):
         setting = setting or {}
@@ -3453,6 +3506,7 @@ class UserInputs(QMainWindow):
             self.calendar_inputs = {}
         self.calendar_inputs["product_build_settings"] = copy.deepcopy(self.product_build_settings)
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
+        self.refresh_product_build_plan_scenario_label()
         return True
 
     def navigate_to_product_build_settings(self):
@@ -3512,10 +3566,20 @@ class UserInputs(QMainWindow):
 
         def success(settings):
             if not settings:
+                planning_category = self.data_stream_planning_categories.get(
+                    "product", DEFAULT_PLANNING_CATEGORIES["product"]
+                )
+                scenario_key = self.planning_plan_targets.latest_wednesday_scenario(
+                    start_time
+                )
                 QMessageBox.information(
                     self,
                     "BlendMaster",
-                f"No overlapping 2WP OPF Feed targets were found for {mine} / {opf} / {crusher}.",
+                    f"No overlapping 2WP {planning_category} targets were found "
+                    f"for {mine} / {opf} / {crusher} using current scenario "
+                    f"key {scenario_key}. Previous-week fallback is only "
+                    "eligible on Wednesdays when that current plan has no "
+                    "published rows.",
                 )
                 return
             self.group_2wp_build_targets_by_brand_choice = bool(
@@ -3534,10 +3598,19 @@ class UserInputs(QMainWindow):
             self.populate_product_build_table()
             self.store_product_build_settings(show_errors=False)
             self.save_active_scenario_state()
+            scenario, fallback = self.product_build_plan_scenario_summary(
+                settings
+            )
+            scenario_note = (
+                f"\n\n2WP Plan Scenario Used: {scenario}"
+                + (" (previous-week fallback)" if fallback else "")
+                if scenario else ""
+            )
             QMessageBox.information(
                 self,
                 "BlendMaster",
-                f"Loaded {len(settings)} product build target(s) for {mine} / {opf} / {crusher}.",
+                f"Loaded {len(settings)} product build target(s) for "
+                f"{mine} / {opf} / {crusher}.{scenario_note}",
             )
 
         self.run_background_task(
@@ -13872,6 +13945,9 @@ class UserInputs(QMainWindow):
             for grade in ["fe", "si", "al", "p", "mn"]:
                 row[f"target_{grade}_min"] = nested_grade_value(setting, grade, "min", 0)
                 row[f"target_{grade}_max"] = nested_grade_value(setting, grade, "max", 100)
+            for key, value in setting.items():
+                if str(key).startswith("planning_"):
+                    row[key] = copy.deepcopy(value)
             normalized.append(row)
         return normalized
 

@@ -154,7 +154,21 @@ class Optimizer:
         )
         
         if result['Linprog_result_object'].success: 
-            steady_state_duration, steady_state_controller_source, steady_state_controller_tonnes = self.update_steady_state_duration(result["transactions"], steady_state_duration, current_time, stockpile_data, period_tracker)
+            original_result = result
+            (
+                stockpile_boundary_duration,
+                stockpile_controller_source,
+                stockpile_controller_tonnes,
+            ) = self.update_steady_state_duration(
+                result["transactions"],
+                steady_state_duration,
+                current_time,
+                stockpile_data,
+                period_tracker,
+            )
+            steady_state_duration = stockpile_boundary_duration
+            steady_state_controller_source = stockpile_controller_source
+            steady_state_controller_tonnes = stockpile_controller_tonnes
             (
                 steady_state_duration,
                 product_build_controller_source,
@@ -164,10 +178,30 @@ class Optimizer:
                 steady_state_duration,
                 solver_config,
             )
+            product_build_controller_lane = None
+            boundary_solver_config = solver_config
             if product_build_controller_source is not None:
-                # Product-build completion is a time boundary only. Do not add
-                # the depleted-source equality constraint used for stockpile
-                # depletion boundaries.
+                product_build_controller_lane = (
+                    self.product_build_completion_lane(
+                        product_build_controller_source,
+                        solver_config,
+                    )
+                )
+                # The first solution estimates the time at which the build
+                # completes. The shorter solve may choose a different blend
+                # and therefore a different product yield. Force that solve
+                # to make exactly the outstanding build tonnes; otherwise an
+                # underfilled build creates a sequence of ever-smaller steady
+                # states which only converges numerically on the target.
+                if product_build_controller_lane is not None:
+                    boundary_solver_config = dict(solver_config)
+                    boundary_solver_config[
+                        "product_build_completion_constraint"
+                    ] = {
+                        "lane": product_build_controller_lane,
+                        "tonnes": product_build_controller_tonnes,
+                        "build_boundary": product_build_controller_source,
+                    }
                 steady_state_controller_source = None
                 steady_state_controller_tonnes = None
 
@@ -191,15 +225,69 @@ class Optimizer:
                 min_stockpiles,
                 max_stockpiles,
                 min_stockpile_contribution_ratio,
-                solver_config,
+                boundary_solver_config,
                 excluded_source_sets,
                 excluded_stockpile_sets,
             )
 
-            if result['Linprog_result_object'].success: 
-                return result
+            if result['Linprog_result_object'].success:
+                if product_build_controller_lane is None:
+                    return result
+                if self.product_build_completion_is_satisfied(
+                    result,
+                    product_build_controller_lane,
+                    product_build_controller_tonnes,
+                ):
+                    return result
+
+                actual_tonnes = result.get(
+                    lane_actual_tonnes_column(product_build_controller_lane),
+                    0.0,
+                )
+                print(
+                    "Rejected product-build boundary "
+                    f"'{product_build_controller_source}': shortened solve "
+                    f"produced {actual_tonnes:.3f} t instead of the required "
+                    f"{float(product_build_controller_tonnes):.3f} t."
+                )
+
+            if product_build_controller_source is not None:
+                # Never accept an unconstrained shortened product-build state:
+                # that is the path which caused the asymptotic micro-state
+                # loop. If the exact boundary cannot be solved, retain the
+                # preceding legitimate boundary (stockpile or original
+                # window) and let the normal runtime state advance once.
+                print(
+                    "Exact product-build completion boundary was infeasible; "
+                    "using the preceding steady-state boundary instead."
+                )
+                if (
+                    stockpile_boundary_duration
+                    < initial_duration - Optimizer.SOLUTION_TOLERANCE
+                ):
+                    filtered_event_pool = self.filter_events_by_steady_state_window(
+                        event_pool, current_time, stockpile_boundary_duration
+                    )
+                    fallback_result = self.run_blending_optimization(
+                        filtered_event_pool,
+                        period_crusher_target,
+                        stockpile_boundary_duration,
+                        stockpile_controller_source,
+                        stockpile_controller_tonnes,
+                        periods,
+                        period_tracker,
+                        min_stockpiles,
+                        max_stockpiles,
+                        min_stockpile_contribution_ratio,
+                        solver_config,
+                        excluded_source_sets,
+                        excluded_stockpile_sets,
+                    )
+                    if fallback_result['Linprog_result_object'].success:
+                        return fallback_result
+                return original_result
             
-            elif not result['Linprog_result_object'].success: 
+            if not result['Linprog_result_object'].success: 
                 steady_state_controller_source, steady_state_controller_tonnes = None, None
                 filtered_event_pool = self.filter_events_by_steady_state_window(
                     event_pool, current_time, steady_state_duration
@@ -226,6 +314,40 @@ class Optimizer:
                 else: return result
 
         else: return result
+
+    @staticmethod
+    def product_build_completion_lane(controller_source, solver_config):
+        """Return the product lane represented by a build-boundary label."""
+        if not controller_source:
+            return None
+        solver_config = solver_config or {}
+        target_builds = dict(solver_config.get("target_product_builds") or {})
+        if not target_builds and solver_config.get("target_product_build"):
+            target_builds = {
+                PRODUCT_LANE: solver_config.get("target_product_build") or {}
+            }
+        for lane, target_build in target_builds.items():
+            build_name = (
+                target_build.get("build_name")
+                or f"{str(lane).title()} product build"
+            )
+            if str(controller_source) == f"{build_name} complete":
+                return lane
+        return None
+
+    @staticmethod
+    def product_build_completion_is_satisfied(result, lane, required_tonnes):
+        """Verify that a shortened solve genuinely reaches its build boundary."""
+        try:
+            actual_tonnes = float(result.get(lane_actual_tonnes_column(lane), 0.0))
+            required_tonnes = float(required_tonnes)
+        except (TypeError, ValueError):
+            return False
+        tolerance = max(
+            Optimizer.PRODUCT_BUILD_TONNES_TOLERANCE,
+            abs(required_tonnes) * 1e-6,
+        )
+        return abs(actual_tonnes - required_tonnes) <= tolerance
 
     @staticmethod
     def update_steady_state_duration_for_product_build_completion(
@@ -1195,10 +1317,13 @@ class Optimizer:
             for cost, crusher_coefficient in zip(base_costs, crusher_coefficients)
         ]
 
-        # Equality constraint is only used when a stockpile is depleted early
-        # in a steady state. This tries to force that stockpile to deplete fully
-        # in the subsequent shortened-state solve. There is a fail-safe in
-        # run_with_dynamic_steady_state if this rigid constraint is infeasible.
+        # Equality constraints pin genuine early decision boundaries. A
+        # depleted stockpile is forced to its remaining physical tonnes. A
+        # product-build boundary is forced to the remaining lane quantity so
+        # a changed blend/yield in the shortened solve cannot underfill the
+        # build and generate an asymptotic series of micro steady states.
+        A_eq = []
+        b_eq = []
         if (steady_state_controller_source != None and steady_state_controller_source != "Null"):
             indices = [
                 i
@@ -1208,12 +1333,27 @@ class Optimizer:
                     and event.stockpile == steady_state_controller_source
                 )
             ]
-            A_eq = [[1 if i in indices else 0 for i in range(len(event_pool))]] 
-            b_eq = [steady_state_controller_tonnes] * len(A_eq)
+            A_eq.append([
+                1 if i in indices else 0 for i in range(len(event_pool))
+            ])
+            b_eq.append(steady_state_controller_tonnes)
 
-        else:
-            A_eq = None
-            b_eq = None
+        product_build_completion_constraint = dict(
+            solver_config.get("product_build_completion_constraint") or {}
+        )
+        completion_lane = product_build_completion_constraint.get("lane")
+        if completion_lane in product_build_coefficients_by_lane:
+            try:
+                completion_tonnes = float(
+                    product_build_completion_constraint.get("tonnes")
+                )
+            except (TypeError, ValueError):
+                completion_tonnes = None
+            if completion_tonnes is not None and completion_tonnes >= 0:
+                A_eq.append(list(
+                    product_build_coefficients_by_lane[completion_lane]
+                ))
+                b_eq.append(completion_tonnes)
 
         # Calendar crusher targets are independent from product-build guidance.
         # In particular, allowing off-spec product-build steady states must not
@@ -1703,7 +1843,7 @@ class Optimizer:
             prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) <= rhs
 
         # Equality constraints if applicable
-        if A_eq is not None and b_eq is not None:
+        if A_eq and b_eq:
             for row, rhs in zip(A_eq, b_eq):
                 prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) == rhs
 

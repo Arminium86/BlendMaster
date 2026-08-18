@@ -34,6 +34,7 @@ class PlanningPlanTargets:
 
     QUERY = """
         SELECT
+            SCENARIO,
             OPERATION,
             PERIOD_START,
             PERIOD_END,
@@ -67,6 +68,14 @@ class PlanningPlanTargets:
             start_time = pd.to_datetime(start_time).to_pydatetime()
         latest_wednesday = start_time - timedelta(days=(start_time.weekday() - 2) % 7)
         return latest_wednesday.strftime("%Y%m%d")
+
+    @classmethod
+    def previous_wednesday_scenario(cls, start_time):
+        """Return the scenario token for the Wednesday before the current 2WP."""
+        current = datetime.strptime(
+            cls.latest_wednesday_scenario(start_time), "%Y%m%d"
+        )
+        return (current - timedelta(days=7)).strftime("%Y%m%d")
 
     @staticmethod
     def normalize_crusher(crusher):
@@ -158,7 +167,9 @@ class PlanningPlanTargets:
         if not 0 < crusher_contribution_ratio <= 1:
             raise ValueError("Crusher contribution ratio must be greater than 0 and no more than 100%.")
 
-        scenario = self.latest_wednesday_scenario(start_time)
+        requested_scenario = self.latest_wednesday_scenario(start_time)
+        scenario = requested_scenario
+        used_previous_week_fallback = False
         periods = PeriodManager(planning_period_count)
         periods.calculate_periods(start_time)
         horizon_end = periods.horizon_end()
@@ -170,12 +181,33 @@ class PlanningPlanTargets:
             cursor = connection.cursor()
             try:
                 planning_category = str(planning_category or "OPF Feed")
-                cursor.execute(
-                    self.QUERY,
-                    (planning_category, scenario, horizon_end, start_time),
-                )
-                rows = cursor.fetchall()
-                columns = [column[0].upper() for column in cursor.description]
+
+                def query_scenario(scenario_key):
+                    cursor.execute(
+                        self.QUERY,
+                        (
+                            planning_category,
+                            scenario_key,
+                            horizon_end,
+                            start_time,
+                        ),
+                    )
+                    result_rows = cursor.fetchall()
+                    result_columns = [
+                        column[0].upper() for column in cursor.description
+                    ]
+                    return result_rows, result_columns
+
+                rows, columns = query_scenario(requested_scenario)
+                # On publication day only, an entirely absent current-week
+                # result means the new plan has not yet been published. Do
+                # not use this fallback when the scenario contains rows for
+                # another OPF: that is an explicit no-target result for the
+                # requested OPF and must remain visible to the user.
+                if not rows and start_time.weekday() == 2:
+                    scenario = self.previous_wednesday_scenario(start_time)
+                    rows, columns = query_scenario(scenario)
+                    used_previous_week_fallback = bool(rows)
             finally:
                 cursor.close()
         finally:
@@ -245,7 +277,14 @@ class PlanningPlanTargets:
                 "planning_operation": str(row.get("OPERATION") or "").strip(),
                 "planning_period_start": row["PERIOD_START"].to_pydatetime(),
                 "planning_period_end": row["PERIOD_END"].to_pydatetime(),
-                "planning_scenario": scenario,
+                "planning_scenario": str(
+                    row.get("SCENARIO") or scenario
+                ).strip(),
+                "planning_scenario_key": scenario,
+                "planning_scenario_requested_key": requested_scenario,
+                "planning_scenario_previous_week_fallback": (
+                    used_previous_week_fallback
+                ),
             }
             # Planning Plan provides a lower-bound target for Fe and
             # upper-bound targets for the contaminants. Keep the opposite
