@@ -554,6 +554,7 @@ class Run:
                 abort_callback=self.is_abort_requested,
                 plan_id=plan_id,
                 reserved_blend_signatures=reserved_blend_signatures,
+                site_context=site_context,
             )
 
         primary_case_modeller = create_case_modeller(

@@ -6,7 +6,6 @@ __pycache__/
 blendmaster_OOP/build/
 blendmaster_OOP/dist/
 blendmaster_OOP/input/
-blendmaster_OOP/tests/
 *.spec
 *.db
 *.prj

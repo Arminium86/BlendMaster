@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.MaterialFlowTopology import one_lane_topology
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
@@ -252,6 +253,49 @@ class ManualBlendPlanner:
             for period in self.period_labels
         }
         self._inventory_template = self._build_inventory()
+
+    @property
+    def material_flow_topology(self):
+        """Expose the same feed graph as an optimized case, from manual inputs."""
+        sources = [
+            {
+                "source": name,
+                "source_type": "stockpile",
+                "source_id": chunk["source_id"],
+                "is_amt": chunk["is_amt"],
+            }
+            for name, chunks in self._inventory_template.items()
+            for chunk in chunks
+        ]
+        payloads = self.payload_transactions
+        # Match attach_direct_tip_candidates: the prepared payload flag owns
+        # manual eligibility; this view must not introduce another filter.
+        if "direct_tip_eligible" in payloads.columns:
+            eligible = payloads[payloads["direct_tip_eligible"].map(self._truthy)]
+            for row in eligible.to_dict("records"):
+                sources.append({
+                    "source": row.get("source") or row.get("direct_tip_id"),
+                    "source_type": "grade_block",
+                    "source_id": row.get("direct_tip_id") or row.get("source"),
+                })
+        targets = {}
+        for period_key, label in zip(self.period_keys, self.period_labels):
+            targets[period_key] = {
+                "crusher_rate": self.crusher_rates[label],
+                "brand": (self.calendar_inputs.get("crusher_brand") or {}).get(label, ""),
+            }
+            for grade in self.GRADES:
+                for bound, default in (("min", 0.0), ("max", 100.0)):
+                    targets[period_key][f"target_{grade}_{bound}"] = (
+                        self.calendar_inputs.get(f"crusher_target_{grade}_{bound}") or {}
+                    ).get(label, default)
+        return one_lane_topology(
+            site_context=self.calendar_inputs.get("site_context"),
+            sources=sources,
+            crusher_targets=targets,
+            product_build_settings=self.product_build_settings,
+            byproducts_enabled=self.byproducts_enabled,
+        )
 
     def _configured_period_keys(self):
         keys = []

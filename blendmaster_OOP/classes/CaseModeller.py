@@ -20,6 +20,7 @@ from classes.ProductBuildLanes import (
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
 from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.MaterialFlowTopology import model_sources, one_lane_topology
 from classes.CustomConstraints import (
     custom_constraint_property_keys,
     expand_required_property_keys,
@@ -125,11 +126,13 @@ class CaseModeller:
         abort_callback: Optional[Callable[[], bool]] = None,
         plan_id: str = "Primary",
         reserved_blend_signatures: Optional[set] = None,
+        site_context: Optional[dict] = None,
     ):
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
         self.crusher_targets = crusher_targets
+        self.site_context = dict(site_context or {})
         self.periods = periods
         self.current_time = periods.get_periods()["preplan_start"]
         self.start_time = periods.get_periods()["preplan_start"]
@@ -282,6 +285,17 @@ class CaseModeller:
         self.grade_block_pair_locks = {}
         self.abort_callback = abort_callback or (lambda: False)
         self.abort_requested = False
+
+    @property
+    def material_flow_topology(self):
+        """Return a detached topology snapshot without altering planning state."""
+        return one_lane_topology(
+            site_context=getattr(self, "site_context", None),
+            sources=model_sources(self.stockpiles, self.grade_blocks),
+            crusher_targets=self.crusher_targets,
+            product_build_settings=self.product_build_settings,
+            byproducts_enabled=self.byproducts_enabled,
+        )
 
     def normalized_product_build_settings(self, product_build_settings):
         normalized = []
