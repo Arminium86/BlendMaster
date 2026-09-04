@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from classes.ManualBlendPlanner import ManualBlendPlanner
+from classes.ManualBlendPlanner import (
+    ManualBlendPlanner,
+    ManualBlendPlanningError,
+)
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from classes.ReportColumns import balance_triplet_columns
 from database.DatabaseContext import get_database_path, set_database_path
@@ -275,6 +278,110 @@ class OptimisedManualPrepopulationTests(unittest.TestCase):
             },
             allocations[state_key],
         )
+
+    def roundoff_direct_tip_plan(self, stockpile_tonnes=0):
+        # A real optimiser result rounds the sum of 35 payloads up by 12 g.
+        requested = 6838.426312
+        available = 6838.426299986162
+        source = "Reserves/CC2/EYR88/01/441/133/444/BA01"
+        rows = [self.report_row(
+            1, source, requested, "grade_block", source_id="DT1",
+            crusher_tonnes=requested + stockpile_tonnes,
+        )]
+        if stockpile_tonnes:
+            rows.append(self.report_row(
+                1, "SP1", stockpile_tonnes,
+                crusher_tonnes=requested + stockpile_tonnes,
+            ))
+        transfer = OptimisedToManualPlan(pd.DataFrame(rows)).build()
+        planner = ManualBlendPlanner(
+            transfer["sequence_rows"],
+            transfer["blend_definitions"],
+            {"SP1": {"balance": stockpile_tonnes, "grade_fe": 60}},
+            [],
+            pd.DataFrame([{
+                "source": source,
+                "direct_tip_id": "DT1",
+                "payload": available,
+                "delivered_datetime": datetime(2025, 1, 1, 6, 10),
+                "direct_tip_eligible": True,
+                "source_grade_fe": 64,
+            }]),
+            {},
+            [],
+            requested + stockpile_tonnes,
+        )
+        return planner, transfer, available, source
+
+    def test_solver_roundoff_transfers_only_available_payload_tonnes(self):
+        for stockpile_tonnes in (0, 100):
+            with self.subTest(stockpile_tonnes=stockpile_tonnes):
+                planner, transfer, available, source = (
+                    self.roundoff_direct_tip_plan(stockpile_tonnes)
+                )
+                states = planner.build_steady_states()
+                allocations = OptimisedToManualPlan.direct_tip_allocations(
+                    states, transfer["direct_tip_rows"]
+                )
+                report = planner.build_report(states, allocations)
+
+                self.assertEqual(
+                    available, allocations[states[0]["state_key"]][source]
+                )
+                direct_tip = report[report["source_type"] == "grade_block"]
+                self.assertEqual(
+                    available, direct_tip.iloc[0]["source_actual_tonnes"]
+                )
+                self.assertEqual(0, direct_tip.iloc[0]["source_closing_balance"])
+                self.assertAlmostEqual(
+                    available + stockpile_tonnes,
+                    report.iloc[0]["crusher_actual_tonnes"],
+                )
+
+    def test_direct_tip_shortage_exceeding_solver_roundoff_is_rejected(self):
+        planner, transfer, available, _source = self.roundoff_direct_tip_plan()
+        states = planner.build_steady_states()
+        transfer["direct_tip_rows"][0]["selected_tonnes"] = available + 0.01
+
+        with self.assertRaisesRegex(
+            ManualBlendPlanningError, r"Could not transfer 0\.01 t"
+        ):
+            OptimisedToManualPlan.direct_tip_allocations(
+                states, transfer["direct_tip_rows"]
+            )
+
+    def test_roundoff_tolerance_does_not_allow_reusing_payload_capacity(self):
+        planner, transfer, available, _source = self.roundoff_direct_tip_plan()
+        states = planner.build_steady_states()
+        selected = transfer["direct_tip_rows"][0]
+        selected["selected_tonnes"] = available
+
+        with self.assertRaises(ManualBlendPlanningError):
+            OptimisedToManualPlan.direct_tip_allocations(
+                states, [selected, selected.copy()]
+            )
+
+    def test_roundoff_tolerance_does_not_allow_missing_direct_tip_source(self):
+        planner, transfer, _available, _source = self.roundoff_direct_tip_plan()
+        states = planner.build_steady_states()
+        states[0]["direct_tip_candidates"] = []
+
+        with self.assertRaises(ManualBlendPlanningError):
+            OptimisedToManualPlan.direct_tip_allocations(
+                states, transfer["direct_tip_rows"]
+            )
+
+    def test_direct_tip_only_validation_handles_roundoff_without_overallocation(self):
+        planner, _transfer, available, source = self.roundoff_direct_tip_plan()
+        states = planner.build_steady_states()
+        key = states[0]["state_key"]
+        self.assertTrue(planner.validate_allocations(
+            states, {key: {source: available}}
+        ))
+        for amount in (available + 0.00001, available - 0.01):
+            with self.subTest(amount=amount):
+                with self.assertRaises(ManualBlendPlanningError):
+                    planner.validate_allocations(states, {key: {source: amount}})
 
     def test_fixed_import_preserves_exact_seconds(self):
         start = datetime(2025, 1, 1, 6, 0, 30)

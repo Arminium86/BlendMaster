@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
+from math import isclose
 from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
@@ -51,6 +52,16 @@ from classes.CustomConstraints import (
 
 
 GRADE_NAMES = ("fe", "si", "al", "p", "mn")
+
+
+def optimised_tonnes_match(requested, allocated):
+    """Allow solver precision when reconciling imported tonnage totals.
+
+    CBC solution values have fewer significant digits than the input payloads;
+    summing them by parent grade block can exceed the absolute 1e-5 t tolerance.
+    This comparison must not be used to increase physical payload availability.
+    """
+    return isclose(requested, allocated, rel_tol=1e-7, abs_tol=1e-5)
 
 
 class ManualBlendPlanningError(ValueError):
@@ -953,7 +964,9 @@ class ManualBlendPlanner:
             blend = self.blends.get(state["blend_ID"], {})
             if (
                 not blend.get("_sources")
-                and abs(total - state["feed_capacity_tonnes"]) > 1e-5
+                and not optimised_tonnes_match(
+                    state["feed_capacity_tonnes"], total
+                )
             ):
                 raise ManualBlendPlanningError(
                     f"Steady state {state['steady_state_number']} is a "

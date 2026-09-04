@@ -6,7 +6,10 @@ from copy import deepcopy
 import pandas as pd
 
 from classes.GradeBlockIdentity import parent_grade_block_name
-from classes.ManualBlendPlanner import ManualBlendPlanningError
+from classes.ManualBlendPlanner import (
+    ManualBlendPlanningError,
+    optimised_tonnes_match,
+)
 
 
 class OptimisedToManualPlan:
@@ -683,12 +686,18 @@ class OptimisedToManualPlan:
                 if remaining <= cls.TOLERANCE:
                     break
 
-            if remaining > 1e-5:
+            # Keep allocations capped at the real payload balance. A small
+            # difference from rounded solver output is not a missing payload.
+            if not optimised_tonnes_match(requested, requested - remaining):
                 label = selected.get(
                     "optimised_steady_state", "?"
                 )
+                shortfall = (
+                    f"{remaining:,.6f}".rstrip("0").rstrip(".")
+                    if remaining < 0.1 else f"{remaining:,.1f}"
+                )
                 raise ManualBlendPlanningError(
-                    f"Could not transfer {remaining:,.1f} t of optimized "
+                    f"Could not transfer {shortfall} t of optimized "
                     f"direct tip for {selected.get('source') or 'source'} "
                     f"in steady state {label}. Check that the same 24HR "
                     "schedule and direct-tip rules are still selected."
