@@ -282,6 +282,14 @@ class DataStreamReconciliation:
         self.save_to_database(opf, scenario_start, factors, warnings)
         return factors, warnings
 
+    def fetch_history(self, scenario_start, opf, brands=(), *, max_lookback_days=30):
+        """Read advanced shift samples; the standard fetch path stays unchanged."""
+        from setup.ReconciliationHistory import ReconciliationHistory
+
+        return ReconciliationHistory(self.inventory_loader).fetch(
+            scenario_start, opf, brands, max_lookback_days=max_lookback_days
+        )
+
     @staticmethod
     def default_factors(opf: Any, brands: Iterable[str], warning: str = ""):
         opf_key = normalise_opf(opf)

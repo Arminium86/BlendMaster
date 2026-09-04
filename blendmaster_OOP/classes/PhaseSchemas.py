@@ -153,6 +153,7 @@ def reconciliation_sample(
     product_dmt: Any = None,
     contributing_blocks: Optional[Iterable[Mapping]] = None,
     source_rows: Any = None,
+    provenance: Optional[Mapping] = None,
 ) -> Dict[str, Any]:
     """One period of reconciliation history with its contributing blocks.
 
@@ -161,6 +162,8 @@ def reconciliation_sample(
     ``feed_wmt`` values describe the composition of the feed that produced
     those factors. Composition is what later lets Task 6 judge whether a
     factor is compositionally relevant to a source being adjusted.
+    ``provenance`` records shift identity, reconstruction basis, attributed
+    and unknown feed tonnes, source assay metadata and quality warnings.
     """
     blocks = _mapping_list(contributing_blocks)
     return {
@@ -176,6 +179,9 @@ def reconciliation_sample(
         "factors": _analyte_map(factors),
         "contributing_blocks": blocks,
         "source_rows": _optional_integer(source_rows),
+        # Optional v1 extension: shift identity, lineage coverage, original
+        # warehouse brand and data-quality warnings supplied by Task 5.
+        "provenance": _mapping(provenance),
     }
 
 
