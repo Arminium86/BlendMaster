@@ -199,6 +199,7 @@ AMT_FIXED_COLUMN_TYPES = {
     "last_update": "TEXT",
     "hex_updated": "TEXT",
     "grade_streams_json": "TEXT",
+    "reconciliation_json": "TEXT",
     "defined_fields_json": "TEXT",
     "modelled_properties_json": "TEXT",
     "amt_inventory_matched": "INTEGER",
@@ -1221,7 +1222,7 @@ class OpeningStockpileInventories:
             for stream in ("rom", "prod1", "prod2", "prod3")
             for analyte in ("fe", "si", "al", "p", "mn")
         ] + [
-            "grade_streams_json", "grade_stream_warnings_json",
+            "grade_streams_json", "grade_stream_warnings_json", "reconciliation_json",
             *INVENTORY_ADDITIONAL_FIELDS,
         ]
         if "transaction_datetime" not in existing_columns:
@@ -1312,6 +1313,7 @@ class OpeningStockpileInventories:
             audit_values = {
                 **inventory_additional_values(row),
                 **flattened_streams.get(key, {}),
+                "reconciliation_json": json.dumps(row.get("reconciliation") or {}),
             }
             if audit_values:
                 assignments = ", ".join(
@@ -1400,6 +1402,7 @@ class OpeningStockpileInventories:
                     "grade_streams_json": json_payload(
                         value(row, "GRADE_STREAMS", "grade_streams"), dict
                     ),
+                    "reconciliation_json": json_payload(row.get("reconciliation"), dict),
                     "defined_fields_json": defined_fields,
                     "modelled_properties_json": json_payload(
                         value(

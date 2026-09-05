@@ -3,6 +3,7 @@ import json
 import pandas as pd
 import random
 from classes.ReportColumns import balance_triplet_columns
+from classes.ReconciliationApplication import aggregate_reconciliation
 import requests, time, traceback
 import dash
 from dash import dcc, html, Input, Output, dash_table, Dash, State, callback_context
@@ -2837,6 +2838,7 @@ class DrawAMTStockpile:
         weighted_streams = {stream: {} for stream in STREAMS}
         stream_grade_mass = defaultdict(float)
         stream_grade_weight = defaultdict(float)
+        stream_covered_wmt = defaultdict(float)
         stream_brands = defaultdict(set)
         mapped_additive_mass = defaultdict(float)
         mapped_intensive_mass = defaultdict(float)
@@ -2951,6 +2953,10 @@ class DrawAMTStockpile:
                         key = (stream, brand, analyte)
                         stream_grade_mass[key] += grade * weight
                         stream_grade_weight[key] += weight
+                        audit = row.get("reconciliation")
+                        audit = audit if isinstance(audit, dict) else {}
+                        fraction = audit.get("by_brand", {}).get(brand, {}).get("grade_coverage", {}).get(stream, {}).get(analyte, 1.0)
+                        stream_covered_wmt[key] += row_tonnes * min(max(float(fraction), 0.0), 1.0)
             lineage = row.get("grade_block_lineage") or []
             for contribution in lineage if isinstance(lineage, list) else []:
                 key = str((contribution or {}).get("lineage_key") or "")
@@ -3014,8 +3020,18 @@ class DrawAMTStockpile:
             1.0 if total_tonnes > 0 else 0.0
         )
         # Canonical weighted-average fields are the authoritative chunk values.
+        reconciliation = aggregate_reconciliation(
+            [(row.get("reconciliation"), row["_positive_balance"]) for row in chunk_rows],
+            source_id=chunk_id,
+        )
+        for brand, detail in reconciliation.get("by_brand", {}).items():
+            detail["grade_coverage"] = {
+                stream: {a: min(stream_covered_wmt[(stream, brand, a)] / total_tonnes, 1.0)
+                         if total_tonnes > 0 else 0.0 for a in ANALYTES}
+                for stream in ("adjusted_rom", "adjusted_product")
+            }
         weighted_streams = reweight_grade_streams_from_properties(
-            weighted_streams, mapped_properties
+            weighted_streams, mapped_properties, preserve_adjusted=bool(reconciliation)
         )
         product_coverage_parts = []
         product_coverage_warnings = []
@@ -3133,6 +3149,7 @@ class DrawAMTStockpile:
             ),
             "member_hexes": ",".join(str(hex_id) for hex_id in member_hexes),
             "grade_streams": weighted_streams,
+            "reconciliation": reconciliation,
             "defined_fields": {
                 name: mapped_properties.get(name)
                 for name in vars(self).get("source_property_kinds", {})
@@ -3573,6 +3590,10 @@ class DrawAMTStockpile:
             if "grade_streams_json" in data.columns:
                 data["grade_streams"] = data["grade_streams_json"].map(
                     lambda value: decode_json(value, dict)
+                )
+            if "reconciliation_json" in data.columns:
+                data["reconciliation"] = data["reconciliation_json"].map(
+                    lambda value: decode_json(value, dict) or {}
                 )
             if "defined_fields_json" in data.columns:
                 data["defined_fields"] = data[

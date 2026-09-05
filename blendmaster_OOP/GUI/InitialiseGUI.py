@@ -48,6 +48,11 @@ from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
 from setup.DataStreamReconciliation import DataStreamReconciliation
+from setup.ReconciliationHistory import ReconciliationHistory
+from classes.ReconciliationApplication import (
+    ReconciliationApplication, aggregate_reconciliation, amt_reconciliation_lineage,
+    normalise_reconciliation_settings, reconciliation_fingerprint,
+)
 from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
     ANALYTES,
@@ -129,7 +134,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
 AMT_OPENING_CACHE_VERSION = 1
-AMT_CHUNK_RECONCILIATION_VERSION = 1
+AMT_CHUNK_RECONCILIATION_VERSION = 2
 EXPIT_INPUT_CACHE_VERSION = 2
 APS_GUIDANCE_CACHE_VERSION = 1
 
@@ -1363,6 +1368,8 @@ class UserInputs(QMainWindow):
             "historical_recon_warnings": copy.deepcopy(getattr(
                 self, "historical_recon_warnings", []
             )),
+            "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
+            "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
             "data_stream_planning_categories": copy.deepcopy(getattr(
                 self, "data_stream_planning_categories", {}
             )),
@@ -1484,6 +1491,7 @@ class UserInputs(QMainWindow):
             "aps_source_property_field_mappings",
             "cb_lump_fines_mode", "cb_lump_percentage",
             "historical_recon_factors", "historical_recon_warnings",
+            "reconciliation_settings", "reconciliation_inputs",
             "data_stream_planning_categories",
             "auto_load_2wp_targets_choice",
             "group_2wp_build_targets_by_brand_choice",
@@ -1805,6 +1813,8 @@ class UserInputs(QMainWindow):
             self.historical_recon_warnings = copy.deepcopy(
                 state.get("historical_recon_warnings") or []
             )
+            self.reconciliation_settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
+            self.reconciliation_inputs = copy.deepcopy(state.get("reconciliation_inputs") or {})
             self.data_stream_planning_categories = normalise_planning_categories(
                 state.get("data_stream_planning_categories")
             )
@@ -8306,9 +8316,11 @@ class UserInputs(QMainWindow):
                 key = f"{stream}_{analyte}"
                 if key in field_names:
                     defined[key] = value
+                    record[key] = value
                     if value is not None:
-                        record[key] = value
                         properties[key] = value
+                    else:
+                        properties.pop(key, None)
         record["defined_fields"] = defined
         record["source_properties"] = properties
 
@@ -9177,9 +9189,117 @@ class UserInputs(QMainWindow):
             or DEFAULT_PLANNING_CATEGORIES["rom"]
         ).strip()
 
+    def reconciliation_inventory_builds(self):
+        if normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))["method"] == "standard":
+            return []
+        return sorted({
+            str(row.get("build") or row.get("BUILD") or "").strip().upper()
+            for row in (vars(self).get("updated_stockpile_data") or {}).values()
+            if not bool(row.get("amt", row.get("AMT", False)))
+            and str(row.get("build") or row.get("BUILD") or "").strip()
+        })
+
+    def fetch_advanced_reconciliation_inputs(self):
+        """Bulk reads run in the existing Data Streams background worker."""
+        settings = normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))
+        if settings["method"] == "standard":
+            return {}
+        result = {"samples": [], "inventory_lineage": {}, "warnings": []}
+        service = ReconciliationHistory(self.data_stream_reconciliation.inventory_loader)
+        try:
+            result["samples"], warnings = service.fetch(
+                self.start_time_choice, self.opf_input_choice, self.product_brand_labels_choice,
+                max_lookback_days=settings["max_lookback_days"],
+            )
+            result["warnings"].extend(warnings)
+        except Exception as exc:
+            result["warnings"].append(f"Advanced history unavailable; using standard global factors. {exc}")
+        try:
+            records, warnings = service.fetch_inventory_lineage(
+                self.start_time_choice, self.reconciliation_inventory_builds(),
+            )
+            result["inventory_lineage"] = {r["build"]: r for r in records}
+            result["warnings"].extend(warnings)
+        except Exception as exc:
+            result["warnings"].append(f"Inventory lineage unavailable; using standard global factors. {exc}")
+        return result
+
+    def reconciliation_application(self):
+        state = vars(self)
+        settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
+        if settings["method"] == "standard":
+            return None
+        inputs = state.get("reconciliation_inputs") or {}
+        arguments = dict(samples=inputs.get("samples", []),
+                         standard_factors=state.get("historical_recon_factors", {}),
+                         opf=state.get("opf_input_choice"), brands=state.get("product_brand_labels_choice"),
+                         scenario_start=state.get("start_time_choice"), settings=settings)
+        signature = reconciliation_fingerprint(arguments)
+        cache = state.get("_reconciliation_application_cache")
+        if not cache or cache[0] != signature:
+            cache = (signature, ReconciliationApplication(**arguments))
+            self._reconciliation_application_cache = cache
+        return cache[1]
+
+    def apply_source_reconciliation(self, application, row, streams, source_id, source_kind):
+        if application is None:
+            row.pop("reconciliation", None)
+            return streams
+        if source_kind == "amt":
+            blocks, warnings = amt_reconciliation_lineage(row)
+            total = numeric(row.get("FINAL_WMT", row.get("balance")))
+            hex_id = row.get("HEX", row.get("hex"))
+        else:
+            build = str(row.get("build") or row.get("BUILD") or "").strip().upper()
+            lineage = (vars(self).get("reconciliation_inputs") or {}).get("inventory_lineage", {}).get(build, {})
+            # Exact build identity is required; never match a footprint to an old build.
+            blocks = lineage.get("contributing_blocks", [])
+            total = numeric(row.get("balance", row.get("BALANCE", row.get("BALANCE_WMT"))))
+            reference_wmt = numeric(lineage.get("inventory_wmt"))
+            if reference_wmt is not None and reference_wmt > 0 and total is not None and total > 0:
+                blocks = [{**b, "feed_wmt": b["feed_wmt"] * total / reference_wmt} for b in blocks]
+            warnings = list(lineage.get("warnings", []))
+            hex_id = None
+        raw_fields = {str(k).lower(): v for k, v in flatten_available_source_fields(row).items()}
+        mappings = mapping_lookup(vars(self).get("field_mappings"), source_kind)
+        grade_coverage = {}
+        for stream in ("modelled_rom", "modelled_product"):
+            grade_coverage[stream] = {}
+            for analyte in ANALYTES:
+                source = str(mappings.get(f"{stream}_{analyte}") or "").lower()
+                coverage = numeric(raw_fields.get(f"{source}_coverage_pct"))
+                if coverage is None:
+                    coverage = numeric(raw_fields.get(f"modelled_{source}_coverage_pct"))
+                if coverage is not None:
+                    grade_coverage[stream][analyte] = coverage / 100.0
+        streams, audit = application.apply(
+            streams, source_id=source_id, source_kind=source_kind,
+            source_wmt=max(total or 0.0, 0.0), contributing_blocks=blocks, hex_id=hex_id,
+            warnings=warnings, grade_coverage=grade_coverage,
+        )
+        row["reconciliation"] = audit
+        return streams
+
+    def overall_reconciliation_confidence(self):
+        """Current selected inventory and AMT chunk confidence, once per source."""
+        selected = vars(self).get("updated_stockpile_data") or {}
+        sources = [(row.get("reconciliation"), max(numeric(row.get("balance", row.get("BALANCE"))) or 0.0, 0.0))
+                   for row in selected.values() if not row.get("amt", row.get("AMT", False))]
+        amt_names = {name for name, row in selected.items() if row.get("amt", row.get("AMT", False))}
+        chunks = vars(self).get("hex_sequence_table") or []
+        chunked_names = {c.get("footprint") for c in chunks}
+        sources.extend((c.get("reconciliation"), max(numeric(c.get("balance")) or 0.0, 0.0))
+                       for c in chunks if c.get("footprint") in amt_names)
+        sources.extend((row.get("reconciliation"), max(numeric(row.get("FINAL_WMT")) or 0.0, 0.0))
+                       for name, rows in (vars(self).get("AMT_stockpile_data") or {}).items()
+                       if name in amt_names and name not in chunked_names for row in rows)
+        return aggregate_reconciliation(sources, source_kind="overall")
+
     def data_stream_input_request_signature(self):
         """Identify the Snowflake inputs that determine recon and 2WP data."""
         payload = {
+            "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
+            "reconciliation_inventory_builds": self.reconciliation_inventory_builds(),
             "start_time": self.start_time_choice,
             "mine": self.mine_input_choice,
             "opf": self.opf_input_choice,
@@ -9277,6 +9397,8 @@ class UserInputs(QMainWindow):
                 self.product_brand_labels_choice,
                 f"Snowflake reconciliation unavailable; factors defaulted to 1.0. {exc}",
             )
+        reconciliation_inputs = self.fetch_advanced_reconciliation_inputs()
+        warnings.extend(reconciliation_inputs.get("warnings", []))
         build_targets = {crusher: [] for crusher in self.selected_site_crushers}
         target_errors = {}
         if self.auto_load_2wp_targets_choice:
@@ -9308,6 +9430,7 @@ class UserInputs(QMainWindow):
                     target_errors[crusher] = str(exc)
         return {
             "factors": factors,
+            "reconciliation_inputs": reconciliation_inputs,
             "warnings": warnings,
             "build_targets": build_targets,
             "target_errors": target_errors,
@@ -9326,6 +9449,7 @@ class UserInputs(QMainWindow):
         self.finish_data_stream_inputs(copy.deepcopy(result or {}))
 
     def finish_data_stream_inputs(self, result):
+        self.reconciliation_inputs = copy.deepcopy(result.get("reconciliation_inputs") or {})
         self.historical_recon_factors = copy.deepcopy(result.get("factors", {}))
         for (brand, factor_type, analyte), effective in getattr(
             self, "data_stream_effective_overrides", {}
@@ -9737,13 +9861,14 @@ class UserInputs(QMainWindow):
             )
             for analyte in ANALYTES
         }
-        streams.setdefault("adjusted_product", {})["SF"] = {
-            analyte: (
-                numeric(modelled.get(analyte)) * regression[analyte]
-                if numeric(modelled.get(analyte)) is not None else None
-            )
-            for analyte in ANALYTES
-        }
+        if not (chunk.get("reconciliation") or {}).get("by_brand", {}).get("SF"):
+            streams.setdefault("adjusted_product", {})["SF"] = {
+                analyte: (
+                    numeric(modelled.get(analyte)) * regression[analyte]
+                    if numeric(modelled.get(analyte)) is not None else None
+                )
+                for analyte in ANALYTES
+            }
         chunk["grade_streams"] = streams
         chunk["GRADE_STREAMS"] = streams
 
@@ -9853,6 +9978,7 @@ class UserInputs(QMainWindow):
         return chunks
 
     def apply_grade_streams_to_inventory(self):
+        application = self.reconciliation_application()
         source_prefixes = tuple(
             f"{name}:" for name in (self.stockpile_data or {})
         )
@@ -9906,10 +10032,12 @@ class UserInputs(QMainWindow):
                 self.opf_input_choice,
                 strict_mappings=True,
             )
+            streams = self.apply_source_reconciliation(application, row, streams, name, "inventory")
             row["GRADE_STREAMS"] = streams
             row["grade_streams"] = streams
             self.sync_canonical_grade_fields(row, streams)
             warnings = self.inventory_stream_warnings(name, row)
+            warnings.extend(f"{name}: {w}" for w in row.get("reconciliation", {}).get("warnings", []))
             if apply_calculated_split:
                 cb_warning = self.apply_cb_split_to_inventory_row(
                     row, source_name=name
@@ -12597,6 +12725,8 @@ class UserInputs(QMainWindow):
         self.AMT_chunk_settings = {}
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
+        self.reconciliation_inputs = {}
+        self._reconciliation_application_cache = None
         self.data_stream_source_warnings = {}
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}
@@ -17639,6 +17769,11 @@ class UserInputs(QMainWindow):
         # lightweight non-window objects used by reconciliation tests.
         state = vars(self)
         payload = {
+            "reconciliation": reconciliation_fingerprint({
+                "settings": state.get("reconciliation_settings"),
+                "inputs": state.get("reconciliation_inputs"),
+                "scenario_start": state.get("start_time_choice"),
+            }),
             "opening_snapshot": str(
                 state.get("AMT_data_request_signature", "") or ""
             ),
@@ -18310,7 +18445,9 @@ class UserInputs(QMainWindow):
 
     def enrich_AMT_grade_streams(self, data_source, amt_data):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
+        application = self.reconciliation_application()
         enriched = copy.deepcopy(amt_data or {})
+        enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
@@ -18322,10 +18459,9 @@ class UserInputs(QMainWindow):
                     "amt",
                 )
                 row["defined_fields"] = canonical
-                row.update({
-                    key: value for key, value in canonical.items()
-                    if value is not None
-                })
+                # Clearing a mapping must also clear a previous enrichment's
+                # baseline; otherwise advanced refresh can reuse a stale grade.
+                row.update(canonical)
                 source_properties = {
                     key: value for key, value in canonical.items()
                     if value is not None
@@ -18350,12 +18486,15 @@ class UserInputs(QMainWindow):
                 )
                 streams = amt_grade_streams(
                     insitu,
-                    row,
+                    row if strict_mappings else {**raw_amt_fields, **row},
                     self.product_brand_labels_choice,
                     self.historical_recon_factors,
                     self.opf_input_choice,
                     strict_mappings=strict_mappings,
                 )
+                streams = self.apply_source_reconciliation(application, row, streams, footprint, "amt")
+                if application:
+                    row["reconciliation"]["enrichment_signature"] = enrichment_signature
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
                 self.sync_canonical_grade_fields(row, streams)
@@ -18397,6 +18536,7 @@ class UserInputs(QMainWindow):
                 row["AMT_INVENTORY_MATCH_RULE"] = match_rule
                 lineage_warning = str(row.get("LINEAGE_WARNING") or "").strip()
                 source_warnings = [lineage_warning] if lineage_warning else []
+                source_warnings.extend(row.get("reconciliation", {}).get("warnings", []))
                 if cb_split_warning:
                     source_warnings.append(cb_split_warning)
                 product_slot = amt_modelled_product_slot(self.opf_input_choice)
@@ -18507,6 +18647,8 @@ class UserInputs(QMainWindow):
 
         factors = getattr(self, "historical_recon_factors", None)
         opf = getattr(self, "opf_input_choice", None)
+        application = self.reconciliation_application()
+        enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
         refreshed = 0
 
         def first_vector(brand_map, brand=None):
@@ -18533,6 +18675,11 @@ class UserInputs(QMainWindow):
                     or chunk.get("GRADE_STREAMS")
                 )
                 if not isinstance(raw_streams, dict):
+                    continue
+                audit = chunk.get("reconciliation") or {}
+                if application and audit.get("enrichment_signature") == enrichment_signature:
+                    # Current member-hex grades already carry the advanced
+                    # adjustments. A global chunk factor would erase them.
                     continue
                 streams = normalise_grade_streams(raw_streams)
                 rom_by_brand = streams.setdefault("modelled_rom", {})
@@ -18588,6 +18735,18 @@ class UserInputs(QMainWindow):
                         for analyte in ANALYTES
                     }
 
+                if application:
+                    streams, audit = application.apply(
+                        streams, source_id=str(chunk.get("hex") or chunk.get("footprint") or ""),
+                        source_kind="amt", source_wmt=max(numeric(chunk.get("balance")) or 0.0, 0.0),
+                        contributing_blocks=[], warnings=[
+                            "Current member-hex reconciliation is unavailable; this chunk uses global factors."
+                        ],
+                    )
+                    audit["source_kind"] = "amt_chunk"
+                    chunk["reconciliation"] = audit
+                else:
+                    chunk.pop("reconciliation", None)
                 chunk["grade_streams"] = streams
                 chunk["GRADE_STREAMS"] = streams
                 refreshed += 1
@@ -25010,6 +25169,8 @@ class UserInputs(QMainWindow):
                 "cb_lump_percentage": self.cb_lump_percentage,
                 "historical_recon_factors": self.historical_recon_factors,
                 "historical_recon_warnings": self.historical_recon_warnings,
+                "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
+                "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
                 "data_stream_planning_categories": self.data_stream_planning_categories,
                 "product_build_settings": self.product_build_settings,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
@@ -25457,6 +25618,8 @@ class UserInputs(QMainWindow):
         self.historical_recon_warnings = list(
             loaded_state.get("historical_recon_warnings") or []
         )
+        self.reconciliation_settings = normalise_reconciliation_settings(loaded_state.get("reconciliation_settings"))
+        self.reconciliation_inputs = copy.deepcopy(loaded_state.get("reconciliation_inputs") or {})
         self.data_stream_planning_categories = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
         )
@@ -25835,6 +25998,9 @@ class UserInputs(QMainWindow):
         self.cb_lump_percentage = 50.0
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
+        self.reconciliation_settings = normalise_reconciliation_settings()
+        self.reconciliation_inputs = {}
+        self._reconciliation_application_cache = None
         self.data_stream_planning_categories = normalise_planning_categories()
         self.data_stream_pending_build_targets = {}
         self.data_stream_target_errors = {}

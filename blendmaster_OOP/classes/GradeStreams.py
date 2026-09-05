@@ -767,7 +767,7 @@ def weighted_merge_grade_streams(
     return result
 
 
-def reweight_grade_streams_from_properties(streams: Any, properties: Any):
+def reweight_grade_streams_from_properties(streams: Any, properties: Any, *, preserve_adjusted=False):
     """Overlay canonical weighted stream fields while preserving brand factors.
 
     Canonical modelled fields may use a product-mass basis that differs from
@@ -777,6 +777,9 @@ def reweight_grade_streams_from_properties(streams: Any, properties: Any):
     adjustment ratio.
     """
     result = normalise_grade_streams(streams)
+    adjusted_snapshot = ({name: copy.deepcopy(result.get(name, {}))
+                          for name in ("adjusted_rom", "adjusted_product")}
+                         if preserve_adjusted else {})
     properties = properties if isinstance(properties, Mapping) else {}
     values = {str(key).strip().lower(): value for key, value in properties.items()}
     for analyte in ANALYTES:
@@ -821,6 +824,10 @@ def reweight_grade_streams_from_properties(streams: Any, properties: Any):
             modelled[analyte] = product_value
             if old_model not in (None, 0.0) and old_adjusted is not None:
                 adjusted[analyte] = product_value * old_adjusted / old_model
+    if preserve_adjusted:
+        # Advanced grades were already aggregated using their declared field
+        # weights. A new ratio to a reweighted modelled value would change them.
+        result.update(adjusted_snapshot)
     return result
 
 
