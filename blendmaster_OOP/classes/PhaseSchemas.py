@@ -274,6 +274,7 @@ def resolved_factor(
     confidence_percent: Any = None,
     uncertainty_percent: Any = None,
     manual_override: Any = False,
+    provenance: Optional[Mapping] = None,
 ) -> Dict[str, Any]:
     """Return one resolved factor set at source/hex/lineage grain.
 
@@ -281,6 +282,8 @@ def resolved_factor(
     best spatial level to be selected once, after which every analyte and both
     factor kinds are resolved at that level. ``source_history`` contains the
     sample references or audit summaries that contributed to the result.
+    ``provenance`` is an optional v1 extension (default empty mapping) for
+    resolver configuration, per-factor evidence and confidence methodology.
     """
     spatial_key = [
         _clean(token) for token in (matched_spatial_key or []) if _clean(token)
@@ -311,6 +314,7 @@ def resolved_factor(
         "confidence_percent": _optional_number(confidence_percent),
         "uncertainty_percent": _optional_number(uncertainty_percent),
         "manual_override": bool(manual_override),
+        "provenance": _mapping(provenance),
     }
 
 
