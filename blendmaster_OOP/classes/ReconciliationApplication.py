@@ -13,30 +13,15 @@ from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
     normalise_grade_streams, normalise_opf,
 )
-from classes.PhaseSchemas import FACTOR_METHODS
+from classes.ReconciliationControls import normalise_reconciliation_settings, resolution_levels
 from classes.ReconciliationFactorResolver import (
-    CONFIDENCE_METHOD, ReconciliationFactorResolver, WINDOW_MODES,
+    CONFIDENCE_METHOD, ReconciliationFactorResolver,
     aggregate_source_confidence,
 )
 from setup.InventoryBuildLineage import canonical_block, clean_text, finite_number
 
 
 APPLICATION_VERSION = 1
-
-
-def normalise_reconciliation_settings(settings=None):
-    settings = dict(settings or {})
-    result = {"method": settings.get("method", "standard"),
-              "window_mode": settings.get("window_mode", "calendar_days")}
-    if result["method"] not in FACTOR_METHODS or result["window_mode"] not in WINDOW_MODES:
-        raise ValueError("Unsupported reconciliation method or lookback mode.")
-    for name, default in (("max_lookback_days", 30), ("min_production_days", 1), ("lookback_days", 7)):
-        raw = settings.get(name, default)
-        value = finite_number(raw)
-        if isinstance(raw, bool) or value is None or value < 1 or not value.is_integer():
-            raise ValueError(f"{name} must be a positive whole number.")
-        result[name] = int(value)
-    return result
 
 
 def reconciliation_fingerprint(value):
@@ -112,9 +97,14 @@ class ReconciliationApplication:
             global_fraction = math.fsum(r["lineage_fraction"] for r in records if r["resolution_level"] == "global")
             resolved["applied_factors"] = applied
             resolved["global_fraction"] = min(global_fraction, 1.0)
+            resolved["manual_override_fraction"] = min(math.fsum(
+                r["lineage_fraction"] for r in records if r.get("manual_override")), 1.0)
             resolved["spatial_fraction"] = max(1.0 - global_fraction, 0.0) if total > 0 else 0.0
+            if total > 0 and resolved["lineage_coverage"] < 1 - 1e-9:
+                audit["warnings"].append(f"{brand}: {1 - resolved['lineage_coverage']:.2%} of source WMT has no usable grade-block lineage; that fraction retains global factors.")
             if global_fraction > 0:
-                audit["warnings"].append(f"{brand}: {global_fraction:.2%} of source WMT uses standard global factors.")
+                share = "<0.01%" if global_fraction < .0001 else f"{global_fraction:.2%}"
+                audit["warnings"].append(f"{brand}: {share} of source WMT has global fallback evidence; local edits, if any, are shown separately.")
             # A zero-mass source has no adjustment contribution. Do not change its
             # stored grade values or infer a positive physical balance.
             if total > 0:
@@ -170,20 +160,22 @@ def aggregate_reconciliation(sources, *, source_id="", source_kind="amt_chunk"):
     signatures = {a.get("enrichment_signature", "") for a in present}
     result["enrichment_signature"] = next(iter(signatures)) if len(signatures) == 1 else ""
     for brand in sorted({b for a in present for b in a["by_brand"]}):
-        members, global_wmt, lineage_wmt = [], 0.0, 0.0
+        members, global_wmt, lineage_wmt, manual_wmt = [], 0.0, 0.0, 0.0
         for audit, raw_wmt in sources:
             wmt = max(finite_number(raw_wmt) or 0.0, 0.0)
             audit = audit if isinstance(audit, dict) else {}
             detail = audit.get("by_brand", {}).get(brand, {})
             members.append({"source_id": audit.get("source_id", ""), "hex_id": audit.get("hex_id", ""),
                             "source_wmt": wmt, "confidence_percent": detail.get("confidence_percent"),
-                            "resolution_levels": sorted({r["resolution_level"] for r in detail.get("records", [])})})
+                            "resolution_levels": resolution_levels(detail)})
             global_wmt += wmt * detail.get("global_fraction", 1.0)
             lineage_wmt += wmt * detail.get("lineage_coverage", 0.0)
+            manual_wmt += wmt * detail.get("manual_override_fraction", 0.0)
         result["by_brand"][brand] = {
             **aggregate_source_confidence(members), "members": members,
             "global_fraction": min(global_wmt / total, 1.0) if total else 0.0,
             "lineage_coverage": min(lineage_wmt / total, 1.0) if total else 0.0,
+            "manual_override_fraction": min(manual_wmt / total, 1.0) if total else 0.0,
             "grade_coverage": {
                 stream: {a: math.fsum(
                     max(finite_number(wmt) or 0.0, 0.0) *

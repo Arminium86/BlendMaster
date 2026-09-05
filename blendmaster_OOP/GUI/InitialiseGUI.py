@@ -41,6 +41,7 @@ from classes.ExpitSequenceReconciler import (
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ReportColumns import balance_triplet_columns, order_balance_triplets
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
 from GUI.ManualSteadyStateDialog import ManualSteadyStateDialog
@@ -53,6 +54,8 @@ from classes.ReconciliationApplication import (
     ReconciliationApplication, aggregate_reconciliation, amt_reconciliation_lineage,
     normalise_reconciliation_settings, reconciliation_fingerprint,
 )
+from classes.ReconciliationControls import required_history_days, reconciliation_columns
+from GUI.ReconciliationReview import ReconciliationReview
 from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
     ANALYTES,
@@ -5519,6 +5522,8 @@ class UserInputs(QMainWindow):
         # differ by brand.
         source_type = str(record.get("source_type") or "").strip().lower()
         if "stockpile" in source_type or source_type.startswith("amt chunk"):
+            record.update(reconciliation_columns(record.get("reconciliation") or fallback.get("reconciliation")))
+        if "stockpile" in source_type or source_type.startswith("amt chunk"):
             # Inventory and AMT ROM WMT is their physical opening balance.
             # This direct value also repairs legacy saved chunks containing a
             # footprint-level mapped ROM quantity in modelled_properties.
@@ -5640,6 +5645,8 @@ class UserInputs(QMainWindow):
         if isinstance(source_warnings, str):
             source_warnings = [source_warnings]
         warnings = [str(value) for value in (source_warnings or []) if str(value)]
+        if "stockpile" in source_type or source_type.startswith("amt chunk"):
+            warnings.extend((record.get("reconciliation") or fallback.get("reconciliation") or {}).get("warnings", []))
         analyte_labels = {
             "fe": "Fe", "si": "Si", "al": "Al", "p": "P", "mn": "Mn"
         }
@@ -6732,6 +6739,7 @@ class UserInputs(QMainWindow):
         name = str(header or "").strip().lower()
         return bool(
             cls.database_view_is_coverage_field(name)
+            or name.startswith("recon_")
             or "lineage" in name
             or name == "grade_block_count"
         )
@@ -6773,6 +6781,7 @@ class UserInputs(QMainWindow):
             header for header in headers
             if (
                 header in identity
+                or header.startswith("recon_")
                 or header in {"modelled_rom_wmt", "modelled_rom_dmt"}
                 or header.startswith("insitu_")
                 or header.startswith(f"{getattr(self, 'selected_data_stream', '')}_")
@@ -8655,7 +8664,16 @@ class UserInputs(QMainWindow):
         property_mapping_help.hide()
         self.aps_source_property_mapping_table.hide()
 
-        factor_label = QLabel("Historical OPF Reconciliation Factors")
+        self.reconciliation_review = ReconciliationReview()
+        self.reconciliation_review.set_context(
+            vars(self).get("reconciliation_settings"), vars(self).get("opf_input_choice"),
+            configured_brands(vars(self).get("product_brand_labels_choice")),
+        )
+        self.reconciliation_review.settingsChanged.connect(self.reconciliation_controls_changed)
+        self.reconciliation_review.reviewRequested.connect(self.prepare_data_streams)
+        layout.addWidget(self.reconciliation_review)
+
+        factor_label = QLabel("Standard Global Factors · Advanced Fallback")
         factor_label.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(factor_label)
         factor_help = QLabel(
@@ -8674,6 +8692,7 @@ class UserInputs(QMainWindow):
         self.recon_factor_table.verticalHeader().setVisible(False)
         self.recon_factor_table.setMinimumHeight(230)
         self.recon_factor_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.recon_factor_table.itemChanged.connect(self.reconciliation_global_factor_changed)
         layout.addWidget(self.recon_factor_table)
 
         self.data_stream_warning_label = QLabel("")
@@ -8686,7 +8705,7 @@ class UserInputs(QMainWindow):
 
         button_row = QHBoxLayout()
         self.refresh_data_streams_button = QPushButton("Refresh Snowflake Factors")
-        self.refresh_data_streams_button.clicked.connect(self.prepare_data_streams)
+        self.refresh_data_streams_button.clicked.connect(self.refresh_reconciliation_history)
         self.data_streams_submit_button = QPushButton("Submit")
         self.data_streams_submit_button.setEnabled(False)
         self.data_streams_submit_button.clicked.connect(self.handle_data_streams_submit)
@@ -9089,6 +9108,7 @@ class UserInputs(QMainWindow):
 
     def populate_recon_factor_table(self):
         table = self.recon_factor_table
+        table.blockSignals(True)
         factors = self.historical_recon_factors or {}
         factor_rows = []
         for brand in configured_brands(self.product_brand_labels_choice):
@@ -9144,12 +9164,110 @@ class UserInputs(QMainWindow):
                 table.setItem(row, 4 + analyte_index * 2, calc_item)
                 effective_item = QTableWidgetItem(f"{effective:.4f}")
                 effective_item.setData(Qt.UserRole, (brand, factor_type, analyte))
+                effective_item.setData(Qt.UserRole + 1, effective_item.text())
+                effective_item.setData(Qt.UserRole + 2, effective)
                 locked = bool(value_record.get("locked", False))
                 if locked:
                     effective_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     effective_item.setToolTip("Dry-plant regression is fixed at 1.0.")
                 table.setItem(row, 5 + analyte_index * 2, effective_item)
             row += 1
+        table.blockSignals(False)
+        review = vars(self).get("reconciliation_review")
+        if review is not None:
+            review.set_context(vars(self).get("reconciliation_settings"), self.opf_input_choice,
+                               configured_brands(self.product_brand_labels_choice))
+            self.data_streams_submit_button.setEnabled(False)
+
+    def reconciliation_controls_changed(self, settings):
+        self.reconciliation_settings = normalise_reconciliation_settings(settings)
+        self._reconciliation_application_cache = None
+        self._reconciliation_review_signature = ""
+        self.data_streams_submit_button.setEnabled(False)
+        self.reconciliation_review.set_busy(False)
+
+    def reconciliation_global_factor_changed(self, item):
+        if item.data(Qt.UserRole):
+            self._reconciliation_review_signature = ""
+            self.data_streams_submit_button.setEnabled(False)
+            self.reconciliation_review.mark_stale("Global factors edited. Calculate review before submitting.")
+
+    def refresh_reconciliation_history(self, _checked=False):
+        self.data_stream_input_cache_signature = ""
+        self.data_stream_input_cache_result = {}
+        self.prepare_data_streams()
+
+    def reconciliation_review_signature(self):
+        state = vars(self)
+        return reconciliation_fingerprint({name: state.get(name) for name in (
+            "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
+            "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
+            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table")})
+
+    def calculate_reconciliation_review(self):
+        """Preview evidence on copies; do not persist grades or alter AMT chunks."""
+        application = self.reconciliation_application()
+        if application is None:
+            return [], {}, []
+        state, audits, warnings = vars(self), [], []
+        selected = state.get("updated_stockpile_data") or {}
+        def resolve(row, name, kind):
+            row = copy.deepcopy(row)
+            self.apply_source_reconciliation(application, row, row.get("grade_streams") or {}, name, kind)
+            return row["reconciliation"]
+        for name, row in selected.items():
+            if not row.get("amt", row.get("AMT", False)):
+                audit = resolve(row, name, "inventory")
+                audit["review_label"] = f"Inventory · {name} · {row.get('build', '')}"
+                audits.append(audit)
+                continue
+            hexes = {str(r.get("HEX", r.get("hex", ""))): resolve(r, name, "amt")
+                     for r in (state.get("AMT_stockpile_data") or {}).get(name, [])
+                     if (numeric(r.get("FINAL_WMT", r.get("balance"))) or 0) > 0}
+            chunks = [c for c in state.get("hex_sequence_table", []) or [] if c.get("footprint") == name]
+            if not chunks:
+                children = list(hexes.values())
+                if not children:
+                    children = [resolve({"FINAL_WMT": max(numeric(row.get("balance")) or 0, 0)}, name, "amt")]
+                    warnings.append(f"{name}: AMT hexes are not loaded; confidence is unscored and global fallback is shown.")
+                audit = aggregate_reconciliation([(a, a["source_wmt"]) for a in children], source_id=name, source_kind="amt_footprint_preview")
+                audit.update(review_label=f"AMT · {name} · before chunking", review_children=children)
+                audits.append(audit)
+            for chunk in chunks:
+                members = chunk.get("member_hexes") or []
+                if isinstance(members, str):
+                    members = [v.strip() for v in members.split(",") if v.strip()]
+                children = [hexes[str(h)] for h in dict.fromkeys(members) if str(h) in hexes]
+                total = max(numeric(chunk.get("balance")) or 0, 0)
+                if not math.isclose(sum(a["source_wmt"] for a in children), total, rel_tol=1e-6, abs_tol=.001):
+                    children = [resolve({"FINAL_WMT": total}, name, "amt")]
+                    warnings.append(f"{name} chunk {chunk.get('sequence')}: current member hexes do not match chunk WMT; global fallback shown. Refresh AMT chunks.")
+                audit = aggregate_reconciliation([(a, a["source_wmt"]) for a in children], source_id=name, source_kind="amt_chunk")
+                audit.update(review_label=f"AMT chunk · {name} · {chunk.get('sequence', '')}", review_children=children)
+                audits.append(audit)
+        for audit in audits:
+            warnings.extend(audit.get("warnings", []))
+        for resolver in application.resolvers.values():
+            warnings.extend(resolver.history_warnings)
+        overall = aggregate_reconciliation([(a, a.get("source_wmt", 0)) for a in audits], source_kind="overall")
+        return audits, overall, list(dict.fromkeys(warnings))
+
+    def update_reconciliation_review(self):
+        review = vars(self).get("reconciliation_review")
+        if review is None:
+            return []
+        review.set_busy(False)
+        try:
+            audits, overall, warnings = self.calculate_reconciliation_review()
+        except (ValueError, TypeError) as exc:
+            review.mark_stale(f"Review could not be calculated: {exc}")
+            self._reconciliation_review_signature = ""
+            self.data_streams_submit_button.setEnabled(False)
+            return [f"Reconciliation review: {exc}"]
+        review.set_review(audits, overall, warnings)
+        self._reconciliation_review_signature = self.reconciliation_review_signature()
+        self.data_streams_submit_button.setEnabled(True)
+        return warnings
 
     def capture_recon_factor_table(self):
         for row in range(self.recon_factor_table.rowCount()):
@@ -9164,6 +9282,10 @@ class UserInputs(QMainWindow):
                 value_record = self.historical_recon_factors[brand][factor_type][analyte]
                 if value_record.get("locked"):
                     value_record["effective"] = 1.0
+                    continue
+                if item.text() == item.data(Qt.UserRole + 1):
+                    # Display rounding is not a manual factor edit.
+                    value_record["effective"] = item.data(Qt.UserRole + 2)
                     continue
                 try:
                     value = float(item.text())
@@ -9209,7 +9331,8 @@ class UserInputs(QMainWindow):
         try:
             result["samples"], warnings = service.fetch(
                 self.start_time_choice, self.opf_input_choice, self.product_brand_labels_choice,
-                max_lookback_days=settings["max_lookback_days"],
+                max_lookback_days=required_history_days(settings, self.opf_input_choice,
+                                                       configured_brands(self.product_brand_labels_choice)),
             )
             result["warnings"].extend(warnings)
         except Exception as exc:
@@ -9298,7 +9421,11 @@ class UserInputs(QMainWindow):
     def data_stream_input_request_signature(self):
         """Identify the Snowflake inputs that determine recon and 2WP data."""
         payload = {
-            "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
+            "reconciliation_history": {
+                "advanced": normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))["method"] != "standard",
+                "max_days": required_history_days(vars(self).get("reconciliation_settings"), self.opf_input_choice,
+                                                   configured_brands(self.product_brand_labels_choice)),
+            },
             "reconciliation_inventory_builds": self.reconciliation_inventory_builds(),
             "start_time": self.start_time_choice,
             "mine": self.mine_input_choice,
@@ -9373,9 +9500,12 @@ class UserInputs(QMainWindow):
             return
         self.data_stream_input_request_inflight = request_signature
         self.data_streams_submit_button.setEnabled(False)
+        review = vars(self).get("reconciliation_review")
+        if review is not None:
+            review.set_busy(True)
         self.run_background_task(
             "Calculating OPF blend and regression reconciliation factors...",
-            self.fetch_data_stream_inputs,
+            self.data_stream_fetch_snapshot(),
             lambda result: self.finish_cached_data_stream_inputs(
                 request_signature, result
             ),
@@ -9383,6 +9513,23 @@ class UserInputs(QMainWindow):
                 error_message, request_signature
             ),
         )
+
+    def data_stream_fetch_snapshot(self):
+        """Freeze the warehouse context before dispatch; workers never read changing widgets/state."""
+        names = ("start_time_choice", "opf_input_choice", "product_brand_labels_choice",
+                 "mine_input_choice", "selected_site_crushers", "crusher_contribution_ratio_choice",
+                 "auto_load_2wp_targets_choice", "group_2wp_build_targets_by_brand_choice",
+                 "byproducts_enabled", "reconciliation_settings")
+        context = SimpleNamespace(**{name: copy.deepcopy(vars(self).get(name)) for name in names})
+        context.data_stream_reconciliation = self.data_stream_reconciliation
+        context.planning_plan_targets = self.planning_plan_targets
+        builds = self.reconciliation_inventory_builds()
+        periods, category = self.planning_period_count(), self.selected_planning_category()
+        context.reconciliation_inventory_builds = lambda: builds
+        context.planning_period_count = lambda: periods
+        context.selected_planning_category = lambda: category
+        context.fetch_advanced_reconciliation_inputs = lambda: UserInputs.fetch_advanced_reconciliation_inputs(context)
+        return lambda: UserInputs.fetch_data_stream_inputs(context)
 
     def fetch_data_stream_inputs(self):
         try:
@@ -9470,6 +9617,7 @@ class UserInputs(QMainWindow):
         )
         self.populate_recon_factor_table()
         display_warnings = list(self.historical_recon_warnings)
+        display_warnings.extend(self.update_reconciliation_review())
         display_warnings.extend(self.aps_grade_mapping_warnings())
         display_warnings.extend(
             f"2WP targets ({crusher}): {message}"
@@ -9478,7 +9626,8 @@ class UserInputs(QMainWindow):
         warning_text = "\n".join(display_warnings)
         self.data_stream_warning_label.setText(warning_text)
         self.data_stream_warning_label.setVisible(bool(warning_text))
-        self.data_streams_submit_button.setEnabled(True)
+        if vars(self).get("reconciliation_review") is None:
+            self.data_streams_submit_button.setEnabled(True)
         if getattr(self, "agent_workflow_after_data_streams", False):
             self.agent_workflow_after_data_streams = False
             self.agent_workflow_after_site_config = False
@@ -10127,6 +10276,11 @@ class UserInputs(QMainWindow):
         return messages
 
     def handle_data_streams_submit(self):
+        if vars(self).get("reconciliation_review") is not None:
+            self.capture_recon_factor_table()
+            if vars(self).get("_reconciliation_review_signature") != self.reconciliation_review_signature():
+                self.prepare_data_streams()
+                return
         self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
         self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
         self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"

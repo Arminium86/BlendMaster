@@ -15,6 +15,7 @@ import re
 import pandas as pd
 
 from classes.GradeStreams import normalise_opf
+from classes.ReconciliationControls import normalise_reconciliation_settings, spatial_cell
 from classes.PhaseSchemas import (
     FACTOR_LEVELS, FACTOR_LEVEL_GLOBAL, FACTOR_METHODS,
     FACTOR_METHOD_LOOKBACK, FACTOR_METHOD_SPATIAL_COMPOSITIONAL,
@@ -113,7 +114,7 @@ class ReconciliationFactorResolver:
     def __init__(self, samples, *, opf, brand, scenario_start, standard_factors,
                  method=FACTOR_METHOD_SPATIAL_COMPOSITIONAL,
                  max_lookback_days=30, min_production_days=1,
-                 window_mode=WINDOW_CALENDAR_DAYS, lookback_days=7):
+                 window_mode=WINDOW_CALENDAR_DAYS, lookback_days=7, cells=None):
         self.opf = normalise_opf(opf)
         self.brand = clean_text(brand).upper()
         if not self.opf or not self.brand or self.brand == "*":
@@ -125,7 +126,12 @@ class ReconciliationFactorResolver:
         self.min_production_days = _positive_integer(min_production_days, "Minimum production days")
         self.lookback_days = _positive_integer(lookback_days, "Lookback days")
         self.end = _time(scenario_start)
-        self.start = self.end - timedelta(days=self.max_lookback_days)
+        self.local = { (r["cell"], r["analyte"]): r for r in
+                       normalise_reconciliation_settings({"cells": cells}).get("cells", [])
+                       if r["opf"] == self.opf and r["brand"] == self.brand }
+        widest = max([self.max_lookback_days, *[r.get("window", {}).get("max_lookback_days", 0)
+                                             for r in self.local.values()]])
+        self.start = self.end - timedelta(days=widest)
         if not isinstance(standard_factors, Mapping):
             raise ValueError("Supply the existing standard factor record for this brand.")
         self.standard = deepcopy(standard_factors)
@@ -144,8 +150,8 @@ class ReconciliationFactorResolver:
         self._index = defaultdict(set)
         self.history_warnings = []
         self.periods = self._prepare(samples) if method != FACTOR_METHOD_STANDARD else []
-        self._allowed = self._window_periods()
-        for index in self._allowed:
+        self._window_cache = {}
+        for index in range(len(self.periods)):
             for depth, bins in enumerate(self.periods[index]["distributions"][1:]):
                 for cell in bins:
                     self._index[depth, cell].add(index)
@@ -242,17 +248,20 @@ class ReconciliationFactorResolver:
             })
         return result
 
-    def _window_periods(self):
+    def _window_periods(self, config=None):
+        config = config or self._default_window()
+        start_bound = self.end - timedelta(days=config["max_lookback_days"])
+        bounded = {i for i, p in enumerate(self.periods) if p["start"] >= start_bound}
         if self.method != FACTOR_METHOD_LOOKBACK:
-            return set(range(len(self.periods)))
-        if self.window_mode == WINDOW_CALENDAR_DAYS:
+            return bounded
+        if config["window_mode"] == WINDOW_CALENDAR_DAYS:
             # Same completed-calendar-date convention as the standard path;
             # this chosen window is fixed and never silently expanded.
             end = self.end.replace(hour=0, minute=0, second=0, microsecond=0)
-            start = max(self.start, end - timedelta(days=self.lookback_days))
-            return {i for i, p in enumerate(self.periods) if start <= p["start"] < end}
-        days = sorted({p["day"] for p in self.periods})
-        if self.window_mode == WINDOW_LATEST_CAMPAIGN and days:
+            start = max(start_bound, end - timedelta(days=config["lookback_days"]))
+            return {i for i in bounded if start <= self.periods[i]["start"] < end}
+        days = sorted({self.periods[i]["day"] for i in bounded})
+        if config["window_mode"] == WINDOW_LATEST_CAMPAIGN and days:
             # No campaign ID is supplied: use consecutive dates with this brand.
             campaign = [days[-1]]
             for day in reversed(days[:-1]):
@@ -260,14 +269,30 @@ class ReconciliationFactorResolver:
                     break
                 campaign.append(day)
             days = sorted(campaign)
-        selected = set(days[-self.lookback_days:])
-        return {i for i, p in enumerate(self.periods) if p["day"] in selected}
+        selected = set(days[-config["lookback_days"]:])
+        return {i for i in bounded if self.periods[i]["day"] in selected}
+
+    def _default_window(self):
+        return dict(window_mode=self.window_mode, lookback_days=self.lookback_days,
+                    min_production_days=self.min_production_days, max_lookback_days=self.max_lookback_days)
+
+    def _cell_windows(self, key):
+        cell = spatial_cell(key)
+        return {a: {**self._default_window(), **self.local.get((cell, a), {}).get("window", {})}
+                for a in SCHEMA_ANALYTES}
 
     def _selection(self, key):
         cells = _cells(key)
         cache_key = cells[0]
         if cache_key in self._selection_cache:
             return self._selection_cache[cache_key]
+        windows = self._cell_windows(key)
+        allowed = {}
+        for analyte, config in windows.items():
+            signature = tuple(sorted(config.items()))
+            if signature not in self._window_cache:
+                self._window_cache[signature] = self._window_periods(config)
+            allowed[analyte] = self._window_cache[signature]
         attempts = []
         for depth, cell in enumerate(cells):
             indices = sorted(self._index.get((depth, cell), ()))
@@ -276,10 +301,10 @@ class ReconciliationFactorResolver:
             missing, used = [], set()
             for kind in KINDS:
                 for analyte in SCHEMA_ANALYTES:
-                    valid = [i for i in indices if self.periods[i]["factors"][kind][analyte] is not None
+                    valid = [i for i in indices if i in allowed[analyte] and self.periods[i]["factors"][kind][analyte] is not None
                              and self.periods[i]["factors"][kind][analyte] > 0]
                     production_days = {self.periods[i]["day"] for i in valid}
-                    if len(production_days) < self.min_production_days:
+                    if len(production_days) < windows[analyte]["min_production_days"]:
                         missing.append(f"{kind}.{analyte}")
                     feed = math.fsum(self.periods[i]["feed"] for i in valid)
                     factors[kind][analyte] = (math.fsum(
@@ -289,6 +314,7 @@ class ReconciliationFactorResolver:
                         "period_indices": valid, "production_days": len(production_days),
                         "period_count": len(valid), "feed_wmt": feed,
                         "row_count": sum(self.periods[i]["rows"] for i in valid),
+                        "window": deepcopy(windows[analyte]),
                     }
                     used.update(valid)
             if not missing:
@@ -298,7 +324,7 @@ class ReconciliationFactorResolver:
                 return result
             attempts.append({"level": FACTOR_LEVELS[depth], "period_count": len(indices),
                              "reason": "No spatially matching periods." if not indices else
-                             f"Fewer than {self.min_production_days} production days for {', '.join(missing)}."})
+                             f"Minimum production days not met within selected windows for {', '.join(missing)}."})
         result = {"depth": None, "attempts": attempts}
         self._selection_cache[cache_key] = result
         return result
@@ -313,7 +339,28 @@ class ReconciliationFactorResolver:
                 "confidence_method": CONFIDENCE_METHOD,
                 "confidence_is_statistical": False}
 
-    def _resolve(self, key, *, source_id, source_kind, hex_id, fraction, distributions, coverage, scores=None):
+    def _resolve(self, key, **kwargs):
+        result = self._resolve_automatic(key, **kwargs)
+        if self.method == FACTOR_METHOD_STANDARD or not key:
+            return result
+        cell = spatial_cell(key)
+        result["provenance"]["cell_windows"] = self._cell_windows(key)
+        overrides = {}
+        for analyte in SCHEMA_ANALYTES:
+            setting = self.local.get((cell, analyte), {})
+            for kind in KINDS:
+                if kind in setting:
+                    overrides.setdefault(kind, {})[analyte] = {
+                        "automatic": result[f"{kind}_factors"][analyte], "effective": setting[kind]}
+                    result[f"{kind}_factors"][analyte] = setting[kind]
+        if overrides:
+            result["manual_override"] = True
+            result["provenance"]["local_override"] = {
+                "opf": self.opf, "brand": self.brand, "cell": cell, "factors": overrides,
+                "confidence_note": "Evidence confidence is unchanged by manual factor edits."}
+        return result
+
+    def _resolve_automatic(self, key, *, source_id, source_kind, hex_id, fraction, distributions, coverage, scores=None):
         base = dict(source_id=source_id, source_kind=source_kind, grade_block_key=key,
                     opf=self.opf, brand=self.brand, hex_id=hex_id, lineage_fraction=fraction, method=self.method)
         selection = {"depth": None, "attempts": []}
