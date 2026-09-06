@@ -113,6 +113,10 @@ from classes.SourcePropertyMappings import (
 from classes.CloudbreakProductSplit import calculate_cb_lump_fines
 from classes.DataQualityWarnings import format_chunk_quality_warning
 from classes.ClosingROMStocksCompliance import ClosingROMStocksCompliance
+from classes.ProductTargets import (
+    PRODUCT_TARGET_KEYS, migrate_product_target_state,
+    product_targets_identifier, product_targets_value,
+)
 from classes.ProductBuildLanes import (
     ANALYTES as PRODUCT_BUILD_ANALYTES,
     BYPRODUCT_LANES,
@@ -367,6 +371,36 @@ def close_bootloader_splash():
         pass
 
 class UserInputs(QMainWindow):
+    @property
+    def product_build_settings(self):
+        """Compatibility alias for integrations using the former Python name."""
+        return self.product_targets
+
+    @product_build_settings.setter
+    def product_build_settings(self, value):
+        self.product_targets = value
+
+    def setup_product_build_settings_tab(self):
+        return self.setup_product_targets_tab()
+
+    def read_product_build_settings_from_table(self, show_errors=True):
+        return self.read_product_targets_from_table(show_errors=show_errors)
+
+    def store_product_build_settings(self, show_errors=True):
+        return self.store_product_targets(show_errors=show_errors)
+
+    def navigate_to_product_build_settings(self):
+        return self.navigate_to_product_targets()
+
+    def handle_product_build_settings_submit(self):
+        return self.handle_product_targets_submit()
+
+    def normalized_agent_product_build_settings(self, product_build_settings):
+        return self.normalized_agent_product_targets(product_build_settings)
+
+    def agent_workflow_apply_product_build_settings(self):
+        return self.agent_workflow_apply_product_targets()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -541,8 +575,8 @@ class UserInputs(QMainWindow):
         # Add Solver Configuration Tab
         self.setup_solver_configuration_tab()
 
-        # Add Product Build Settings tab
-        self.setup_product_build_settings_tab()
+        # Add Product Targets tab
+        self.setup_product_targets_tab()
 
         # Decision Levers is the user-facing home for the simplified solver
         # controls introduced in the dedicated Decision Levers task.
@@ -861,7 +895,7 @@ class UserInputs(QMainWindow):
             "stockpile_inventories",
             "amt_stockpiles",
             "solver_configuration",
-            "product_build_settings",
+            "product_targets",
             "calendar",
             "decision_point",
             "optimised_blend_sequence",
@@ -892,6 +926,7 @@ class UserInputs(QMainWindow):
         return page_id
 
     def set_page_enabled(self, page_id, enabled):
+        page_id = product_targets_identifier(page_id)
         location = self.page_locations.get(page_id)
         if location is None:
             return
@@ -899,6 +934,7 @@ class UserInputs(QMainWindow):
         tab_widget.setTabEnabled(tab_index, bool(enabled))
 
     def is_page_enabled(self, page_id):
+        page_id = product_targets_identifier(page_id)
         location = self.page_locations.get(page_id)
         if location is None:
             return False
@@ -906,6 +942,7 @@ class UserInputs(QMainWindow):
         return tab_widget.isTabEnabled(tab_index)
 
     def show_page(self, page_id, force=False):
+        page_id = product_targets_identifier(page_id)
         if (
             getattr(
                 self,
@@ -938,6 +975,7 @@ class UserInputs(QMainWindow):
     def normalized_page_states(self, raw_states):
         if not isinstance(raw_states, dict):
             return {}
+        raw_states = migrate_product_target_state({"tab_states": raw_states})["tab_states"]
         normalized = {}
         for key, enabled in raw_states.items():
             if key in self.page_locations:
@@ -948,7 +986,9 @@ class UserInputs(QMainWindow):
             except (TypeError, ValueError):
                 continue
             if 0 <= legacy_index < len(self.legacy_tab_page_ids):
-                normalized[self.legacy_tab_page_ids[legacy_index]] = bool(enabled)
+                page_id = product_targets_identifier(self.legacy_tab_page_ids[legacy_index])
+                if page_id not in raw_states:
+                    normalized[page_id] = bool(enabled)
         return normalized
 
     def restore_page_states(self, raw_states):
@@ -1087,7 +1127,7 @@ class UserInputs(QMainWindow):
                 getattr(self, "historical_recon_warnings", []),
             )
         DatabaseManager().add_product_build_progress_to_existing_reports(
-            getattr(self, "product_build_settings", []) or [],
+            getattr(self, "product_targets", []) or [],
             database_path,
         )
         site_context = self.active_site_context()
@@ -1241,13 +1281,13 @@ class UserInputs(QMainWindow):
             captured[full_key] = values
         captured["planning_period_count"] = self.planning_period_count()
         captured["solver_config"] = copy.deepcopy(self.solver_config or {})
-        captured["product_build_settings"] = copy.deepcopy(self.product_build_settings or [])
+        captured["product_targets"] = copy.deepcopy(self.product_targets or [])
         captured["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         captured["expit_material_brand_pairs"] = copy.deepcopy(
             getattr(self, "calendar_expit_material_brand_rows", {})
         )
         captured["site_context"] = self.active_site_context()
-        return captured
+        return migrate_product_target_state(captured)
 
     def capture_stockpile_table_choices(self):
         if not hasattr(self, "stockpile_table"):
@@ -1466,7 +1506,7 @@ class UserInputs(QMainWindow):
         if hasattr(self, "solver_config_tab"):
             self.store_solver_config_inputs(show_errors=False)
         if hasattr(self, "product_build_table"):
-            self.store_product_build_settings(show_errors=False)
+            self.store_product_targets(show_errors=False)
         calendar_inputs = (
             copy.deepcopy(getattr(self, "calendar_inputs", {}) or {})
             if restoring_project
@@ -1495,7 +1535,7 @@ class UserInputs(QMainWindow):
             "available_two_wp_product_crushers",
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
-            "product_brand_labels_choice", "product_build_settings",
+            "product_brand_labels_choice", "product_targets",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
             "product_build_tonnes_stream", "byproducts_enabled",
             "byproduct_quantity_fields", "byproduct_grade_fields",
@@ -1688,7 +1728,7 @@ class UserInputs(QMainWindow):
             self.is_project_loaded = previous_project_loaded
 
     def restore_site_scenario(self, state):
-        state = copy.deepcopy(state or {})
+        state = copy.deepcopy(migrate_product_target_state(state or {}))
         self.scenario_switch_in_progress = True
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
@@ -1833,7 +1873,7 @@ class UserInputs(QMainWindow):
             self.data_stream_planning_categories = normalise_planning_categories(
                 state.get("data_stream_planning_categories")
             )
-            self.product_build_settings = copy.deepcopy(state.get("product_build_settings") or [])
+            self.product_targets = copy.deepcopy(state.get("product_targets") or [])
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
             )
@@ -1959,7 +1999,7 @@ class UserInputs(QMainWindow):
                 # saved ``Now`` scenario to the current timestamp invalidates
                 # inventories, chunks and results, but not its rates, bounds,
                 # brands, custom constraints or stockpile-state preferences.
-                state["product_build_settings"] = []
+                state["product_targets"] = []
                 state["saved_blends_for_schedule"] = []
                 state["stored_blend_sequence_table_for_gantt"] = []
                 state["stored_blend_sequence_table_for_gantt_default"] = []
@@ -3009,13 +3049,13 @@ class UserInputs(QMainWindow):
         layout.addLayout(decision_submit_layout)
         layout.addStretch()
 
-    def setup_product_build_settings_tab(self):
+    def setup_product_targets_tab(self):
         self.product_build_tab = QWidget()
         self.product_build_tab_index = self.register_page(
-            "product_build_settings",
+            "product_targets",
             self.workspace_tabs,
             self.product_build_tab,
-            "Product Build Settings",
+            "Product Targets",
             position=1,
         )
         self.product_build_layout = QVBoxLayout(self.product_build_tab)
@@ -3046,7 +3086,7 @@ class UserInputs(QMainWindow):
             }
         """)
 
-        title_label = QLabel("Product Build Settings")
+        title_label = QLabel("Product Targets")
         title_label.setStyleSheet("font-weight: 750; font-size: 20px; color: #172033;")
         self.product_build_layout.addWidget(title_label)
 
@@ -3060,7 +3100,7 @@ class UserInputs(QMainWindow):
         top_layout = QHBoxLayout()
         self.product_build_count_input = QLineEdit()
         self.product_build_count_input.setFixedWidth(80)
-        self.product_build_count_input.setText(str(len(getattr(self, "product_build_settings", []) or [])))
+        self.product_build_count_input.setText(str(len(getattr(self, "product_targets", []) or [])))
         self.product_build_count_input.setValidator(QIntValidator(0, 50, self))
         self.product_build_count_button = QPushButton("Create")
         self.product_build_count_button.clicked.connect(self.set_product_build_count_from_input)
@@ -3128,7 +3168,7 @@ class UserInputs(QMainWindow):
 
         button_layout = QHBoxLayout()
         self.product_build_submit_button = QPushButton("Submit")
-        self.product_build_submit_button.clicked.connect(self.handle_product_build_settings_submit)
+        self.product_build_submit_button.clicked.connect(self.handle_product_targets_submit)
         self.product_build_delete_button = QPushButton("Delete Selected Build(s)")
         self.product_build_delete_button.clicked.connect(self.delete_selected_product_build_rows)
         button_layout.addWidget(self.product_build_submit_button)
@@ -3200,7 +3240,7 @@ class UserInputs(QMainWindow):
 
     def set_product_build_table_row_count(self, count):
         count = max(int(count or 0), 0)
-        existing = self.read_product_build_settings_from_table(show_errors=False) or []
+        existing = self.read_product_targets_from_table(show_errors=False) or []
         self.product_build_table.setRowCount(count)
         for row_idx in range(count):
             source = existing[row_idx] if row_idx < len(existing) else {}
@@ -3209,7 +3249,7 @@ class UserInputs(QMainWindow):
         self.resize_product_build_table()
 
     def populate_product_build_table(self):
-        settings = getattr(self, "product_build_settings", []) or []
+        settings = getattr(self, "product_targets", []) or []
         if hasattr(self, "product_build_table"):
             self.product_build_table.setColumnHidden(
                 self.product_build_headers.index("By-product"),
@@ -3255,7 +3295,7 @@ class UserInputs(QMainWindow):
         if not hasattr(self, "product_build_plan_scenario_label"):
             return
         scenario, fallback = self.product_build_plan_scenario_summary(
-            getattr(self, "product_build_settings", []) or []
+            getattr(self, "product_targets", []) or []
         )
         if not scenario:
             self.product_build_plan_scenario_label.clear()
@@ -3364,7 +3404,7 @@ class UserInputs(QMainWindow):
             self.product_build_table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeToContents)
         self.product_build_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
-    def read_product_build_settings_from_table(self, show_errors=True):
+    def read_product_targets_from_table(self, show_errors=True):
         if not hasattr(self, "product_build_table"):
             return []
 
@@ -3455,7 +3495,7 @@ class UserInputs(QMainWindow):
                     QMessageBox.warning(
                         self,
                         "Invalid Input",
-                        "By-products are enabled, so Product Build Settings must "
+                        "By-products are enabled, so Product Targets must "
                         f"contain at least one build for: {', '.join(missing_lanes)}.",
                     )
                 return None
@@ -3494,7 +3534,7 @@ class UserInputs(QMainWindow):
         self.renumber_product_build_rows()
         if hasattr(self, "product_build_count_input"):
             self.product_build_count_input.setText(str(self.product_build_table.rowCount()))
-        self.store_product_build_settings(show_errors=False)
+        self.store_product_targets(show_errors=False)
         self.resize_product_build_table()
 
     def renumber_product_build_rows(self):
@@ -3516,33 +3556,34 @@ class UserInputs(QMainWindow):
             )
             self.update_product_build_name_for_row(row_idx, brand, byproduct)
 
-    def store_product_build_settings(self, show_errors=True):
-        settings = self.read_product_build_settings_from_table(show_errors=show_errors)
+    def store_product_targets(self, show_errors=True):
+        settings = self.read_product_targets_from_table(show_errors=show_errors)
         if settings is None:
             return False
-        previous_settings = getattr(self, "product_build_settings", []) or []
+        previous_settings = getattr(self, "product_targets", []) or []
         for index, setting in enumerate(settings):
             if index >= len(previous_settings) or not isinstance(previous_settings[index], dict):
                 continue
             for key, value in previous_settings[index].items():
                 if key.startswith("planning_"):
                     setting[key] = copy.deepcopy(value)
-        self.product_build_settings = settings
+        self.product_targets = settings
         if self.calendar_inputs is None:
             self.calendar_inputs = {}
-        self.calendar_inputs["product_build_settings"] = copy.deepcopy(self.product_build_settings)
+        self.calendar_inputs = migrate_product_target_state(self.calendar_inputs or {})
+        self.calendar_inputs["product_targets"] = copy.deepcopy(self.product_targets)
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         self.refresh_product_build_plan_scenario_label()
         return True
 
-    def navigate_to_product_build_settings(self):
+    def navigate_to_product_targets(self):
         self.populate_product_build_table()
         self.set_page_enabled(self.product_build_tab_index, True)
         self.set_page_enabled(self.decision_levers_tab_index, True)
         self.show_page(self.product_build_tab_index)
 
-    def handle_product_build_settings_submit(self):
-        if not self.store_product_build_settings():
+    def handle_product_targets_submit(self):
+        if not self.store_product_targets():
             return
         self.save_active_scenario_state()
         self.navigate_to_decision_levers()
@@ -3620,9 +3661,9 @@ class UserInputs(QMainWindow):
                 self.product_brand_options() + extra_brands
             )
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
-            self.product_build_settings = settings
+            self.product_targets = settings
             self.populate_product_build_table()
-            self.store_product_build_settings(show_errors=False)
+            self.store_product_targets(show_errors=False)
             self.save_active_scenario_state()
             scenario, fallback = self.product_build_plan_scenario_summary(
                 settings
@@ -4132,7 +4173,7 @@ class UserInputs(QMainWindow):
             self.workspace_tabs,
             self.expit_sequence_tab,
             "Expit Sequence",
-            # AMT Stockpiles and Product Build Settings are inserted ahead of
+            # AMT Stockpiles and Product Targets are inserted ahead of
             # this later during startup, leaving Expit Sequence immediately
             # before the Auto Blending Dashboard in the final Workspace order.
             position=0,
@@ -13161,7 +13202,7 @@ class UserInputs(QMainWindow):
 
         current_crusher = selected_crushers[0]
         self.crusher_input_choice = current_crusher
-        self.product_build_settings = copy.deepcopy(build_targets.get(current_crusher) or [])
+        self.product_targets = copy.deepcopy(build_targets.get(current_crusher) or [])
         self.populate_product_build_table()
         self.saved_blends_for_schedule = []
         self.stored_blend_sequence_table_for_gantt = []
@@ -13299,7 +13340,7 @@ class UserInputs(QMainWindow):
             self.AMT_chunk_settings = {}
             self.hex_sequence_table = []
             self.hex_sequence_table_argument = []
-            self.product_build_settings = []
+            self.product_targets = []
             self.saved_blends_for_schedule = []
             self.stored_blend_sequence_table_for_gantt = []
             self.stored_blend_sequence_table_for_gantt_default = []
@@ -13344,7 +13385,7 @@ class UserInputs(QMainWindow):
         elif not automatic_2wp_targets:
             message += (
                 "\n\nAutomatic 2WP product-build targets were skipped. "
-                "Use Product Build Settings for manual entry or load them there later."
+                "Use Product Targets for manual entry or load them there later."
             )
         if not restoring_project:
             QMessageBox.information(self, "BlendMaster", message)
@@ -13995,7 +14036,7 @@ class UserInputs(QMainWindow):
                 "preferred_apply_path": (
                     "Return broad workflow sections when the app should visibly apply a run through the UI: "
                     "site_configuration, selected_stockpiles, selected_amt_stockpiles, amt_chunking, "
-                    "solver_config, product_build_settings, and calendar_rates. If any stockpile is selected as AMT, "
+                    "solver_config, product_targets, and calendar_rates. If any stockpile is selected as AMT, "
                     "hex_sequence_table is required. The app cannot submit AMT stockpiles from agent output "
                     "without the generated chunk rows. site_configuration must identify one explicit "
                     "hub / mine / opf / crusher scenario. When that OPF has multiple crushers it must also "
@@ -14007,11 +14048,11 @@ class UserInputs(QMainWindow):
                     "(the APS Destination.Name). A grade block is not eligible for direct tip unless a rule "
                     "matches both its full source name and this scenario's operating crusher."
                 ),
-                "product_build_settings_contract": (
-                    "For product build targeting, include product_build_settings as a list of rows with brand, "
+                "product_targets_contract": (
+                    "For product build targeting, include product_targets as a list of rows with brand, "
                     "target_tonnes, target_fe_min, target_fe_max, target_si_min, target_si_max, "
                     "target_al_min, target_al_max, target_p_min, target_p_max, target_mn_min, and target_mn_max. "
-                    "The app applies these rows through the Product Build Settings tab before Calendar."
+                    "The app applies these rows through the Product Targets tab before Calendar."
                 ),
                 "hex_sequence_table_contract": (
                     "For AMT workflows, include hex_sequence_table as a list of chunk dictionaries that can be "
@@ -14025,7 +14066,7 @@ class UserInputs(QMainWindow):
                     "Return project_file/project_state only for complete restore, or proposed_constraints "
                     "only for small leaf-level edits. Use targets such as "
                     "solver_config.blend_option_timeout_seconds, calendar_rates.crusher_rate.Period_1, "
-                    "selected_stockpiles, product_build_settings, or amt_chunking.STOCKPILE.chunk_reclaim_hours."
+                    "selected_stockpiles, product_targets, or amt_chunking.STOCKPILE.chunk_reclaim_hours."
                 ),
             },
             "site_configuration": {
@@ -14084,7 +14125,7 @@ class UserInputs(QMainWindow):
             "solver_configuration": self.normalized_solver_config(getattr(self, "solver_config", {})),
             "selected_stockpiles": selected_stockpiles,
             "selected_amt_stockpiles": selected_amt_stockpiles,
-            "product_build_settings": getattr(self, "product_build_settings", []),
+            "product_targets": getattr(self, "product_targets", []),
             "calendar_inputs": getattr(self, "calendar_inputs", {}),
             "latest_decision_trace": (
                 self.decision_output.toPlainText()[-8000:]
@@ -14092,7 +14133,7 @@ class UserInputs(QMainWindow):
                 else ""
             ),
         }
-        return self.make_agent_json_safe(context)
+        return self.make_agent_json_safe(migrate_product_target_state(context))
 
     def make_agent_json_safe(self, value, depth=0):
         if depth > 6:
@@ -14155,7 +14196,7 @@ class UserInputs(QMainWindow):
                 QTableWidgetItem(
                     "Drive the normal UI sequence: Site Configuration, "
                     "Guidance Schedules, Stockpiles, AMT if needed, Solver "
-                    "Configuration, Product Build Settings, Decision Levers, "
+                    "Configuration, Product Targets, Decision Levers, "
                     "Calendar."
                 ),
             )
@@ -14295,20 +14336,14 @@ class UserInputs(QMainWindow):
         if blend_settings:
             payload["blend_settings"] = blend_settings
 
-        product_build_settings = section(
-            ["product_build_settings", "product_builds", "product_build_settings_tab"],
-            dict_only=False,
-        )
-        if isinstance(product_build_settings, dict):
-            product_build_settings = (
-                product_build_settings.get("builds")
-                or product_build_settings.get("rows")
-                or product_build_settings.get("product_builds")
-                or []
-            )
-        if isinstance(product_build_settings, list):
-            payload["product_build_settings"] = self.normalized_agent_product_build_settings(
-                product_build_settings
+        product_targets = None
+        for key in PRODUCT_TARGET_KEYS:
+            if key in result or key in target_values:
+                product_targets = section([key], dict_only=False)
+                break
+        if isinstance(product_targets, (list, dict)):
+            payload["product_targets"] = self.normalized_agent_product_targets(
+                product_targets
             )
 
         calendar_rates = section(["calendar_rates", "calendar"], dict_only=True)
@@ -14372,15 +14407,13 @@ class UserInputs(QMainWindow):
             cursor[path[-1]] = copy.deepcopy(value)
         return nested
 
-    def normalized_agent_product_build_settings(self, product_build_settings):
-        if isinstance(product_build_settings, dict):
-            product_build_settings = (
-                product_build_settings.get("builds")
-                or product_build_settings.get("rows")
-                or product_build_settings.get("product_builds")
-                or []
+    def normalized_agent_product_targets(self, product_targets):
+        if isinstance(product_targets, dict):
+            product_targets = product_targets_value(
+                product_targets,
+                product_targets.get("builds") or product_targets.get("rows") or [],
             )
-        if not isinstance(product_build_settings, list):
+        if not isinstance(product_targets, list):
             return []
 
         def first_value(mapping, keys, default=None):
@@ -14420,7 +14453,7 @@ class UserInputs(QMainWindow):
 
         normalized = []
         brand_counts = {}
-        for index, setting in enumerate(product_build_settings):
+        for index, setting in enumerate(product_targets):
             if not isinstance(setting, dict):
                 continue
             brand = str(first_value(setting, ["brand", "brand_label", "product_brand"], "") or "").strip().upper()
@@ -14690,15 +14723,15 @@ class UserInputs(QMainWindow):
                 parts.append("AMT settings only")
         if payload.get("solver_configuration") or payload.get("blend_settings"):
             parts.append("Solver Config")
-        product_builds = payload.get("product_build_settings") or []
-        if product_builds:
-            parts.append(f"Product Builds ({len(product_builds)})")
+        product_builds = product_targets_value(payload)
+        if isinstance(product_builds, list):
+            parts.append(f"Product Targets ({len(product_builds)})")
         if payload.get("calendar_rates"):
             parts.append("Calendar")
         return " -> ".join(parts) if parts else "No workflow sections"
 
     def is_agent_workflow_target(self, target):
-        target_text = str(target or "").strip()
+        target_text = str(product_targets_identifier(target) or "").strip()
         target_key = target_text.lower()
         if target_key in {
             "site_configuration",
@@ -14710,9 +14743,7 @@ class UserInputs(QMainWindow):
             "solver_configuration",
             "solver_config",
             "blend_settings",
-            "product_build_settings",
-            "product_builds",
-            "product_build_settings_tab",
+            "product_targets",
             "calendar_rates",
             "calendar",
             "amt_chunking",
@@ -14723,7 +14754,7 @@ class UserInputs(QMainWindow):
         return target_text.startswith((
             "solver_config.",
             "blend_settings.",
-            "product_build_settings.",
+            "product_targets.",
             "calendar_rates.",
             "calendar.",
             "amt_chunking.",
@@ -14773,6 +14804,10 @@ class UserInputs(QMainWindow):
             if not isinstance(proposal, dict):
                 continue
             target = str(proposal.get("target") or proposal.get("name") or "").strip()
+            canonical_target = product_targets_identifier(target)
+            if canonical_target != target:
+                proposal = dict(proposal, target=canonical_target)
+                target = canonical_target
             value = proposal.get("value", proposal.get("proposed_value", ""))
             rationale = str(proposal.get("rationale", proposal.get("reason", "")))
             target_key = target.strip().lower()
@@ -15021,12 +15056,13 @@ class UserInputs(QMainWindow):
         return None
 
     def is_known_agent_target(self, target):
+        target = product_targets_identifier(target)
         key = self.normalized_agent_target(target)
         if target in {"site_configuration", "site_config"}:
             return True
         if target in {"selected_stockpiles", "selected_amt_stockpiles", "amt_stockpiles"}:
             return hasattr(self, "stockpile_table")
-        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
+        if target == "product_targets":
             return hasattr(self, "product_build_table")
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             parsed = self.parse_agent_calendar_target(target)
@@ -15085,12 +15121,13 @@ class UserInputs(QMainWindow):
         return key in known
 
     def get_agent_target_current_value(self, target):
+        target = product_targets_identifier(target)
         if target == "selected_stockpiles":
             return sorted(
                 name for name, selected in (self.stockpile_data_use_column or {}).items() if selected
             )
-        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
-            return getattr(self, "product_build_settings", [])
+        if target == "product_targets":
+            return getattr(self, "product_targets", [])
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             parsed = self.parse_agent_calendar_target(target)
             if parsed:
@@ -15608,25 +15645,18 @@ class UserInputs(QMainWindow):
             self.stop_agent_workflow_apply("Agent workflow stopped: Solver Configuration inputs are not valid.")
             return
 
-        self.navigate_to_product_build_settings()
-        QTimer.singleShot(250, self.agent_workflow_apply_product_build_settings)
+        self.navigate_to_product_targets()
+        QTimer.singleShot(250, self.agent_workflow_apply_product_targets)
 
-    def agent_workflow_apply_product_build_settings(self):
+    def agent_workflow_apply_product_targets(self):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
-        product_builds = (
-            payload.get("product_build_settings")
-            or payload.get("product_builds")
-            or payload.get("product_build_settings_tab")
-            or []
-        )
-        if isinstance(product_builds, dict):
-            product_builds = product_builds.get("builds") or product_builds.get("rows") or []
-        if isinstance(product_builds, list):
-            self.product_build_settings = self.normalized_agent_product_build_settings(product_builds)
+        product_builds = product_targets_value(payload)
+        if isinstance(product_builds, (list, dict)):
+            self.product_targets = self.normalized_agent_product_targets(product_builds)
             self.populate_product_build_table()
 
-        if not self.store_product_build_settings(show_errors=False):
-            self.stop_agent_workflow_apply("Agent workflow stopped: Product Build Settings inputs are not valid.")
+        if not self.store_product_targets(show_errors=False):
+            self.stop_agent_workflow_apply("Agent workflow stopped: Product Targets inputs are not valid.")
             return
 
         self.setup_calendar()
@@ -15806,7 +15836,7 @@ class UserInputs(QMainWindow):
         if not isinstance(loaded_state, dict):
             raise ValueError("Agent project state must be a dictionary.")
 
-        loaded_state = copy.deepcopy(loaded_state)
+        loaded_state = copy.deepcopy(migrate_product_target_state(loaded_state))
         site_config = loaded_state.pop("site_configuration", None)
         if isinstance(site_config, dict):
             self.merge_agent_site_configuration_into_state(loaded_state, site_config)
@@ -15895,8 +15925,8 @@ class UserInputs(QMainWindow):
         loaded_state["data_stream_planning_categories"] = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
         )
-        if loaded_state.get("product_build_settings") is None:
-            loaded_state["product_build_settings"] = []
+        if loaded_state.get("product_targets") is None:
+            loaded_state["product_targets"] = []
         if loaded_state.get("auto_load_2wp_targets_choice") is None:
             loaded_state["auto_load_2wp_targets_choice"] = True
         if loaded_state.get(
@@ -16181,6 +16211,7 @@ class UserInputs(QMainWindow):
         return value
 
     def apply_agent_target_value(self, target, value):
+        target = product_targets_identifier(target)
         if target in {"site_configuration", "site_config"}:
             self.apply_agent_site_configuration_payload(value)
             return True
@@ -16188,12 +16219,12 @@ class UserInputs(QMainWindow):
             return self.apply_agent_selected_stockpiles(value)
         if target in {"selected_amt_stockpiles", "amt_stockpiles"}:
             return self.apply_agent_selected_stockpiles({"amt": value})
-        if target in {"product_build_settings", "product_builds", "product_build_settings_tab"}:
+        if target == "product_targets":
             if not hasattr(self, "product_build_table"):
                 return False
-            self.product_build_settings = self.normalized_agent_product_build_settings(value)
+            self.product_targets = self.normalized_agent_product_targets(value)
             self.populate_product_build_table()
-            return self.store_product_build_settings(show_errors=False)
+            return self.store_product_targets(show_errors=False)
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):
             return self.apply_agent_calendar_target(target, value)
         if str(target).startswith("amt_chunking."):
@@ -17569,7 +17600,7 @@ class UserInputs(QMainWindow):
         if not self.store_solver_config_inputs():
             return
         self.save_active_scenario_state()
-        self.navigate_to_product_build_settings()
+        self.navigate_to_product_targets()
 
     def parse_float_from_table_item(self, item, default=0.0):
         if not item or not item.text().strip():
@@ -19648,7 +19679,7 @@ class UserInputs(QMainWindow):
                 if row_key == "crusher_brand":
                     brand_combo = QComboBox()
                     brand_combo.setProperty("useCurrentData", True)
-                    if self.product_build_settings:
+                    if self.product_targets:
                         brand_combo.addItem("From Product Build", "")
                         brand_combo.setEnabled(False)
                     else:
@@ -19914,7 +19945,8 @@ class UserInputs(QMainWindow):
 
         self.store_stockpile_constraint_inputs()
         self.calendar_inputs["planning_period_count"] = self.planning_period_count()
-        self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
+        self.calendar_inputs = migrate_product_target_state(self.calendar_inputs or {})
+        self.calendar_inputs["product_targets"] = copy.deepcopy(getattr(self, "product_targets", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
             getattr(self, "calendar_expit_material_brand_rows", {})
@@ -20547,7 +20579,8 @@ class UserInputs(QMainWindow):
         )
         self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
         self.calendar_inputs["planning_period_count"] = self.planning_period_count()
-        self.calendar_inputs["product_build_settings"] = copy.deepcopy(getattr(self, "product_build_settings", []))
+        self.calendar_inputs = migrate_product_target_state(self.calendar_inputs or {})
+        self.calendar_inputs["product_targets"] = copy.deepcopy(getattr(self, "product_targets", []))
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
             getattr(self, "calendar_expit_material_brand_rows", {})
@@ -24903,7 +24936,7 @@ class UserInputs(QMainWindow):
             getattr(self, "hex_sequence_table", []),
             self.manual_expit_payload_transactions(),
             periods.get_periods(),
-            getattr(self, "product_build_settings", []),
+            getattr(self, "product_targets", []),
             rate,
             calendar_inputs=manual_calendar_inputs,
         )
@@ -25527,7 +25560,7 @@ class UserInputs(QMainWindow):
         )
         agent_proposals_table = self.capture_agent_proposals_table()
         if hasattr(self, "product_build_table"):
-            self.store_product_build_settings(show_errors=False)
+            self.store_product_targets(show_errors=False)
 
         if hasattr(self, "blend_data_from_config_table_inputs"):
             self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
@@ -25613,7 +25646,7 @@ class UserInputs(QMainWindow):
                 "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
                 "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
                 "data_stream_planning_categories": self.data_stream_planning_categories,
-                "product_build_settings": self.product_build_settings,
+                "product_targets": self.product_targets,
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
                     self.group_2wp_build_targets_by_brand_choice
@@ -25710,7 +25743,7 @@ class UserInputs(QMainWindow):
             
             # Serialize the dictionary to a file
             with open(filename, 'wb') as file:
-                pickle.dump(state_to_save, file)
+                pickle.dump(migrate_product_target_state(state_to_save), file)
 
             if show_success:
                 QMessageBox.information(self, "BlendMaster", "Project saved successfully!")
@@ -25859,6 +25892,7 @@ class UserInputs(QMainWindow):
 
     def prepare_loaded_site_scenarios(self, loaded_state):
         """Restore v2 multi-site projects and wrap legacy projects as one scenario."""
+        loaded_state = migrate_product_target_state(loaded_state)
         saved_scenarios = loaded_state.get("site_scenarios")
         if not isinstance(saved_scenarios, dict) or not saved_scenarios:
             legacy_state = copy.deepcopy(loaded_state)
@@ -26065,8 +26099,8 @@ class UserInputs(QMainWindow):
         self.data_stream_planning_categories = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
         )
-        self.product_build_settings = self.normalized_agent_product_build_settings(
-            loaded_state.get("product_build_settings", []) or []
+        self.product_targets = self.normalized_agent_product_targets(
+            loaded_state.get("product_targets", []) or []
         )
         self.auto_load_2wp_targets_choice = bool(
             loaded_state.get("auto_load_2wp_targets_choice", True)
@@ -26354,7 +26388,7 @@ class UserInputs(QMainWindow):
             # In particular, do not interpret default/empty calendar widgets
             # as authority to launch a solver run.
             page_order = (
-                "product_build_settings",
+                "product_targets",
                 "solver_configuration",
                 "database_view",
                 "amt_stockpiles",
@@ -26450,7 +26484,7 @@ class UserInputs(QMainWindow):
         self.data_stream_input_cache_signature = ""
         self.data_stream_input_cache_result = {}
         self.data_stream_input_request_inflight = ""
-        self.product_build_settings = []
+        self.product_targets = []
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}
@@ -26841,4 +26875,3 @@ if __name__ == "__main__":
     if splash is not None:
         splash.finish(window)
     sys.exit(app.exec_())      # Run the event loop
-

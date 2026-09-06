@@ -258,7 +258,7 @@ class CaseModeller:
             missing = [lane for lane in BYPRODUCT_LANES if lane not in configured_lanes]
             if missing:
                 raise ValueError(
-                    "By-products are enabled but Product Build Settings have no "
+                    "By-products are enabled but Product Targets have no "
                     f"{', '.join(lane.title() for lane in missing)} build."
                 )
         self.product_build_runtime_states = [

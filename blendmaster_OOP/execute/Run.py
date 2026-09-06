@@ -11,6 +11,7 @@ from classes.CaseModeller import (
 from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductTargets import product_targets_value
 from classes.ProductBuildLanes import (
     normalize_byproduct_grade_fields,
     normalize_byproduct_quantity_fields,
@@ -373,7 +374,7 @@ class Run:
             (site_context or {}).get("aps_active_blend_guidance", []) or []
         )
         solver_config["product_builds_configured"] = bool(
-            (calendar_inputs or {}).get("product_build_settings")
+            product_targets_value(calendar_inputs)
         )
         try:
             contingency_plan_count = max(
@@ -551,9 +552,7 @@ class Run:
                 max_stockpiles=max_stockpiles,
                 min_stockpile_contribution_ratio=min_stockpile_contribution_ratio,
                 solver_config=copy.deepcopy(solver_config),
-                product_build_settings=(calendar_inputs or {}).get(
-                    "product_build_settings", []
-                ),
+                product_build_settings=product_targets_value(calendar_inputs, []),
                 abort_callback=self.is_abort_requested,
                 plan_id=plan_id,
                 reserved_blend_signatures=reserved_blend_signatures,

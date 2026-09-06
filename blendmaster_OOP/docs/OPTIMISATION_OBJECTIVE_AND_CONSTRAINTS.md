@@ -386,7 +386,7 @@ These are hard constraints in every steady state unless both:
 
 - “Off-spec steady states are allowed if ultimate build is on spec” is enabled;
   and
-- Product Build Settings are configured.
+- Product Targets are configured.
 
 ### 6. Stockpile-only grade feasibility
 

@@ -482,7 +482,7 @@ when AMT Stockpiles is submitted.
 
 When **Enable Lump and Fines by-products** is selected, Data Streams also
 requires explicit canonical fields for the Lump/Fines quantities and the five
-Lump/Fines grades. Product Build Settings then operates two independent lanes:
+Lump/Fines grades. Product Targets then operates two independent lanes:
 one active Lump build and one active Fines build. Every transaction contributes
 its configured portion to both active builds and must satisfy both build-grade
 contracts. Rows are sequential within each lane. Completion of either active

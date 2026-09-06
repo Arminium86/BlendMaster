@@ -332,8 +332,11 @@ an Fe lower bound and contaminant upper bounds, leaving opposite bounds open.
 
 Contracts:
 
-- The tab renames from Product Build Settings to Product Targets (Q11 of the
-  task list, Task 11). The caption lives at `GUI/InitialiseGUI.py:2992`.
+- Task 11 is implemented: the tab is **Product Targets**. The canonical page,
+  project/scenario/calendar key and agent workflow section are `product_targets`.
+  Older `product_build_settings` projects and agent payloads remain readable;
+  explicit current values (including an empty list) take precedence over aliases.
+  See `docs/TASK_11_PRODUCT_TARGETS.md` for the migration contract and validation.
 - LQL and HQL are properties of a brand, and therefore of a product-build row,
   per analyte. They are row entries like the existing Min and Max, not a
   separate table (Q52, Q55).
