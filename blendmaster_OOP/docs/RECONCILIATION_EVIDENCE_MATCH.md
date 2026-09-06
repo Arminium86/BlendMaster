@@ -4,6 +4,9 @@ Implemented 6 September 2026 as a clarification of Tasks 6–8A, before Task 9.
 The user confirmed that Spatial should look up the most relevant historical
 context for the composition of the source being adjusted, and requested
 **Evidence match score** in place of confidence, with no uncertainty display.
+Updated after Task 11 on 6 September: Auto now independently compares all five
+spatial levels within each candidate window. See
+[the level-search extension](RECONCILIATION_AUTO_LEVEL_SEARCH.md).
 
 ## The three advanced methods
 
@@ -11,7 +14,7 @@ context for the composition of the source being adjusted, and requested
 | --- | --- |
 | Advanced · spatial and compositional | Rank spatially eligible shifts by their whole-feed match to the whole inventory/hex composition. Keep the highest-matching shifts needed to meet the minimum distinct production dates, including all ties. |
 | Advanced · lookback window | Keep all eligible spatially matching shifts inside the chosen Calendar, Production days or Latest campaign window. No match-based trimming occurs. |
-| Auto · maximise evidence match score | Compare source-matched Spatial selections under different whole-day horizons with all supported lookback windows; choose the highest-scoring policy per physical source and brand. |
+| Auto · maximise evidence match score | Compare every eligible spatial level within source-matched Spatial horizons and all supported lookback windows. Choose the best level per component and best method/window per physical source and brand. |
 
 Standard global reconciliation remains available and is the default.
 
@@ -58,10 +61,20 @@ sources remain unscored. No factor is invented, and APS is unchanged.
 ## Auto and the review
 
 Auto retains one method/window policy per inventory or hex and brand. The full
-maximum-lookback source-matched Spatial result is both a candidate and the
-comparison baseline. Its temporal candidates use the same minimum/maximum
+maximum-lookback ordinary Spatial result (first sufficient level) remains the
+comparison baseline. Auto evaluates all five levels within that horizon and
+every temporal candidate, including levels broader than an already-sufficient
+level. One level must support all ten series in each component. Spatial candidates
+rank shifts separately at each level; Lookback candidates retain all eligible
+shifts in their window at each level. Temporal candidates use the same minimum/maximum
 guardrails. Temporal membership caches distinguish Spatial ranking from Lookback
 selection even when both methods can see the same periods.
+
+All levels use the same six-resolution composition overlap score. There is no
+extra score deduction for selecting a broader level. Specificity breaks score
+ties. Standard global factors remain the terminal fallback if no spatial level
+qualifies, and missing lineage keeps zero score. The component review lists all
+five candidates, their eligibility and scores, and the selected level.
 
 **Spatial · 30 days max** means that source-matched shifts were selected from
 within a 30-day horizon. It does not mean all 30 days were used. Component
@@ -96,16 +109,17 @@ apply by OPF, brand, spatial cell, material type and analyte across sources.
   `uncertainty_percent`, `auto_max_confidence`) to preserve project/database
   compatibility. They are internal compatibility names rather than current UI
   labels. Older manual-edit notes are also rendered using the new wording.
-- Source-dependent selection caches include the match ranking, so shared cells
-  cannot reuse another source's chosen history. Algorithm revision 2 invalidates
+- Source-dependent selection caches include the match ranking and requested
+  spatial level, so shared cells cannot reuse another source's chosen history
+  or another level's selection. Algorithm revision 3 invalidates
   derived application/review/AMT enrichment caches without forcing a new history
-  read. Auto search provenance is version 2; component provenance retains the
+  read. Auto search provenance is version 3; component provenance retains the
   `whole_source_match_ranked_shifts` rule, threshold and counts.
 
 The separate EXPIT sequence geometry/replay reliability classification retains
 its existing terminology because it is not the grade-factor match metric.
 
-## Validation
+## Original source-selection validation (before the level-search extension)
 
 **644 tests passed**, including ten new tests for ranked source selection,
 non-consecutive dates and ties, shared cutoffs with local guardrails, distinct
@@ -134,6 +148,7 @@ extract and guardrails, not measurements of prediction accuracy. Auto's gain
 over Spatial on this extract is very small; both display as 30.2% in the UI.
 Validation reused saved data and temporary artifacts without production writes.
 
-Restart BlendMaster and calculate the review again to load the new selection
+Restart BlendMaster and calculate the review again to load the current selection
 logic and labels. Submit then applies the new factors through the existing
-workflow. Task 9 has not started; changes are not committed or pushed.
+workflow. The original validation above predates Tasks 9–11; current extension
+validation is recorded in [the level-search note](RECONCILIATION_AUTO_LEVEL_SEARCH.md).

@@ -293,11 +293,12 @@ class ReconciliationFactorResolver:
             self._window_cache.move_to_end(signature)
         return self._window_cache[signature]
 
-    def _selection(self, key, *, windows=None, method=None, scores=None):
+    def _selection(self, key, *, windows=None, method=None, scores=None, level_depth=None):
         cells = _cells(key)
         windows = windows or self._cell_windows(key)
         method = method or self.method
-        cache_key = (cells[0], method, tuple(tuple(sorted(windows[a].items())) for a in SCHEMA_ANALYTES))
+        cache_key = (cells[0], method, level_depth,
+                     tuple(tuple(sorted(windows[a].items())) for a in SCHEMA_ANALYTES))
         spatial = method == FACTOR_METHOD_SPATIAL_COMPOSITIONAL
         if spatial:
             if scores is None:
@@ -314,6 +315,10 @@ class ReconciliationFactorResolver:
             allowed[analyte] = self._allowed_periods(config, method)
         attempts = []
         for depth, cell in enumerate(cells):
+            # Auto evaluates each level independently. Ordinary Spatial and
+            # Lookback still stop at the first level with sufficient evidence.
+            if level_depth is not None and depth != level_depth:
+                continue
             indices = sorted(self._index.get((depth, cell), ()))
             eligible, missing, thresholds = {}, [], []
             for kind in KINDS:
@@ -428,6 +433,8 @@ class ReconciliationFactorResolver:
                 scores = {i: _similarity(distributions, p["distributions"]) for i, p in enumerate(self.periods)}
             selection = chosen if chosen is not None else self._selection(key, scores=scores)
             reason = "All spatial levels exhausted within the configured window; using supplied standard global factors."
+        level_search = selection.get("level_search")
+        level_provenance = {"level_search": deepcopy(level_search)} if level_search else {}
         if selection["depth"] is None:
             return resolved_factor(
                 **base, resolution_level=FACTOR_LEVEL_GLOBAL,
@@ -439,7 +446,7 @@ class ReconciliationFactorResolver:
                                  "source_brand_by_analyte": deepcopy(self.standard.get("source_brand_by_analyte", {})),
                                  "lookback_days": deepcopy(self.standard.get("lookback_days", {})),
                                  "standard_record": deepcopy(self.standard)}],
-                provenance={**self._config(), "attempts": deepcopy(selection["attempts"]),
+                provenance={**self._config(), **level_provenance, "attempts": deepcopy(selection["attempts"]),
                             "history_warnings": list(self.history_warnings),
                             "source_lineage_coverage": coverage,
                             "confidence_basis": "no_accepted_spatial_evidence"},
@@ -481,9 +488,10 @@ class ReconciliationFactorResolver:
             source_feed_wmt=math.fsum(self.periods[i]["feed"] for i in indices), source_history=history,
             lookback_start=first, lookback_end=last,
             lookback_days=max(1, math.ceil((last - first).total_seconds() / 86400)),
-            fallback_reason="; ".join(f"{a['level']}: {a['reason']}" for a in selection["attempts"]),
+            fallback_reason=(level_search["reason"] if level_search else
+                             "; ".join(f"{a['level']}: {a['reason']}" for a in selection["attempts"])),
             confidence_percent=confidence, uncertainty_percent=100.0 - confidence,
-            provenance={**self._config(), "attempts": deepcopy(selection["attempts"]),
+            provenance={**self._config(), **level_provenance, "attempts": deepcopy(selection["attempts"]),
                         **({"spatial_selection": deepcopy(selection["spatial_selection"])} if "spatial_selection" in selection else {}),
                         "factor_history": detail, "history_warnings": list(self.history_warnings),
                         "source_lineage_coverage": coverage,

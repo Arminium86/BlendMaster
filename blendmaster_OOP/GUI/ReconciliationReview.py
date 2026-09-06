@@ -302,7 +302,7 @@ class ReconciliationReview(QWidget):
                               "It keeps the best-matching shifts, including ties, until all ten factor series meet their minimum production dates at one spatial level. "
                               "The selected shifts can be non-consecutive. Evidence match score measures composition and spatial-address overlap.")
         if self._settings["method"] == "auto_max_confidence":
-            self.help.setText("Auto compares source-matched spatial selections and all three lookback options within the minimum production days and maximum lookback. "
+            self.help.setText("Auto compares all five spatial fallback levels within source-matched Spatial selections and all three lookback options, subject to minimum production days and maximum lookback. "
                               "It chooses one policy per inventory stockpile or AMT hex and brand. Local minimum/maximum guardrails and manual factors are retained; N is chosen automatically. "
                               "Evidence match score measures composition and spatial-address overlap.")
         self.custom_window.setText("Set local guardrails for this analyte" if self._settings["method"] == "auto_max_confidence"
@@ -435,16 +435,34 @@ class ReconciliationReview(QWidget):
                       f"Spatial baseline match score: {percent(search.get('baseline_confidence_percent'))} · improvement: {quantity(search.get('improvement_percent'), 2)} percentage points"]
             if search.get("candidate_count") is not None:
                 lines.append(f"Compared {search['candidate_count']} windows / {search['unique_evidence_count']} distinct period selections for this whole source.")
+            if search.get("fallback_strategy") == "best_eligible_level":
+                lines.append(f"Compared {search.get('level_candidate_count', 0)} component/level candidates across distinct windows. "
+                             "All five spatial levels compete on the same score; specificity breaks ties without a score deduction. "
+                             "Global remains the terminal fallback.")
             for family, candidate in search.get("best_by_family", {}).items():
                 label = dict((value, title) for title, value in WINDOWS).get(family, "Spatial and compositional")
                 n = candidate["window_days"]
                 suffix = " max" if family == "spatial_compositional" else ""
                 lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'}{suffix} · evidence match score {percent(candidate['confidence_percent'])}")
+                if candidate.get("selected_levels"):
+                    lines.append("  Levels: " + ", ".join(LEVEL_LABELS.get(level, level) for level in candidate["selected_levels"]))
         if record:
             lines += [f"Component: {record.get('grade_block_key') or 'Unknown lineage'}",
                       f"Selected fallback: {LEVEL_LABELS.get(record['resolution_level'], record['resolution_level'])}",
                       "Matched address: " + (" | ".join(record.get("matched_spatial_key") or []) or "Global OPF / brand"),
                       f"Reason: {record.get('fallback_reason') or 'Most specific level has sufficient history.'}"]
+            level_search = record.get("provenance", {}).get("level_search")
+            if level_search:
+                lines.append("Level comparison for this component within the selected method/window:")
+                for candidate in level_search["candidates"]:
+                    label = LEVEL_LABELS.get(candidate["level"], candidate["level"])
+                    if candidate["eligible"]:
+                        status = "selected" if candidate["selected"] else "eligible"
+                        lines.append(f"  {label}: {percent(candidate['evidence_match_score_percent'])} · {status} · "
+                                     f"at least {candidate['min_production_days']} production date{'s' if candidate['min_production_days'] != 1 else ''} per series · "
+                                     f"{quantity(candidate['feed_wmt'])} period feed WMT")
+                    else:
+                        lines.append(f"  {label}: ineligible — {candidate['reason']}")
             local = record.get("provenance", {}).get("local_override", {})
             for kind in ("blend", "regression"):
                 lines.append(kind.title() + ": " + ", ".join(

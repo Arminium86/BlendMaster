@@ -129,7 +129,7 @@ class SourceMatchingTests(unittest.TestCase):
         view = window()
         first = view.AMT_enrichment_request_signature()
         before = view.reconciliation_application()
-        with patch("GUI.InitialiseGUI.RECONCILIATION_ALGORITHM_VERSION", 3):
+        with patch("GUI.InitialiseGUI.RECONCILIATION_ALGORITHM_VERSION", 999):
             self.assertNotEqual(view.AMT_enrichment_request_signature(), first)
             self.assertIsNot(view.reconciliation_application(), before)
 

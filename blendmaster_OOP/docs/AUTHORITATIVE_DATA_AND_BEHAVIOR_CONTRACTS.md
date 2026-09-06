@@ -185,7 +185,8 @@ request to bring automatic evidence-match maximisation forward before Task 9
 1. Lookback time window.
 2. Spatial and compositional relevance, bounded by a max lookback window.
 3. Auto-maximise evidence match score across spatial reconciliation and the three
-   supported lookback families.
+   supported lookback families, independently comparing every eligible spatial
+   fallback level within each candidate window (clarified after Task 11).
 
 Standard global reconciliation remains the default. The earlier deferral of
 automatic maximisation is superseded by Task 8A.
@@ -216,10 +217,14 @@ production days and maximum calendar lookback are user guardrails, including
 local cell/analyte settings. Saved manual window choices are retained for the
 other methods; Auto chooses the method and N within those guardrails.
 
-Each component retains the first eligible shared fallback level for all ten
-factor series. Manual factors apply after selection without increasing the evidence
-match score. The full maximum-lookback source-matched spatial result is the comparison baseline
-and a candidate. Ties prefer less global evidence, finer fallback levels, more
+Auto compares all five spatial levels for each component in every candidate
+window, even when a finer level already has enough history. The best-scoring
+eligible level is selected per component; one level must still support all ten
+factor series. Ordinary Spatial and Lookback retain the first-sufficient-level
+rule. Manual factors apply after selection without increasing the evidence
+match score. The full maximum-lookback ordinary Spatial result remains the
+comparison baseline; Auto also evaluates every level within that full horizon.
+Ties prefer less global evidence, finer fallback levels, more
 supporting production dates, then more period feed, with deterministic policy
 order resolving remaining ties. Score differences below numerical precision
 (scores rounded to ten decimal places for ranking) are treated as ties.
@@ -229,8 +234,10 @@ WMT-weighted overall score within the supported search space. Missing lineage
 remains in the denominator with zero evidence match score. AMT chunks aggregate hex
 choices when available; before chunking, footprints show a preview. Selected
 windows, baseline evidence match score and gain in percentage points are retained in
-source/chunk audits, the review and CSV/Database View fields. See
-[the source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md) for the implemented scope.
+source/chunk audits, the review and CSV/Database View fields. Component evidence
+also records the five-level comparison, eligibility and scores for the selected
+method/window. See [the source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md)
+and [Auto's level-search extension](RECONCILIATION_AUTO_LEVEL_SEARCH.md).
 
 ### 5.3.1 Per-hex lineage weighting (Q39)
 
@@ -248,8 +255,9 @@ retain total-period-feed WMT weighting, followed by physical source fractions.
 
 - Grade-block tokens are as mapped in section 4. No additional token vocabulary
   is introduced.
-- When the selected advanced window yields no valid factor, resolution walks
-  the section 4.2 ladder rather than expanding the window.
+- Spatial and Lookback walk the section 4.2 ladder until a level qualifies within
+  their selected window. Auto independently compares all five spatial levels in
+  each candidate window; insufficient evidence never relaxes that window's bounds.
 - When every spatial level is exhausted, the terminal fallback is the standard
   global OPF/brand/analyte factor, never 1.0 and never a blocked submission.
 - Minimum production days and maximum lookback window bound the search (Q42).
@@ -259,8 +267,10 @@ retain total-period-feed WMT weighting, followed by physical source fractions.
 - Evidence match score is 100 percent when every grade block in the source period has the
   highest spatial and compositional relevance to the source being adjusted, and
   the composition ratios match.
-- The score decreases as ratios deviate, as fallback levels are used, and as
-  less relevant material enters the same feed period.
+- The score decreases as ratios deviate, spatial/material overlap weakens, and
+  less relevant material enters the same feed period. All candidates are scored
+  over the same six spatial/compositional resolutions. Choosing a broader
+  fallback level carries no extra deduction; specificity is a tie-break only.
 - Inventory stockpiles are adjusted as a single weighted average with no
   chunking, and evidence match score is reported at that level.
 - AMT stockpiles are adjusted per hexagon, each hex carrying its own

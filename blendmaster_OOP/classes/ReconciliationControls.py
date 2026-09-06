@@ -10,7 +10,7 @@ from setup.InventoryBuildLineage import canonical_block, clean_text, finite_numb
 WINDOW_MODES = ("calendar_days", "production_days", "latest_campaign")
 WINDOW_DEFAULTS = {"window_mode": "calendar_days", "lookback_days": 7,
                    "min_production_days": 1, "max_lookback_days": 30}
-RECONCILIATION_ALGORITHM_VERSION = 2
+RECONCILIATION_ALGORITHM_VERSION = 3
 METHOD_LABELS = {"standard": "Standard · global factors",
                  "lookback": "Advanced · lookback window",
                  "spatial_compositional": "Advanced · spatial and compositional",
