@@ -10,12 +10,20 @@ the authoritative inventory balance.
 from __future__ import annotations
 
 import json
-from math import atan2, cos, hypot, radians, sin, sqrt
+from copy import deepcopy
+from math import atan2, cos, fsum, hypot, isfinite, radians, sin, sqrt
 from statistics import median
+
+from classes.PhaseSchemas import (
+    amt_footprint_audit, AMT_OUTCOME_RECONCILED, AMT_OUTCOME_ZEROED_NON_POSITIVE_RAW,
+    AMT_OUTCOME_ZEROED_NON_POSITIVE_INVENTORY, AMT_OUTCOME_RETAINED_INVENTORY_UNAVAILABLE,
+)
+
+AMT_TONNAGE_RECON_VERSION = 3
 
 
 SPATIAL_METHOD = (
-    "directional_nearest_capacity_v2: negative hex deficits are allocated to "
+    "directional_nearest_capacity_v3: non-positive raw hex totals are zeroed before inventory allocation; negative hex deficits are allocated to "
     "positive hexes by distance, connected geometry, and inferred reclaim-front "
     "direction; residual inventory deductions are then weighted toward lower "
     "grade-block lineage coverage"
@@ -28,9 +36,57 @@ def _number(value, default=None):
     try:
         if value in (None, ""):
             return default
-        return float(value)
+        number = float(value)
+        return number if isfinite(number) else default
     except (TypeError, ValueError):
         return default
+
+
+def raw_amt_hex_total(rows):
+    """Q46: signed raw hex tonnes only; missing raw evidence is not final mass."""
+    values = [_number(row.get("RAW_WMT", row.get("raw_wmt"))) for row in rows or []]
+    return fsum(values) if values and all(v is not None for v in values) else None
+
+
+def amt_zeroing_outcome(rows):
+    rows = rows or []
+    raw_total = raw_amt_hex_total(rows)
+    inventory = _number(rows[0].get("INVENTORY_BALANCE_WMT", rows[0].get("inventory_balance_wmt"))) if rows else None
+    if raw_total is not None and raw_total <= 0:
+        return AMT_OUTCOME_ZEROED_NON_POSITIVE_RAW
+    if inventory is not None and inventory <= 0:
+        return AMT_OUTCOME_ZEROED_NON_POSITIVE_INVENTORY
+    return None
+
+
+def zeroed_amt_footprints(snapshot):
+    return {str(name).strip().upper() for name, rows in (snapshot or {}).items() if amt_zeroing_outcome(rows)}
+
+
+def guard_amt_snapshot(snapshot):
+    """Repair zeroed saved snapshots from raw evidence without a warehouse read."""
+    from setup.AMTGradeBlockLineage import align_amt_grade_block_lineage
+    result = deepcopy(snapshot or {})
+    aliases = {"RAW_WMT": "raw_wmt", "FINAL_WMT": "balance",
+               "INVENTORY_BALANCE_WMT": "inventory_balance_wmt",
+               "UNATTRIBUTED_MOVEMENT_WMT": "unattributed_movement_wmt",
+               "GRADE_BLOCK_LINEAGE_JSON": "grade_block_lineage_json",
+               "MODELLED_PROPERTIES_JSON": "modelled_properties_json"}
+    for footprint, rows in result.items():
+        if not amt_zeroing_outcome(rows):
+            continue
+        for row in rows:
+            row.setdefault("FOOTPRINT", footprint)
+            for target, alias in aliases.items():
+                if target not in row and alias in row:
+                    row[target] = row[alias]
+        rows = align_amt_grade_block_lineage(reconcile_amt_hex_rows(rows))
+        for row in rows:
+            for key in ("balance", "final_wmt"):
+                if key in row:
+                    row[key] = 0.0
+        result[footprint] = rows
+    return result
 
 
 def _lineage_coverage(row):
@@ -398,6 +454,9 @@ def reconcile_amt_hex_rows(rows):
         _number(row.get("RAW_WMT", row.get("FINAL_WMT")), 0.0)
         for row in corrected_rows
     ]
+    # Decide before clipping negatives, adding unattributed movements, or
+    # allocating inventory. A donor hex cannot rescue a non-positive sum.
+    raw_hex_total = fsum(raw_balances)
     coordinates = _coordinates(corrected_rows)
     (
         spatial_balances,
@@ -418,7 +477,7 @@ def reconcile_amt_hex_rows(rows):
     unattributed_movement = _number(
         corrected_rows[0].get("UNATTRIBUTED_MOVEMENT_WMT"), 0.0
     )
-    raw_stockpile_total = sum(raw_balances) + unattributed_movement
+    raw_stockpile_total = raw_hex_total + unattributed_movement
     raw_positive_total = (
         sum(max(value, 0.0) for value in raw_balances)
         + max(unattributed_movement, 0.0)
@@ -430,7 +489,17 @@ def reconcile_amt_hex_rows(rows):
     lineage_coverages = [
         _lineage_coverage(row) for row in corrected_rows
     ]
-    if inventory_balance is not None:
+    outcome = AMT_OUTCOME_RECONCILED
+    reason = "Spatially corrected raw hex tonnes reconciled to inventory."
+    if raw_hex_total <= 0:
+        outcome = AMT_OUTCOME_ZEROED_NON_POSITIVE_RAW
+        reason = "Sum of raw hex RAW_WMT is at or below zero; all final tonnes are zero and inventory is not allocated."
+        final_balances = [0.0] * len(corrected_rows)
+        ledger_adjustments = [-value for value in spatial_nonnegative]
+    elif inventory_balance is not None:
+        if inventory_balance <= 0:
+            outcome = AMT_OUTCOME_ZEROED_NON_POSITIVE_INVENTORY
+            reason = "Inventory balance is at or below zero; all final footprint tonnes are zero."
         inventory_balance = max(inventory_balance, 0.0)
         if spatial_total > 1e-9:
             if inventory_balance < spatial_total - 1e-9:
@@ -460,16 +529,28 @@ def reconcile_amt_hex_rows(rows):
             final - spatial
             for final, spatial in zip(final_balances, spatial_nonnegative)
         ]
+    else:
+        outcome = AMT_OUTCOME_RETAINED_INVENTORY_UNAVAILABLE
+        reason = "Inventory balance is unavailable; spatially reconciled AMT tonnes are retained."
 
     final_total = sum(final_balances)
     status = "OK_SPATIAL_AND_INVENTORY_RECONCILED"
-    if unresolved_total > 0.01:
+    if outcome in (AMT_OUTCOME_ZEROED_NON_POSITIVE_RAW, AMT_OUTCOME_ZEROED_NON_POSITIVE_INVENTORY):
+        status = outcome.upper()
+    elif unresolved_total > 0.01:
         status = "WARN_INSUFFICIENT_LOCAL_POSITIVE_TONNES_GLOBAL_FALLBACK_USED"
     elif geometry_fallback_used:
         status = "WARN_MISSING_GEOMETRY_DISTANCE_FALLBACK_USED"
     elif inventory_balance is None:
         status = "WARN_INVENTORY_BALANCE_UNAVAILABLE_SPATIAL_ONLY"
 
+    footprint_audit = amt_footprint_audit(
+        corrected_rows[0].get("FOOTPRINT", corrected_rows[0].get("footprint")),
+        outcome=outcome, outcome_reason=reason, raw_wmt=raw_hex_total,
+        spatially_reconciled_wmt=spatial_total,
+        inventory_wmt=_number(corrected_rows[0].get("INVENTORY_BALANCE_WMT")),
+        final_wmt=final_total, source_rows=len(corrected_rows),
+    )
     for index, row in enumerate(corrected_rows):
         raw_balance = raw_balances[index]
         direction = directions.get(index)
@@ -490,10 +571,13 @@ def reconcile_amt_hex_rows(rows):
             "SPATIAL_DONOR_WMT": donor_used.get(index, 0.0),
             "SPATIAL_UNRESOLVED_WMT": remaining_deficits.get(index, 0.0),
             "RAW_STOCKPILE_WMT": raw_stockpile_total,
+            "RAW_HEX_STOCKPILE_WMT": raw_hex_total,
             "RAW_POSITIVE_STOCKPILE_WMT": raw_positive_total,
             "SPATIALLY_CORRECTED_STOCKPILE_WMT": spatial_total,
             "FINAL_STOCKPILE_WMT": final_total,
             "SPATIAL_RECON_STATUS": status,
+            "SPATIAL_RECON_REASON": reason,
+            "AMT_FOOTPRINT_AUDIT": deepcopy(footprint_audit),
             "SPATIAL_RECON_METHOD": SPATIAL_METHOD,
             "RECLAIM_DIRECTION_EASTING": direction[0] if direction else None,
             "RECLAIM_DIRECTION_NORTHING": direction[1] if direction else None,

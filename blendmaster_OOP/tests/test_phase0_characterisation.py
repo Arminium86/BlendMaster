@@ -195,40 +195,25 @@ class AMTFootprintBalanceCharacterisation(unittest.TestCase):
         ])
         self.assertTrue(all(row["FINAL_WMT"] >= 0.0 for row in corrected))
 
-    # --- Known defects. Both are corrected by Task 9. -------------------
-
-    def test_negative_footprint_currently_receives_inventory_tonnes(self):
-        """CHANGES IN Task 9.
-
-        Q47 requires that a non-positive footprint total yields zero final
-        tonnes and that positive inventory is not allocated back into the
-        footprint. Today the inventory branch assigns the whole balance to the
-        first hex, so a footprint whose raw total is -70 still reports 200 t.
-        """
+    def test_negative_footprint_cannot_receive_inventory_tonnes(self):
+        """Task 9 fixes the former allocation of 200 t onto a -70 t footprint."""
         corrected, total = self.totals([
             amt_row("h1", -50, 0, 200),
             amt_row("h2", -20, 1, 200),
         ])
         self.assertAlmostEqual(corrected[0]["RAW_STOCKPILE_WMT"], -70.0)
-        self.assertAlmostEqual(total, 200.0)
-        self.assertAlmostEqual(corrected[0]["FINAL_WMT"], 200.0)
-        # Target behavior after Task 9:
-        #   self.assertAlmostEqual(total, 0.0)
+        self.assertAlmostEqual(total, 0.0)
+        self.assertTrue(all(row["FINAL_WMT"] == 0.0 for row in corrected))
 
-    def test_zero_footprint_currently_receives_inventory_tonnes(self):
-        """CHANGES IN Task 9.
-
-        A footprint with no raw tonnes is also non-positive under Q46, so it
-        must not absorb inventory either.
-        """
+    def test_zero_footprint_cannot_receive_inventory_tonnes(self):
+        """A zero raw footprint must not absorb positive inventory (Q46/Q47)."""
         corrected, total = self.totals([
             amt_row("h1", 0, 0, 200),
             amt_row("h2", 0, 1, 200),
         ])
         self.assertAlmostEqual(corrected[0]["RAW_STOCKPILE_WMT"], 0.0)
-        self.assertAlmostEqual(total, 200.0)
-        # Target behavior after Task 9:
-        #   self.assertAlmostEqual(total, 0.0)
+        self.assertAlmostEqual(total, 0.0)
+        self.assertTrue(all(row["FINAL_WMT"] == 0.0 for row in corrected))
 
 
 def lineage_hex(final_wmt, components):

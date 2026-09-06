@@ -26,6 +26,14 @@ def calculate_amt_chunk_plan(
     target_hours = _positive_float(target_hours)
     target_chunk_wmt = reclaim_rate_tph * target_hours
 
+    if total_wmt <= 0:
+        return {
+            "chunk_count": 0,
+            "chunk_size": 0.0,
+            "target_chunk_wmt": target_chunk_wmt,
+            "resulting_chunk_hours": 0.0,
+        }
+
     if reclaim_rate_tph <= 0 or target_hours <= 0:
         return {
             "chunk_count": 1,
@@ -35,14 +43,6 @@ def calculate_amt_chunk_plan(
                 total_wmt / reclaim_rate_tph
                 if reclaim_rate_tph > 0 else 0.0
             ),
-        }
-
-    if total_wmt <= 0:
-        return {
-            "chunk_count": 1,
-            "chunk_size": 0.0,
-            "target_chunk_wmt": target_chunk_wmt,
-            "resulting_chunk_hours": 0.0,
         }
 
     ideal_count = total_wmt / target_chunk_wmt

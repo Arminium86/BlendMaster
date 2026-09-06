@@ -1814,11 +1814,14 @@ class InventoryOnlyDataStreamIntegrationTests(unittest.TestCase):
             "numerator": "fines_wmt * minus_1mm_pct",
             "denominator": "1",
         }]))
+        selected = stockpile_record(amt=amt)
+        # AMT tonnes come from a positive chunk, never the inventory fallback.
+        chunks = [{**selected["SP1"], "footprint": "SP1", "sequence": 1}] if amt else []
         loader = DataLoader(
-            stockpile_record(amt=amt),
+            selected,
             calendar,
             pd.DataFrame(),
-            [],
+            chunks,
         )
         stockpiles, grade_blocks, equipment, targets = loader.load_data()
         tracker = BalanceTracker(

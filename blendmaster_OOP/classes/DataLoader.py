@@ -1,6 +1,7 @@
 # This loads the data from external sources (currently an Excel file with multiple tabs which represents the combined user input and opening inventories)
 import json
 import math
+from copy import deepcopy
 import pandas as pd
 from classes.EquipmentData import EquipmentData
 from classes.StockpileData import StockpileData
@@ -24,7 +25,9 @@ from pandas import DataFrame
 
 class DataLoader:
     def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions: DataFrame, hex_sequence_table: list, periods=None):
-        self.stockpile_data = stockpile_data
+        # AMT chunk selection replaces solver balances. Keep the selected
+        # inventory snapshot intact for audit and later scenario refreshes.
+        self.stockpile_data = deepcopy(stockpile_data)
         self.calendar_inputs = calendar_inputs
         self.expit_payload_transactions = expit_payload_transactions
         self.hex_sequence_table = hex_sequence_table
@@ -622,5 +625,11 @@ class DataLoader:
                     stockpile_data["source_properties"] = (
                         self.solver_source_properties(corresponding_hex)
                     )
+                else:
+                    # An AMT source without positive chunks has no opening
+                    # material. Its inventory balance cannot act as a fallback.
+                    stockpile_data['balance'] = 0.0
+                    stockpile_data['defined_fields'] = {}
+                    stockpile_data['source_properties'] = {}
 
 

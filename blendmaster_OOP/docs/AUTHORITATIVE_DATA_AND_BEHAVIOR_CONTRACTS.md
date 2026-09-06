@@ -466,13 +466,20 @@ Contracts:
 
 ## 13. AMT tonnage safety and footprint exclusion
 
-- Positivity is decided by the sum of raw hex `RAW_WMT` (Q46).
+- Positivity is decided by the sum of raw hex `RAW_WMT`, excluding
+  `UNATTRIBUTED_MOVEMENT_WMT` (Q46).
 - When the AMT footprint total is at or below zero and inventory is positive,
   all final hex and footprint tonnes become zero and the positive inventory
   balance is not allocated back into the footprint. The guard runs before
   inventory scaling and allocation (Q47).
-- When inventory is at or below zero, zero the footprint. When inventory is
-  unavailable, retain spatially reconciled AMT tonnes (Q48).
+- When inventory is at or below zero, zero the footprint. For a positive raw
+  footprint with inventory unavailable, retain spatially reconciled AMT tonnes
+  (Q48). A non-positive raw footprint always stays zero.
+- Task 9 implementation and validation are recorded in
+  [Task 9: non-positive AMT footprints](TASK_9_NON_POSITIVE_AMT_FOOTPRINTS.md).
+  Raw evidence and the zeroing reason survive persistence; zeroed material
+  cannot re-enter through cached chunks, inventory fallback or solver events.
+- The following whole-footprint exclusion controls remain Task 10 scope:
 - Excluded footprints are skipped before Snowflake and AMT processing and do
   not appear on reports (Q49, Q50).
 - If every footprint is excluded, the user may proceed when at least one

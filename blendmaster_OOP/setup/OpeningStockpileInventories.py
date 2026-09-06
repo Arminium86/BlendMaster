@@ -220,11 +220,14 @@ AMT_FIXED_COLUMN_TYPES = {
     "spatial_donor_wmt": "REAL",
     "spatial_unresolved_wmt": "REAL",
     "raw_stockpile_wmt": "REAL",
+    "raw_hex_stockpile_wmt": "REAL",
     "raw_positive_stockpile_wmt": "REAL",
     "spatially_corrected_stockpile_wmt": "REAL",
     "final_stockpile_wmt": "REAL",
     "unattributed_movement_wmt": "REAL",
     "spatial_recon_status": "TEXT",
+    "spatial_recon_reason": "TEXT",
+    "amt_footprint_audit_json": "TEXT",
     "spatial_recon_method": "TEXT",
     "reclaim_direction_easting": "REAL",
     "reclaim_direction_northing": "REAL",
@@ -1465,6 +1468,9 @@ class OpeningStockpileInventories:
                     "raw_stockpile_wmt": value(
                         row, "RAW_STOCKPILE_WMT", "raw_stockpile_wmt"
                     ),
+                    "raw_hex_stockpile_wmt": value(row, "RAW_HEX_STOCKPILE_WMT", "raw_hex_stockpile_wmt"),
+                    "amt_footprint_audit_json": json_payload(value(row, "AMT_FOOTPRINT_AUDIT", "amt_footprint_audit_json"), dict),
+                    "spatial_recon_reason": value(row, "SPATIAL_RECON_REASON", "spatial_recon_reason"),
                     "raw_positive_stockpile_wmt": value(
                         row, "RAW_POSITIVE_STOCKPILE_WMT",
                         "raw_positive_stockpile_wmt",

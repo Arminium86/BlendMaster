@@ -54,6 +54,7 @@ _AMT_RECONCILIATION_QUANTITY_FIELDS = {
     "ledger_adjustment_wmt",
     "raw_positive_stockpile_wmt",
     "raw_stockpile_wmt",
+    "raw_hex_stockpile_wmt",
     "raw_wmt",
     "spatial_adjustment_wmt",
     "spatial_deficit_filled_wmt",

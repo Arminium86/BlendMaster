@@ -4,7 +4,8 @@ This document describes how BlendMaster reconstructs opening AMT hex tonnes,
 reconciles AMT source-hex precision errors, and attributes the final material in
 each hex to the grade blocks that supplied it. The opening query is evaluated at
 the scenario start time. The inventory build ledger is the stockpile-total
-authority; AMT supplies the spatial movement allocation.
+authority for positive raw AMT footprints; AMT supplies the spatial movement
+allocation. The Task 9 non-positive-footprint guard takes precedence.
 
 The grade-block attribution produces **modelled** properties. It does not replace
 the existing AMT insitu grades. Historical OPF blend and regression
@@ -131,7 +132,13 @@ The reconciliation is deterministic:
    when nearer capacity is insufficient.
 5. Do not pass any negative balance into chunking. Retain unresolved deficits in
    audit fields.
-6. If the spatially corrected total exceeds inventory `BALANCEWMT`, distribute
+6. Before inventory allocation, test the sum of raw hex `RAW_WMT`, excluding
+   unattributed movements. If it is at or below zero, set every final hex to
+   zero, regardless of inventory. For positive raw AMT, non-positive inventory
+   also zeroes final tonnes; unavailable inventory retains spatially corrected
+   AMT tonnes.
+7. For positive raw AMT and positive inventory, if the spatially corrected total
+   exceeds inventory `BALANCEWMT`, distribute
    the residual deduction using `hex WMT x (1 + 4 x (1 - lineage coverage))`.
    Thus a hex with no matched grade-block lineage initially receives five times
    the deduction weight of a fully covered hex. Deductions are capped at the
@@ -152,6 +159,12 @@ RAW_WMT
 deficit values, the inventory/ledger adjustment,
 `INVENTORY_RECON_DEDUCTION_WMT`, the lineage coverage used for that deduction,
 inferred direction, method and status remain available for audit.
+`RAW_HEX_STOCKPILE_WMT` stores the raw sum used by the positivity guard;
+the legacy `RAW_STOCKPILE_WMT` still includes unattributed movements.
+`AMT_FOOTPRINT_AUDIT` and `SPATIAL_RECON_REASON` record the outcome and reason,
+including the original signed inventory balance. See
+[Task 9](TASK_9_NON_POSITIVE_AMT_FOOTPRINTS.md) for snapshot migration and the
+downstream chunk/solver rules.
 
 ### Coordinate outlier quarantine
 

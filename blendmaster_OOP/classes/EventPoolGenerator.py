@@ -206,6 +206,8 @@ class EventPoolGenerator:
     def is_stockpile_ready(self, stockpile: StockpileData, period, current_time, balance_tracker: BalanceTracker):
         stockpile_state = stockpile.to_dict().get(f"state_{period}", 0)
         stockpile.balance, stockpile.grade_fe, stockpile.grade_si, stockpile.grade_al, stockpile.grade_mn, stockpile.grade_p = balance_tracker.get_balance(stockpile.name)
+        if stockpile.is_AMT and stockpile.balance <= 0:
+            return False
         get_properties = getattr(
             balance_tracker, "get_source_properties", None
         )

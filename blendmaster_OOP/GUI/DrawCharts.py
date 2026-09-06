@@ -2217,6 +2217,7 @@ class DrawAMTStockpile:
         "inventory_recon_lineage_coverage_pct",
         "spatial_deficit_wmt", "spatial_donor_wmt",
         "spatial_unresolved_wmt", "raw_stockpile_wmt", "raw_positive_stockpile_wmt",
+        "raw_hex_stockpile_wmt", "amt_footprint_audit_json", "spatial_recon_reason",
         "spatially_corrected_stockpile_wmt", "final_stockpile_wmt",
         "spatial_recon_status", "spatial_recon_method",
         "grade_block_lineage_json", "modelled_properties_json",
@@ -3501,7 +3502,8 @@ class DrawAMTStockpile:
             )
             selected = selected[selected["_positive_balance"] > 0].copy()
             if selected.empty:
-                result.append(dict(entry))
+                # Known member rows are now all zero; discard the stale chunk.
+                refreshed += 1
                 continue
             for grade in (
                 "grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"

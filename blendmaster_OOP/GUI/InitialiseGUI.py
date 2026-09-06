@@ -58,6 +58,9 @@ from classes.ReconciliationControls import (
     required_history_days, reconciliation_columns, evidence_display_column, evidence_display_record,
     RECONCILIATION_ALGORITHM_VERSION,
 )
+from setup.AMTSpatialReconciliation import (
+    AMT_TONNAGE_RECON_VERSION, guard_amt_snapshot, raw_amt_hex_total, zeroed_amt_footprints,
+)
 from GUI.ReconciliationReview import ReconciliationReview
 from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
@@ -140,7 +143,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
 AMT_OPENING_CACHE_VERSION = 1
-AMT_CHUNK_RECONCILIATION_VERSION = 2
+AMT_CHUNK_RECONCILIATION_VERSION = 3
 EXPIT_INPUT_CACHE_VERSION = 2
 APS_GUIDANCE_CACHE_VERSION = 1
 
@@ -5817,7 +5820,35 @@ class UserInputs(QMainWindow):
                 }
             if raw_flag and str(name).strip():
                 selected.add(str(name).strip().upper())
-        return selected
+        return selected - zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+
+    def prune_zeroed_amt_chunks(self):
+        """Remove known zeroed footprints from every live scheduling snapshot."""
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+        if not zeroed:
+            return 0
+        removed = 0
+        def keep(rows):
+            nonlocal removed
+            kept = [row for row in rows or [] if self.amt_chunk_footprint(row) not in zeroed]
+            removed += len(rows or []) - len(kept)
+            return kept
+        for name in ("hex_sequence_table", "hex_sequence_table_argument"):
+            if name in vars(self):
+                setattr(self, name, keep(vars(self)[name]))
+        draw = vars(self).get("draw_AMT_map")
+        if draw is not None and hasattr(draw, "selected_points"):
+            draw.selected_points = keep(draw.selected_points)
+        if removed:
+            self.AMT_chunk_reconciliation_signature = ""
+            self.database_view_rows = []
+            self.database_view_snapshot_signature = None
+            self.database_view_refresh_pending = True
+            self.total_AMT_stockpile_balances = {
+                name: value for name, value in (vars(self).get("total_AMT_stockpile_balances") or {}).items()
+                if str(name).strip().upper() not in zeroed
+            }
+        return removed
 
     def submitted_amt_chunks(self):
         """Merge canonical, solver-snapshot and current-map AMT chunk rows.
@@ -5838,6 +5869,7 @@ class UserInputs(QMainWindow):
 
         chunks = []
         seen = set()
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
         for source in sources:
             for chunk in source:
                 if not isinstance(chunk, dict):
@@ -5856,7 +5888,7 @@ class UserInputs(QMainWindow):
                     chunk.get("sequence", chunk.get("SEQUENCE"))
                 )
                 identity = chunk_id or (footprint, sequence)
-                if not footprint or identity in seen:
+                if not footprint or footprint in zeroed or identity in seen:
                     continue
                 seen.add(identity)
                 chunks.append(copy.deepcopy(chunk))
@@ -5868,6 +5900,7 @@ class UserInputs(QMainWindow):
             getattr(self, "updated_stockpile_data", {}) or {}
         )
         selected_chunks = self.submitted_amt_chunks()
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
 
         chunks_by_footprint = {}
         for chunk in selected_chunks:
@@ -5897,6 +5930,8 @@ class UserInputs(QMainWindow):
             # It must suppress the weighted-average inventory instance even if
             # a live/restored scenario contains a stale or missing AMT flag.
             if chunks or bool(raw_amt_flag):
+                if stockpile_key in zeroed:
+                    continue
                 footprint_rows = (
                     getattr(self, "AMT_stockpile_data", {}) or {}
                 ).get(stockpile_name, []) or []
@@ -9225,6 +9260,7 @@ class UserInputs(QMainWindow):
             return [], {}, []
         state, audits, warnings = vars(self), [], []
         selected = state.get("updated_stockpile_data") or {}
+        zeroed = zeroed_amt_footprints(state.get("AMT_stockpile_data"))
         def resolve(row, name, kind):
             row = copy.deepcopy(row)
             self.apply_source_reconciliation(application, row, row.get("grade_streams") or {}, name, kind)
@@ -9233,6 +9269,12 @@ class UserInputs(QMainWindow):
             if not row.get("amt", row.get("AMT", False)):
                 audit = resolve(row, name, "inventory")
                 audit["review_label"] = f"Inventory · {name} · {row.get('build', '')}"
+                audits.append(audit)
+                continue
+            if str(name).strip().upper() in zeroed:
+                audit = resolve({"FINAL_WMT": 0}, name, "amt")
+                audit["review_label"] = f"AMT · {name} · zeroed footprint"
+                audit["warnings"].append("Footprint tonnes are zero under the raw AMT / inventory rule; no material is available for chunks.")
                 audits.append(audit)
                 continue
             hexes = {str(r.get("HEX", r.get("hex", ""))): resolve(r, name, "amt")
@@ -17515,23 +17557,7 @@ class UserInputs(QMainWindow):
 
     def AMT_raw_signed_footprint_total(self, stockpile_name):
         rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
-        if not rows:
-            return 0.0
-        reported_total = self.AMT_row_numeric_value(
-            rows[0], "RAW_STOCKPILE_WMT", "raw_stockpile_wmt"
-        )
-        if reported_total is not None:
-            return reported_total
-        raw_hex_total = sum(
-            self.AMT_row_numeric_value(
-                row, "RAW_WMT", "raw_wmt", "FINAL_WMT", "final_wmt"
-            ) or 0.0
-            for row in rows
-        )
-        unattributed = self.AMT_row_numeric_value(
-            rows[0], "UNATTRIBUTED_MOVEMENT_WMT", "unattributed_movement_wmt"
-        ) or 0.0
-        return raw_hex_total + unattributed
+        return raw_amt_hex_total(rows) if rows else 0.0
 
     def update_AMT_chunk_plan_cells(self, row):
         headers = self.amt_stockpile_headers()
@@ -17993,6 +18019,7 @@ class UserInputs(QMainWindow):
         state = vars(self)
         payload = {
             "reconciliation": reconciliation_fingerprint({
+                "tonnage_recon_version": AMT_TONNAGE_RECON_VERSION,
                 "algorithm_version": RECONCILIATION_ALGORITHM_VERSION,
                 "settings": state.get("reconciliation_settings"),
                 "inputs": state.get("reconciliation_inputs"),
@@ -18058,6 +18085,7 @@ class UserInputs(QMainWindow):
             data_source if data_source is not None else self.selected_AMT_data_source(),
             self.AMT_stockpile_data,
         )
+        self.prune_zeroed_amt_chunks()
         self.AMT_enrichment_signature = signature
         self.AMT_chunk_reconciliation_signature = ""
         if persist:
@@ -18328,6 +18356,8 @@ class UserInputs(QMainWindow):
             )
         if not compatible:
             return False
+        self.AMT_stockpile_data = guard_amt_snapshot(self.AMT_stockpile_data)
+        self.prune_zeroed_amt_chunks()
         self.opening_stockpile_inventories.save_AMT_to_database(
             self.AMT_stockpile_data
         )
@@ -18390,8 +18420,12 @@ class UserInputs(QMainWindow):
     ):
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_data = compact_amt_stockpile_data(
-            AMT_stockpile_data or {}
+            guard_amt_snapshot(AMT_stockpile_data)
         )
+        self.prune_zeroed_amt_chunks()
+        zeroed = zeroed_amt_footprints(self.AMT_stockpile_data)
+        if zeroed:
+            reuse_prepared = False
         if not reuse_prepared:
             if self.AMT_stockpile_data:
                 self.refresh_AMT_enrichment_if_needed(
@@ -18448,6 +18482,12 @@ class UserInputs(QMainWindow):
                     self.AMT_stockpile_table.setItem(
                         row_idx, headers.index(caption), item
                     )
+                    if caption == "AMT Total WMT":
+                        first = (self.AMT_stockpile_data.get(stockpile_name) or [{}])[0]
+                        reason = first.get("SPATIAL_RECON_REASON", "")
+                        item.setToolTip(reason)
+                        if str(stockpile_name).strip().upper() in zeroed:
+                            item.setText("0 · zeroed")
 
                 average_rate_item = QTableWidgetItem(f"{average_reclaim_rate:.2f}")
                 average_rate_item.setTextAlignment(Qt.AlignCenter)
@@ -18670,7 +18710,7 @@ class UserInputs(QMainWindow):
     def enrich_AMT_grade_streams(self, data_source, amt_data):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
         application = self.reconciliation_application()
-        enriched = copy.deepcopy(amt_data or {})
+        enriched = guard_amt_snapshot(amt_data)
         enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
         for footprint, rows in enriched.items():
             for row in rows or []:
@@ -18853,6 +18893,7 @@ class UserInputs(QMainWindow):
         membership and modelled values remain authoritative; only the derived
         brand copies and historical reconciliation layers are rebuilt here.
         """
+        self.prune_zeroed_amt_chunks()
         request_signature = self.AMT_chunk_reconciliation_request_signature()
         if (
             not force
@@ -19040,6 +19081,7 @@ class UserInputs(QMainWindow):
         return self.store_hex_sequence_table(navigate=True)
 
     def store_hex_sequence_table(self, navigate=True):
+        self.prune_zeroed_amt_chunks()
         if not self.store_AMT_chunk_settings():
             return
 
@@ -19057,6 +19099,8 @@ class UserInputs(QMainWindow):
             return False
 
         selected_footprints = self.selected_amt_footprints()
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+        candidate_chunks = [row for row in candidate_chunks if self.amt_chunk_footprint(row) not in zeroed]
         chunk_footprints = {
             self.amt_chunk_footprint(chunk)
             for chunk in candidate_chunks
