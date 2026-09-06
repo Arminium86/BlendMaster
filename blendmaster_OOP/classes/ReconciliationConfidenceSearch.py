@@ -2,7 +2,8 @@
 
 The objective separates by physical source and brand. One policy is selected for
 the whole inventory/hex composition; each component retains the shared-level
-rule for all ten factor series. No arbitrary subset of assay periods is selected.
+rule for all ten factor series. Spatial candidates select source-matched shift
+prefixes; lookback candidates retain all eligible shifts in their time window.
 """
 
 import math
@@ -11,7 +12,7 @@ from datetime import timedelta
 from classes.PhaseSchemas import SCHEMA_ANALYTES
 
 
-SEARCH_VERSION = 1
+SEARCH_VERSION = 2
 KINDS = ("blend", "regression")
 SPATIAL = "spatial_compositional"
 LOOKBACK = "lookback"
@@ -66,7 +67,7 @@ class ConfidenceSearch:
         for key, wmt in weights.items():
             share = wmt / total
             config = self.windows(key, policy)
-            selection = engine._selection(key, windows=config, method=method)
+            selection = engine._selection(key, windows=config, method=method, scores=scores)
             windows[key], selections[key] = config, selection
             depth = selection["depth"]
             if depth is None:
@@ -107,7 +108,9 @@ class ConfidenceSearch:
             config = dict(window_mode="calendar_days" if family == SPATIAL else family,
                           lookback_days=n, max_lookback_days=min(cap, n) if family == SPATIAL else cap)
             profiles.append(tuple(sorted(self.resolver._allowed_periods(config, method))))
-        return tuple(profiles)
+        # Spatial now ranks shifts by source match. Its result must never be
+        # reused for a lookback window, even with identical temporal membership.
+        return method, tuple(profiles)
 
     @staticmethod
     def description(result):
@@ -150,8 +153,8 @@ class ConfidenceSearch:
                  "candidate_count": len(candidates) if weights else 0,
                  "unique_evidence_count": len(unique) if weights else 0,
                  "best_by_family": {family: self.description(result) for family, result in families.items()} if weights else {},
-                 "objective": "physical_source_wmt_weighted_confidence",
+                 "objective": "physical_source_wmt_weighted_evidence_match_score",
                  "tie_break": "less_global_then_more_specific_then_more_production_days_then_more_feed_then_fixed_policy_order",
-                 "scope": "Existing spatial and lookback families within local/default guardrails; one policy per source and brand.",
-                 "baseline": "Spatial and compositional reconciliation using the full maximum lookback."}
+                 "scope": "Source-matched spatial shifts and lookback families within local/default guardrails; one policy per source and brand.",
+                 "baseline": "Source-matched spatial reconciliation within the full maximum lookback."}
         return {"audit": audit, "scores": scores, "selections": best["selections"], "windows": best["windows"]}

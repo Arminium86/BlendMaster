@@ -50,18 +50,18 @@ class ConfidenceSearchTests(unittest.TestCase):
         return (period(blocks=composition((GB, 50), (REMOTE, 50)), blend=1.1, regression=.9) +
                 period("2026-08-21 06:00", blocks=composition((GB, 90), (REMOTE, 10)), blend=1.4, regression=1.2))
 
-    def test_different_sources_choose_different_policies(self):
+    def test_different_sources_choose_different_historical_contexts(self):
         engine = auto(self.history())
         a = engine.resolve_source("A", "amt", composition((GB, 100)), 100)
         b = engine.resolve_source("B", "amt", composition((REMOTE, 100)), 100)
         self.assertAlmostEqual(a["confidence_percent"], 90)
-        self.assertAlmostEqual(a["auto_selection"]["baseline_confidence_percent"], 70)
-        self.assertAlmostEqual(a["auto_selection"]["improvement_percent"], 20)
-        self.assertEqual(a["auto_selection"]["window_days"], 1)
+        self.assertAlmostEqual(a["auto_selection"]["baseline_confidence_percent"], 90)
+        self.assertAlmostEqual(a["auto_selection"]["improvement_percent"], 0)
+        self.assertEqual(a["auto_selection"]["window_days"], 30)
         self.assertEqual(a["records"][0]["blend_factors"]["fe"], 1.4)
-        self.assertAlmostEqual(b["confidence_percent"], 30)
+        self.assertAlmostEqual(b["confidence_percent"], 50)
         self.assertEqual(b["auto_selection"]["window_days"], 30)
-        self.assertAlmostEqual(b["records"][0]["blend_factors"]["fe"], 1.25)
+        self.assertAlmostEqual(b["records"][0]["blend_factors"]["fe"], 1.1)
 
     def test_whole_source_policy_is_not_selected_independently_per_component(self):
         result = auto(self.history()).resolve_source("mix", "inventory", composition((GB, 40), (REMOTE, 60)), 100)
@@ -70,13 +70,13 @@ class ConfidenceSearchTests(unittest.TestCase):
         self.assertEqual(len(policies), 1)
         self.assertAlmostEqual(result["confidence_percent"], sum(r["lineage_fraction"] * r["confidence_percent"] for r in result["records"]))
 
-    def test_calendar_can_win_when_today_has_less_relevant_completed_feed(self):
+    def test_spatial_excludes_less_relevant_completed_feed_on_current_date(self):
         history = period("2026-08-21 06:00", blocks=composition((GB, 100)), blend=1.1)
         history += period("2026-08-22 06:00", blocks=composition((GB, 10), (REMOTE, 90)), blend=1.5)
         result = auto(history, scenario_start="2026-08-22 18:00").resolve(GB)
         choice = result["provenance"]["auto_selection"]
-        self.assertEqual(choice["selected_method"], "lookback")
-        self.assertEqual(choice["window_mode"], "calendar_days")
+        self.assertEqual(choice["selected_method"], "spatial_compositional")
+        self.assertIsNone(choice["window_mode"])
         self.assertEqual(result["confidence_percent"], 100)
         self.assertEqual(result["blend_factors"]["fe"], 1.1)
 
@@ -203,8 +203,8 @@ class SearchApplicationTests(unittest.TestCase):
         chunk = aggregate_reconciliation([(audit, 100)], source_kind="amt_chunk")
         overall = aggregate_reconciliation([(chunk, 100)], source_kind="overall")
         columns = reconciliation_columns(overall)
-        self.assertAlmostEqual(columns["recon_sf_baseline_confidence_pct"], 70)
-        self.assertAlmostEqual(columns["recon_sf_confidence_gain_pp"], 20)
+        self.assertAlmostEqual(columns["recon_sf_baseline_evidence_match_score_pct"], 90)
+        self.assertAlmostEqual(columns["recon_sf_evidence_match_score_gain_pp"], 0)
         self.assertIn("Spatial", columns["recon_sf_selected_window"])
 
     def test_settings_roundtrip_and_enrichment_reacts_to_auto_and_guardrail_changes(self):
@@ -222,8 +222,8 @@ class SearchApplicationTests(unittest.TestCase):
         _, fixed = apply(blocks=composition((GB, 100)))
         mixed = aggregate_reconciliation([(chosen, 100), (fixed, 100)])
         search = mixed["by_brand"]["SF"]["auto_selection"]
-        self.assertAlmostEqual(search["improvement_percent"], 10)
-        self.assertAlmostEqual(search["baseline_confidence_percent"], 85)
+        self.assertAlmostEqual(search["improvement_percent"], 0)
+        self.assertAlmostEqual(search["baseline_confidence_percent"], 95)
 
     def test_hex_enrichment_repeat_and_chunk_metadata_retain_auto_choice(self):
         view = window()
@@ -236,7 +236,7 @@ class SearchApplicationTests(unittest.TestCase):
         row = rows["SP1"][0]
         chunk = chart().build_chunk_row("SP1", 1, [{**row, **{f"grade_{a}": 50 for a in ("fe", "si", "al", "p", "mn")},
                                                   "hex": "H1", "footprint": "SP1", "balance": 100, "_positive_balance": 100}], 100)
-        self.assertAlmostEqual(chunk["reconciliation"]["by_brand"]["SF"]["auto_selection"]["improvement_percent"], 20)
+        self.assertAlmostEqual(chunk["reconciliation"]["by_brand"]["SF"]["auto_selection"]["improvement_percent"], 0)
         self.assertIn("auto_selection", row["reconciliation"]["by_brand"]["SF"])
 
 
@@ -285,7 +285,7 @@ class AutoReviewTests(unittest.TestCase):
         success(result)
         self.assertTrue(view.data_streams_submit_button.isEnabled())
         self.assertTrue(self.panel.export_button.isEnabled())
-        self.assertIn("20", self.panel.summary.text())
+        self.assertIn("evidence match score 90.0%", self.panel.summary.text())
         self.assertEqual(view._reconciliation_review_signature, view.reconciliation_review_signature())
         self.assertIsNotNone(view._reconciliation_application_cache)
 
@@ -361,8 +361,8 @@ class AutoReviewTests(unittest.TestCase):
                 self.panel.export_review()
             with open(path, encoding="utf-8-sig", newline="") as file:
                 rows = list(csv.DictReader(file))
-        self.assertEqual(rows[0]["method"], AUTO)
-        self.assertAlmostEqual(float(rows[0]["recon_sf_confidence_gain_pp"]), 20)
+        self.assertEqual(rows[0]["method"], "Auto · maximise evidence match score")
+        self.assertAlmostEqual(float(rows[0]["recon_sf_evidence_match_score_gain_pp"]), 0)
         self.assertIn("Spatial", rows[0]["recon_sf_selected_window"])
 
     def test_method_change_reuses_history_input_cache(self):

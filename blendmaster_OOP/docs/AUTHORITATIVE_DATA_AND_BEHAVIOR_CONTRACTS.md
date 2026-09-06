@@ -179,40 +179,58 @@ Three selectable modes, configured in the reconciliation tab:
 ### 5.3 Factor sourcing methods (Q38, Q42)
 
 Three advanced methods are available following the user's 6 September 2026
-request to bring confidence maximisation forward before Task 9 (Task 8A):
+request to bring automatic evidence-match maximisation forward before Task 9
+(Task 8A), and the subsequent source-selection clarification:
 
 1. Lookback time window.
 2. Spatial and compositional relevance, bounded by a max lookback window.
-3. Auto-maximise confidence across spatial reconciliation and the three
+3. Auto-maximise evidence match score across spatial reconciliation and the three
    supported lookback families.
 
 Standard global reconciliation remains the default. The earlier deferral of
-auto-maximise confidence is superseded by Task 8A.
+automatic maximisation is superseded by Task 8A.
+
+Spatial is source-directed. Within the maximum lookback, eligible historical
+shifts are ranked by their whole-feed composition/spatial-address match to the
+whole source being adjusted. At the first spatial level supporting all ten
+factor series, retain the highest-matching shifts until every series satisfies
+its cell/analyte minimum distinct production dates. One shared score cutoff
+applies across the ten series in that component; all ties at the cutoff are
+included. Selected dates can be non-consecutive. The date/score cutoff can differ
+between components according to their evidence and local guardrails, while the
+match reference is always the complete inventory/hex composition.
+
+Lookback retains all eligible spatially matching shifts in the chosen time
+window. It does not rank or trim them by source match. This makes it distinct
+from Spatial. A calendar/production/campaign subset can have a higher aggregate
+match score because its mix of shift-feed tonnes differs; Auto compares both.
 
 Auto selects one method/window policy per physical inventory stockpile or AMT
 hex and brand, scored against that source's complete composition. The search
 covers whole-day spatial horizons, trailing completed calendar dates, last N
 brand production dates, and final N dates of the latest consecutive production
-campaign. It does not select arbitrary subsets of historical periods. Minimum
+campaign. Spatial candidates apply the source-match ranking rule; lookback
+candidates keep all eligible periods in their window. This is a deterministic
+ranking-prefix search, not unrestricted optimisation over all shift subsets. Minimum
 production days and maximum calendar lookback are user guardrails, including
 local cell/analyte settings. Saved manual window choices are retained for the
 other methods; Auto chooses the method and N within those guardrails.
 
 Each component retains the first eligible shared fallback level for all ten
-factor series. Manual factors apply after selection without increasing evidence
-confidence. The full maximum-lookback spatial result is the comparison baseline
+factor series. Manual factors apply after selection without increasing the evidence
+match score. The full maximum-lookback source-matched spatial result is the comparison baseline
 and a candidate. Ties prefer less global evidence, finer fallback levels, more
 supporting production dates, then more period feed, with deterministic policy
-order resolving remaining ties. Confidence differences below numerical precision
+order resolving remaining ties. Score differences below numerical precision
 (scores rounded to ten decimal places for ranking) are treated as ties.
 
 Fixed physical source WMT makes these independent choices maximise the existing
 WMT-weighted overall score within the supported search space. Missing lineage
-remains in the denominator with zero confidence. AMT chunks aggregate hex
+remains in the denominator with zero evidence match score. AMT chunks aggregate hex
 choices when available; before chunking, footprints show a preview. Selected
-windows, baseline confidence and gain in percentage points are retained in
+windows, baseline evidence match score and gain in percentage points are retained in
 source/chunk audits, the review and CSV/Database View fields. See
-[Task 8A](TASK_8A_CONFIDENCE_MAXIMISATION.md) for the implemented scope.
+[the source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md) for the implemented scope.
 
 ### 5.3.1 Per-hex lineage weighting (Q39)
 
@@ -221,8 +239,10 @@ Where a hex is 40 percent GB1 and 60 percent GB2, the applied factor is the
 40/60 weighted combination of the factors resolved for GB1 and GB2. A single
 dominant factor for the whole hex is not used.
 
-Composition-ratio mismatch between the source period and the hex being adjusted
-is expressed as reduced confidence, not as a different factor.
+Composition-ratio mismatch lowers the evidence match score. Under the user's
+6 September source-selection clarification it also influences which shifts
+Spatial selects. The score never multiplies a factor: selected period factors
+retain total-period-feed WMT weighting, followed by physical source fractions.
 
 ### 5.3.2 Window and fallback exhaustion (Q34, Q37, Q41)
 
@@ -234,22 +254,26 @@ is expressed as reduced confidence, not as a different factor.
   global OPF/brand/analyte factor, never 1.0 and never a blocked submission.
 - Minimum production days and maximum lookback window bound the search (Q42).
 
-### 5.4 Confidence and uncertainty (Q32, Q42, Q45)
+### 5.4 Evidence match score (Q32, Q42, Q45; terminology clarified 6 September)
 
-- Confidence is 100 percent when every grade block in the source period has the
+- Evidence match score is 100 percent when every grade block in the source period has the
   highest spatial and compositional relevance to the source being adjusted, and
   the composition ratios match.
-- Confidence decreases as ratios deviate, as fallback levels are used, and as
+- The score decreases as ratios deviate, as fallback levels are used, and as
   less relevant material enters the same feed period.
 - Inventory stockpiles are adjusted as a single weighted average with no
-  chunking, and confidence is reported at that level.
+  chunking, and evidence match score is reported at that level.
 - AMT stockpiles are adjusted per hexagon, each hex carrying its own
-  confidence, reported in Database View at AMT chunk level, where a chunk may
+  evidence match score, reported in Database View at AMT chunk level, where a chunk may
   span several hexagons.
-- An overall confidence across all adjusted sources is also reported.
+- An overall evidence match score across all adjusted sources is also reported.
 - Required provenance in reports: selected fallback level and
-  confidence/uncertainty. A `reconciliation_confidence` field already exists in
-  `classes/ExpitSequenceReconciler.py`.
+  evidence match score. Uncertainty is removed from the Data Streams review,
+  Database View and CSV output. The score is diagnostic similarity, not a
+  calibrated grade-accuracy probability. Legacy internal `confidence_percent`
+  and `uncertainty_percent` fields remain readable for saved-state compatibility.
+  The separate EXPIT geometry/replay reliability classification in
+  `classes/ExpitSequenceReconciler.py` is not this factor-evidence metric.
 
 ### 5.5 Lineage sources (Q36, Q43)
 

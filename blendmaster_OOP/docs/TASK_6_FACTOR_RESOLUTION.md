@@ -1,5 +1,10 @@
 # Task 6 — Deterministic reconciliation factor resolution
 
+Historical implementation record. The user's 6 September 2026
+[source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md) supersedes the
+Spatial selection rule below: it now ranks shifts by the complete source's
+match, and the visible metric is Evidence match score with no uncertainty field.
+
 Implemented in `classes/ReconciliationFactorResolver.py`. This is a pure resolver
 over Task 5 history and the existing effective standard factor record. It returns
 factors, supporting evidence and confidence at lineage-component and source grain.

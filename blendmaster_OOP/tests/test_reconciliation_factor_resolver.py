@@ -82,7 +82,7 @@ class SpatialSelectionTests(unittest.TestCase):
         samples += period("2026-08-21 06:00", feed=300, blend=1.3, regression=1.1,
                           blocks=composition((GB, 299), (REMOTE, 1)), rows=20)
         samples[2]["product_dmt"] = samples[3]["product_dmt"] = 1
-        result = resolver(samples).resolve(GB)
+        result = resolver(samples, min_production_days=2).resolve(GB)
         self.assertAlmostEqual(result["blend_factors"]["fe"], 1.25)
         self.assertAlmostEqual(result["regression_factors"]["fe"], 1.05)
         self.assertEqual(result["source_feed_wmt"], 400)
@@ -395,7 +395,7 @@ class ResolverIntegrityTests(unittest.TestCase):
         self.assertEqual(engine.resolve("unknown")["blend_factors"]["fe"], 1.07)
         self.assertEqual(original[1:], samples[1:])
         engine.resolve(GB.replace("LG01", "LG02"))
-        self.assertEqual(len(engine._selection_cache), 1)
+        self.assertEqual(len(engine._selection_cache), 2)  # Source match rankings differ despite the shared cell.
 
     def test_full_source_composition_and_component_api_agree(self):
         blocks = composition((GB, 40), (REMOTE, 60))

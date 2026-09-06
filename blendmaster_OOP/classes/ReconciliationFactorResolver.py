@@ -293,11 +293,19 @@ class ReconciliationFactorResolver:
             self._window_cache.move_to_end(signature)
         return self._window_cache[signature]
 
-    def _selection(self, key, *, windows=None, method=None):
+    def _selection(self, key, *, windows=None, method=None, scores=None):
         cells = _cells(key)
         windows = windows or self._cell_windows(key)
         method = method or self.method
         cache_key = (cells[0], method, tuple(tuple(sorted(windows[a].items())) for a in SCHEMA_ANALYTES))
+        spatial = method == FACTOR_METHOD_SPATIAL_COMPOSITIONAL
+        if spatial:
+            if scores is None:
+                source = _distributions({key: 1.0}, 1.0)
+                scores = {i: _similarity(source, p["distributions"]) for i, p in enumerate(self.periods)}
+            # Ranking depends on the whole source, even for a shared cell.
+            ranked_scores = tuple(round(scores[i], 10) for i in range(len(self.periods)))
+            cache_key += (ranked_scores,)
         if cache_key in self._selection_cache:
             self._selection_cache.move_to_end(cache_key)
             return self._selection_cache[cache_key]
@@ -307,18 +315,40 @@ class ReconciliationFactorResolver:
         attempts = []
         for depth, cell in enumerate(cells):
             indices = sorted(self._index.get((depth, cell), ()))
-            factors = {kind: {} for kind in KINDS}
-            details = {kind: {} for kind in KINDS}
-            missing, used = [], set()
-            shared_indices = {}
+            eligible, missing, thresholds = {}, [], []
             for kind in KINDS:
                 for analyte in SCHEMA_ANALYTES:
                     valid = tuple(i for i in indices if i in allowed[analyte] and self.periods[i]["factors"][kind][analyte] is not None
                                   and self.periods[i]["factors"][kind][analyte] > 0)
+                    eligible[kind, analyte] = valid
+                    dates = {self.periods[i]["day"] for i in valid}
+                    minimum = windows[analyte]["min_production_days"]
+                    if len(dates) < minimum:
+                        missing.append(f"{kind}.{analyte}")
+                    elif spatial:
+                        best_by_date = {}
+                        for i in valid:
+                            day = self.periods[i]["day"]
+                            best_by_date[day] = max(best_by_date.get(day, -1), ranked_scores[i])
+                        thresholds.append(sorted(best_by_date.values(), reverse=True)[minimum - 1])
+            if missing:
+                attempts.append({"level": FACTOR_LEVELS[depth], "period_count": len(indices),
+                                 "reason": "No spatially matching periods." if not indices else
+                                 f"Minimum production days not met within selected windows for {', '.join(missing)}."})
+                continue
+            # A shared score cutoff includes the highest-matching shifts until
+            # every series has enough distinct dates. Include all ties at the
+            # cutoff; neither factor values nor recency break relevance ties.
+            cutoff = min(thresholds) if spatial else None
+            factors = {kind: {} for kind in KINDS}
+            details = {kind: {} for kind in KINDS}
+            used = set()
+            shared_indices = {}
+            for kind in KINDS:
+                for analyte in SCHEMA_ANALYTES:
+                    valid = tuple(i for i in eligible[kind, analyte] if not spatial or ranked_scores[i] >= cutoff)
                     valid = shared_indices.setdefault(valid, valid)
                     production_days = {self.periods[i]["day"] for i in valid}
-                    if len(production_days) < windows[analyte]["min_production_days"]:
-                        missing.append(f"{kind}.{analyte}")
                     feed = math.fsum(self.periods[i]["feed"] for i in valid)
                     factors[kind][analyte] = (math.fsum(
                         self.periods[i]["factors"][kind][analyte] * (self.periods[i]["feed"] / feed)
@@ -333,13 +363,19 @@ class ReconciliationFactorResolver:
             if not missing:
                 result = {"depth": depth, "cell": cell, "indices": sorted(used),
                           "factors": factors, "details": details, "attempts": attempts}
+                if spatial:
+                    candidate_count = len(set().union(*eligible.values()))
+                    result["spatial_selection"] = {
+                        "rule": "whole_source_match_ranked_shifts", "version": 2,
+                        "cutoff_evidence_match_score_percent": cutoff,
+                        "candidate_period_count": candidate_count, "selected_period_count": len(used),
+                        "excluded_period_count": candidate_count - len(used),
+                        "ties": "All equally matching shifts at the cutoff are retained.",
+                    }
                 self._selection_cache[cache_key] = result
                 if len(self._selection_cache) > 2048:
                     self._selection_cache.popitem(last=False)
                 return result
-            attempts.append({"level": FACTOR_LEVELS[depth], "period_count": len(indices),
-                             "reason": "No spatially matching periods." if not indices else
-                             f"Minimum production days not met within selected windows for {', '.join(missing)}."})
         result = {"depth": None, "attempts": attempts}
         self._selection_cache[cache_key] = result
         if len(self._selection_cache) > 2048:
@@ -374,7 +410,7 @@ class ReconciliationFactorResolver:
             result["manual_override"] = True
             result["provenance"]["local_override"] = {
                 "opf": self.opf, "brand": self.brand, "cell": cell, "factors": overrides,
-                "confidence_note": "Evidence confidence is unchanged by manual factor edits."}
+                "confidence_note": "The evidence match score is unchanged by manual factor edits."}
         return result
 
     def _resolve_automatic(self, key, *, source_id, source_kind, hex_id, fraction, distributions, coverage,
@@ -384,11 +420,13 @@ class ReconciliationFactorResolver:
         chosen = selection
         selection = {"depth": None, "attempts": []}
         if self.method == FACTOR_METHOD_STANDARD:
-            reason = "Standard global mode requested; no spatial confidence assessed."
+            reason = "Standard global mode requested; no spatial evidence match assessed."
         elif not key or coverage <= 0:
             reason = "No positive attributed source lineage; using supplied standard global factors."
         else:
-            selection = chosen if chosen is not None else self._selection(key)
+            if self.method == FACTOR_METHOD_SPATIAL_COMPOSITIONAL and scores is None:
+                scores = {i: _similarity(distributions, p["distributions"]) for i, p in enumerate(self.periods)}
+            selection = chosen if chosen is not None else self._selection(key, scores=scores)
             reason = "All spatial levels exhausted within the configured window; using supplied standard global factors."
         if selection["depth"] is None:
             return resolved_factor(
@@ -446,6 +484,7 @@ class ReconciliationFactorResolver:
             fallback_reason="; ".join(f"{a['level']}: {a['reason']}" for a in selection["attempts"]),
             confidence_percent=confidence, uncertainty_percent=100.0 - confidence,
             provenance={**self._config(), "attempts": deepcopy(selection["attempts"]),
+                        **({"spatial_selection": deepcopy(selection["spatial_selection"])} if "spatial_selection" in selection else {}),
                         "factor_history": detail, "history_warnings": list(self.history_warnings),
                         "source_lineage_coverage": coverage,
                         "confidence_basis": "conditional_on_attributed_source_lineage"},
@@ -499,6 +538,8 @@ class ReconciliationFactorResolver:
         known = math.fsum(weights.values())
         distributions = _distributions(weights, known)
         records, scores = [], {}
+        if self.method == FACTOR_METHOD_SPATIAL_COMPOSITIONAL and weights:
+            scores = {i: _similarity(distributions, p["distributions"]) for i, p in enumerate(self.periods)}
         search = None
         if self.method == FACTOR_METHOD_MAX_CONFIDENCE:
             from classes.ReconciliationConfidenceSearch import ConfidenceSearch

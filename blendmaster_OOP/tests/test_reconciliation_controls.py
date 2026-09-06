@@ -200,13 +200,13 @@ class ReviewIntegrationTests(unittest.TestCase):
         view.selected_data_stream = "adjusted_rom"
         _, audit = apply()
         record = view.database_view_record_with_streams({"source_type": "AMT Chunk"}, streams(), {"reconciliation": audit})
-        self.assertIn("recon_sf_confidence_pct", record)
+        self.assertIn("recon_sf_evidence_match_score_pct", record)
         self.assertIn("recon_sf_fallback_levels", record)
         view.database_view_rows = [record]
         headers = view.database_view_all_headers(include_coverage=False)
-        self.assertIn("recon_sf_confidence_pct", view.default_database_view_columns(headers))
+        self.assertIn("recon_sf_evidence_match_score_pct", view.default_database_view_columns(headers))
         aps = view.database_view_record_with_streams({"source_type": "APS Grade Block"}, streams(), {"reconciliation": audit})
-        self.assertNotIn("recon_sf_confidence_pct", aps)
+        self.assertNotIn("recon_sf_evidence_match_score_pct", aps)
 
     def test_fetch_snapshot_does_not_read_mutated_window_or_site(self):
         view = window()
@@ -316,7 +316,7 @@ class NativeReviewTests(unittest.TestCase):
 
                 evidence = self.widget.evidence.toPlainText()
                 self.assertIn(f"History: 0 rows · {formatted} period feed WMT", evidence)
-                self.assertIn(f"{formatted} feed WMT · confidence", evidence)
+                self.assertIn(f"{formatted} feed WMT · evidence match score", evidence)
                 self.assertIn(f"AWST · {formatted} feed WMT", evidence)
 
     def test_invalid_factor_does_not_save_and_reset_restores_inheritance(self):
@@ -433,9 +433,9 @@ class NativeReviewTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1]["source_id"], audit["source_id"])
-        self.assertEqual(float(rows[1]["recon_sf_confidence_pct"]), audit["by_brand"]["SF"]["confidence_percent"])
+        self.assertEqual(float(rows[1]["recon_sf_evidence_match_score_pct"]), audit["by_brand"]["SF"]["confidence_percent"])
         self.assertIn(FACTOR_LEVELS[0], rows[1]["recon_sf_fallback_levels"])
-        self.assertEqual(rows[1]["method"], "spatial_compositional")
+        self.assertEqual(rows[1]["method"], "Advanced · spatial and compositional")
         self.widget.mark_stale()
         self.assertFalse(self.widget.export_button.isEnabled())
 

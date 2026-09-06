@@ -1,5 +1,9 @@
 # Task 7 — Apply advanced factors to inventory and AMT grades
 
+Historical implementation record. See the 6 September 2026
+[source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md) for current
+Spatial selection and the Evidence match score terminology used in the UI/CSV.
+
 Task 7 connects the Task 6 resolver to the existing grade-stream pipeline.
 Inventory stockpiles receive one adjustment at their whole-stockpile average;
 AMT receives an adjustment for each hex before scheduling chunks are formed.

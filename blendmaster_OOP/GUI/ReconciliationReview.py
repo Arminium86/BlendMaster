@@ -15,12 +15,10 @@ from PyQt5.QtWidgets import (
 from classes.GradeStreams import ANALYTES, is_dry_plant, normalise_opf
 from classes.ReconciliationControls import (
     normalise_reconciliation_settings, spatial_cell, resolution_levels, reconciliation_report_rows, confidence_search_labels,
+    METHOD_LABELS,
 )
 
-METHODS = (("Standard · global factors", "standard"),
-           ("Advanced · lookback window", "lookback"),
-           ("Advanced · spatial and compositional", "spatial_compositional"),
-           ("Auto · maximise confidence", "auto_max_confidence"))
+METHODS = tuple((label, value) for value, label in METHOD_LABELS.items())
 WINDOWS = (("Trailing calendar days", "calendar_days"),
            ("Last N production days", "production_days"),
            ("Last N days of latest campaign", "latest_campaign"))
@@ -139,13 +137,13 @@ class ReconciliationReview(QWidget):
         self.source_filter.textChanged.connect(self.filter_sources)
         layout.addWidget(self.source_filter)
         self.sources = QTreeWidget()
-        self.sources.setHeaderLabels(["Source / component", "Brand", "WMT / share", "Confidence",
-                                      "Uncertainty", "Global evidence", "Lineage", "Fallback level", "Selected window"])
+        self.sources.setHeaderLabels(["Source / component", "Brand", "WMT / share", "Evidence match score",
+                                      "Global evidence", "Lineage", "Fallback level", "Selected window"])
         self.sources.setMinimumHeight(240)
         self.sources.setColumnWidth(0, 280)
-        for column in range(1, 8):
-            self.sources.setColumnWidth(column, 100 if column != 7 else 160)
-        self.sources.setColumnWidth(8, 190)
+        for column in range(1, 7):
+            self.sources.setColumnWidth(column, 160 if column in (3, 6) else 100)
+        self.sources.setColumnWidth(7, 210)
         self.sources.currentItemChanged.connect(self.show_evidence)
         layout.addWidget(self.sources)
         self.evidence = QPlainTextEdit()
@@ -158,7 +156,7 @@ class ReconciliationReview(QWidget):
         self.edit_component.setEnabled(False)
         self.edit_component.clicked.connect(self.open_component)
         layout.addWidget(self.edit_component)
-        self.tabs.addTab(page, "Sources and confidence")
+        self.tabs.addTab(page, "Sources and evidence")
 
     def build_local_tab(self):
         page = QWidget()
@@ -292,17 +290,21 @@ class ReconciliationReview(QWidget):
         self.tabs.setVisible(advanced)
         self.export_button.setVisible(advanced)
         self.summary.setVisible(advanced)
-        self.sources.setColumnHidden(8, self._settings["method"] != "auto_max_confidence")
+        self.sources.setColumnHidden(7, self._settings["method"] != "auto_max_confidence")
         self.help.setText(
             "Standard uses the existing global 7/14/21/28/30-day search. Local settings are retained for advanced mode."
             if not advanced else
             "Defaults can be refined by cell and analyte in Local factors and windows. All windows end before scenario start. "
             "Latest campaign means consecutive production dates; a date gap ends the campaign. "
-            "Confidence measures composition and spatial-address overlap; uncertainty is its complement, not a statistical interval.")
+            "Evidence match score measures composition and spatial-address overlap.")
+        if self._settings["method"] == "spatial_compositional":
+            self.help.setText("Spatial ranks historical shifts by their whole-feed match to this source within the maximum lookback. "
+                              "It keeps the best-matching shifts, including ties, until all ten factor series meet their minimum production dates at one spatial level. "
+                              "The selected shifts can be non-consecutive. Evidence match score measures composition and spatial-address overlap.")
         if self._settings["method"] == "auto_max_confidence":
-            self.help.setText("Auto compares spatial horizons and all three lookback options within the minimum production days and maximum lookback. "
+            self.help.setText("Auto compares source-matched spatial selections and all three lookback options within the minimum production days and maximum lookback. "
                               "It chooses one policy per inventory stockpile or AMT hex and brand. Local minimum/maximum guardrails and manual factors are retained; N is chosen automatically. "
-                              "Confidence measures evidence similarity, not a statistical probability.")
+                              "Evidence match score measures composition and spatial-address overlap.")
         self.custom_window.setText("Set local guardrails for this analyte" if self._settings["method"] == "auto_max_confidence"
                                    else "Set a local window for this analyte")
         self.update_local_window()
@@ -333,7 +335,7 @@ class ReconciliationReview(QWidget):
         self._record_options = {}
         self._report_rows = reconciliation_report_rows(audits, overall)
         for row in self._report_rows:
-            row["method"] = self._settings["method"]
+            row["method"] = METHOD_LABELS[self._settings["method"]]
         if self._report_rows:
             self._report_rows[0]["warnings"] = "; ".join(dict.fromkeys([*overall.get("warnings", []), *warnings]))
         self.export_button.setEnabled(bool(self._report_rows))
@@ -346,7 +348,7 @@ class ReconciliationReview(QWidget):
             for brand, detail in audit.get("by_brand", {}).items():
                 name = str(audit.get("review_label") or audit.get("hex_id") or audit.get("source_id") or "Source")
                 node = QTreeWidgetItem([name, brand, f"{audit.get('source_wmt', 0):,.1f}",
-                    percent(detail.get("confidence_percent")), percent(detail.get("uncertainty_percent")),
+                    percent(detail.get("confidence_percent")),
                     percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)), levels(detail),
                     "; ".join(confidence_search_labels(detail))])
                 (parent.addChild if parent else self.sources.addTopLevelItem)(node)
@@ -354,7 +356,7 @@ class ReconciliationReview(QWidget):
                 for record in detail.get("records", []):
                     child = QTreeWidgetItem([record.get("grade_block_key") or "Unknown lineage · global fallback", brand,
                         percent(100 * record.get("lineage_fraction", 0)), percent(record.get("confidence_percent")),
-                        percent(record.get("uncertainty_percent")), "", "",
+                        "", "",
                         LEVEL_LABELS.get(record.get("resolution_level"), record.get("resolution_level", "")) +
                         (" · manual edit" if record.get("manual_override") else ""), "; ".join(confidence_search_labels(detail))])
                     attach(child, audit, brand, record)
@@ -372,18 +374,17 @@ class ReconciliationReview(QWidget):
             add(None, audit)
         summaries = []
         for brand, detail in overall.get("by_brand", {}).items():
-            summaries.append(f"{brand}: confidence {percent(detail.get('confidence_percent'))} · "
-                             f"uncertainty {percent(detail.get('uncertainty_percent'))} · "
+            summaries.append(f"{brand}: evidence match score {percent(detail.get('confidence_percent'))} · "
                              f"global evidence {percent(100 * detail.get('global_fraction', 0))} · "
                              f"lineage {percent(100 * detail.get('lineage_coverage', 0))} · "
                              f"manual edits {percent(100 * detail.get('manual_override_fraction', 0))}")
             search = detail.get("auto_selection")
             if search:
                 gain = search.get("improvement_percent")
-                summaries.append(f"Auto: full-window baseline {percent(search.get('baseline_confidence_percent'))} · "
+                summaries.append(f"Auto: spatial baseline match score {percent(search.get('baseline_confidence_percent'))} · "
                                  f"improvement {quantity(gain, 2)} percentage points")
         self.summary.setText("Overall · physical WMT weighted\n" + "\n".join(summaries) if summaries else
-                             "No positive adjusted sources are available for confidence review.")
+                             "No positive adjusted sources are available for evidence review.")
         self.status.setText(("Standard global factors are ready. Submit applies these settings." if self._settings["method"] == "standard"
                             else "Review calculated. Submit applies these settings to the grade streams.") +
                             (" History or lineage warnings are shown below." if warnings else ""))
@@ -431,13 +432,14 @@ class ReconciliationReview(QWidget):
         search = detail.get("auto_selection")
         if search:
             lines += ["Auto selection: " + "; ".join(confidence_search_labels(detail)),
-                      f"Full-window baseline: {percent(search.get('baseline_confidence_percent'))} · improvement: {quantity(search.get('improvement_percent'), 2)} percentage points"]
+                      f"Spatial baseline match score: {percent(search.get('baseline_confidence_percent'))} · improvement: {quantity(search.get('improvement_percent'), 2)} percentage points"]
             if search.get("candidate_count") is not None:
                 lines.append(f"Compared {search['candidate_count']} windows / {search['unique_evidence_count']} distinct period selections for this whole source.")
             for family, candidate in search.get("best_by_family", {}).items():
                 label = dict((value, title) for title, value in WINDOWS).get(family, "Spatial and compositional")
                 n = candidate["window_days"]
-                lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'} · confidence {percent(candidate['confidence_percent'])}")
+                suffix = " max" if family == "spatial_compositional" else ""
+                lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'}{suffix} · evidence match score {percent(candidate['confidence_percent'])}")
         if record:
             lines += [f"Component: {record.get('grade_block_key') or 'Unknown lineage'}",
                       f"Selected fallback: {LEVEL_LABELS.get(record['resolution_level'], record['resolution_level'])}",
@@ -451,15 +453,20 @@ class ReconciliationReview(QWidget):
                 lines.append("Manual local edits: " + "; ".join(
                     f"{kind}/{a} {factor(v['automatic'])} → {factor(v['effective'])}"
                     for kind, values in local["factors"].items() for a, v in values.items()))
-                lines.append(local["confidence_note"])
+                lines.append("The evidence match score is unchanged by manual factor edits.")
             elif record.get("manual_override"):
                 lines.append("Includes edits to the supplied standard global factors.")
             lines.append(f"History: {quantity(record.get('source_rows'), 0)} rows · "
                          f"{quantity(record.get('source_feed_wmt'))} period feed WMT")
+            spatial = record.get("provenance", {}).get("spatial_selection")
+            if spatial:
+                lines.append(f"Source-matched shifts: {spatial['selected_period_count']} of {spatial['candidate_period_count']} eligible periods; "
+                             f"minimum included match score {percent(spatial['cutoff_evidence_match_score_percent'])}. "
+                             "All ties retained; production dates need not be consecutive.")
             for kind, values in record.get("provenance", {}).get("factor_history", {}).items():
                 for a, value in values.items():
                     lines.append(f"{kind}/{a}: {value['production_days']} production dates · {value['period_count']} periods · "
-                                 f"{quantity(value.get('feed_wmt'))} feed WMT · confidence {percent(value.get('confidence_percent'))}")
+                                 f"{quantity(value.get('feed_wmt'))} feed WMT · evidence match score {percent(value.get('confidence_percent'))}")
             for period in record.get("source_history", []):
                 if period.get("period_start"):
                     lines.append(f"{period['period_start']} — {period['period_end']} AWST · {quantity(period.get('feed_wmt'))} feed WMT")
@@ -517,7 +524,7 @@ class ReconciliationReview(QWidget):
             automatic = {kind: overrides.get(kind, {}).get(analyte, {}).get("automatic",
                           record.get(kind + "_factors", {}).get(analyte)) for kind in ("blend", "regression")}
             lookback = self._settings["method"] == "lookback"
-            window_label = "Auto within guardrails" if self._settings["method"] == "auto_max_confidence" else "Spatial within max window"
+            window_label = "Auto within guardrails" if self._settings["method"] == "auto_max_confidence" else "Source-matched shifts"
             values = [label, factor(automatic["blend"]), factor(local.get("blend")), factor(automatic["regression"]),
                       factor(local.get("regression")), dict((v, k) for k, v in WINDOWS)[config["window_mode"]] if lookback else window_label,
                       config["lookback_days"] if lookback else "—", config["min_production_days"], config["max_lookback_days"]]
@@ -575,7 +582,7 @@ class ReconciliationReview(QWidget):
         self._settings = updated
         self.mark_stale()
         self.settingsChanged.emit(self.settings())
-        self.local_status.setText("Local settings saved. Calculate review to see the resulting factors and confidence.")
+        self.local_status.setText("Local settings saved. Calculate review to see the resulting factors and evidence match score.")
 
     def open_component(self):
         current = self.sources.currentItem()

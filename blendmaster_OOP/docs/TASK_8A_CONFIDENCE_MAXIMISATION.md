@@ -1,4 +1,11 @@
-# Task 8A — Auto-maximise reconciliation confidence
+# Task 8A — Auto-maximise evidence match score
+
+Updated by the user's subsequent 6 September clarification: Spatial now selects
+source-matched historical shifts, the visible metric is **Evidence match score**,
+and uncertainty is removed from the UI and CSV. See
+[current selection rules and validation](RECONCILIATION_EVIDENCE_MATCH.md).
+The sections below record the initial window-search implementation and its
+validation; the linked clarification supersedes its Spatial semantics and labels.
 
 Implemented 6 September 2026 at the user's request, bringing the previously
 unnumbered deferred Q38/Q42 feature forward before Task 9. Existing task numbers

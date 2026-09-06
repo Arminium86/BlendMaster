@@ -54,7 +54,10 @@ from classes.ReconciliationApplication import (
     ReconciliationApplication, aggregate_reconciliation, amt_reconciliation_lineage,
     normalise_reconciliation_settings, reconciliation_fingerprint,
 )
-from classes.ReconciliationControls import required_history_days, reconciliation_columns
+from classes.ReconciliationControls import (
+    required_history_days, reconciliation_columns, evidence_display_column, evidence_display_record,
+    RECONCILIATION_ALGORITHM_VERSION,
+)
 from GUI.ReconciliationReview import ReconciliationReview
 from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
@@ -5510,7 +5513,7 @@ class UserInputs(QMainWindow):
         self, record, streams, fallback=None, source_warnings=None
     ):
         """Flatten stored and optimiser-resolved grades into one audit row."""
-        record = dict(record or {})
+        record = evidence_display_record(dict(record or {}))
         fallback = fallback or {}
         normalized_streams = normalise_grade_streams(streams, fallback)
 
@@ -6760,7 +6763,8 @@ class UserInputs(QMainWindow):
             for key in record
             if self.database_view_is_automatic_audit_field(key)
         })
-        headers = list(dict.fromkeys([*fixed, *defined, *audit, "warnings"]))
+        headers = list(dict.fromkeys(evidence_display_column(h) for h in [*fixed, *defined, *audit, "warnings"]
+                                    if evidence_display_column(h) is not None))
         if include_coverage is None:
             include_coverage = bool(
                 getattr(self, "database_view_show_coverage_fields", False)
@@ -6789,6 +6793,11 @@ class UserInputs(QMainWindow):
         ]
 
     def database_view_headers(self):
+        for name in ("database_view_selected_columns", "database_view_known_columns"):
+            previous = vars(self).get(name)
+            if previous is not None:
+                setattr(self, name, list(dict.fromkeys(evidence_display_column(h) for h in previous
+                                                      if evidence_display_column(h) is not None)))
         all_headers = self.database_view_all_headers()
         selected = getattr(self, "database_view_selected_columns", None)
         if selected is None:
@@ -9204,10 +9213,10 @@ class UserInputs(QMainWindow):
 
     def reconciliation_review_signature(self):
         state = vars(self)
-        return reconciliation_fingerprint({name: state.get(name) for name in (
+        return reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **{name: state.get(name) for name in (
             "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
             "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
-            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings")})
+            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings")}})
 
     def calculate_reconciliation_review(self):
         """Preview evidence on copies; do not persist grades or alter AMT chunks."""
@@ -9234,7 +9243,7 @@ class UserInputs(QMainWindow):
                 children = list(hexes.values())
                 if not children:
                     children = [resolve({"FINAL_WMT": max(numeric(row.get("balance")) or 0, 0)}, name, "amt")]
-                    warnings.append(f"{name}: AMT hexes are not loaded; confidence is unscored and global fallback is shown.")
+                    warnings.append(f"{name}: AMT hexes are not loaded; the evidence match score is unscored and global fallback is shown.")
                 audit = aggregate_reconciliation([(a, a["source_wmt"]) for a in children], source_id=name, source_kind="amt_footprint_preview")
                 audit.update(review_label=f"AMT · {name} · before chunking", review_children=children)
                 audits.append(audit)
@@ -9306,7 +9315,7 @@ class UserInputs(QMainWindow):
                 self.data_streams_submit_button.setEnabled(False)
                 return
             if error:
-                self.reconciliation_review.mark_stale(f"Confidence search could not be completed: {error}")
+                self.reconciliation_review.mark_stale(f"Evidence match search could not be completed: {error}")
                 self.data_streams_submit_button.setEnabled(False)
                 return
             (audits, overall, warnings), cache = result
@@ -9321,7 +9330,7 @@ class UserInputs(QMainWindow):
                 label.setVisible(bool(text))
             self.advance_agent_after_reconciliation()
 
-        self.run_background_task("Finding the highest-confidence reconciliation within the guardrails...",
+        self.run_background_task("Finding the highest evidence match score within the guardrails...",
                                  calculate, finish, lambda error: finish(error=error))
 
     def advance_agent_after_reconciliation(self):
@@ -9421,7 +9430,7 @@ class UserInputs(QMainWindow):
                          standard_factors=state.get("historical_recon_factors", {}),
                          opf=state.get("opf_input_choice"), brands=state.get("product_brand_labels_choice"),
                          scenario_start=state.get("start_time_choice"), settings=settings)
-        signature = reconciliation_fingerprint(arguments)
+        signature = reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **arguments})
         cache = state.get("_reconciliation_application_cache")
         if not cache or cache[0] != signature:
             cache = (signature, ReconciliationApplication(**arguments))
@@ -17984,6 +17993,7 @@ class UserInputs(QMainWindow):
         state = vars(self)
         payload = {
             "reconciliation": reconciliation_fingerprint({
+                "algorithm_version": RECONCILIATION_ALGORITHM_VERSION,
                 "settings": state.get("reconciliation_settings"),
                 "inputs": state.get("reconciliation_inputs"),
                 "scenario_start": state.get("start_time_choice"),

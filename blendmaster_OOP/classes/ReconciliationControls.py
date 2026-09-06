@@ -10,6 +10,31 @@ from setup.InventoryBuildLineage import canonical_block, clean_text, finite_numb
 WINDOW_MODES = ("calendar_days", "production_days", "latest_campaign")
 WINDOW_DEFAULTS = {"window_mode": "calendar_days", "lookback_days": 7,
                    "min_production_days": 1, "max_lookback_days": 30}
+RECONCILIATION_ALGORITHM_VERSION = 2
+METHOD_LABELS = {"standard": "Standard · global factors",
+                 "lookback": "Advanced · lookback window",
+                 "spatial_compositional": "Advanced · spatial and compositional",
+                 "auto_max_confidence": "Auto · maximise evidence match score"}
+
+
+def evidence_display_column(name):
+    """Translate legacy presentation fields without rewriting saved audits."""
+    if not str(name).startswith("recon_"):
+        return name
+    for old, new in (("_uncertainty_pct", None),
+                     ("_baseline_confidence_pct", "_baseline_evidence_match_score_pct"),
+                     ("_confidence_gain_pp", "_evidence_match_score_gain_pp"),
+                     ("_confidence_pct", "_evidence_match_score_pct")):
+        if name.endswith(old):
+            return name[:-len(old)] + new if new else None
+    return name
+
+
+def evidence_display_record(record):
+    result = {evidence_display_column(k): v for k, v in record.items() if evidence_display_column(k) is not None}
+    # Prefer an explicitly supplied current field if both names were saved.
+    result.update({k: v for k, v in record.items() if evidence_display_column(k) == k})
+    return result
 
 
 def spatial_cell(value):
@@ -100,7 +125,7 @@ def confidence_search_labels(detail):
     label = {"spatial_compositional": "Spatial", "calendar_days": "Calendar",
              "production_days": "Production days", "latest_campaign": "Latest campaign"}.get(family, family)
     n = search.get("window_days")
-    return [f"{label} · {n} {'day' if n == 1 else 'days'}"]
+    return [f"{label} · {n} {'day' if n == 1 else 'days'}" + (" max" if family == "spatial_compositional" else "")]
 
 
 def reconciliation_columns(audit):
@@ -108,16 +133,15 @@ def reconciliation_columns(audit):
     result = {}
     for brand, detail in (audit or {}).get("by_brand", {}).items():
         prefix = "recon_" + re.sub(r"[^a-z0-9]+", "_", brand.lower()).strip("_")
-        result.update({f"{prefix}_confidence_pct": detail.get("confidence_percent"),
-                       f"{prefix}_uncertainty_pct": detail.get("uncertainty_percent"),
+        result.update({f"{prefix}_evidence_match_score_pct": detail.get("confidence_percent"),
                        f"{prefix}_fallback_levels": ", ".join(resolution_levels(detail)),
                        f"{prefix}_global_pct": 100 * detail.get("global_fraction", 0),
                        f"{prefix}_lineage_coverage_pct": 100 * detail.get("lineage_coverage", 0),
                        f"{prefix}_manual_override_pct": 100 * detail.get("manual_override_fraction", 0)})
         if detail.get("auto_selection"):
             result.update({f"{prefix}_selected_window": "; ".join(confidence_search_labels(detail)),
-                           f"{prefix}_baseline_confidence_pct": detail["auto_selection"].get("baseline_confidence_percent"),
-                           f"{prefix}_confidence_gain_pp": detail["auto_selection"].get("improvement_percent")})
+                           f"{prefix}_baseline_evidence_match_score_pct": detail["auto_selection"].get("baseline_confidence_percent"),
+                           f"{prefix}_evidence_match_score_gain_pp": detail["auto_selection"].get("improvement_percent")})
     return result
 
 
@@ -125,6 +149,6 @@ def reconciliation_report_rows(audits, overall):
     """One report row per source/AMT chunk plus the WMT-weighted overall row."""
     return [{"opf": audit.get("opf", ""), "source_kind": audit.get("source_kind", ""),
              "source_id": audit.get("source_id", ""), "source": audit.get("review_label") or audit.get("source_id") or "Overall",
-             "source_wmt": audit.get("source_wmt", 0), "method": audit.get("method", ""),
+             "source_wmt": audit.get("source_wmt", 0), "method": METHOD_LABELS.get(audit.get("method"), audit.get("method", "")),
              **reconciliation_columns(audit), "warnings": "; ".join(audit.get("warnings", []))}
             for audit in [overall, *audits] if audit.get("by_brand")]
