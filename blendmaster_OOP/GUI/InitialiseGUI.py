@@ -9183,12 +9183,17 @@ class UserInputs(QMainWindow):
         self.reconciliation_settings = normalise_reconciliation_settings(settings)
         self._reconciliation_application_cache = None
         self._reconciliation_review_signature = ""
+        self._reconciliation_review_generation = vars(self).get("_reconciliation_review_generation", 0) + 1
+        self._reconciliation_review_pending = False
         self.data_streams_submit_button.setEnabled(False)
         self.reconciliation_review.set_busy(False)
 
     def reconciliation_global_factor_changed(self, item):
         if item.data(Qt.UserRole):
             self._reconciliation_review_signature = ""
+            self._reconciliation_review_generation = vars(self).get("_reconciliation_review_generation", 0) + 1
+            self._reconciliation_review_pending = False
+            self.reconciliation_review.set_busy(False)
             self.data_streams_submit_button.setEnabled(False)
             self.reconciliation_review.mark_stale("Global factors edited. Calculate review before submitting.")
 
@@ -9202,7 +9207,7 @@ class UserInputs(QMainWindow):
         return reconciliation_fingerprint({name: state.get(name) for name in (
             "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
             "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
-            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table")})
+            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings")})
 
     def calculate_reconciliation_review(self):
         """Preview evidence on copies; do not persist grades or alter AMT chunks."""
@@ -9256,6 +9261,9 @@ class UserInputs(QMainWindow):
         review = vars(self).get("reconciliation_review")
         if review is None:
             return []
+        if normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))["method"] == "auto_max_confidence":
+            self.start_confidence_search_review()
+            return []
         review.set_busy(False)
         try:
             audits, overall, warnings = self.calculate_reconciliation_review()
@@ -9268,6 +9276,62 @@ class UserInputs(QMainWindow):
         self._reconciliation_review_signature = self.reconciliation_review_signature()
         self.data_streams_submit_button.setEnabled(True)
         return warnings
+
+    def start_confidence_search_review(self):
+        """Compute against an isolated snapshot so the UI remains responsive."""
+        names = ("reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
+                 "opf_input_choice", "product_brand_labels_choice", "start_time_choice", "field_mappings",
+                 "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table")
+        context = SimpleNamespace(**copy.deepcopy({name: vars(self).get(name) for name in names}))
+        context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
+        context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
+        signature = self.reconciliation_review_signature()
+        generation = vars(self).get("_reconciliation_review_generation", 0) + 1
+        self._reconciliation_review_generation = generation
+        self._reconciliation_review_pending = True
+        self._reconciliation_review_signature = ""
+        self.data_streams_submit_button.setEnabled(False)
+        self.reconciliation_review.set_busy(True)
+
+        def calculate():
+            return UserInputs.calculate_reconciliation_review(context), vars(context).get("_reconciliation_application_cache")
+
+        def finish(result=None, error=None):
+            if generation != vars(self).get("_reconciliation_review_generation"):
+                return
+            self._reconciliation_review_pending = False
+            self.reconciliation_review.set_busy(False)
+            if signature != self.reconciliation_review_signature():
+                self.reconciliation_review.mark_stale("Sources or settings changed. Calculate review again.")
+                self.data_streams_submit_button.setEnabled(False)
+                return
+            if error:
+                self.reconciliation_review.mark_stale(f"Confidence search could not be completed: {error}")
+                self.data_streams_submit_button.setEnabled(False)
+                return
+            (audits, overall, warnings), cache = result
+            self._reconciliation_application_cache = cache
+            self.reconciliation_review.set_review(audits, overall, warnings)
+            self._reconciliation_review_signature = signature
+            self.data_streams_submit_button.setEnabled(True)
+            label = vars(self).get("data_stream_warning_label")
+            if label is not None:
+                text = "\n".join(dict.fromkeys([*label.text().splitlines(), *warnings]))
+                label.setText(text)
+                label.setVisible(bool(text))
+            self.advance_agent_after_reconciliation()
+
+        self.run_background_task("Finding the highest-confidence reconciliation within the guardrails...",
+                                 calculate, finish, lambda error: finish(error=error))
+
+    def advance_agent_after_reconciliation(self):
+        if (vars(self).get("agent_workflow_after_data_streams", False)
+                and not vars(self).get("_reconciliation_review_pending", False)
+                and self.data_streams_submit_button.isEnabled()):
+            self.agent_workflow_after_data_streams = False
+            self.agent_workflow_after_site_config = False
+            self.handle_data_streams_submit()
+            QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
 
     def capture_recon_factor_table(self):
         for row in range(self.recon_factor_table.rowCount()):
@@ -9628,11 +9692,7 @@ class UserInputs(QMainWindow):
         self.data_stream_warning_label.setVisible(bool(warning_text))
         if vars(self).get("reconciliation_review") is None:
             self.data_streams_submit_button.setEnabled(True)
-        if getattr(self, "agent_workflow_after_data_streams", False):
-            self.agent_workflow_after_data_streams = False
-            self.agent_workflow_after_site_config = False
-            self.handle_data_streams_submit()
-            QTimer.singleShot(250, self.agent_workflow_apply_stockpiles)
+        self.advance_agent_after_reconciliation()
 
     def handle_data_stream_inputs_error(self, error_message, request_signature=None):
         if (

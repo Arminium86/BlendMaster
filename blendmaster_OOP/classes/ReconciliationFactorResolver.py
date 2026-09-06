@@ -5,7 +5,7 @@ and independent analyte fallback. One spatial level must support both factor
 kinds and all five analytes. Grades and application state are not changed here.
 """
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import timedelta
@@ -19,7 +19,7 @@ from classes.ReconciliationControls import normalise_reconciliation_settings, sp
 from classes.PhaseSchemas import (
     FACTOR_LEVELS, FACTOR_LEVEL_GLOBAL, FACTOR_METHODS,
     FACTOR_METHOD_LOOKBACK, FACTOR_METHOD_SPATIAL_COMPOSITIONAL,
-    FACTOR_METHOD_STANDARD, RECONCILIATION_SAMPLE_SCHEMA_VERSION,
+    FACTOR_METHOD_STANDARD, FACTOR_METHOD_MAX_CONFIDENCE, RECONCILIATION_SAMPLE_SCHEMA_VERSION,
     SAMPLE_GRAINS, SCHEMA_ANALYTES, is_readable, resolved_factor,
 )
 from setup.InventoryBuildLineage import canonical_block, clean_text, finite_number
@@ -146,11 +146,11 @@ class ReconciliationFactorResolver:
                 self.global_maps[kind][analyte] = effective
                 calculated = finite_number(value.get("calculated")) if isinstance(value, Mapping) else None
                 self.global_override |= calculated is not None and not math.isclose(calculated, effective)
-        self._keys, self._selection_cache = {}, {}
+        self._keys, self._selection_cache = {}, OrderedDict()
         self._index = defaultdict(set)
         self.history_warnings = []
         self.periods = self._prepare(samples) if method != FACTOR_METHOD_STANDARD else []
-        self._window_cache = {}
+        self._window_cache = OrderedDict()
         for index in range(len(self.periods)):
             for depth, bins in enumerate(self.periods[index]["distributions"][1:]):
                 for cell in bins:
@@ -248,11 +248,11 @@ class ReconciliationFactorResolver:
             })
         return result
 
-    def _window_periods(self, config=None):
+    def _window_periods(self, config=None, method=None):
         config = config or self._default_window()
         start_bound = self.end - timedelta(days=config["max_lookback_days"])
         bounded = {i for i, p in enumerate(self.periods) if p["start"] >= start_bound}
-        if self.method != FACTOR_METHOD_LOOKBACK:
+        if (method or self.method) != FACTOR_METHOD_LOOKBACK:
             return bounded
         if config["window_mode"] == WINDOW_CALENDAR_DAYS:
             # Same completed-calendar-date convention as the standard path;
@@ -281,28 +281,41 @@ class ReconciliationFactorResolver:
         return {a: {**self._default_window(), **self.local.get((cell, a), {}).get("window", {})}
                 for a in SCHEMA_ANALYTES}
 
-    def _selection(self, key):
+    def _allowed_periods(self, config, method):
+        lookback = method == FACTOR_METHOD_LOOKBACK
+        signature = (method, config["window_mode"] if lookback else None,
+                     config["lookback_days"] if lookback else None, config["max_lookback_days"])
+        if signature not in self._window_cache:
+            self._window_cache[signature] = self._window_periods(config, method)
+            if len(self._window_cache) > 2048:
+                self._window_cache.popitem(last=False)
+        else:
+            self._window_cache.move_to_end(signature)
+        return self._window_cache[signature]
+
+    def _selection(self, key, *, windows=None, method=None):
         cells = _cells(key)
-        cache_key = cells[0]
+        windows = windows or self._cell_windows(key)
+        method = method or self.method
+        cache_key = (cells[0], method, tuple(tuple(sorted(windows[a].items())) for a in SCHEMA_ANALYTES))
         if cache_key in self._selection_cache:
+            self._selection_cache.move_to_end(cache_key)
             return self._selection_cache[cache_key]
-        windows = self._cell_windows(key)
         allowed = {}
         for analyte, config in windows.items():
-            signature = tuple(sorted(config.items()))
-            if signature not in self._window_cache:
-                self._window_cache[signature] = self._window_periods(config)
-            allowed[analyte] = self._window_cache[signature]
+            allowed[analyte] = self._allowed_periods(config, method)
         attempts = []
         for depth, cell in enumerate(cells):
             indices = sorted(self._index.get((depth, cell), ()))
             factors = {kind: {} for kind in KINDS}
             details = {kind: {} for kind in KINDS}
             missing, used = [], set()
+            shared_indices = {}
             for kind in KINDS:
                 for analyte in SCHEMA_ANALYTES:
-                    valid = [i for i in indices if i in allowed[analyte] and self.periods[i]["factors"][kind][analyte] is not None
-                             and self.periods[i]["factors"][kind][analyte] > 0]
+                    valid = tuple(i for i in indices if i in allowed[analyte] and self.periods[i]["factors"][kind][analyte] is not None
+                                  and self.periods[i]["factors"][kind][analyte] > 0)
+                    valid = shared_indices.setdefault(valid, valid)
                     production_days = {self.periods[i]["day"] for i in valid}
                     if len(production_days) < windows[analyte]["min_production_days"]:
                         missing.append(f"{kind}.{analyte}")
@@ -321,12 +334,16 @@ class ReconciliationFactorResolver:
                 result = {"depth": depth, "cell": cell, "indices": sorted(used),
                           "factors": factors, "details": details, "attempts": attempts}
                 self._selection_cache[cache_key] = result
+                if len(self._selection_cache) > 2048:
+                    self._selection_cache.popitem(last=False)
                 return result
             attempts.append({"level": FACTOR_LEVELS[depth], "period_count": len(indices),
                              "reason": "No spatially matching periods." if not indices else
                              f"Minimum production days not met within selected windows for {', '.join(missing)}."})
         result = {"depth": None, "attempts": attempts}
         self._selection_cache[cache_key] = result
+        if len(self._selection_cache) > 2048:
+            self._selection_cache.popitem(last=False)
         return result
 
     def _config(self):
@@ -344,7 +361,7 @@ class ReconciliationFactorResolver:
         if self.method == FACTOR_METHOD_STANDARD or not key:
             return result
         cell = spatial_cell(key)
-        result["provenance"]["cell_windows"] = self._cell_windows(key)
+        result["provenance"]["cell_windows"] = deepcopy(kwargs.get("windows") or self._cell_windows(key))
         overrides = {}
         for analyte in SCHEMA_ANALYTES:
             setting = self.local.get((cell, analyte), {})
@@ -360,16 +377,18 @@ class ReconciliationFactorResolver:
                 "confidence_note": "Evidence confidence is unchanged by manual factor edits."}
         return result
 
-    def _resolve_automatic(self, key, *, source_id, source_kind, hex_id, fraction, distributions, coverage, scores=None):
+    def _resolve_automatic(self, key, *, source_id, source_kind, hex_id, fraction, distributions, coverage,
+                           scores=None, selection=None, windows=None):
         base = dict(source_id=source_id, source_kind=source_kind, grade_block_key=key,
                     opf=self.opf, brand=self.brand, hex_id=hex_id, lineage_fraction=fraction, method=self.method)
+        chosen = selection
         selection = {"depth": None, "attempts": []}
         if self.method == FACTOR_METHOD_STANDARD:
             reason = "Standard global mode requested; no spatial confidence assessed."
         elif not key or coverage <= 0:
             reason = "No positive attributed source lineage; using supplied standard global factors."
         else:
-            selection = self._selection(key)
+            selection = chosen if chosen is not None else self._selection(key)
             reason = "All spatial levels exhausted within the configured window; using supplied standard global factors."
         if selection["depth"] is None:
             return resolved_factor(
@@ -452,6 +471,16 @@ class ReconciliationFactorResolver:
         fraction = weights.get(key, 0.0) / total if lineage_fraction is None else finite_number(lineage_fraction)
         if fraction is None or not 0 <= fraction <= 1:
             raise ValueError("Lineage fraction must be between zero and one.")
+        if self.method == FACTOR_METHOD_MAX_CONFIDENCE:
+            # Select against the full physical source, even when a caller only
+            # requests one component's result.
+            blocks = [{"grade_block_key": k, "feed_wmt": v} for k, v in weights.items()]
+            result = self.resolve_source(source_id, source_kind, blocks, total, hex_id=hex_id)
+            record = next((r for r in result["records"] if r["grade_block_key"] == key), None)
+            if record is None:
+                raise ValueError("Requested component is not present in the supplied source composition.")
+            record["lineage_fraction"] = fraction
+            return record
         return self._resolve(key, source_id=source_id, source_kind=source_kind, hex_id=hex_id,
                              fraction=fraction, distributions=_distributions(weights, known),
                              coverage=min(known / total, 1.0))
@@ -470,20 +499,31 @@ class ReconciliationFactorResolver:
         known = math.fsum(weights.values())
         distributions = _distributions(weights, known)
         records, scores = [], {}
+        search = None
+        if self.method == FACTOR_METHOD_MAX_CONFIDENCE:
+            from classes.ReconciliationConfidenceSearch import ConfidenceSearch
+            search = ConfidenceSearch(self).select(weights, total, distributions)
+            scores = search["scores"]
         if total > 0:
             for key, tonnes in weights.items():
                 records.append(self._resolve(
                     key, source_id=source_id, source_kind=source_kind, hex_id=hex_id,
-                    fraction=tonnes / total, distributions=distributions, coverage=min(known / total, 1.0), scores=scores))
+                    fraction=tonnes / total, distributions=distributions, coverage=min(known / total, 1.0), scores=scores,
+                    selection=search["selections"].get(key) if search else None,
+                    windows=search["windows"].get(key) if search else None))
             unknown = max(total - known, 0.0)
             if unknown > 0:
                 records.append(self._resolve(
                     "", source_id=source_id, source_kind=source_kind, hex_id=hex_id,
                     fraction=unknown / total, distributions=distributions, coverage=min(known / total, 1.0)))
         confidence = min(100.0, math.fsum(r["lineage_fraction"] * r["confidence_percent"] for r in records)) if total > 0 else None
+        if search:
+            for record in records:
+                record["provenance"]["auto_selection"] = deepcopy(search["audit"])
         return {"source_id": clean_text(source_id), "source_kind": clean_text(source_kind),
                 "hex_id": clean_text(hex_id), "source_wmt": total, "records": records,
                 "confidence_percent": confidence,
                 "uncertainty_percent": 100.0 - confidence if confidence is not None else None,
                 "lineage_coverage": min(known / total, 1.0) if total > 0 else 0.0,
-                "confidence_method": CONFIDENCE_METHOD}
+                "confidence_method": CONFIDENCE_METHOD,
+                **({"auto_selection": search["audit"]} if search else {})}

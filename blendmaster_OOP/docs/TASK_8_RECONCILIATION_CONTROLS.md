@@ -2,6 +2,10 @@
 
 Implemented 5 September 2026. Standard global reconciliation remains the default.
 
+Follow-up, 6 September 2026: [Task 8A](TASK_8A_CONFIDENCE_MAXIMISATION.md)
+adds Auto confidence maximisation at the user's request before Task 9. The
+original Task 8 scope and validation below describe the preceding implementation.
+
 ## User workflow
 
 1. In **Data Streams**, select Standard, Advanced lookback, or Advanced spatial

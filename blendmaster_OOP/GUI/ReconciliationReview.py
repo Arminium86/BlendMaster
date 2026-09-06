@@ -14,12 +14,13 @@ from PyQt5.QtWidgets import (
 
 from classes.GradeStreams import ANALYTES, is_dry_plant, normalise_opf
 from classes.ReconciliationControls import (
-    normalise_reconciliation_settings, spatial_cell, resolution_levels, reconciliation_report_rows,
+    normalise_reconciliation_settings, spatial_cell, resolution_levels, reconciliation_report_rows, confidence_search_labels,
 )
 
 METHODS = (("Standard · global factors", "standard"),
            ("Advanced · lookback window", "lookback"),
-           ("Advanced · spatial and compositional", "spatial_compositional"))
+           ("Advanced · spatial and compositional", "spatial_compositional"),
+           ("Auto · maximise confidence", "auto_max_confidence"))
 WINDOWS = (("Trailing calendar days", "calendar_days"),
            ("Last N production days", "production_days"),
            ("Last N days of latest campaign", "latest_campaign"))
@@ -45,6 +46,10 @@ def factor(value):
     return "—" if value is None else f"{value:.6g}"
 
 
+def quantity(value, decimals=1):
+    return "—" if value is None else f"{value:,.{decimals}f}"
+
+
 def levels(detail):
     return ", ".join(LEVEL_LABELS.get(level, level) for level in resolution_levels(detail)) or "No positive WMT"
 
@@ -59,6 +64,7 @@ class ReconciliationReview(QWidget):
         self._settings = normalise_reconciliation_settings()
         self._opf, self._brands, self._records, self._cells = "", [], {}, []
         self._evidence_rows = []
+        self._record_options = {}
         self._report_rows = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -134,11 +140,12 @@ class ReconciliationReview(QWidget):
         layout.addWidget(self.source_filter)
         self.sources = QTreeWidget()
         self.sources.setHeaderLabels(["Source / component", "Brand", "WMT / share", "Confidence",
-                                      "Uncertainty", "Global evidence", "Lineage", "Fallback level"])
+                                      "Uncertainty", "Global evidence", "Lineage", "Fallback level", "Selected window"])
         self.sources.setMinimumHeight(240)
         self.sources.setColumnWidth(0, 280)
         for column in range(1, 8):
             self.sources.setColumnWidth(column, 100 if column != 7 else 160)
+        self.sources.setColumnWidth(8, 190)
         self.sources.currentItemChanged.connect(self.show_evidence)
         layout.addWidget(self.sources)
         self.evidence = QPlainTextEdit()
@@ -172,6 +179,12 @@ class ReconciliationReview(QWidget):
         self.cell.setMinimumContentsLength(25)
         self.cell.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         selectors.addRow("Pit | Stage | Bench | Blast | Flitch | Material", self.cell)
+        self.source_context = QComboBox()
+        self.source_context.setMinimumContentsLength(28)
+        self.source_context.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.source_context.setToolTip("Automatic factors can differ by source composition in Auto mode. Local edits apply to this cell across all sources.")
+        selectors.addRow("Review source / hex", self.source_context)
+        self.source_context.currentIndexChanged.connect(self.populate_matrix_values)
         layout.addLayout(selectors)
         self.matrix = QTableWidget(5, 9)
         self.matrix.setHorizontalHeaderLabels(["Analyte", "Auto blend", "Local blend", "Auto regression",
@@ -248,6 +261,7 @@ class ReconciliationReview(QWidget):
         if current_brand in self._brands:
             self.brand.setCurrentText(current_brand)
         self._records = {}
+        self._record_options = {}
         self._cells = []
         self.sources.clear()
         self._evidence_rows = []
@@ -278,12 +292,19 @@ class ReconciliationReview(QWidget):
         self.tabs.setVisible(advanced)
         self.export_button.setVisible(advanced)
         self.summary.setVisible(advanced)
+        self.sources.setColumnHidden(8, self._settings["method"] != "auto_max_confidence")
         self.help.setText(
             "Standard uses the existing global 7/14/21/28/30-day search. Local settings are retained for advanced mode."
             if not advanced else
             "Defaults can be refined by cell and analyte in Local factors and windows. All windows end before scenario start. "
             "Latest campaign means consecutive production dates; a date gap ends the campaign. "
             "Confidence measures composition and spatial-address overlap; uncertainty is its complement, not a statistical interval.")
+        if self._settings["method"] == "auto_max_confidence":
+            self.help.setText("Auto compares spatial horizons and all three lookback options within the minimum production days and maximum lookback. "
+                              "It chooses one policy per inventory stockpile or AMT hex and brand. Local minimum/maximum guardrails and manual factors are retained; N is chosen automatically. "
+                              "Confidence measures evidence similarity, not a statistical probability.")
+        self.custom_window.setText("Set local guardrails for this analyte" if self._settings["method"] == "auto_max_confidence"
+                                   else "Set a local window for this analyte")
         self.update_local_window()
 
     def mark_stale(self, message=None):
@@ -297,6 +318,7 @@ class ReconciliationReview(QWidget):
         self._evidence_rows = []
         self.evidence.clear()
         self._records = {}
+        self._record_options = {}
         self.populate_matrix()
 
     def set_busy(self, busy):
@@ -308,6 +330,7 @@ class ReconciliationReview(QWidget):
         self.sources.clear()
         self._evidence_rows = []
         self._records, self._cells = {}, []
+        self._record_options = {}
         self._report_rows = reconciliation_report_rows(audits, overall)
         for row in self._report_rows:
             row["method"] = self._settings["method"]
@@ -324,7 +347,8 @@ class ReconciliationReview(QWidget):
                 name = str(audit.get("review_label") or audit.get("hex_id") or audit.get("source_id") or "Source")
                 node = QTreeWidgetItem([name, brand, f"{audit.get('source_wmt', 0):,.1f}",
                     percent(detail.get("confidence_percent")), percent(detail.get("uncertainty_percent")),
-                    percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)), levels(detail)])
+                    percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)), levels(detail),
+                    "; ".join(confidence_search_labels(detail))])
                 (parent.addChild if parent else self.sources.addTopLevelItem)(node)
                 attach(node, audit, brand, None)
                 for record in detail.get("records", []):
@@ -332,12 +356,14 @@ class ReconciliationReview(QWidget):
                         percent(100 * record.get("lineage_fraction", 0)), percent(record.get("confidence_percent")),
                         percent(record.get("uncertainty_percent")), "", "",
                         LEVEL_LABELS.get(record.get("resolution_level"), record.get("resolution_level", "")) +
-                        (" · manual edit" if record.get("manual_override") else "")])
+                        (" · manual edit" if record.get("manual_override") else ""), "; ".join(confidence_search_labels(detail))])
                     attach(child, audit, brand, record)
                     node.addChild(child)
                     cell = spatial_cell(record.get("grade_block_key"))
                     if cell:
                         self._records[(brand, cell)] = record
+                        self._record_options.setdefault((brand, cell), []).append((
+                            f"{audit.get('source_id', '')} / {audit.get('hex_id') or 'inventory'} / {record.get('grade_block_key')}", record))
                         self._cells.append((brand, cell))
                 for member in audit.get("review_children", []):
                     # Child audit has the same brand set as its parent.
@@ -351,6 +377,11 @@ class ReconciliationReview(QWidget):
                              f"global evidence {percent(100 * detail.get('global_fraction', 0))} · "
                              f"lineage {percent(100 * detail.get('lineage_coverage', 0))} · "
                              f"manual edits {percent(100 * detail.get('manual_override_fraction', 0))}")
+            search = detail.get("auto_selection")
+            if search:
+                gain = search.get("improvement_percent")
+                summaries.append(f"Auto: full-window baseline {percent(search.get('baseline_confidence_percent'))} · "
+                                 f"improvement {quantity(gain, 2)} percentage points")
         self.summary.setText("Overall · physical WMT weighted\n" + "\n".join(summaries) if summaries else
                              "No positive adjusted sources are available for confidence review.")
         self.status.setText(("Standard global factors are ready. Submit applies these settings." if self._settings["method"] == "standard"
@@ -379,7 +410,7 @@ class ReconciliationReview(QWidget):
     def filter_sources(self, *_):
         query = self.source_filter.text().strip().lower()
         def visit(node, parent_match=False):
-            match = parent_match or not query or query in " ".join(node.text(i) for i in range(8)).lower()
+            match = parent_match or not query or query in " ".join(node.text(i) for i in range(self.sources.columnCount())).lower()
             child_matches = [visit(node.child(i), match) for i in range(node.childCount())]
             visible = match or any(child_matches)
             node.setHidden(not visible)
@@ -397,6 +428,16 @@ class ReconciliationReview(QWidget):
         audit, brand, record = self._evidence_rows[current.data(0, Qt.UserRole)]
         detail = audit["by_brand"][brand]
         lines = [f"{audit.get('source_kind', '')} · {audit.get('source_id', '')} · {brand}"]
+        search = detail.get("auto_selection")
+        if search:
+            lines += ["Auto selection: " + "; ".join(confidence_search_labels(detail)),
+                      f"Full-window baseline: {percent(search.get('baseline_confidence_percent'))} · improvement: {quantity(search.get('improvement_percent'), 2)} percentage points"]
+            if search.get("candidate_count") is not None:
+                lines.append(f"Compared {search['candidate_count']} windows / {search['unique_evidence_count']} distinct period selections for this whole source.")
+            for family, candidate in search.get("best_by_family", {}).items():
+                label = dict((value, title) for title, value in WINDOWS).get(family, "Spatial and compositional")
+                n = candidate["window_days"]
+                lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'} · confidence {percent(candidate['confidence_percent'])}")
         if record:
             lines += [f"Component: {record.get('grade_block_key') or 'Unknown lineage'}",
                       f"Selected fallback: {LEVEL_LABELS.get(record['resolution_level'], record['resolution_level'])}",
@@ -413,14 +454,15 @@ class ReconciliationReview(QWidget):
                 lines.append(local["confidence_note"])
             elif record.get("manual_override"):
                 lines.append("Includes edits to the supplied standard global factors.")
-            lines.append(f"History: {record.get('source_rows', 0)} rows · {record.get('source_feed_wmt', 0):,.1f} period feed WMT")
+            lines.append(f"History: {quantity(record.get('source_rows'), 0)} rows · "
+                         f"{quantity(record.get('source_feed_wmt'))} period feed WMT")
             for kind, values in record.get("provenance", {}).get("factor_history", {}).items():
                 for a, value in values.items():
                     lines.append(f"{kind}/{a}: {value['production_days']} production dates · {value['period_count']} periods · "
-                                 f"{value['feed_wmt']:,.1f} feed WMT · confidence {percent(value.get('confidence_percent'))}")
+                                 f"{quantity(value.get('feed_wmt'))} feed WMT · confidence {percent(value.get('confidence_percent'))}")
             for period in record.get("source_history", []):
                 if period.get("period_start"):
-                    lines.append(f"{period['period_start']} — {period['period_end']} AWST · {period['feed_wmt']:,.1f} feed WMT")
+                    lines.append(f"{period['period_start']} — {period['period_end']} AWST · {quantity(period.get('feed_wmt'))} feed WMT")
                 elif period.get("source") == "standard_global":
                     lines.append(f"Global source brand: {period.get('source_brand')} · windows: {period.get('lookback_days')}")
             lines.extend(record.get("provenance", {}).get("history_warnings", []))
@@ -453,7 +495,21 @@ class ReconciliationReview(QWidget):
                      (self._opf, self.brand.currentText(), self.cell.currentData(), analyte)), {})
 
     def populate_matrix(self, *_):
-        record = self._records.get((self.brand.currentText(), self.cell.currentData()), {})
+        previous = self.source_context.currentText()
+        self.source_context.blockSignals(True)
+        self.source_context.clear()
+        for label, _record in self._record_options.get((self.brand.currentText(), self.cell.currentData()), []):
+            self.source_context.addItem(label)
+        index = self.source_context.findText(previous)
+        if index >= 0:
+            self.source_context.setCurrentIndex(index)
+        self.source_context.blockSignals(False)
+        self.populate_matrix_values()
+
+    def populate_matrix_values(self, *_):
+        options = self._record_options.get((self.brand.currentText(), self.cell.currentData()), [])
+        index = self.source_context.currentIndex()
+        record = options[index][1] if 0 <= index < len(options) else {}
         overrides = record.get("provenance", {}).get("local_override", {}).get("factors", {})
         for row, (analyte, label) in enumerate(zip(ANALYTES, ANALYTE_LABELS)):
             local = self.local_record(analyte)
@@ -461,8 +517,9 @@ class ReconciliationReview(QWidget):
             automatic = {kind: overrides.get(kind, {}).get(analyte, {}).get("automatic",
                           record.get(kind + "_factors", {}).get(analyte)) for kind in ("blend", "regression")}
             lookback = self._settings["method"] == "lookback"
+            window_label = "Auto within guardrails" if self._settings["method"] == "auto_max_confidence" else "Spatial within max window"
             values = [label, factor(automatic["blend"]), factor(local.get("blend")), factor(automatic["regression"]),
-                      factor(local.get("regression")), dict((v, k) for k, v in WINDOWS)[config["window_mode"]] if lookback else "Spatial within max window",
+                      factor(local.get("regression")), dict((v, k) for k, v in WINDOWS)[config["window_mode"]] if lookback else window_label,
                       config["lookback_days"] if lookback else "—", config["min_production_days"], config["max_lookback_days"]]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -524,10 +581,12 @@ class ReconciliationReview(QWidget):
         current = self.sources.currentItem()
         if current is None:
             return
-        _audit, brand, record = self._evidence_rows[current.data(0, Qt.UserRole)]
+        audit, brand, record = self._evidence_rows[current.data(0, Qt.UserRole)]
         if not record:
             return
         self.brand.setCurrentText(brand)
         self.cell_filter.clear()
         self.cell.setCurrentIndex(self.cell.findData(spatial_cell(record.get("grade_block_key"))))
+        label = f"{audit.get('source_id', '')} / {audit.get('hex_id') or 'inventory'} / {record.get('grade_block_key')}"
+        self.source_context.setCurrentIndex(self.source_context.findText(label))
         self.tabs.setCurrentIndex(1)

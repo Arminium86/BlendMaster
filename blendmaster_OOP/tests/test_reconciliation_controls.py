@@ -285,6 +285,40 @@ class NativeReviewTests(unittest.TestCase):
         self.assertTrue(root.child(0).isHidden())
         self.assertFalse(root.child(1).isHidden())
 
+    def test_global_fallback_evidence_displays_unavailable_history(self):
+        _, audit = apply(engine=application(samples=[]))
+        self.widget.set_review([audit], aggregate_reconciliation([(audit, 100)]))
+        record = audit["by_brand"]["SF"]["records"][0]
+        self.assertIsNone(record["source_feed_wmt"])
+        self.assertIsNone(record["source_rows"])
+
+        self.widget.show_evidence(self.widget.sources.topLevelItem(0).child(0))
+
+        evidence = self.widget.evidence.toPlainText()
+        self.assertIn("Selected fallback: Global", evidence)
+        self.assertIn("History: — rows · — period feed WMT", evidence)
+        self.assertIn("Global source brand: CBSF", evidence)
+        self.assertIn("Blend: Fe 1.07", evidence)
+        self.assertIsNone(record["source_feed_wmt"])
+
+    def test_evidence_formats_missing_zero_and_positive_history_feed(self):
+        audit = self.populate()
+        node = self.widget.sources.topLevelItem(0).child(0)
+        record = audit["by_brand"]["SF"]["records"][0]
+        for value, formatted in ((None, "—"), (0, "0.0"), (1234.56, "1,234.6")):
+            with self.subTest(feed=value):
+                record["source_feed_wmt"] = value
+                record["source_rows"] = 0
+                record["provenance"]["factor_history"]["blend"]["fe"]["feed_wmt"] = value
+                record["source_history"][0]["feed_wmt"] = value
+
+                self.widget.show_evidence(node)
+
+                evidence = self.widget.evidence.toPlainText()
+                self.assertIn(f"History: 0 rows · {formatted} period feed WMT", evidence)
+                self.assertIn(f"{formatted} feed WMT · confidence", evidence)
+                self.assertIn(f"AWST · {formatted} feed WMT", evidence)
+
     def test_invalid_factor_does_not_save_and_reset_restores_inheritance(self):
         self.populate()
         self.widget.tabs.setCurrentIndex(1)

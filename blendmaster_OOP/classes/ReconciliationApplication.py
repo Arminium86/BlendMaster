@@ -13,7 +13,7 @@ from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
     normalise_grade_streams, normalise_opf,
 )
-from classes.ReconciliationControls import normalise_reconciliation_settings, resolution_levels
+from classes.ReconciliationControls import normalise_reconciliation_settings, resolution_levels, confidence_search_labels
 from classes.ReconciliationFactorResolver import (
     CONFIDENCE_METHOD, ReconciliationFactorResolver,
     aggregate_source_confidence,
@@ -184,4 +184,20 @@ def aggregate_reconciliation(sources, *, source_id="", source_kind="amt_chunk"):
                 for stream in ("adjusted_rom", "adjusted_product")
             },
         }
+        if any((audit.get("by_brand", {}).get(brand) or {}).get("auto_selection") for audit, _ in sources):
+            baseline_members = []
+            for audit, wmt in sources:
+                detail = audit.get("by_brand", {}).get(brand, {})
+                base = (detail["auto_selection"].get("baseline_confidence_percent") if detail.get("auto_selection")
+                        else detail.get("confidence_percent"))
+                baseline_members.append(max(finite_number(wmt) or 0, 0) * (base or 0))
+            baseline = math.fsum(baseline_members) / total if total else None
+            confidence = result["by_brand"][brand]["confidence_percent"]
+            result["by_brand"][brand]["auto_selection"] = {
+                "status": "aggregate", "baseline_confidence_percent": baseline,
+                "confidence_percent": confidence,
+                "improvement_percent": max(confidence - baseline, 0) if total else None,
+                "selected_windows": sorted({label for audit, _ in sources for label in
+                                            confidence_search_labels(audit.get("by_brand", {}).get(brand, {}))}),
+            }
     return result

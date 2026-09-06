@@ -87,6 +87,22 @@ def resolution_levels(detail):
                   {level for r in detail.get("members", []) for level in r.get("resolution_levels", [])})
 
 
+def confidence_search_labels(detail):
+    search = detail.get("auto_selection") or {}
+    if not search:
+        return []
+    if "selected_windows" in search:
+        return search["selected_windows"]
+    if search.get("status") in {"no_lineage", "zero_mass", "global_fallback"}:
+        return [{"no_lineage": "Global fallback (no lineage)", "zero_mass": "Unscored (zero WMT)",
+                 "global_fallback": "Global fallback (no eligible history)"}[search["status"]]]
+    family = search.get("window_mode") or "spatial_compositional"
+    label = {"spatial_compositional": "Spatial", "calendar_days": "Calendar",
+             "production_days": "Production days", "latest_campaign": "Latest campaign"}.get(family, family)
+    n = search.get("window_days")
+    return [f"{label} · {n} {'day' if n == 1 else 'days'}"]
+
+
 def reconciliation_columns(audit):
     """Scalar evidence columns for Database View and reconciliation reports."""
     result = {}
@@ -98,6 +114,10 @@ def reconciliation_columns(audit):
                        f"{prefix}_global_pct": 100 * detail.get("global_fraction", 0),
                        f"{prefix}_lineage_coverage_pct": 100 * detail.get("lineage_coverage", 0),
                        f"{prefix}_manual_override_pct": 100 * detail.get("manual_override_fraction", 0)})
+        if detail.get("auto_selection"):
+            result.update({f"{prefix}_selected_window": "; ".join(confidence_search_labels(detail)),
+                           f"{prefix}_baseline_confidence_pct": detail["auto_selection"].get("baseline_confidence_percent"),
+                           f"{prefix}_confidence_gain_pp": detail["auto_selection"].get("improvement_percent")})
     return result
 
 

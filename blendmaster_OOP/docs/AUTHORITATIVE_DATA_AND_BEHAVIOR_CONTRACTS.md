@@ -178,14 +178,41 @@ Three selectable modes, configured in the reconciliation tab:
 
 ### 5.3 Factor sourcing methods (Q38, Q42)
 
-Two methods ship in Phase 1:
+Three advanced methods are available following the user's 6 September 2026
+request to bring confidence maximisation forward before Task 9 (Task 8A):
 
 1. Lookback time window.
 2. Spatial and compositional relevance, bounded by a max lookback window.
+3. Auto-maximise confidence across spatial reconciliation and the three
+   supported lookback families.
 
-A third auto-maximise-confidence mode is deferred to a later phase. Guardrails
-for the search are minimum production days and maximum lookback window, both
-user inputs.
+Standard global reconciliation remains the default. The earlier deferral of
+auto-maximise confidence is superseded by Task 8A.
+
+Auto selects one method/window policy per physical inventory stockpile or AMT
+hex and brand, scored against that source's complete composition. The search
+covers whole-day spatial horizons, trailing completed calendar dates, last N
+brand production dates, and final N dates of the latest consecutive production
+campaign. It does not select arbitrary subsets of historical periods. Minimum
+production days and maximum calendar lookback are user guardrails, including
+local cell/analyte settings. Saved manual window choices are retained for the
+other methods; Auto chooses the method and N within those guardrails.
+
+Each component retains the first eligible shared fallback level for all ten
+factor series. Manual factors apply after selection without increasing evidence
+confidence. The full maximum-lookback spatial result is the comparison baseline
+and a candidate. Ties prefer less global evidence, finer fallback levels, more
+supporting production dates, then more period feed, with deterministic policy
+order resolving remaining ties. Confidence differences below numerical precision
+(scores rounded to ten decimal places for ranking) are treated as ties.
+
+Fixed physical source WMT makes these independent choices maximise the existing
+WMT-weighted overall score within the supported search space. Missing lineage
+remains in the denominator with zero confidence. AMT chunks aggregate hex
+choices when available; before chunking, footprints show a preview. Selected
+windows, baseline confidence and gain in percentage points are retained in
+source/chunk audits, the review and CSV/Database View fields. See
+[Task 8A](TASK_8A_CONFIDENCE_MAXIMISATION.md) for the implemented scope.
 
 ### 5.3.1 Per-hex lineage weighting (Q39)
 
@@ -477,7 +504,6 @@ Contract for when it is built:
 
 ## 16. Deferred by agreement
 
-- Auto-maximise-confidence factor sourcing (Q38, Q42).
 - Conveyor and COS latency, Phase 4 (Q26).
 - Imported LQL/HQL; manual entry only for now (Q54).
 - Analytes beyond the existing five in the production report (Q69).
