@@ -1,3 +1,4 @@
+import pickle
 import unittest
 
 import pandas as pd
@@ -90,6 +91,63 @@ class AMTGeometryOutlierTests(unittest.TestCase):
         self.assertEqual(quarantined_chunk["geometry_quarantine_hexes"], "OUTLIER")
         self.assertEqual(quarantined_chunk["geometry_quarantine_wmt"], 100.0)
         self.assertIn("Quarantined 1 invalid coordinate hex", message)
+
+    def test_restored_path_matches_generated_path_and_excludes_invalid_coordinates(self):
+        original = self.chart()
+        missing = footprint_rows()[0].copy()
+        missing.update(hex="MISSING", lat=None, long=None)
+        original.data = pd.DataFrame([*footprint_rows(), missing])
+        reclaim, cut, error = original.automatic_directions_for_footprint("SP1")
+        self.assertEqual(error, "")
+        chunks, _ = original.build_chunks_for_footprint(
+            "SP1", reclaim["start"], reclaim["end"], cut["start"], cut["end"]
+        )
+        restored = self.chart()
+        restored.data = original.data.sample(frac=1, random_state=42).reset_index(drop=True)
+        restored.selected_points = pickle.loads(pickle.dumps(chunks))
+
+        self.assertEqual(
+            restored.dig_path_from_selected_points("SP1"), original.dig_paths["SP1"]
+        )
+        self.assertAlmostEqual(sum(row["balance"] for row in restored.selected_points), 1400.0)
+
+    def test_refresh_preserves_saved_member_order_instead_of_database_order(self):
+        original = self.chart()
+        reclaim, cut, error = original.automatic_directions_for_footprint("SP1")
+        self.assertEqual(error, "")
+        chunks, _ = original.build_chunks_for_footprint(
+            "SP1", reclaim["start"], reclaim["end"], cut["start"], cut["end"]
+        )
+        restored = self.chart()
+        restored.data = original.data.sample(frac=1, random_state=42).reset_index(drop=True)
+        saved = pickle.loads(pickle.dumps(chunks))
+        saved[0]["member_hexes"] = saved[0]["member_hexes"].split(",")
+        rebuilt, count = restored.rebuild_saved_chunk_records(saved)
+
+        self.assertEqual(count, len(chunks))
+        self.assertEqual(
+            [row["member_hexes"] for row in rebuilt], [row["member_hexes"] for row in chunks]
+        )
+        self.assertEqual([row["balance"] for row in rebuilt], [row["balance"] for row in chunks])
+        restored.selected_points = rebuilt
+        self.assertEqual(
+            restored.dig_path_from_selected_points("SP1"), original.dig_paths["SP1"]
+        )
+
+    def test_plot_uses_loaded_sequence_instead_of_previous_cached_path(self):
+        chart = self.chart()
+        chart.reclaim_directions = {}
+        chart.cut_directions = {}
+        chart.dig_paths["SP1"] = [(0.0, 0.0, "STALE")]
+        chart.selected_points = [{
+            "footprint": "SP1", "sequence": 1, "member_hexes": "H20,H10,H00,OUTLIER",
+        }]
+
+        figure = chart.generate_scatter_plot("SP1", None, None)
+
+        path = next(trace for trace in figure.data if trace.name == "Dig Path")
+        self.assertEqual(list(path.x), [119.78, 119.78, 119.78])
+        self.assertEqual(list(path.y), [-22.4198, -22.4199, -22.42])
 
     def test_manual_exclusion_removes_hex_from_axes_path_and_chunks(self):
         chart = self.chart()

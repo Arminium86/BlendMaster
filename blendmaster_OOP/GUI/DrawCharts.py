@@ -3495,15 +3495,24 @@ class DrawAMTStockpile:
                 result.append(dict(entry))
                 continue
 
-            member_keys = {str(value).strip() for value in member_hexes}
+            member_order = {
+                hex_id: index for index, hex_id in enumerate(
+                    dict.fromkeys(str(value).strip() for value in member_hexes)
+                )
+            }
             selected = data[
                 (data["footprint"].astype(str) == footprint)
-                & (data["hex"].astype(str).isin(member_keys))
+                & (data["hex"].astype(str).isin(member_order))
             ].copy()
             if selected.empty:
                 result.append(dict(entry))
                 continue
 
+            # Membership order is the saved dig path within this chunk.
+            # Filtering with isin alone retains database order and scrambles
+            # that path whenever the chunk's properties are refreshed.
+            selected["_member_order"] = selected["hex"].astype(str).map(member_order)
+            selected = selected.sort_values("_member_order", kind="stable")
             selected["balance"] = pd.to_numeric(
                 selected["balance"], errors="coerce"
             ).fillna(0.0)
@@ -3542,7 +3551,7 @@ class DrawAMTStockpile:
             refreshed += 1
         return result, refreshed
 
-    def dig_path_from_selected_points(self, footprint):
+    def dig_path_from_selected_points(self, footprint, geometry_rows=None):
         selected_chunks = [
             entry for entry in self.selected_points
             if isinstance(entry, dict) and entry.get("footprint") == footprint
@@ -3556,10 +3565,17 @@ class DrawAMTStockpile:
         if not path_hexes:
             return []
 
-        filtered_data = self.data[self.data["footprint"] == footprint].copy()
+        # Non-spatial allocations retain invalid-coordinate hexes in chunk
+        # membership for their tonnes, but must never become path vertices.
+        if geometry_rows is None:
+            geometry_rows, _outliers, _missing = self.footprint_geometry_rows(
+                footprint, positive_only=True
+            )
+        excluded = self.excluded_hex_ids(footprint)
         coordinate_lookup = {
             row["hex"]: (row["long"], row["lat"], row["hex"])
-            for _, row in filtered_data.iterrows()
+            for _, row in geometry_rows.iterrows()
+            if str(row["hex"]) not in excluded
         }
         return [
             coordinate_lookup[hex_id]
@@ -4302,7 +4318,9 @@ class DrawAMTStockpile:
                 name="Cut Direction"
             ))
 
-        dig_path = self.dig_paths.get(selected_footprint) or self.dig_path_from_selected_points(selected_footprint)
+        # The current saved sequence owns the displayed path. A cached path
+        # may belong to a different loaded project or an earlier sequence.
+        dig_path = self.dig_path_from_selected_points(selected_footprint, eligible_data)
         if dig_path:
             fig.add_trace(go.Scatter(
                 x=[point[0] for point in dig_path],
