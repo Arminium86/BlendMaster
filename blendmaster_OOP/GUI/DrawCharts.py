@@ -3400,6 +3400,13 @@ class DrawAMTStockpile:
             self.build_chunk_row(footprint, sequence, rows, chunk_size)
             for sequence, rows in enumerate(chunks, start=1)
         ]
+        for chunk, rows in zip(chunk_rows, chunks):
+            # Persist the traversal separately from membership: inventory
+            # refreshes and older projects can order members by database ID.
+            chunk["dig_path_hexes"] = [
+                str(row["hex"]) for row in rows
+                if not row.get("_geometry_quarantine_reason")
+            ]
         message = (
             f"Generated {len(chunk_rows)} chunks for {footprint}. "
             f"Calculated target: {requested_chunk_count} chunks at "
@@ -3551,6 +3558,59 @@ class DrawAMTStockpile:
             refreshed += 1
         return result, refreshed
 
+    @staticmethod
+    def restore_legacy_dig_path(path, chunk_indices, legacy_chunks):
+        """Uncross an old member-order path without moving hexes between chunks.
+
+        Legacy projects did not persist the generated traversal. When their
+        member order crosses itself, recover a spatial route with shortening
+        2-opt reversals. Only reverse vertices within a single legacy chunk;
+        keep explicit saved paths and the overall chunk sequence intact.
+        """
+        if len(path) < 4 or not legacy_chunks:
+            return path
+        coordinates = np.asarray([point[:2] for point in path], dtype=float)
+        centre = coordinates.mean(axis=0)
+        coordinates -= centre
+        coordinates[:, 0] *= max(abs(np.cos(np.deg2rad(centre[1]))), 1e-6)
+        coordinates *= 111320.0
+        starts, ends = coordinates[:-1], coordinates[1:]
+        directions = ends - starts
+
+        def cross(offsets):
+            return (directions[:, None, 0] * offsets[:, :, 1]
+                    - directions[:, None, 1] * offsets[:, :, 0])
+
+        start_side = cross(starts[None, :, :] - starts[:, None, :])
+        end_side = cross(ends[None, :, :] - starts[:, None, :])
+        opposite_sides = start_side * end_side < -1e-12
+        if not np.any(np.triu(opposite_sides & opposite_sides.T, 2)):
+            return path
+
+        indices = np.asarray(chunk_indices)
+        allowed = (
+            (indices[1:, None] == indices[None, :-1])
+            & np.isin(indices[1:], list(legacy_chunks))[:, None]
+            & np.triu(np.ones((len(path) - 1, len(path) - 1), dtype=bool), 2)
+        )
+        first, second = np.where(allowed)
+        if not len(first):
+            return path
+        distances = np.linalg.norm(
+            coordinates[:, None, :] - coordinates[None, :, :], axis=2
+        )
+        order = np.arange(len(path))
+        for _ in range(3 * len(path)):
+            a, b = order[first], order[first + 1]
+            c, d = order[second], order[second + 1]
+            changes = distances[a, c] + distances[b, d] - distances[a, b] - distances[c, d]
+            best = int(np.argmin(changes))
+            if changes[best] >= -1e-7:
+                break
+            start, end = first[best] + 1, second[best] + 1
+            order[start:end] = order[start:end][::-1]
+        return [path[index] for index in order]
+
     def dig_path_from_selected_points(self, footprint, geometry_rows=None):
         selected_chunks = [
             entry for entry in self.selected_points
@@ -3558,11 +3618,7 @@ class DrawAMTStockpile:
         ]
         selected_chunks = sorted(selected_chunks, key=lambda entry: entry.get("sequence", float("inf")))
 
-        path_hexes = []
-        for entry in selected_chunks:
-            path_hexes.extend(self.member_hexes_from_entry(entry))
-
-        if not path_hexes:
+        if not selected_chunks:
             return []
 
         # Non-spatial allocations retain invalid-coordinate hexes in chunk
@@ -3577,11 +3633,30 @@ class DrawAMTStockpile:
             for _, row in geometry_rows.iterrows()
             if str(row["hex"]) not in excluded
         }
-        return [
-            coordinate_lookup[hex_id]
-            for hex_id in path_hexes
-            if hex_id in coordinate_lookup
-        ]
+        path, chunk_indices, legacy_chunks = [], [], set()
+        for index, entry in enumerate(selected_chunks):
+            members = self.member_hexes_from_entry(entry)
+            if "dig_path_hexes" in entry:
+                path_hexes = self.member_hexes_from_entry({
+                    "member_hexes": entry["dig_path_hexes"],
+                })
+            else:
+                legacy_chunks.add(index)
+                path_hexes = members
+            member_ids = set(members)
+            for hex_id in path_hexes:
+                if hex_id in coordinate_lookup and hex_id in member_ids:
+                    path.append(coordinate_lookup[hex_id])
+                    chunk_indices.append(index)
+        path = self.restore_legacy_dig_path(path, chunk_indices, legacy_chunks)
+        # Cache the recovered traversal on the chunk, so redraws do not
+        # repeatedly repair it. Submission persists the same chunk metadata.
+        for index in legacy_chunks:
+            selected_chunks[index]["dig_path_hexes"] = [
+                point[2] for point, chunk_index in zip(path, chunk_indices)
+                if chunk_index == index
+            ]
+        return path
 
     def chunk_lookup_for_footprint(self, footprint):
         chunk_lookup = {}

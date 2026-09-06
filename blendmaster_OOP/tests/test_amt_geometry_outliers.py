@@ -1,3 +1,4 @@
+from copy import deepcopy
 import pickle
 import unittest
 
@@ -37,6 +38,18 @@ def footprint_rows():
         "grade_streams": None,
     })
     return rows
+
+
+def path_crossings(path):
+    def side(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    return sum(
+        side(a, b, c) * side(a, b, d) < -1e-28
+        and side(c, d, a) * side(c, d, b) < -1e-28
+        for index, (a, b) in enumerate(zip(path, path[1:]))
+        for c, d in zip(path[index + 2:], path[index + 3:])
+    )
 
 
 class AMTGeometryOutlierTests(unittest.TestCase):
@@ -148,6 +161,66 @@ class AMTGeometryOutlierTests(unittest.TestCase):
         path = next(trace for trace in figure.data if trace.name == "Dig Path")
         self.assertEqual(list(path.x), [119.78, 119.78, 119.78])
         self.assertEqual(list(path.y), [-22.4198, -22.4199, -22.42])
+
+    def test_legacy_crossed_path_is_recovered_without_changing_chunks(self):
+        chart = self.chart()
+        chart.selected_points = [
+            {"footprint": "SP1", "sequence": 1, "balance": 600,
+             "member_hexes": "H00,H21,H01,H20,H10,H11"},
+            {"footprint": "SP1", "sequence": 2, "balance": 700,
+             "member_hexes": "H02,H23,H03,H22,H12,H13,OUTLIER"},
+        ]
+        original_chunks = deepcopy(chart.selected_points)
+        lookup = {row["hex"]: (row["long"], row["lat"], row["hex"])
+                  for row in footprint_rows() if row["hex"] != "OUTLIER"}
+        old_path = [lookup[hex_id] for chunk in original_chunks
+                    for hex_id in chunk["member_hexes"].split(",") if hex_id in lookup]
+        self.assertGreater(path_crossings(old_path), 0)
+
+        recovered = chart.dig_path_from_selected_points("SP1")
+
+        self.assertEqual(path_crossings(recovered), 0)
+        self.assertCountEqual(recovered, old_path)
+        self.assertEqual([point[2] for point in recovered[:6]], chart.selected_points[0]["dig_path_hexes"])
+        for before, after in zip(original_chunks, chart.selected_points):
+            self.assertEqual(before, {key: value for key, value in after.items() if key != "dig_path_hexes"})
+            self.assertEqual(set(after["dig_path_hexes"]), set(before["member_hexes"].split(",")) - {"OUTLIER"})
+        self.assertEqual(recovered, chart.dig_path_from_selected_points("SP1"))
+
+    def test_explicit_saved_path_survives_member_reordering_and_refresh(self):
+        chart = self.chart()
+        reclaim, cut, _ = chart.automatic_directions_for_footprint("SP1")
+        chunks, _ = chart.build_chunks_for_footprint(
+            "SP1", reclaim["start"], reclaim["end"], cut["start"], cut["end"]
+        )
+        expected = chart.dig_paths["SP1"]
+        saved = pickle.loads(pickle.dumps(chunks))
+        for chunk in saved:
+            chunk["member_hexes"] = ",".join(sorted(chunk["member_hexes"].split(",")))
+        chart.data = chart.data.sample(frac=1, random_state=42).reset_index(drop=True)
+        chart.selected_points, _ = chart.rebuild_saved_chunk_records(saved)
+
+        self.assertEqual(expected, chart.dig_path_from_selected_points("SP1"))
+        self.assertEqual([c["dig_path_hexes"] for c in chunks],
+                         [c["dig_path_hexes"] for c in chart.selected_points])
+
+    def test_uncrossed_legacy_path_keeps_its_saved_order(self):
+        chart = self.chart()
+        chart.selected_points = [{
+            "footprint": "SP1", "sequence": 1,
+            "member_hexes": "H20,H10,H00,H01,H11,H21",
+        }]
+        path = chart.dig_path_from_selected_points("SP1")
+        self.assertEqual([p[2] for p in path], ["H20", "H10", "H00", "H01", "H11", "H21"])
+
+    def test_explicit_custom_path_is_not_reconstructed(self):
+        chart = self.chart()
+        explicit = ["H00", "H21", "H01", "H20"]
+        chart.selected_points = [{
+            "footprint": "SP1", "sequence": 1,
+            "member_hexes": ",".join(sorted(explicit)), "dig_path_hexes": explicit,
+        }]
+        self.assertEqual([p[2] for p in chart.dig_path_from_selected_points("SP1")], explicit)
 
     def test_manual_exclusion_removes_hex_from_axes_path_and_chunks(self):
         chart = self.chart()
