@@ -2251,12 +2251,14 @@ class DrawAMTStockpile:
         self, db_path, port, hex_sequence_table, chunk_settings=None,
         source_property_kinds=None,
         source_property_weights=None,
+        excluded_footprints=None,
     ):
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = hex_sequence_table or []
         self.chunk_settings = chunk_settings or {}
+        self.excluded_footprints = set(excluded_footprints or [])
         self.source_property_kinds = dict(source_property_kinds or {})
         self.source_property_weights = dict(source_property_weights or {})
         self.direction_clicks = {}
@@ -2292,7 +2294,8 @@ class DrawAMTStockpile:
 
     def clean_up_hex_sequence_table(self):
         """Removes all string entries from self.selected_points."""
-        self.selected_points = [entry for entry in self.selected_points if not isinstance(entry, str)]
+        self.selected_points = [entry for entry in self.selected_points if not isinstance(entry, str)
+                                and (not isinstance(entry, dict) or str(entry.get("footprint", "")).strip().upper() not in getattr(self, "excluded_footprints", set()))]
         if not hasattr(self, "excluded_hexes"):
             self.excluded_hexes = {}
         for entry in self.selected_points:
@@ -2471,7 +2474,8 @@ class DrawAMTStockpile:
     def get_unique_footprints(self):
         if self.data is None or self.data.empty or "footprint" not in self.data.columns:
             return []
-        return self.data["footprint"].dropna().unique()
+        values = self.data["footprint"].dropna()
+        return values[~values.astype(str).str.strip().str.upper().isin(getattr(self, "excluded_footprints", set()))].unique()
 
     def update_chunk_settings(self, chunk_settings):
         self.chunk_settings = chunk_settings or {}
@@ -2586,6 +2590,8 @@ class DrawAMTStockpile:
         if not hasattr(self, "geometry_outliers"):
             self.geometry_outliers = {}
         data = self.data[self.data["footprint"] == footprint].copy()
+        if str(footprint).strip().upper() in getattr(self, "excluded_footprints", set()):
+            data = data.iloc[:0]
         if data.empty:
             return data, data.copy(), data.copy()
         if "balance" not in data:
@@ -3255,6 +3261,8 @@ class DrawAMTStockpile:
         return path_rows
 
     def build_chunks_for_footprint(self, footprint, reclaim_start_point, reclaim_end_point, cut_start_point, cut_end_point):
+        if str(footprint).strip().upper() in getattr(self, "excluded_footprints", set()):
+            return [], "This footprint is excluded in AMT setup."
         chunk_size = self.get_chunk_size(footprint)
         if chunk_size <= 0:
             return [], (
@@ -3471,6 +3479,8 @@ class DrawAMTStockpile:
         """
         result = []
         refreshed = 0
+        rows = [row for row in rows or [] if not isinstance(row, dict)
+                or str(row.get("footprint", "")).strip().upper() not in getattr(self, "excluded_footprints", set())]
         data = getattr(self, "data", None)
         if not isinstance(data, pd.DataFrame) or data.empty:
             return list(rows or []), refreshed
@@ -3579,6 +3589,8 @@ class DrawAMTStockpile:
             conn = sqlite3.connect(self.db_path)
             query = "SELECT * FROM opening_AMT_stockpile_inventories"
             data = pd.read_sql(query, conn)
+            if "footprint" in data:
+                data = data[~data["footprint"].astype(str).str.strip().str.upper().isin(getattr(self, "excluded_footprints", set()))].copy()
             if data.empty:
                 return self.empty_amt_dataframe()
             def decode_json(value, expected_type):

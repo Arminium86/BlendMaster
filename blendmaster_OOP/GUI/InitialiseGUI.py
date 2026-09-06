@@ -61,6 +61,9 @@ from classes.ReconciliationControls import (
 from setup.AMTSpatialReconciliation import (
     AMT_TONNAGE_RECON_VERSION, guard_amt_snapshot, raw_amt_hex_total, zeroed_amt_footprints,
 )
+from classes.AMTFootprintExclusions import (
+    excluded_footprints, included_footprints, normalize_amt_exclusions, exclusion_audit,
+)
 from GUI.ReconciliationReview import ReconciliationReview
 from setup.AMTGradeBlockLineage import compact_amt_stockpile_data
 from classes.GradeStreams import (
@@ -711,6 +714,7 @@ class UserInputs(QMainWindow):
         self.stockpile_data_use_column = {}
         self.stockpile_data_AMT_column = {}
         self.AMT_chunk_settings = {}
+        self.AMT_footprint_exclusions = {}
         self.AMT_chunk_reconciliation_signature = ""
         self.AMT_refresh_tolerance_minutes = 30
         self.AMT_last_refresh_datetime = None
@@ -1065,14 +1069,15 @@ class UserInputs(QMainWindow):
 
     def seed_active_scenario_database(self, force=False):
         """Recreate opening inventory tables when a scenario DB is new or restored."""
+        self.prune_excluded_AMT_state()
         database_path = get_database_path()
         if self.stockpile_data and (
-            force or not self.database_contains_table(database_path, "opening_stockpile_inventories")
+            force or self.excluded_amt_footprints() or not self.database_contains_table(database_path, "opening_stockpile_inventories")
         ):
-            self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
-        if self.AMT_stockpile_data and (
+            self.opening_stockpile_inventories.save_to_database(self.included_AMT_snapshot(self.stockpile_data))
+        if self.excluded_amt_footprints() or (self.AMT_stockpile_data and (
             force or not self.database_contains_table(database_path, "opening_AMT_stockpile_inventories")
-        ):
+        )):
             self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
         if getattr(self, "historical_recon_factors", None):
             self.data_stream_reconciliation.save_to_database(
@@ -1515,7 +1520,7 @@ class UserInputs(QMainWindow):
             "AMT_chunk_reconciliation_signature",
             "AMT_refresh_tolerance_minutes", "AMT_last_refresh_datetime",
             "data_stream_input_cache_signature", "data_stream_input_cache_result",
-            "AMT_chunk_settings",
+            "AMT_chunk_settings", "AMT_footprint_exclusions",
             "hex_sequence_table", "hex_sequence_table_argument",
             "database_view_selected_columns", "database_view_known_columns",
             "database_view_show_coverage_fields",
@@ -1603,6 +1608,7 @@ class UserInputs(QMainWindow):
         if amt_chart is not None and refresh_amt_map:
             amt_chart.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
             amt_chart.selected_points = copy.deepcopy(self.hex_sequence_table or [])
+            amt_chart.excluded_footprints = self.excluded_amt_footprints()
             amt_chart.data = amt_chart.fetch_data()
             amt_chart.unique_footprints = amt_chart.get_unique_footprints()
             amt_chart.clean_up_hex_sequence_table()
@@ -1918,6 +1924,7 @@ class UserInputs(QMainWindow):
             self.data_stream_input_request_inflight = ""
             self._available_mapping_fields_cache = {}
             self.AMT_chunk_settings = copy.deepcopy(state.get("AMT_chunk_settings") or {})
+            self.AMT_footprint_exclusions = normalize_amt_exclusions(state.get("AMT_footprint_exclusions"))
             self.hex_sequence_table = copy.deepcopy(state.get("hex_sequence_table") or [])
             self.hex_sequence_table_argument = copy.deepcopy(
                 state.get("hex_sequence_table_argument") or self.hex_sequence_table
@@ -5249,6 +5256,7 @@ class UserInputs(QMainWindow):
         signature = {
             "period_count": self.planning_period_count(),
             "expit_inputs": self.expit_input_cache_signature(),
+            "excluded_amt_footprints": sorted(self.excluded_amt_footprints()),
         }
         return json.dumps(signature, sort_keys=True, default=str)
 
@@ -5820,10 +5828,103 @@ class UserInputs(QMainWindow):
                 }
             if raw_flag and str(name).strip():
                 selected.add(str(name).strip().upper())
-        return selected - zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+        return selected - zeroed_amt_footprints(vars(self).get("AMT_stockpile_data")) - self.excluded_amt_footprints()
+
+    def excluded_amt_footprints(self):
+        return excluded_footprints(vars(self).get("AMT_footprint_exclusions"))
+
+    def included_stockpile_data(self):
+        return included_footprints(vars(self).get("updated_stockpile_data"), vars(self).get("AMT_footprint_exclusions"))
+
+    def included_AMT_snapshot(self, snapshot):
+        return included_footprints(snapshot, vars(self).get("AMT_footprint_exclusions"))
+
+    def prune_excluded_AMT_state(self):
+        """Remove excluded material without changing the inventory selection."""
+        excluded = self.excluded_amt_footprints()
+        draw = vars(self).get("draw_AMT_map")
+        if draw is not None:
+            draw.excluded_footprints = excluded
+        if not excluded:
+            return
+        for name in ("AMT_stockpile_data", "AMT_chunk_settings", "total_AMT_stockpile_balances"):
+            if name in vars(self):
+                setattr(self, name, self.included_AMT_snapshot(vars(self)[name]))
+        for name in ("hex_sequence_table", "hex_sequence_table_argument"):
+            if name in vars(self):
+                setattr(self, name, [r for r in vars(self)[name] or [] if self.amt_chunk_footprint(r) not in excluded])
+        if draw is not None:
+            if hasattr(draw, "selected_points"):
+                draw.selected_points = [r for r in draw.selected_points or [] if self.amt_chunk_footprint(r) not in excluded]
+            if isinstance(getattr(draw, "data", None), pd.DataFrame) and "footprint" in draw.data:
+                draw.data = draw.data[~draw.data["footprint"].astype(str).str.strip().str.upper().isin(excluded)].copy()
+            for name in ("chunk_settings", "dig_paths", "geometry_outliers", "reclaim_directions", "cut_directions"):
+                if isinstance(getattr(draw, name, None), dict):
+                    setattr(draw, name, self.included_AMT_snapshot(getattr(draw, name)))
+            if hasattr(draw, "get_unique_footprints"):
+                draw.unique_footprints = draw.get_unique_footprints()
+
+    def set_amt_footprint_excluded(self, footprint, excluded):
+        """Persist an explicit participation decision; restoration needs fresh data."""
+        key = str(footprint).strip().upper()
+        selected = {str(n).strip().upper(): r for n, r in (vars(self).get("updated_stockpile_data") or {}).items()}
+        if key not in selected or not selected[key].get("amt", False):
+            return False
+        records = normalize_amt_exclusions(vars(self).get("AMT_footprint_exclusions"))
+        if bool(excluded) == (key in excluded_footprints(records)):
+            return False
+        if excluded:
+            rows = next((r for n, r in (vars(self).get("AMT_stockpile_data") or {}).items() if str(n).strip().upper() == key), [])
+            first = rows[0] if rows else {}
+            records[key] = exclusion_audit(
+                key, reason="Excluded using Include footprint in AMT setup.", timestamp=datetime.now().isoformat(),
+                raw_wmt=raw_amt_hex_total(rows), inventory_wmt=numeric(selected[key].get("balance")),
+                spatial_wmt=numeric(first.get("SPATIALLY_CORRECTED_STOCKPILE_WMT")),
+                final_wmt=sum(max(numeric(r.get("FINAL_WMT", r.get("balance"))) or 0, 0) for r in rows) if rows else None,
+                source_rows=len(rows),
+            )
+        else:
+            records[key] = {"schema_version": 1, "footprint_id": key, "excluded": False,
+                            "restored_at": datetime.now().isoformat(), "last_exclusion": records[key]}
+        self.AMT_footprint_exclusions = records
+        self.prune_excluded_AMT_state()
+        self.AMT_enrichment_signature = ""
+        self.AMT_chunk_reconciliation_signature = ""
+        self.database_view_snapshot_signature = None
+        self.database_view_rows = []
+        self.database_view_refresh_pending = True
+        self._reconciliation_review_signature = ""
+        self._available_mapping_fields_cache = {}
+        return True
+
+    def handle_AMT_footprint_inclusion_change(self, row, _column):
+        if _column != self.AMT_column_index("Include footprint"):
+            return
+        name = self.AMT_stockpile_table.item(row, 0)
+        item = self.AMT_stockpile_table.item(row, _column)
+        if not name or not item or not self.set_amt_footprint_excluded(name.text(), item.checkState() != Qt.Checked):
+            return
+        # Persist only retained rows. Exclusion itself never fetches or enriches.
+        self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
+        if vars(self).get("stockpile_data"):
+            self.opening_stockpile_inventories.save_to_database(self.included_AMT_snapshot(self.stockpile_data))
+        DatabaseManager.clear_scheduling_reports()
+        self.current_sqlite_report_df = pd.DataFrame()
+        self.scenario_report_refresh_pending = True
+        self.current_decision_dataframe = pd.DataFrame()
+        self.decision_run_dataframe = pd.DataFrame()
+        self.finish_AMT_stockpile_table(self.selected_AMT_data_source(), self.AMT_stockpile_data, reuse_prepared=True)
+        self.refresh_AMT_map_data_from_database()
+        self.set_AMT_cache_status("Footprint selection updated; previous scheduling reports need recalculation. Use Refresh AMT Data from Snowflake to load restored footprints.")
+        self.save_active_scenario_state()
+
+    def validate_AMT_participation(self):
+        if self.excluded_amt_footprints() and not self.included_stockpile_data():
+            raise ValueError("All AMT footprints are excluded. Select at least one conventional inventory stockpile or restore an AMT footprint before continuing.")
 
     def prune_zeroed_amt_chunks(self):
         """Remove known zeroed footprints from every live scheduling snapshot."""
+        self.prune_excluded_AMT_state()
         zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
         if not zeroed:
             return 0
@@ -5869,7 +5970,7 @@ class UserInputs(QMainWindow):
 
         chunks = []
         seen = set()
-        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data")) | self.excluded_amt_footprints()
         for source in sources:
             for chunk in source:
                 if not isinstance(chunk, dict):
@@ -5897,7 +5998,7 @@ class UserInputs(QMainWindow):
     def database_view_stockpile_rows(self):
         records = []
         selected_stockpiles = copy.deepcopy(
-            getattr(self, "updated_stockpile_data", {}) or {}
+            self.included_stockpile_data()
         )
         selected_chunks = self.submitted_amt_chunks()
         zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
@@ -8280,7 +8381,7 @@ class UserInputs(QMainWindow):
         """Attach canonical fields to Inventory and AMT records before streams."""
         self.ensure_field_mapping_migration()
         definitions = normalize_field_definitions(self.field_definitions)
-        for source in (self.stockpile_data or {}, self.updated_stockpile_data or {}):
+        for source in (self.included_AMT_snapshot(self.stockpile_data), self.included_stockpile_data()):
             for record in source.values():
                 explicit = mapping_lookup(
                     self.field_mappings, "inventory"
@@ -8304,7 +8405,7 @@ class UserInputs(QMainWindow):
                 }
                 record["source_properties"] = properties
                 record.update({key: value for key, value in canonical.items() if value is not None})
-        for rows in (self.AMT_stockpile_data or {}).values():
+        for rows in self.included_AMT_snapshot(self.AMT_stockpile_data).values():
             for record in rows or []:
                 explicit = mapping_lookup(self.field_mappings, "amt")
                 for definition in definitions:
@@ -9251,7 +9352,7 @@ class UserInputs(QMainWindow):
         return reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **{name: state.get(name) for name in (
             "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
             "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
-            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings")}})
+            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings", "AMT_footprint_exclusions")}})
 
     def calculate_reconciliation_review(self):
         """Preview evidence on copies; do not persist grades or alter AMT chunks."""
@@ -9259,7 +9360,7 @@ class UserInputs(QMainWindow):
         if application is None:
             return [], {}, []
         state, audits, warnings = vars(self), [], []
-        selected = state.get("updated_stockpile_data") or {}
+        selected = included_footprints(state.get("updated_stockpile_data"), state.get("AMT_footprint_exclusions"))
         zeroed = zeroed_amt_footprints(state.get("AMT_stockpile_data"))
         def resolve(row, name, kind):
             row = copy.deepcopy(row)
@@ -9332,7 +9433,7 @@ class UserInputs(QMainWindow):
         """Compute against an isolated snapshot so the UI remains responsive."""
         names = ("reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
                  "opf_input_choice", "product_brand_labels_choice", "start_time_choice", "field_mappings",
-                 "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table")
+                 "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "AMT_footprint_exclusions")
         context = SimpleNamespace(**copy.deepcopy({name: vars(self).get(name) for name in names}))
         context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
         context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
@@ -10266,7 +10367,7 @@ class UserInputs(QMainWindow):
         )
         self.data_stream_source_warnings = {}
 
-        selected_rows = getattr(self, "updated_stockpile_data", {}) or {}
+        selected_rows = self.included_stockpile_data()
         selected_keys = {
             str(name).strip().upper() for name in selected_rows
         }
@@ -10311,7 +10412,7 @@ class UserInputs(QMainWindow):
 
         # The fetched inventory contains every stockpile at the site. Keep its
         # audit streams current, but never let an unselected row block a run.
-        for name, row in (self.stockpile_data or {}).items():
+        for name, row in self.included_AMT_snapshot(self.stockpile_data).items():
             enrich_row(
                 name,
                 row,
@@ -12984,6 +13085,7 @@ class UserInputs(QMainWindow):
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
         self.inventory_data_request_signature = ""
+        self.AMT_footprint_exclusions = {}
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
         self._available_mapping_fields_cache = {}
@@ -13149,6 +13251,9 @@ class UserInputs(QMainWindow):
         preserved_amt_selection = copy.deepcopy(
             getattr(self, "project_load_saved_stockpile_AMT_column", {}) or {}
         )
+        preserved_amt_exclusions = normalize_amt_exclusions(
+            vars(self).get("AMT_footprint_exclusions")
+        ) if restoring_project or same_calendar_context else {}
         if fresh_site_configuration:
             build_targets = stockpile_data.get("build_targets") or {}
             target_errors = stockpile_data.get("target_errors") or {}
@@ -13163,6 +13268,7 @@ class UserInputs(QMainWindow):
             self.reset_downstream_inputs_for_new_site_configuration(
                 preserve_calendar=preserve_calendar_configuration
             )
+            self.AMT_footprint_exclusions = preserved_amt_exclusions
             self.inventory_data_request_signature = inventory_signature
         self.stockpile_data = stockpile_data
         if refreshed_current_time:
@@ -16927,7 +17033,7 @@ class UserInputs(QMainWindow):
             if not getattr(self, "project_load_restore_in_progress", False):
                 DatabaseManager.clear_all_tables(get_database_path())
                 self.opening_stockpile_inventories.save_to_database(
-                    self.stockpile_data
+                    self.included_AMT_snapshot(self.stockpile_data)
                 )
             self.save_active_scenario_state()
             self.setup_calendar()
@@ -16948,6 +17054,11 @@ class UserInputs(QMainWindow):
             for footprint in (selected_footprints or set())
             if str(footprint).strip()
         }
+        self.AMT_footprint_exclusions = {
+            name: record for name, record in normalize_amt_exclusions(vars(self).get("AMT_footprint_exclusions")).items()
+            if name in selected
+        }
+        selected -= self.excluded_amt_footprints()
 
         def record_footprint(record):
             if not isinstance(record, dict):
@@ -17614,6 +17725,9 @@ class UserInputs(QMainWindow):
         }
 
     def handle_AMT_chunk_cell_change(self, row, column):
+        if column == self.AMT_column_index("Include footprint"):
+            self.handle_AMT_footprint_inclusion_change(row, column)
+            return
         editable_columns = {
             self.AMT_column_index("Average Reclaim Rate (t/h)"),
             self.AMT_column_index("Target Hours per Chunk"),
@@ -17643,6 +17757,8 @@ class UserInputs(QMainWindow):
                 continue
 
             stockpile_name = stockpile_item.text()
+            if str(stockpile_name).strip().upper() in self.excluded_amt_footprints():
+                continue
             average_reclaim_rate = self.parse_float_from_table_item(
                 self.AMT_stockpile_table.item(row, rate_column),
                 DEFAULT_AMT_RECLAIM_RATE_TPH,
@@ -17672,6 +17788,7 @@ class UserInputs(QMainWindow):
     def amt_stockpile_headers(self):
         headers = [
             "AMT Stockpiles",
+            "Include footprint",
             "Raw Signed AMT WMT",
             "AMT Total WMT",
             "Inventory Stockpile Total WMT",
@@ -17887,7 +18004,7 @@ class UserInputs(QMainWindow):
         """Identify the Snowflake inputs that determine an AMT snapshot."""
         selections = []
         for stockpile_name, attributes in sorted(
-            (data_source or {}).items(), key=lambda item: str(item[0]).upper()
+            self.included_AMT_snapshot(data_source).items(), key=lambda item: str(item[0]).upper()
         ):
             attributes = attributes or {}
             selections.append({
@@ -17903,6 +18020,7 @@ class UserInputs(QMainWindow):
                 getattr(self, "start_time_choice", None)
             ),
             "selections": selections,
+            "excluded_footprints": sorted(self.excluded_amt_footprints()),
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -17939,6 +18057,9 @@ class UserInputs(QMainWindow):
 
         cached = copy.deepcopy(cached)
         requested = copy.deepcopy(requested)
+        # Effective selections govern warehouse reuse; exclusions still identify callbacks.
+        cached.pop("excluded_footprints", None)
+        requested.pop("excluded_footprints", None)
         cached_selections = selection_pairs(cached)
         requested_selections = selection_pairs(requested)
         if cached_selections is None or requested_selections is None:
@@ -18020,6 +18141,7 @@ class UserInputs(QMainWindow):
         payload = {
             "reconciliation": reconciliation_fingerprint({
                 "tonnage_recon_version": AMT_TONNAGE_RECON_VERSION,
+                "excluded_footprints": sorted(self.excluded_amt_footprints()),
                 "algorithm_version": RECONCILIATION_ALGORITHM_VERSION,
                 "settings": state.get("reconciliation_settings"),
                 "inputs": state.get("reconciliation_inputs"),
@@ -18062,7 +18184,7 @@ class UserInputs(QMainWindow):
     def selected_AMT_data_source(self):
         return {
             name: values
-            for name, values in (getattr(self, "updated_stockpile_data", {}) or {}).items()
+            for name, values in self.included_stockpile_data().items()
             if values.get("amt", False)
         }
 
@@ -18070,6 +18192,7 @@ class UserInputs(QMainWindow):
         self, data_source=None, force=False, persist=True, refresh_map=True
     ):
         """Rebuild and persist AMT hex fields only when their inputs changed."""
+        self.prune_excluded_AMT_state()
         if not getattr(self, "AMT_stockpile_data", None):
             self.AMT_enrichment_signature = ""
             self.AMT_chunk_reconciliation_signature = ""
@@ -18141,12 +18264,27 @@ class UserInputs(QMainWindow):
         header_font.setBold(True)
         self.AMT_stockpile_table.horizontalHeader().setFont(header_font)
 
-        # Choose data source
-        data_source = {
-            key: value for key, value in self.updated_stockpile_data.items() if value.get("amt", False)
-        }
+        # Keep participation controls usable even if the first warehouse read
+        # fails. These rows require only the selected inventory names.
+        if self.AMT_stockpile_table.rowCount() == 0:
+            selected = {n: r for n, r in (vars(self).get("updated_stockpile_data") or {}).items() if r.get("amt", False)}
+            self.AMT_stockpile_table.blockSignals(True)
+            self.AMT_stockpile_table.setRowCount(len(selected))
+            for index, name in enumerate(selected):
+                name_item = QTableWidgetItem(name)
+                name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.AMT_stockpile_table.setItem(index, 0, name_item)
+                item = QTableWidgetItem()
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked if str(name).strip().upper() in self.excluded_amt_footprints() else Qt.Checked)
+                self.AMT_stockpile_table.setItem(index, headers.index("Include footprint"), item)
+            self.AMT_stockpile_table.blockSignals(False)
+            self.ensure_AMT_map_panel()
 
-        builds = [value["build"] for value in self.updated_stockpile_data.values() if value.get("amt", False)]
+        # Choose data source
+        self.prune_excluded_AMT_state()
+        data_source = self.selected_AMT_data_source()
+        builds = [value["build"] for value in data_source.values()]
         request_signature = self.AMT_opening_request_signature(data_source)
 
         if data_source:
@@ -18253,11 +18391,12 @@ class UserInputs(QMainWindow):
             print(f"AMT cache miss: {cache_miss_reason}.")
             self.set_AMT_cache_status(cache_status, warning=True)
 
+            request_start = self.start_time_choice
             self.run_background_task(
                 "Fetching AMT stockpile data from Snowflake...",
                 lambda: self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(
                     builds,
-                    self.start_time_choice,
+                    request_start,
                 ),
                 lambda AMT_stockpile_data: self.finish_AMT_stockpile_table_from_fetch(
                     data_source, AMT_stockpile_data, request_signature
@@ -18269,7 +18408,7 @@ class UserInputs(QMainWindow):
         self.opening_stockpile_inventories.clear_AMT_stockpile_database()
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
-        self.set_AMT_cache_status("No AMT stockpiles are selected.")
+        self.set_AMT_cache_status("All AMT footprints are excluded; conventional inventory stockpiles can still be submitted." if self.excluded_amt_footprints() else "No AMT stockpiles are selected.")
         self.finish_AMT_stockpile_table(data_source, {}, reuse_prepared=True)
 
     @staticmethod
@@ -18356,7 +18495,7 @@ class UserInputs(QMainWindow):
             )
         if not compatible:
             return False
-        self.AMT_stockpile_data = guard_amt_snapshot(self.AMT_stockpile_data)
+        self.AMT_stockpile_data = guard_amt_snapshot(self.included_AMT_snapshot(self.AMT_stockpile_data))
         self.prune_zeroed_amt_chunks()
         self.opening_stockpile_inventories.save_AMT_to_database(
             self.AMT_stockpile_data
@@ -18366,6 +18505,12 @@ class UserInputs(QMainWindow):
     def finish_AMT_stockpile_table_from_fetch(
         self, data_source, AMT_stockpile_data, request_signature=None
     ):
+        current_source = self.selected_AMT_data_source()
+        if request_signature and not self.opening_request_signatures_match(
+            request_signature, self.AMT_opening_request_signature(current_source)
+        ):
+            self.set_AMT_cache_status("AMT selection changed during refresh; the outdated result was discarded. Refresh to load the current selection.", warning=True)
+            return
         self.AMT_data_request_signature = str(request_signature or "")
         self.AMT_last_refresh_datetime = datetime.now()
         self.AMT_enrichment_signature = ""
@@ -18375,7 +18520,7 @@ class UserInputs(QMainWindow):
             "AMT opening snapshot fetched from Snowflake and cached for this "
             "site, timestamp and build selection."
         )
-        self.finish_AMT_stockpile_table(data_source, AMT_stockpile_data)
+        self.finish_AMT_stockpile_table(current_source, AMT_stockpile_data)
 
         if hasattr(self, "map_fields_available_list"):
             self.refresh_map_available_fields()
@@ -18420,7 +18565,7 @@ class UserInputs(QMainWindow):
     ):
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_data = compact_amt_stockpile_data(
-            guard_amt_snapshot(AMT_stockpile_data)
+            guard_amt_snapshot(self.included_AMT_snapshot(AMT_stockpile_data))
         )
         self.prune_zeroed_amt_chunks()
         zeroed = zeroed_amt_footprints(self.AMT_stockpile_data)
@@ -18437,6 +18582,11 @@ class UserInputs(QMainWindow):
         if not reuse_prepared or refresh_prepared_map:
             self.refresh_AMT_map_data_from_database()
 
+        # Excluded footprints stay visible here to allow restoration.
+        data_source = {name: row for name, row in (vars(self).get("updated_stockpile_data") or data_source or {}).items() if row.get("amt", False)}
+        excluded = self.excluded_amt_footprints()
+        self.AMT_stockpile_table.blockSignals(True)
+        self.AMT_stockpile_table.clearContents()
         # Set Table Dimensions
         self.AMT_stockpile_table.setRowCount(len(data_source))
 
@@ -18450,6 +18600,20 @@ class UserInputs(QMainWindow):
                 stockpile_item.setFlags(Qt.ItemIsEnabled)  # Non-editable
                 stockpile_item.setTextAlignment(Qt.AlignCenter)  # Center-align the stockpile name
                 self.AMT_stockpile_table.setItem(row_idx, 0, stockpile_item)
+
+                include_item = QTableWidgetItem()
+                include_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                is_excluded = str(stockpile_name).strip().upper() in excluded
+                include_item.setCheckState(Qt.Unchecked if is_excluded else Qt.Checked)
+                include_item.setToolTip("Uncheck to skip this whole footprint. Recheck and refresh AMT data to restore it.")
+                self.AMT_stockpile_table.setItem(row_idx, headers.index("Include footprint"), include_item)
+                if is_excluded:
+                    record = normalize_amt_exclusions(vars(self).get("AMT_footprint_exclusions"))[str(stockpile_name).strip().upper()]
+                    status = QTableWidgetItem("Excluded")
+                    status.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    status.setToolTip(f"{record.get('exclusion_reason', '')}\n{record.get('excluded_at', '')}")
+                    self.AMT_stockpile_table.setItem(row_idx, headers.index("AMT Total WMT"), status)
+                    continue
 
                 amt_total_wmt, inventory_total_wmt = (
                     self.AMT_footprint_totals(stockpile_name, attributes)
@@ -18603,6 +18767,7 @@ class UserInputs(QMainWindow):
                 column, QHeaderView.ResizeToContents
             )
         self.store_AMT_chunk_settings()
+        self.AMT_stockpile_table.blockSignals(False)
         self.ensure_AMT_map_panel()
 
         # A freshly created web view has no URL.  Restored projects already
@@ -18710,7 +18875,7 @@ class UserInputs(QMainWindow):
     def enrich_AMT_grade_streams(self, data_source, amt_data):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
         application = self.reconciliation_application()
-        enriched = guard_amt_snapshot(amt_data)
+        enriched = guard_amt_snapshot(self.included_AMT_snapshot(amt_data))
         enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
         for footprint, rows in enriched.items():
             for row in rows or []:
@@ -18846,6 +19011,7 @@ class UserInputs(QMainWindow):
 
         # Canonical mappings are persisted at hex granularity. Fetch those
         # rows before rebuilding any already-generated chunk snapshots.
+        draw_AMT_map.excluded_footprints = self.excluded_amt_footprints()
         draw_AMT_map.data = draw_AMT_map.fetch_data()
         self.reconcile_saved_AMT_chunk_grade_streams()
         draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
@@ -19066,14 +19232,13 @@ class UserInputs(QMainWindow):
         return refreshed
 
     def get_AMT_stockpile_data(self, builds):
-        if any(self.stockpile_data_AMT_column.values()):
-            QMessageBox.information(self, "BlendMaster", f"Calling Snowflake Query..")
+        data_source = self.selected_AMT_data_source()
+        if data_source:
             self.AMT_stockpile_data = self.opening_stockpile_inventories.call_opening_AMT_stockpile_inventories(
-                builds,
-                self.start_time_choice,
+                [row["build"] for row in data_source.values()], self.start_time_choice,
             )
-        else:    
-            QMessageBox.information(self, "BlendMaster", f"No AMT Stockpile Selected.")
+        else:
+            self.AMT_stockpile_data = {}
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
 
     def handle_AMT_submit_clicked(self, _checked=False):
@@ -19081,13 +19246,17 @@ class UserInputs(QMainWindow):
         return self.store_hex_sequence_table(navigate=True)
 
     def store_hex_sequence_table(self, navigate=True):
+        try:
+            self.validate_AMT_participation()
+        except ValueError as exc:
+            QMessageBox.warning(self, "AMT Stockpiles", str(exc))
+            return False
         self.prune_zeroed_amt_chunks()
         if not self.store_AMT_chunk_settings():
             return
 
-        candidate_chunks = copy.deepcopy(
-            self.draw_AMT_map.return_hex_sequence() or []
-        )
+        draw = vars(self).get("draw_AMT_map")
+        candidate_chunks = copy.deepcopy(draw.return_hex_sequence() or []) if draw is not None else copy.deepcopy(vars(self).get("hex_sequence_table") or [])
 
         if any(not isinstance(item, dict) for item in candidate_chunks):
             QMessageBox.warning(
@@ -19099,7 +19268,7 @@ class UserInputs(QMainWindow):
             return False
 
         selected_footprints = self.selected_amt_footprints()
-        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data"))
+        zeroed = zeroed_amt_footprints(vars(self).get("AMT_stockpile_data")) | self.excluded_amt_footprints()
         candidate_chunks = [row for row in candidate_chunks if self.amt_chunk_footprint(row) not in zeroed]
         chunk_footprints = {
             self.amt_chunk_footprint(chunk)
@@ -19143,6 +19312,7 @@ class UserInputs(QMainWindow):
             return False
     
     def populate_total_AMT_stockpile_balances(self):
+        self.prune_excluded_AMT_state()
         # Extract unique footprints from the hex sequence table
         unique_footprints = set(hex_entry.get('footprint') for hex_entry in self.hex_sequence_table if 'footprint' in hex_entry)
 
@@ -20411,6 +20581,7 @@ class UserInputs(QMainWindow):
         self.decision_current_steady_state = None
 
     def execute_run_program(self):
+        self.validate_AMT_participation()
         self.reconcile_saved_AMT_chunk_grade_streams()
         active_solver_config = self.normalized_solver_config(
             (self.calendar_inputs or {}).get("solver_config", self.solver_config)
@@ -20446,8 +20617,8 @@ class UserInputs(QMainWindow):
             self.expit_mode_choice,
             self.file_path_24hr_choice,
             self.blend_mode_choice,
-            self.updated_stockpile_data,
-            self.calendar_inputs,
+            self.included_stockpile_data(),
+            {**(self.calendar_inputs or {}), "excluded_amt_footprints": sorted(self.excluded_amt_footprints())},
             getattr(self, "hex_sequence_table_argument", []),
             self.min_stockpiles,
             self.max_stockpiles,
@@ -22420,6 +22591,7 @@ class UserInputs(QMainWindow):
             self.draw_AMT_map = DrawAMTStockpile(
                 db_path,
                 port=8054,
+                excluded_footprints=self.excluded_amt_footprints(),
                 hex_sequence_table=self.hex_sequence_table,
                 chunk_settings=copy.deepcopy(self.AMT_chunk_settings),
                 source_property_kinds={
@@ -22438,6 +22610,7 @@ class UserInputs(QMainWindow):
             self.dash_thread_AMT_map.start()
 
         else:
+            self.draw_AMT_map.excluded_footprints = self.excluded_amt_footprints()
             self.draw_AMT_map.db_path = db_path
             self.draw_AMT_map.source_property_kinds = {
                 row["name"]: row["kind"]
@@ -22894,9 +23067,9 @@ class UserInputs(QMainWindow):
         # Fetch build report data
         build_report_df = self.fetch_build_report()
 
-        self.blend_config_table.setRowCount(len(self.updated_stockpile_data))
+        self.blend_config_table.setRowCount(len(self.included_stockpile_data()))
 
-        for row_idx, (stockpile_name, attributes) in enumerate(self.updated_stockpile_data.items()):
+        for row_idx, (stockpile_name, attributes) in enumerate(self.included_stockpile_data().items()):
             # Stockpile Name (Bold Content)
             stockpile_item = QTableWidgetItem(stockpile_name)
             stockpile_item.setFlags(Qt.ItemIsEnabled)
@@ -25191,7 +25364,7 @@ class UserInputs(QMainWindow):
     def start_or_update_dash_manual_grade_profile_thread(self):
         """Update or start the Dash app."""
         hex_sequence_table = copy.deepcopy(self.hex_sequence_table)
-        updated_stockpile_data = copy.deepcopy(self.updated_stockpile_data)
+        updated_stockpile_data = copy.deepcopy(self.included_stockpile_data())
         grade_profile_data = self.manual_grade_profile_data()
         if grade_profile_data.empty:
             grade_profile_data = (
@@ -25511,6 +25684,7 @@ class UserInputs(QMainWindow):
                     self, "AMT_last_refresh_datetime", None
                 ),
                 'AMT_chunk_settings': self.AMT_chunk_settings,
+                'AMT_footprint_exclusions': normalize_amt_exclusions(vars(self).get("AMT_footprint_exclusions")),
                 "database_view_selected_columns": copy.deepcopy(
                     getattr(self, "database_view_selected_columns", None)
                 ),
@@ -26048,6 +26222,7 @@ class UserInputs(QMainWindow):
         self.data_stream_input_request_inflight = ""
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
+        self.AMT_footprint_exclusions = normalize_amt_exclusions(loaded_state.get("AMT_footprint_exclusions"))
         self.reconcile_saved_AMT_chunk_grade_streams()
         self.database_view_selected_columns = copy.deepcopy(
             loaded_state.get("database_view_selected_columns")
@@ -26340,6 +26515,7 @@ class UserInputs(QMainWindow):
         self.hex_sequence_table_argument = []
         self.stockpile_data_AMT_column = {}
         self.AMT_stockpile_data = {}
+        self.AMT_footprint_exclusions = {}
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
         self.AMT_chunk_reconciliation_signature = ""

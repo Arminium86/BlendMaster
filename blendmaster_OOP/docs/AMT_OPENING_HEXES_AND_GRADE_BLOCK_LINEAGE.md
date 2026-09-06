@@ -192,6 +192,20 @@ after exclusions. Each generated chunk persists `excluded_hex_count`,
 `excluded_hex_wmt` and `excluded_hexes`, so exclusions survive project
 save/load and the deliberately omitted tonnes remain traceable.
 
+### Whole-footprint exclusion
+
+In AMT setup, **Include footprint** controls whether an entire selected AMT
+footprint participates. Unchecking it skips its build in subsequent warehouse
+requests and removes its loaded AMT rows, chunks and downstream scheduling
+source. It stays visible as **Excluded** in the setup table, with the exclusion
+reason and time in its tooltip. The scenario/project retains the decision and
+audit without adding the excluded footprint to reports.
+
+Recheck the box and use **Refresh AMT Data from Snowflake** to restore the
+footprint, then regenerate its chunks. If every AMT footprint is excluded,
+Submit requires a selected conventional inventory stockpile. See
+[Task 10](TASK_10_AMT_FOOTPRINT_EXCLUSION.md) for persistence and report behavior.
+
 ## Grade-block linkage
 
 Each deduplicated inbound AMT trip is enriched through two paths.

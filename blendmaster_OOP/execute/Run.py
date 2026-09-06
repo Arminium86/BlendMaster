@@ -489,6 +489,9 @@ class Run:
         )
 
         stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        # Keep every model seed and depletion report on the same participating
+        # chunk set, including restored scenarios and APS-added destinations.
+        hex_sequence_table = input_data.hex_sequence_table
 
         for warning in (site_context or {}).get("historical_recon_warnings", []) or []:
             self.case_bridge.print(f"Data stream warning: {warning}")

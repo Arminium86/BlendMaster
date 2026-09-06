@@ -27,10 +27,11 @@ class DataLoader:
     def __init__(self, stockpile_data: dict, calendar_inputs: dict, expit_payload_transactions: DataFrame, hex_sequence_table: list, periods=None):
         # AMT chunk selection replaces solver balances. Keep the selected
         # inventory snapshot intact for audit and later scenario refreshes.
-        self.stockpile_data = deepcopy(stockpile_data)
+        excluded = {str(name).strip().upper() for name in (calendar_inputs or {}).get("excluded_amt_footprints", [])}
+        self.stockpile_data = deepcopy({name: row for name, row in (stockpile_data or {}).items() if str(name).strip().upper() not in excluded})
         self.calendar_inputs = calendar_inputs
         self.expit_payload_transactions = expit_payload_transactions
-        self.hex_sequence_table = hex_sequence_table
+        self.hex_sequence_table = [row for row in (hex_sequence_table or []) if str(row.get("footprint", "")).strip().upper() not in excluded]
         self.periods = periods
         self.solver_config = (calendar_inputs or {}).get("solver_config", {})
         self.direct_tip_enabled = bool(self.solver_config.get("direct_tip_enabled", True))

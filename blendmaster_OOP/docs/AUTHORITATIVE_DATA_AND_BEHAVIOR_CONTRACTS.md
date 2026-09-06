@@ -479,12 +479,17 @@ Contracts:
   [Task 9: non-positive AMT footprints](TASK_9_NON_POSITIVE_AMT_FOOTPRINTS.md).
   Raw evidence and the zeroing reason survive persistence; zeroed material
   cannot re-enter through cached chunks, inventory fallback or solver events.
-- The following whole-footprint exclusion controls remain Task 10 scope:
+- Task 10 whole-footprint exclusion is implemented in AMT setup; see
+  [Task 10: whole-footprint exclusion](TASK_10_AMT_FOOTPRINT_EXCLUSION.md).
 - Excluded footprints are skipped before Snowflake and AMT processing and do
   not appear on reports (Q49, Q50).
 - If every footprint is excluded, the user may proceed when at least one
   conventional inventory stockpile is selected, and must be blocked otherwise
   (Q50).
+- Participation decisions and the exclusion audit persist per scenario/project.
+  Restoring a footprint requires a refresh and fresh chunks. Changing inclusion
+  invalidates generated scheduling reports, while preserving input data and
+  unrelated user tables.
 
 ## 14. Conveyor and COS latency (Phase 4)
 

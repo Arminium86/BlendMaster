@@ -169,6 +169,27 @@ class DatabaseManager:
         "manual": "manual_plan_blend_report",
     }
 
+    @staticmethod
+    def clear_scheduling_reports(database_name=None):
+        """Invalidate derived reports after the participating source set changes."""
+        connection = sqlite3.connect(database_name or get_database_path())
+        try:
+            names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+            derived = {
+                "optimised_blend_report", "manual_blend_report", "build_report", "product_build_report",
+                "optimised_stockpile_depletion_report", "optimised_stockpile_profile_report",
+                "optimisation_plan_blend_report", "optimisation_plan_build_report",
+                "optimisation_plan_product_build_report", "manual_plan_blend_report",
+                "two_wp_active_blend_report", "optimisation_plan_status", "closing_rom_stocks_compliance",
+            }
+            for name in names:
+                if name in derived:
+                    escaped = name.replace('"', '""')
+                    connection.execute(f'DELETE FROM "{escaped}"')
+            connection.commit()
+        finally:
+            connection.close()
+
     def clear_optimisation_plan_results(self, database_name=None):
         database_name = database_name or get_database_path()
         connection = sqlite3.connect(database_name)
