@@ -70,8 +70,9 @@ treated as zero or removed from the denominator. Planning-grade provenance is
 aggregated separately so manually edited targets are not relabelled as 2WP.
 
 This task preserves the new quality values through table editing without
-rounding. Task 13 remains responsible for the broader three-decimal display and
-precision work on all 2WP target paths, including existing Min/Max cells.
+rounding. [Task 13](TASK_13_TARGET_PRECISION.md), subsequently completed, adds
+three-decimal display with full stored precision for imported 2WP grades,
+including existing Min/Max cells.
 
 ## Persistence, agent workflows and row ownership
 
@@ -126,5 +127,5 @@ checked using separate lump/fines specifications. Compilation and
 CaseModeller and DrawCharts. Validation used mocked 2WP history and temporary
 databases; no warehouse or production database changes were made.
 
-Restart BlendMaster to load the new inputs. **Task 13 — Carry three-decimal
-target precision end to end** is next.
+Restart BlendMaster to load the new inputs. Task 13 is also complete;
+**Task 14 — Build a reusable product-assay history service** is next.

@@ -45,6 +45,9 @@ from types import SimpleNamespace
 from GUI.DrawCharts import DrawGanttChart, DrawStockProfiles, DrawAMTStockpile
 from GUI.ManualBlendDash import ManualBlendDash, DrawGradeProfiles, DrawOptimisedGradeProfiles
 from GUI.ManualSteadyStateDialog import ManualSteadyStateDialog
+from GUI.ProductTargetDelegate import (
+    IMPORTED_GRADE_ROLE, PRECISION_TOOLTIP, ProductTargetDelegate,
+)
 from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
@@ -3150,6 +3153,7 @@ class UserInputs(QMainWindow):
         self.product_build_layout.addWidget(quality_note)
 
         self.product_build_table = CustomTableWidget()
+        self.product_build_table.setItemDelegate(ProductTargetDelegate(self.product_build_table))
         self.product_build_table.setAlternatingRowColors(True)
         self.product_build_table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.product_build_headers = [
@@ -3405,6 +3409,8 @@ class UserInputs(QMainWindow):
             "target_mn_max",
         ]
         target_column = self.product_build_headers.index("Target Tonnes")
+        # Includes older 2WP projects that predate planning_grade_targets.
+        imported_2wp = bool(setting.get("planning_scenario") or setting.get("planning_grade_targets"))
         for col_idx, key in enumerate(keys, start=target_column):
             value = setting.get(key, defaults[key])
             if key == "target_tonnes":
@@ -3412,12 +3418,15 @@ class UserInputs(QMainWindow):
                     value = f"{math.floor(float(value)):,.0f}"
                 except (TypeError, ValueError, OverflowError):
                     value = "0"
-            elif value is not None:
+            elif value is not None and not imported_2wp:
                 try:
                     value = f"{float(value):.2f}"
                 except (TypeError, ValueError):
                     pass
             item = QTableWidgetItem("" if value is None else str(value))
+            if imported_2wp and key != "target_tonnes":
+                item.setData(IMPORTED_GRADE_ROLE, True)
+                item.setToolTip(PRECISION_TOOLTIP)
             item.setTextAlignment(Qt.AlignCenter)
             self.product_build_table.setItem(row_idx, col_idx, item)
 
@@ -3427,6 +3436,9 @@ class UserInputs(QMainWindow):
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
             item.setToolTip("Optional reference specification (%). When supplied, LQL ≤ Target ≤ HQL. Blank means unspecified.")
+            if imported_2wp and part == "target":
+                item.setData(IMPORTED_GRADE_ROLE, True)
+                item.setToolTip(item.toolTip() + " " + PRECISION_TOOLTIP)
             self.product_build_table.setItem(row_idx, self.product_build_headers.index(label), item)
 
     def update_product_build_grade_view(self, *_):

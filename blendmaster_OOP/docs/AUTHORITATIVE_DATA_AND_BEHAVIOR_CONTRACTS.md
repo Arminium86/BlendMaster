@@ -391,6 +391,12 @@ Contracts:
   assigned to Tasks 16–17, and current on-spec checks still use Min/Max.
 - Three displayed decimals apply only to 2WP-imported product targets;
   calculations keep full precision and everything else is unchanged (Q51).
+- Task 13 is implemented: imported-row Min/Max and central Target cells format
+  only their painted text to three decimals. Editing, copying, validation,
+  project/agent round trips, solver inputs and numeric reports retain the full
+  value. Manual-row and LQL/HQL formats remain unchanged. Previously rounded
+  saved values require a fresh 2WP import to recover the planned precision.
+  See [Task 13](TASK_13_TARGET_PRECISION.md).
 
 ### 8.1 Penalty formulation
 
