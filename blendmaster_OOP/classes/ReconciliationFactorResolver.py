@@ -435,6 +435,8 @@ class ReconciliationFactorResolver:
             reason = "All spatial levels exhausted within the configured window; using supplied standard global factors."
         level_search = selection.get("level_search")
         level_provenance = {"level_search": deepcopy(level_search)} if level_search else {}
+        if selection.get("shared_history"):
+            level_provenance["shared_history"] = deepcopy(selection["shared_history"])
         if selection["depth"] is None:
             return resolved_factor(
                 **base, resolution_level=FACTOR_LEVEL_GLOBAL,

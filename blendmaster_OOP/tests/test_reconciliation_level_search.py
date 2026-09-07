@@ -72,7 +72,7 @@ class LevelSearchTests(unittest.TestCase):
                 self.assertAlmostEqual(chosen["blend_factors"]["fe"], 1.5)
                 self.assertAlmostEqual(chosen["regression_factors"]["fe"], 1.2)
                 search = chosen["provenance"]["auto_selection"]
-                self.assertEqual(search["search_version"], 3)
+                self.assertEqual(search["search_version"], 4)
                 self.assertAlmostEqual(search["baseline_confidence_percent"], 1)
                 self.assertAlmostEqual(search["improvement_percent"], expected - 1)
                 levels = chosen["provenance"]["level_search"]["candidates"]
@@ -209,4 +209,3 @@ class LevelSearchPresentationTests(unittest.TestCase):
         self.assertIn("Blast + material: 66.7% · selected", text)
         self.assertIn("All five spatial levels compete on the same score", text)
         self.assertIn("all five spatial fallback levels", panel.help.text())
-

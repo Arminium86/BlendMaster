@@ -186,7 +186,8 @@ request to bring automatic evidence-match maximisation forward before Task 9
 2. Spatial and compositional relevance, bounded by a max lookback window.
 3. Auto-maximise evidence match score across spatial reconciliation and the three
    supported lookback families, independently comparing every eligible spatial
-   fallback level within each candidate window (clarified after Task 11).
+   fallback level within each candidate window, comparing component-based and
+   shared whole-source histories (clarified after Task 11, 6–7 September).
 
 Standard global reconciliation remains the default. The earlier deferral of
 automatic maximisation is superseded by Task 8A.
@@ -206,7 +207,7 @@ window. It does not rank or trim them by source match. This makes it distinct
 from Spatial. A calendar/production/campaign subset can have a higher aggregate
 match score because its mix of shift-feed tonnes differs; Auto compares both.
 
-Auto selects one method/window policy per physical inventory stockpile or AMT
+Auto selects one history approach and method/window policy per physical inventory stockpile or AMT
 hex and brand, scored against that source's complete composition. The search
 covers whole-day spatial horizons, trailing completed calendar dates, last N
 brand production dates, and final N dates of the latest consecutive production
@@ -217,15 +218,28 @@ production days and maximum calendar lookback are user guardrails, including
 local cell/analyte settings. Saved manual window choices are retained for the
 other methods; Auto chooses the method and N within those guardrails.
 
-Auto compares all five spatial levels for each component in every candidate
+Auto's retained component-based approach compares all five spatial levels for each component in every candidate
 window, even when a finer level already has enough history. The best-scoring
 eligible level is selected per component; one level must still support all ten
 factor series. Ordinary Spatial and Lookback retain the first-sufficient-level
 rule. Manual factors apply after selection without increasing the evidence
 match score. The full maximum-lookback ordinary Spatial result remains the
 comparison baseline; Auto also evaluates every level within that full horizon.
+
+The additional shared-history approach tests all five common levels in each
+window. Each selected shift must contain every known source spatial/material
+group at that level (positive presence, without a percentage threshold), support
+all ten valid positive factors, and obey every local window bound. The strictest
+minimum dates and tightest maximum apply. One shared set supplies all known
+components and ten series; individual whole-shift scores are feed-weighted,
+never calculated from pooled shift compositions. This candidate competes with
+the component-based result using the same score. No shared candidate is forced
+when unavailable or worse, and no additional input is required. Manual factors
+still apply afterward to their original cell/analyte; unknown source mass retains
+zero evidence and global factors. Lookback and Spatial modes are unchanged.
+
 Ties prefer less global evidence, finer fallback levels, more
-supporting production dates, then more period feed, with deterministic policy
+supporting production dates, then more period feed, then component-based history, with deterministic policy
 order resolving remaining ties. Score differences below numerical precision
 (scores rounded to ten decimal places for ranking) are treated as ties.
 
@@ -233,11 +247,11 @@ Fixed physical source WMT makes these independent choices maximise the existing
 WMT-weighted overall score within the supported search space. Missing lineage
 remains in the denominator with zero evidence match score. AMT chunks aggregate hex
 choices when available; before chunking, footprints show a preview. Selected
-windows, baseline evidence match score and gain in percentage points are retained in
+windows, history approaches, baseline evidence match score and gain in percentage points are retained in
 source/chunk audits, the review and CSV/Database View fields. Component evidence
 also records the five-level comparison, eligibility and scores for the selected
 method/window. See [the source-matching clarification](RECONCILIATION_EVIDENCE_MATCH.md)
-and [Auto's level-search extension](RECONCILIATION_AUTO_LEVEL_SEARCH.md).
+and [Auto's current shared-history mental map](RECONCILIATION_SHARED_HISTORY.md).
 
 ### 5.3.1 Per-hex lineage weighting (Q39)
 

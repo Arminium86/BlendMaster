@@ -2,6 +2,11 @@
 
 Implemented 6 September 2026, following Task 11 and before Task 12.
 
+Extended 7 September: Auto now also compares a common whole-source shift set
+against these component-based candidates. See the current
+[shared-history mental map and validation](RECONCILIATION_SHARED_HISTORY.md).
+The implementation and validation below describe the preceding level-search step.
+
 Auto previously tried each supported temporal policy but stopped each component
 at its first sufficient spatial level. It now compares every eligible spatial
 level within each temporal policy, including broader levels when a finer level

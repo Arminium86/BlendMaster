@@ -7,6 +7,9 @@ context for the composition of the source being adjusted, and requested
 Updated after Task 11 on 6 September: Auto now independently compares all five
 spatial levels within each candidate window. See
 [the level-search extension](RECONCILIATION_AUTO_LEVEL_SEARCH.md).
+Updated 7 September: Auto also compares shared whole-source histories with the
+component-based candidate. The current complete mental map and validation are in
+[the shared-history extension](RECONCILIATION_SHARED_HISTORY.md).
 
 ## The three advanced methods
 
@@ -14,7 +17,7 @@ spatial levels within each candidate window. See
 | --- | --- |
 | Advanced · spatial and compositional | Rank spatially eligible shifts by their whole-feed match to the whole inventory/hex composition. Keep the highest-matching shifts needed to meet the minimum distinct production dates, including all ties. |
 | Advanced · lookback window | Keep all eligible spatially matching shifts inside the chosen Calendar, Production days or Latest campaign window. No match-based trimming occurs. |
-| Auto · maximise evidence match score | Compare every eligible spatial level within source-matched Spatial horizons and all supported lookback windows. Choose the best level per component and best method/window per physical source and brand. |
+| Auto · maximise evidence match score | Compare component-based and shared whole-source histories at every eligible spatial level within Spatial horizons and supported lookback windows. Choose the best approach/method/window per physical source and brand. |
 
 Standard global reconciliation remains available and is the default.
 
@@ -111,10 +114,11 @@ apply by OPF, brand, spatial cell, material type and analyte across sources.
   labels. Older manual-edit notes are also rendered using the new wording.
 - Source-dependent selection caches include the match ranking and requested
   spatial level, so shared cells cannot reuse another source's chosen history
-  or another level's selection. Algorithm revision 3 invalidates
+  or another level's selection. Algorithm revision 4 invalidates
   derived application/review/AMT enrichment caches without forcing a new history
-  read. Auto search provenance is version 3; component provenance retains the
-  `whole_source_match_ranked_shifts` rule, threshold and counts.
+  read. Auto search provenance is version 4; component-based provenance retains
+  the `whole_source_match_ranked_shifts` rule, threshold and counts. Winning shared
+  sets also record their common membership, eligibility and scoring rules.
 
 The separate EXPIT sequence geometry/replay reliability classification retains
 its existing terminology because it is not the grade-factor match metric.

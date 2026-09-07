@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 from classes.GradeStreams import ANALYTES, is_dry_plant, normalise_opf
 from classes.ReconciliationControls import (
     normalise_reconciliation_settings, spatial_cell, resolution_levels, reconciliation_report_rows, confidence_search_labels,
-    METHOD_LABELS,
+    METHOD_LABELS, HISTORY_APPROACH_LABELS, history_approach_labels,
 )
 
 METHODS = tuple((label, value) for value, label in METHOD_LABELS.items())
@@ -138,12 +138,13 @@ class ReconciliationReview(QWidget):
         layout.addWidget(self.source_filter)
         self.sources = QTreeWidget()
         self.sources.setHeaderLabels(["Source / component", "Brand", "WMT / share", "Evidence match score",
-                                      "Global evidence", "Lineage", "Fallback level", "Selected window"])
+                                      "Global evidence", "Lineage", "Fallback level", "Selected window", "History selection"])
         self.sources.setMinimumHeight(240)
         self.sources.setColumnWidth(0, 280)
         for column in range(1, 7):
             self.sources.setColumnWidth(column, 160 if column in (3, 6) else 100)
         self.sources.setColumnWidth(7, 210)
+        self.sources.setColumnWidth(8, 155)
         self.sources.currentItemChanged.connect(self.show_evidence)
         layout.addWidget(self.sources)
         self.evidence = QPlainTextEdit()
@@ -291,6 +292,7 @@ class ReconciliationReview(QWidget):
         self.export_button.setVisible(advanced)
         self.summary.setVisible(advanced)
         self.sources.setColumnHidden(7, self._settings["method"] != "auto_max_confidence")
+        self.sources.setColumnHidden(8, self._settings["method"] != "auto_max_confidence")
         self.help.setText(
             "Standard uses the existing global 7/14/21/28/30-day search. Local settings are retained for advanced mode."
             if not advanced else
@@ -302,8 +304,9 @@ class ReconciliationReview(QWidget):
                               "It keeps the best-matching shifts, including ties, until all ten factor series meet their minimum production dates at one spatial level. "
                               "The selected shifts can be non-consecutive. Evidence match score measures composition and spatial-address overlap.")
         if self._settings["method"] == "auto_max_confidence":
-            self.help.setText("Auto compares all five spatial fallback levels within source-matched Spatial selections and all three lookback options, subject to minimum production days and maximum lookback. "
-                              "It chooses one policy per inventory stockpile or AMT hex and brand. Local minimum/maximum guardrails and manual factors are retained; N is chosen automatically. "
+            self.help.setText("Auto compares component-based and shared-history selections at all five spatial fallback levels within source-matched Spatial and all three lookback options. "
+                              "Shared history uses the same individually matched shifts for all known source components and all ten factor series. "
+                              "It chooses one approach and policy per inventory stockpile or AMT hex and brand. Local minimum/maximum guardrails and manual factors are retained; N is chosen automatically. "
                               "Evidence match score measures composition and spatial-address overlap.")
         self.custom_window.setText("Set local guardrails for this analyte" if self._settings["method"] == "auto_max_confidence"
                                    else "Set a local window for this analyte")
@@ -350,7 +353,7 @@ class ReconciliationReview(QWidget):
                 node = QTreeWidgetItem([name, brand, f"{audit.get('source_wmt', 0):,.1f}",
                     percent(detail.get("confidence_percent")),
                     percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)), levels(detail),
-                    "; ".join(confidence_search_labels(detail))])
+                    "; ".join(confidence_search_labels(detail)), "; ".join(history_approach_labels(detail))])
                 (parent.addChild if parent else self.sources.addTopLevelItem)(node)
                 attach(node, audit, brand, None)
                 for record in detail.get("records", []):
@@ -358,7 +361,8 @@ class ReconciliationReview(QWidget):
                         percent(100 * record.get("lineage_fraction", 0)), percent(record.get("confidence_percent")),
                         "", "",
                         LEVEL_LABELS.get(record.get("resolution_level"), record.get("resolution_level", "")) +
-                        (" · manual edit" if record.get("manual_override") else ""), "; ".join(confidence_search_labels(detail))])
+                        (" · manual edit" if record.get("manual_override") else ""), "; ".join(confidence_search_labels(detail)),
+                        "; ".join(history_approach_labels(detail)) if record.get("resolution_level") != "global" else ""])
                     attach(child, audit, brand, record)
                     node.addChild(child)
                     cell = spatial_cell(record.get("grade_block_key"))
@@ -432,6 +436,7 @@ class ReconciliationReview(QWidget):
         search = detail.get("auto_selection")
         if search:
             lines += ["Auto selection: " + "; ".join(confidence_search_labels(detail)),
+                      "History selection: " + ("; ".join(history_approach_labels(detail)) or "Global / unscored"),
                       f"Spatial baseline match score: {percent(search.get('baseline_confidence_percent'))} · improvement: {quantity(search.get('improvement_percent'), 2)} percentage points"]
             if search.get("candidate_count") is not None:
                 lines.append(f"Compared {search['candidate_count']} windows / {search['unique_evidence_count']} distinct period selections for this whole source.")
@@ -439,11 +444,32 @@ class ReconciliationReview(QWidget):
                 lines.append(f"Compared {search.get('level_candidate_count', 0)} component/level candidates across distinct windows. "
                              "All five spatial levels compete on the same score; specificity breaks ties without a score deduction. "
                              "Global remains the terminal fallback.")
+            for approach, candidate in search.get("best_by_approach", {}).items():
+                label = HISTORY_APPROACH_LABELS.get(approach, approach)
+                if candidate.get("eligible"):
+                    window = "; ".join(confidence_search_labels({"auto_selection": candidate}))
+                    lines.append(f"Best {label}: {percent(candidate['confidence_percent'])} · {window}")
+                else:
+                    lines.append(f"{label}: unavailable — {candidate['reason']}")
+            if search.get("shared_history"):
+                common = search["shared_history"]
+                lines.append(f"Shared set: {common['selected_period_count']} shifts over {common['production_days']} production dates; "
+                             f"at least {common['min_production_days']} dates required within {common['max_lookback_days']} calendar days. "
+                             "Each shift contains every known source group at the selected level and has ten valid factors. "
+                             "Each shift is scored against the whole source; shift compositions are not pooled before scoring.")
+            if search.get("shared_level_comparison") and search.get("history_approach") != "shared_history":
+                lines.append("Shared-history level comparison within the winning window (not applied):")
+                for candidate in search["shared_level_comparison"]:
+                    label = LEVEL_LABELS.get(candidate["level"], candidate["level"])
+                    value = (percent(candidate["physical_source_evidence_match_score_percent"]) + " · eligible"
+                             if candidate["eligible"] else "ineligible — " + candidate["reason"])
+                    lines.append(f"  {label}: {value}")
             for family, candidate in search.get("best_by_family", {}).items():
                 label = dict((value, title) for title, value in WINDOWS).get(family, "Spatial and compositional")
                 n = candidate["window_days"]
                 suffix = " max" if family == "spatial_compositional" else ""
-                lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'}{suffix} · evidence match score {percent(candidate['confidence_percent'])}")
+                approach = HISTORY_APPROACH_LABELS.get(candidate.get("history_approach", "component_based"), "")
+                lines.append(f"Best {label}: {n} {'day' if n == 1 else 'days'}{suffix} · evidence match score {percent(candidate['confidence_percent'])} · {approach}")
                 if candidate.get("selected_levels"):
                     lines.append("  Levels: " + ", ".join(LEVEL_LABELS.get(level, level) for level in candidate["selected_levels"]))
         if record:
@@ -453,7 +479,9 @@ class ReconciliationReview(QWidget):
                       f"Reason: {record.get('fallback_reason') or 'Most specific level has sufficient history.'}"]
             level_search = record.get("provenance", {}).get("level_search")
             if level_search:
-                lines.append("Level comparison for this component within the selected method/window:")
+                lines.append("Shared level comparison within the selected method/window:" if
+                             level_search.get("strategy") == "best_eligible_shared_level" else
+                             "Level comparison for this component within the selected method/window:")
                 for candidate in level_search["candidates"]:
                     label = LEVEL_LABELS.get(candidate["level"], candidate["level"])
                     if candidate["eligible"]:

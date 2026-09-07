@@ -13,7 +13,9 @@ from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
     normalise_grade_streams, normalise_opf,
 )
-from classes.ReconciliationControls import normalise_reconciliation_settings, resolution_levels, confidence_search_labels
+from classes.ReconciliationControls import (
+    normalise_reconciliation_settings, resolution_levels, confidence_search_labels, history_approaches,
+)
 from classes.ReconciliationFactorResolver import (
     CONFIDENCE_METHOD, ReconciliationFactorResolver,
     aggregate_source_confidence,
@@ -199,5 +201,8 @@ def aggregate_reconciliation(sources, *, source_id="", source_kind="amt_chunk"):
                 "improvement_percent": max(confidence - baseline, 0) if total else None,
                 "selected_windows": sorted({label for audit, _ in sources for label in
                                             confidence_search_labels(audit.get("by_brand", {}).get(brand, {}))}),
+                "selected_history_approaches": sorted({approach for audit, wmt in sources
+                    if (finite_number(wmt) or 0) > 0
+                    for approach in history_approaches(audit.get("by_brand", {}).get(brand, {}))}),
             }
     return result

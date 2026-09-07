@@ -155,7 +155,7 @@ class EvidencePresentationTests(unittest.TestCase):
         self.assertIn("evidence match score", text)
         self.assertNotIn("confidence", text)
         self.assertNotIn("uncertainty", text)
-        self.assertEqual(panel.sources.columnCount(), 8)
+        self.assertEqual(panel.sources.columnCount(), 9)
         self.assertTrue(panel.sources.topLevelItem(0).text(7).startswith("Spatial"))
         rows = reconciliation_report_rows([audit], overall)
         self.assertFalse(any("confidence" in k or "uncertainty" in k for row in rows for k in row))

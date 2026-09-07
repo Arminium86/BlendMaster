@@ -10,7 +10,8 @@ from setup.InventoryBuildLineage import canonical_block, clean_text, finite_numb
 WINDOW_MODES = ("calendar_days", "production_days", "latest_campaign")
 WINDOW_DEFAULTS = {"window_mode": "calendar_days", "lookback_days": 7,
                    "min_production_days": 1, "max_lookback_days": 30}
-RECONCILIATION_ALGORITHM_VERSION = 3
+RECONCILIATION_ALGORITHM_VERSION = 4
+HISTORY_APPROACH_LABELS = {"component_based": "Component-based", "shared_history": "Shared history"}
 METHOD_LABELS = {"standard": "Standard · global factors",
                  "lookback": "Advanced · lookback window",
                  "spatial_compositional": "Advanced · spatial and compositional",
@@ -112,6 +113,17 @@ def resolution_levels(detail):
                   {level for r in detail.get("members", []) for level in r.get("resolution_levels", [])})
 
 
+def history_approaches(detail):
+    search = detail.get("auto_selection") or {}
+    if not search or search.get("status") in {"no_lineage", "zero_mass", "global_fallback"}:
+        return []
+    return search.get("selected_history_approaches", [search.get("history_approach", "component_based")])
+
+
+def history_approach_labels(detail):
+    return [HISTORY_APPROACH_LABELS.get(value, value) for value in history_approaches(detail)]
+
+
 def confidence_search_labels(detail):
     search = detail.get("auto_selection") or {}
     if not search:
@@ -140,6 +152,7 @@ def reconciliation_columns(audit):
                        f"{prefix}_manual_override_pct": 100 * detail.get("manual_override_fraction", 0)})
         if detail.get("auto_selection"):
             result.update({f"{prefix}_selected_window": "; ".join(confidence_search_labels(detail)),
+                           f"{prefix}_history_selection": "; ".join(history_approach_labels(detail)),
                            f"{prefix}_baseline_evidence_match_score_pct": detail["auto_selection"].get("baseline_confidence_percent"),
                            f"{prefix}_evidence_match_score_gain_pp": detail["auto_selection"].get("improvement_percent")})
     return result

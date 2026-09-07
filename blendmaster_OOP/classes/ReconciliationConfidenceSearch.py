@@ -1,9 +1,9 @@
 """Bounded search over reconciliation windows and every eligible spatial level.
 
-The objective separates by physical source and brand. One policy is selected for
-the whole inventory/hex composition; each component retains the shared-level
-rule for all ten factor series. Spatial candidates select source-matched shift
-prefixes; lookback candidates retain all eligible shifts in their time window.
+The objective separates by physical source and brand. Component-based selections
+compete with common shift sets for the whole inventory/hex composition. Spatial
+candidates select source-matched shift prefixes; lookback candidates retain all
+eligible shifts in their time window. One approach and policy wins per source.
 """
 
 import math
@@ -12,7 +12,7 @@ from datetime import timedelta
 from classes.PhaseSchemas import FACTOR_LEVELS, FACTOR_LEVEL_GLOBAL, SCHEMA_ANALYTES
 
 
-SEARCH_VERSION = 3
+SEARCH_VERSION = 4
 KINDS = ("blend", "regression")
 SPATIAL = "spatial_compositional"
 LOOKBACK = "lookback"
@@ -141,7 +141,8 @@ class ConfidenceSearch:
                 -round(math.fsum(depth_score) + 5 * unknown, 12),
                 round(math.fsum(days_score), 10), round(math.fsum(feed_score), 6))
         return {"rank": rank, "confidence_percent": score, "policy": policy,
-                "selections": selections, "windows": windows, "signature": tuple(signature)}
+                "selections": selections, "windows": windows, "signature": tuple(signature),
+                "history_approach": "component_based"}
 
     def membership(self, caps, policy):
         family, n = policy
@@ -159,6 +160,7 @@ class ConfidenceSearch:
     def description(result):
         family, n = result["policy"]
         return {"selected_method": SPATIAL if family == SPATIAL else LOOKBACK,
+                "history_approach": result["history_approach"],
                 "window_mode": None if family == SPATIAL else family,
                 "window_days": n, "confidence_percent": result["confidence_percent"],
                 "selected_levels": sorted({FACTOR_LEVELS[s["depth"]] if s["depth"] is not None else FACTOR_LEVEL_GLOBAL
@@ -166,6 +168,7 @@ class ConfidenceSearch:
 
     def select(self, weights, total, distributions):
         from classes.ReconciliationFactorResolver import _similarity
+        from classes.ReconciliationSharedHistory import SharedHistorySearch
         engine = self.resolver
         # Similarity depends on the complete physical source, not the window.
         # Compute once per period/source, and reuse across components/policies.
@@ -175,22 +178,32 @@ class ConfidenceSearch:
         # Keep the ordinary full-horizon Spatial result as the comparison
         # baseline. Auto also searches every level inside that same horizon.
         baseline = self.evaluate(weights, total, policies[0], scores, search_levels=False)
-        best, families, unique = None, {}, set()
-        evaluated = {}
+        best, families, approaches, unique = None, {}, {}, set()
+        evaluated, shared_evaluated = {}, {}
+        shared = SharedHistorySearch(self, weights, total)
         candidates = policies if weights and total > 0 else policies[:1]
         for policy in candidates:
             membership = self.membership(caps, policy)
             if membership not in evaluated:
                 evaluated[membership] = self.evaluate(weights, total, policy, scores)
+                shared_evaluated[membership] = shared.evaluate(policy, scores)
             # Equivalent temporal families have identical factors and scores.
             # Keep their labels for comparison, and materialise only the winner.
-            result = {**evaluated[membership], "policy": policy}
-            unique.add(result["signature"])
-            family = policy[0]
-            if family not in families or result["rank"] > families[family]["rank"]:
-                families[family] = result
-            if best is None or result["rank"] > best["rank"]:
-                best = result
+            alternatives = [evaluated[membership]]
+            common = shared_evaluated[membership]
+            if common and common.get("eligible"):
+                alternatives.append(common)
+            for alternative in alternatives:
+                result = {**alternative, "policy": policy}
+                unique.add(result["signature"])
+                family, approach = policy[0], result["history_approach"]
+                rank = (result["rank"], approach == "component_based")
+                if family not in families or rank > (families[family]["rank"], families[family]["history_approach"] == "component_based"):
+                    families[family] = result
+                if approach not in approaches or result["rank"] > approaches[approach]["rank"]:
+                    approaches[approach] = result
+                if best is None or rank > (best["rank"], best["history_approach"] == "component_based"):
+                    best = result
         status = ("zero_mass" if total <= 0 else "no_lineage" if not weights else
                   "global_fallback" if all(s["depth"] is None for s in best["selections"].values()) else "selected")
         audit = {"search_version": SEARCH_VERSION, "status": status, **self.description(best),
@@ -200,11 +213,23 @@ class ConfidenceSearch:
                  "candidate_count": len(candidates) if weights else 0,
                  "level_candidate_count": sum(len(s.get("level_search", {}).get("candidates", []))
                                               for r in evaluated.values() for s in r["selections"].values()),
+                 "shared_level_candidate_count": sum(len(r["level_comparison"]) for r in shared_evaluated.values() if r),
                  "unique_evidence_count": len(unique) if weights else 0,
                  "best_by_family": {family: self.description(result) for family, result in families.items()} if weights else {},
+                 "best_by_approach": {approach: {"eligible": True, **self.description(result)}
+                                      for approach, result in approaches.items()} if weights else {},
                  "objective": "physical_source_wmt_weighted_evidence_match_score",
-                 "tie_break": "less_global_then_more_specific_then_more_production_days_then_more_feed_then_fixed_policy_order",
+                 "tie_break": "less_global_then_more_specific_then_more_production_days_then_more_feed_then_component_based_then_fixed_policy_order",
                  "fallback_strategy": "best_eligible_level",
-                 "scope": "All five spatial levels within source-matched Spatial and lookback windows; one method/window per source and brand, best eligible level per component.",
-                 "baseline": "Ordinary source-matched Spatial within the full maximum lookback, using its first sufficient shared level."}
+                 "scope": "Component-based and common whole-source shift sets compete across all five spatial levels and supported windows; one winning approach/method/window per source and brand.",
+                 "baseline": "Ordinary source-matched Spatial within the full maximum lookback, using its first sufficient level per component."}
+        if weights and "shared_history" not in approaches:
+            audit["best_by_approach"]["shared_history"] = {"eligible": False,
+                "reason": "No common shift set meets all source-group, factor-validity and local-window requirements."}
+        winning_membership = self.membership(caps, best["policy"])
+        common = shared_evaluated.get(winning_membership)
+        if common:
+            audit["shared_level_comparison"] = common["level_comparison"]
+        if best.get("shared_history"):
+            audit["shared_history"] = best["shared_history"]
         return {"audit": audit, "scores": scores, "selections": best["selections"], "windows": best["windows"]}
