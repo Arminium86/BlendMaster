@@ -6,6 +6,7 @@ from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, with_quality_configuration
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
     PRODUCT_LANE,
@@ -324,7 +325,10 @@ class CaseModeller:
                     ),
                     "",
                 )
-            normalized.append({
+            normalized.append(with_quality_configuration({
+                **{key: copy.deepcopy(value) for key, value in setting.items()
+                   if key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"} or key.startswith("planning_")},
+                **quality_fields(setting),
                 "build_id": int(setting.get("build_id") or index + 1),
                 "build_name": build_name,
                 "brand": explicit_brand,
@@ -343,7 +347,7 @@ class CaseModeller:
                 "target_p_max": float(setting.get("target_p_max", 100) or 100),
                 "target_mn_min": float(setting.get("target_mn_min", 0) or 0),
                 "target_mn_max": float(setting.get("target_mn_max", 100) or 100),
-            })
+            }))
         return normalized
 
     def current_product_build_indices(self):
@@ -1789,7 +1793,7 @@ class CaseModeller:
         current_indices = self.current_product_build_indices()
         if current_indices:
             target_builds = {
-                lane: dict(self.product_build_settings[index])
+                lane: copy.deepcopy(self.product_build_settings[index])
                 for lane, index in current_indices.items()
             }
             target_states = {
@@ -3097,6 +3101,8 @@ class CaseModeller:
             "target_p_max",
             "target_mn_min",
             "target_mn_max",
+            "opf",
+            *QUALITY_FIELDS,
         ]
         if not self.product_build_settings or self.results is None or self.results.empty:
             return pd.DataFrame(columns=columns)
@@ -3222,6 +3228,8 @@ class CaseModeller:
                             - self.PRODUCT_BUILD_TONNES_TOLERANCE
                         ),
                         "build_on_spec": False,
+                        "opf": build_setting.get("opf", ""),
+                        **quality_fields(build_setting),
                         **{
                             f"build_grade_{grade}": 0
                             for grade in ("fe", "si", "al", "p", "mn")

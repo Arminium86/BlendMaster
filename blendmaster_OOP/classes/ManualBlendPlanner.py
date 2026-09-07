@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
+from classes.ProductQualityLimits import with_quality_configuration
 from classes.MaterialFlowTopology import one_lane_topology
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ProductBuildLanes import (
@@ -151,7 +152,7 @@ class ManualBlendPlanner:
         )
         self.periods = dict(periods or {})
         self.product_build_settings = [
-            dict(row) for row in (product_build_settings or [])
+            with_quality_configuration(dict(row)) for row in (product_build_settings or [])
         ]
         self.calendar_inputs = dict(calendar_inputs or {})
         site_context = self.calendar_inputs.get("site_context") or {}

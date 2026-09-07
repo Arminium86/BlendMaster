@@ -353,6 +353,9 @@ Current behavior: `setup/PlanningPlanTargets.py` builds product-build rows with
 `planning_target_tonnes`, `crusher_contribution_ratio`, `opf`, `crusher` and
 planning period fields. Grades arrive as `fe`, `si`, `al`, `p`, `mn`. 2WP gives
 an Fe lower bound and contaminant upper bounds, leaving opposite bounds open.
+Task 12 additionally seeds `target_<analyte>_target` from the planned grade and
+provides optional row-owned LQL/HQL fields. Existing Min/Max remain active;
+the new specifications are reference values until the scheduled enforcement work.
 
 Contracts:
 
@@ -375,6 +378,17 @@ Contracts:
   safe because `classes/CloudbreakProductSplit.py` back-calculates lump grades
   so lump and fines recombine to the adjusted head grade (Q53).
 - LQL/HQL are manually entered for now (Q54).
+- Task 12 is implemented: **Grade fields** selects Min/Max, LQL/Target/HQL or
+  all columns on the existing Product Targets rows. Blank specifications remain
+  `None`; finite supplied percentages must satisfy LQL <= Target <= HQL wherever
+  those values are present. Zero is preserved. OPF/lane ownership and planning
+  provenance follow the row through edits, deletion, persistence and agents.
+- Targets group by tonnes only within compatible consecutive OPF/brand/lane
+  rows; different manual quality limits prevent merging. Legacy hard bounds
+  do not imply a central Target. The validated versioned reference configuration
+  reaches solver inputs; quality fields also reach product/progress reports.
+  See [Task 12](TASK_12_PRODUCT_QUALITY_LIMITS.md). Hard/soft enforcement remains
+  assigned to Tasks 16–17, and current on-spec checks still use Min/Max.
 - Three displayed decimals apply only to 2WP-imported product targets;
   calculations keep full precision and everything else is unchanged (Q51).
 

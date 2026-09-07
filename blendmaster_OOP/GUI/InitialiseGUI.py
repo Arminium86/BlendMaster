@@ -117,6 +117,7 @@ from classes.ProductTargets import (
     PRODUCT_TARGET_KEYS, migrate_product_target_state,
     product_targets_identifier, product_targets_value,
 )
+from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields
 from classes.ProductBuildLanes import (
     ANALYTES as PRODUCT_BUILD_ANALYTES,
     BYPRODUCT_LANES,
@@ -3128,6 +3129,11 @@ class UserInputs(QMainWindow):
         top_layout.addWidget(self.product_build_count_button)
         top_layout.addWidget(self.product_build_2wp_button)
         top_layout.addWidget(self.group_2wp_build_targets_checkbox)
+        self.product_build_grade_view = QComboBox()
+        self.product_build_grade_view.addItems(["Min / Max", "LQL / Target / HQL", "All grade fields"])
+        self.product_build_grade_view.setToolTip("Choose the grade columns to view; this does not change solver enforcement.")
+        top_layout.addWidget(QLabel("Grade fields"))
+        top_layout.addWidget(self.product_build_grade_view)
         top_layout.addStretch()
         self.product_build_layout.addLayout(top_layout)
 
@@ -3138,6 +3144,11 @@ class UserInputs(QMainWindow):
             self.product_build_plan_scenario_label
         )
 
+        quality_note = QLabel("Min/Max are the active solver bounds. LQL (lower quality limit), Target and HQL (higher quality limit) are saved reference specifications for each build; they do not currently constrain the solver. Leave unspecified values blank.")
+        quality_note.setWordWrap(True)
+        quality_note.setStyleSheet("color: #526474;")
+        self.product_build_layout.addWidget(quality_note)
+
         self.product_build_table = CustomTableWidget()
         self.product_build_table.setAlternatingRowColors(True)
         self.product_build_table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -3145,6 +3156,7 @@ class UserInputs(QMainWindow):
             "Build",
             "Brand",
             "By-product",
+            "OPF",
             "Target Tonnes",
             "Fe Min",
             "Fe Max",
@@ -3156,6 +3168,7 @@ class UserInputs(QMainWindow):
             "P Max",
             "Mn Min",
             "Mn Max",
+            *[f"{grade} {part}" for grade in ("Fe", "Si", "Al", "P", "Mn") for part in ("LQL", "Target", "HQL")],
         ]
         self.product_build_table.setColumnCount(len(self.product_build_headers))
         self.product_build_table.setHorizontalHeaderLabels(self.product_build_headers)
@@ -3165,6 +3178,8 @@ class UserInputs(QMainWindow):
         )
         self.product_build_table.verticalHeader().setVisible(False)
         self.product_build_layout.addWidget(self.product_build_table)
+        self.product_build_grade_view.currentIndexChanged.connect(self.update_product_build_grade_view)
+        self.update_product_build_grade_view()
 
         button_layout = QHBoxLayout()
         self.product_build_submit_button = QPushButton("Submit")
@@ -3240,7 +3255,9 @@ class UserInputs(QMainWindow):
 
     def set_product_build_table_row_count(self, count):
         count = max(int(count or 0), 0)
-        existing = self.read_product_targets_from_table(show_errors=False) or []
+        existing = self.read_product_targets_from_table(show_errors=True)
+        if existing is None:
+            return
         self.product_build_table.setRowCount(count)
         for row_idx in range(count):
             source = existing[row_idx] if row_idx < len(existing) else {}
@@ -3344,9 +3361,16 @@ class UserInputs(QMainWindow):
         )
         build_name = self.product_build_name_for_row(row_idx, brand, lane)
         build_item = QTableWidgetItem(build_name)
+        # Row-owned metadata must move with deletion/reordering, never be
+        # recovered by an index into the previous list of builds.
+        build_item.setData(Qt.UserRole, copy.deepcopy(setting))
         build_item.setFlags(Qt.ItemIsEnabled)
         build_item.setTextAlignment(Qt.AlignCenter)
         self.product_build_table.setItem(row_idx, 0, build_item)
+        opf_item = QTableWidgetItem(str(setting.get("opf") or getattr(self, "opf_input_choice", "") or ""))
+        opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        opf_item.setToolTip("The OPF carried with this build. New manual rows use the active OPF.")
+        self.product_build_table.setItem(row_idx, self.product_build_headers.index("OPF"), opf_item)
         brand_combo.currentTextChanged.connect(
             lambda _text: self.renumber_product_build_rows()
         )
@@ -3396,6 +3420,24 @@ class UserInputs(QMainWindow):
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
             self.product_build_table.setItem(row_idx, col_idx, item)
+
+        for key, value in quality_fields(setting, validate=False).items():
+            _, grade, part = key.split("_")
+            label = f"{grade.title()} {part.upper() if part != 'target' else 'Target'}"
+            item = QTableWidgetItem("" if value is None else str(value))
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setToolTip("Optional reference specification (%). When supplied, LQL ≤ Target ≤ HQL. Blank means unspecified.")
+            self.product_build_table.setItem(row_idx, self.product_build_headers.index(label), item)
+
+    def update_product_build_grade_view(self, *_):
+        if not hasattr(self, "product_build_grade_view"):
+            return
+        selected = self.product_build_grade_view.currentIndex()
+        for column, header in enumerate(self.product_build_headers):
+            quality = header.rsplit(" ", 1)[-1] in {"LQL", "Target", "HQL"}
+            hard = header.rsplit(" ", 1)[-1] in {"Min", "Max"}
+            if quality or hard:
+                self.product_build_table.setColumnHidden(column, (quality and selected == 0) or (hard and selected == 1))
 
     def resize_product_build_table(self):
         if not hasattr(self, "product_build_table"):
@@ -3463,11 +3505,13 @@ class UserInputs(QMainWindow):
             target_tonnes = math.floor(target_tonnes)
 
             setting = {
+                **copy.deepcopy(self.product_build_table.item(row_idx, 0).data(Qt.UserRole) or {}),
                 "build_id": row_idx + 1,
                 "build_name": build_name,
                 "brand": brand,
                 "byproduct": byproduct,
                 "target_tonnes": target_tonnes,
+                "opf": self.product_build_table.item(row_idx, self.product_build_headers.index("OPF")).text().strip(),
             }
             for grade_label, (min_key, max_key) in grade_keys.items():
                 min_col = self.product_build_headers.index(f"{grade_label} Min")
@@ -3486,6 +3530,19 @@ class UserInputs(QMainWindow):
                     return None
                 setting[min_key] = min_value
                 setting[max_key] = max_value
+            for key in QUALITY_FIELDS:
+                _, grade, part = key.split("_")
+                label = f"{grade.title()} {part.upper() if part != 'target' else 'Target'}"
+                item = self.product_build_table.item(row_idx, self.product_build_headers.index(label))
+                setting[key] = item.text().strip() if item else None
+            try:
+                setting.update(quality_fields(setting))
+            except ValueError as exc:
+                if show_errors:
+                    QMessageBox.warning(self, "Invalid Input", f"Product Targets row {row_idx + 1}: {exc}")
+                return None
+            # Runtime configurations are derived from these current row values.
+            setting.pop("quality_limits", None)
             settings.append(setting)
         if getattr(self, "byproducts_enabled", False) and settings:
             configured_lanes = {setting.get("byproduct") for setting in settings}
@@ -3560,13 +3617,6 @@ class UserInputs(QMainWindow):
         settings = self.read_product_targets_from_table(show_errors=show_errors)
         if settings is None:
             return False
-        previous_settings = getattr(self, "product_targets", []) or []
-        for index, setting in enumerate(settings):
-            if index >= len(previous_settings) or not isinstance(previous_settings[index], dict):
-                continue
-            for key, value in previous_settings[index].items():
-                if key.startswith("planning_"):
-                    setting[key] = copy.deepcopy(value)
         self.product_targets = settings
         if self.calendar_inputs is None:
             self.calendar_inputs = {}
@@ -14052,6 +14102,9 @@ class UserInputs(QMainWindow):
                     "For product build targeting, include product_targets as a list of rows with brand, "
                     "target_tonnes, target_fe_min, target_fe_max, target_si_min, target_si_max, "
                     "target_al_min, target_al_max, target_p_min, target_p_max, target_mn_min, and target_mn_max. "
+                    "Optional row-owned quality specifications use target_<analyte>_lql, target_<analyte>_target and target_<analyte>_hql; "
+                    "blank/null means unspecified. Preserve opf and byproduct ownership. Values must satisfy LQL <= Target <= HQL where present. "
+                    "Quality specifications are reference values; Min/Max remain the active solver bounds. "
                     "The app applies these rows through the Product Targets tab before Calendar."
                 ),
                 "hex_sequence_table_contract": (
@@ -14479,8 +14532,9 @@ class UserInputs(QMainWindow):
             for grade in ["fe", "si", "al", "p", "mn"]:
                 row[f"target_{grade}_min"] = nested_grade_value(setting, grade, "min", 0)
                 row[f"target_{grade}_max"] = nested_grade_value(setting, grade, "max", 100)
+            row.update(quality_fields(setting, validate=False))
             for key, value in setting.items():
-                if str(key).startswith("planning_"):
+                if str(key).startswith("planning_") or key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"}:
                     row[key] = copy.deepcopy(value)
             normalized.append(row)
         return normalized
@@ -15652,7 +15706,14 @@ class UserInputs(QMainWindow):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
         product_builds = product_targets_value(payload)
         if isinstance(product_builds, (list, dict)):
-            self.product_targets = self.normalized_agent_product_targets(product_builds)
+            candidates = self.normalized_agent_product_targets(product_builds)
+            try:
+                for row in candidates:
+                    row.update(quality_fields(row))
+            except ValueError as exc:
+                self.stop_agent_workflow_apply(f"Agent workflow stopped: Product Targets inputs are not valid. {exc}")
+                return
+            self.product_targets = candidates
             self.populate_product_build_table()
 
         if not self.store_product_targets(show_errors=False):
@@ -16222,7 +16283,13 @@ class UserInputs(QMainWindow):
         if target == "product_targets":
             if not hasattr(self, "product_build_table"):
                 return False
-            self.product_targets = self.normalized_agent_product_targets(value)
+            candidates = self.normalized_agent_product_targets(value)
+            try:
+                for row in candidates:
+                    row.update(quality_fields(row))
+            except ValueError:
+                return False
+            self.product_targets = candidates
             self.populate_product_build_table()
             return self.store_product_targets(show_errors=False)
         if str(target).startswith("calendar_rates.") or str(target).startswith("calendar."):

@@ -45,4 +45,5 @@ application binaries to understand new saves.
   inputs. Both the tab caption and heading displayed Product Targets.
 - Python compilation and `git diff --check` passed.
 
-Task 12 (quality-limit data model and input table) remains next.
+Task 12 was subsequently implemented on 7 September; see
+[Product quality-limit data and inputs](TASK_12_PRODUCT_QUALITY_LIMITS.md).

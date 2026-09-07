@@ -357,8 +357,8 @@ def analyte_quality_limit(
 ) -> Dict[str, Any]:
     """Return the quality settings for one analyte.
 
-    No ordering validation happens here; Task 12 owns validation of
-    LQL <= target <= HQL. Keeping absent bounds as ``None`` prevents an open
+    ProductQualityLimits validates LQL <= target <= HQL at input and runtime
+    boundaries. Keeping absent bounds as ``None`` prevents an open
     upper bound from becoming a literal zero.
     """
     return {

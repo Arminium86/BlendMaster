@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Iterable, Mapping, Optional
 
 import pandas as pd
+from classes.ProductQualityLimits import QUALITY_FIELDS, with_quality_configuration
 
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
@@ -15,7 +16,7 @@ from classes.ProductBuildLanes import (
 
 _PRODUCT_BUILD_GRADES = ("fe", "si", "al", "p", "mn")
 _PRODUCT_BUILD_BASE_SUFFIXES = [
-    "id", "name", "brand", "target_tonnes", "opening_tonnes",
+    "id", "name", "brand", "opf", "target_tonnes", "opening_tonnes",
     "added_tonnes", "closing_tonnes", "remaining_tonnes", "complete",
     "current_on_spec", "complete_on_spec",
     *[f"grade_{grade}" for grade in _PRODUCT_BUILD_GRADES],
@@ -23,6 +24,7 @@ _PRODUCT_BUILD_BASE_SUFFIXES = [
         f"target_{grade}_{bound}"
         for grade in _PRODUCT_BUILD_GRADES for bound in ("min", "max")
     ],
+    *QUALITY_FIELDS,
 ]
 
 
@@ -54,6 +56,16 @@ class ProductBuildProgress:
             return float(default)
 
     @classmethod
+    def ensure_columns(cls, report):
+        """Add the complete audit schema together, avoiding fragmented frames."""
+        missing = [column for column in cls.COLUMNS if column not in report.columns]
+        if not missing:
+            return report
+        return pd.concat([report, pd.DataFrame({
+            column: pd.Series(None, index=report.index, dtype=object) for column in missing
+        })], axis=1)
+
+    @classmethod
     def normalize_builds(
         cls, product_build_settings: Optional[Iterable[Mapping]]
     ):
@@ -67,6 +79,7 @@ class ProductBuildProgress:
             if target_tonnes <= 0:
                 continue
             build = {
+                **dict(setting),
                 "build_id": setting.get("build_id") or index + 1,
                 "build_name": str(
                     setting.get("build_name") or f"Build {index + 1}"
@@ -84,7 +97,7 @@ class ProductBuildProgress:
                 build[f"target_{grade}_max"] = cls._number(
                     setting.get(f"target_{grade}_max"), 100.0
                 )
-            builds.append(build)
+            builds.append(with_quality_configuration(build))
         return builds
 
     @classmethod
@@ -115,9 +128,7 @@ class ProductBuildProgress:
             if isinstance(report, pd.DataFrame)
             else pd.DataFrame(report or [])
         ).reset_index(drop=True)
-        for column in cls.COLUMNS:
-            if column not in result.columns:
-                result[column] = None
+        result = cls.ensure_columns(result)
 
         # Reports written before quantity-stream support have no explicit
         # product-build quantity. Preserve their historical readability only;
@@ -256,6 +267,8 @@ class ProductBuildProgress:
                 build_tonnes, grade_metal, build, grade_weights
             )
             values = {
+                f"{prefix}_opf": build.get("opf", ""),
+                **{f"{prefix}_{key}": build[key] for key in QUALITY_FIELDS},
                 f"{prefix}_id": build["build_id"],
                 f"{prefix}_name": build["build_name"],
                 f"{prefix}_brand": build["brand"],

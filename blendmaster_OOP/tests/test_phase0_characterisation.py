@@ -392,13 +392,14 @@ class ProductTargetImportCharacterisation(unittest.TestCase):
         self.assertAlmostEqual(lanes["fines"], 2000.0)
         self.assertAlmostEqual(lanes["lump"], 400.0)
 
-    def test_no_quality_limit_fields_exist_yet(self):
-        """CHANGES IN Task 12. LQL/HQL and Target are added there."""
+    def test_quality_fields_are_open_for_legacy_rows_without_explicit_specifications(self):
+        """Task 12 adds optional fields without inferring targets from hard bounds."""
         grouped = PlanningPlanTargets.group_builds_by_brand([
             target_build(1, "CCFB", 1000, 58.0, datetime(2026, 9, 1)),
         ])
-        for absent in ("target_fe_lql", "target_fe_hql", "target_fe_target"):
-            self.assertNotIn(absent, grouped[0])
+        for optional in ("target_fe_lql", "target_fe_hql", "target_fe_target"):
+            self.assertIn(optional, grouped[0])
+            self.assertIsNone(grouped[0][optional])
 
 
 class GlobalReconciliationCharacterisation(unittest.TestCase):

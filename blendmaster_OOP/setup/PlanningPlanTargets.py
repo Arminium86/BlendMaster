@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from classes.PeriodManager import PeriodManager
+from classes.ProductQualityLimits import quality_fields
+from setup.InventoryBuildLineage import finite_number
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 
 
@@ -295,6 +297,12 @@ class PlanningPlanTargets:
             for grade in ("si", "al", "p", "mn"):
                 build[f"target_{grade}_min"] = 0.0
                 build[f"target_{grade}_max"] = grades[grade]
+            build["planning_grade_targets"] = {
+                grade: finite_number(row.get(column)) for grade, column in
+                (("fe", "FE"), ("si", "SIO2"), ("al", "AL2O3"), ("p", "P"), ("mn", "MN"))
+            }
+            build.update({f"target_{grade}_target": value for grade, value in build["planning_grade_targets"].items()})
+            build.update(quality_fields(build))
             builds.append(build)
 
         brand_counts = {}
@@ -356,8 +364,15 @@ class PlanningPlanTargets:
         groups = []
         for build in builds or []:
             brand = str(build.get("brand") or "").strip().upper()
-            if not groups or groups[-1]["brand"] != brand:
+            quality = quality_fields(build)
+            # Specifications belong to a build's OPF/brand/lane. Different
+            # manual limits must not be averaged into a new specification.
+            quality_key = (brand, str(build.get("opf") or "").strip().upper(),
+                           tuple(quality[f"target_{a}_{part}"] for a in ("fe", "si", "al", "p", "mn") for part in ("lql", "hql")))
+            if not groups or groups[-1]["_quality_key"] != quality_key:
                 groups.append({
+                    "_quality_key": quality_key,
+                    "_targets": [],
                     "brand": brand,
                     "target_tonnes": 0.0,
                     "planning_target_tonnes": 0.0,
@@ -371,6 +386,7 @@ class PlanningPlanTargets:
                 })
             group = groups[-1]
             tonnes = cls._number(build.get("target_tonnes"))
+            group["_targets"].append((tonnes, quality, build.get("planning_grade_targets") or {}))
             group["target_tonnes"] += tonnes
             group["planning_target_tonnes"] += cls._number(
                 build.get("planning_target_tonnes")
@@ -428,5 +444,19 @@ class PlanningPlanTargets:
                     group["_weighted_grades"][field] / total
                     if total > 0 else 0.0
                 )
+            result.update(quality_fields(result))
+            for grade in ("fe", "si", "al", "p", "mn"):
+                key = f"target_{grade}_target"
+                positive = [(wmt, values[key]) for wmt, values, _ in group["_targets"] if wmt > 0]
+                result[key] = (sum(wmt * value for wmt, value in positive) / total
+                               if total > 0 and all(value is not None for _, value in positive) else None)
+            if any(planned for _, _, planned in group["_targets"]):
+                result["planning_grade_targets"] = {}
+                for grade in ("fe", "si", "al", "p", "mn"):
+                    positive = [(wmt, planned.get(grade)) for wmt, _, planned in group["_targets"] if wmt > 0]
+                    result["planning_grade_targets"][grade] = (
+                        sum(wmt * value for wmt, value in positive) / total
+                        if total > 0 and all(value is not None for _, value in positive) else None)
+            result.update(quality_fields(result))
             combined.append(result)
         return combined

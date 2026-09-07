@@ -22,6 +22,25 @@ feed-weighted factors → manual edits → source adjustment → chunk/overall r
 
 Standard global mode remains available and unchanged.
 
+### The three Default window selections in Lookback
+
+| Default window selection | What N counts | Treatment of gaps | What happens if fewer than N production dates exist? |
+| --- | --- | --- | --- |
+| Trailing calendar days | The N completed calendar dates immediately before the scenario-start date. | Non-production dates still occupy calendar days. | Use eligible shifts inside those fixed dates; the minimum production-days rule still applies. |
+| Last N production days | The most recent N dates with this brand's production inside maximum lookback. | Skip non-production dates and reach further back, within the maximum cap. | Use available dates within the cap if they meet the minimum; never extend beyond the cap. |
+| Last N days of latest campaign | Up to N final dates of the latest consecutive run of brand production. | A date without brand production ends the campaign; do not bridge that gap. | A shorter campaign can qualify if it supplies the required minimum; do not borrow dates from an older campaign. |
+
+These selections first identify a **time pool for the OPF/brand**. Component
+spatial/material eligibility and valid factor requirements then determine which
+shifts in that pool can actually supply each component's factors. Thus four
+brand-production dates do not necessarily give each component four eligible
+dates. The scenario-start date is excluded by Calendar; other selections can use
+already-completed shifts on it, subject to their bounds.
+
+See the [one-source, two-material worked world](RECONCILIATION_SIMPLE_WORLD.md)
+for the same history calculated through all three Lookback selections, Spatial,
+Auto, factor aggregation and the adjusted grade.
+
 **Calendar N** uses the N completed calendar dates immediately before the scenario
 start date, clipped by maximum lookback. **Production N** uses the most recent N
 dates with that brand's production inside the cap, allowing date gaps. **Latest

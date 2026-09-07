@@ -664,9 +664,7 @@ class DatabaseManager:
             results["source_type"] = ""
         if "actual_direct_tip_ratio" not in results.columns:
             results["actual_direct_tip_ratio"] = 0
-        for column in ProductBuildProgress.COLUMNS:
-            if column not in results.columns:
-                results[column] = None
+        results = ProductBuildProgress.ensure_columns(results)
 
         results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
         results['end_datetime'] = pd.to_datetime(results['end_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
