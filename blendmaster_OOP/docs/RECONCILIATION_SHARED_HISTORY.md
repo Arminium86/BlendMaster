@@ -37,9 +37,11 @@ brand-production dates do not necessarily give each component four eligible
 dates. The scenario-start date is excluded by Calendar; other selections can use
 already-completed shifts on it, subject to their bounds.
 
-See the [one-source, two-material worked world](RECONCILIATION_SIMPLE_WORLD.md)
-for the same history calculated through all three Lookback selections, Spatial,
-Auto, factor aggregation and the adjusted grade.
+See the [two-pit, one-stockpile worked example](RECONCILIATION_TWO_PITS.md)
+for the same eight shifts calculated through all three Default window selections,
+every spatial Fallback level, both Auto History selection options, ten factors,
+adjusted grades, local settings and the review fields. It uses the UI's field
+and option names throughout and includes an offline reproduction script.
 
 **Calendar N** uses the N completed calendar dates immediately before the scenario
 start date, clipped by maximum lookback. **Production N** uses the most recent N
