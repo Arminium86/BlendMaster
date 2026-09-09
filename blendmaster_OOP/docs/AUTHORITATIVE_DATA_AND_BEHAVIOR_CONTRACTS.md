@@ -76,6 +76,9 @@ default 12 hours, user-configurable, measured immediately before scenario start.
 
 Destination capacity (Q9, Q10): user-entered remaining capacity is ROM WMT and
 is consumed only by final non-direct-tipped tonnes.
+At a capacity boundary, keep the remaining non-direct-tipped payload whole at
+the current destination, record the overrun, and advance the next payload
+(confirmed 2026-09-09 during Task 23).
 
 ## 4. Grade-block identity and token mapping
 
@@ -643,12 +646,18 @@ planned ROM WMT, build instances, sequence positions and exclusion reasons.
 Implemented in `setup/RecentDestinationActivity.py` and
 `setup/sql/recent_destination_activity.sql`. The query window is half-open:
 `[scenario start - lookback, scenario start)`, in AWST. Default lookback is
-12 hours; the UI allows 0.01–744 hours. It filters the selected site (`OPERATION`),
+12 hours; the UI allows 0.01–744 hours and displays the exact AWST boundaries.
+Scenario site codes map to warehouse `OPERATION` names: CC → Christmas Creek,
+CB → Cloudbreak, KV/VK → Kings, FT → Firetail, EW → Eliwana, IB → Iron Bridge.
+It filters that operation,
 mapped stockpile footprints (`DESTINATION_FMS`), undeleted PrimaryMovement rows,
 and ExPit / Expit Ore / Expit Ore classifications. Waste and Expit Ore Direct
-Feed do not establish ROM activity. These classifications and the complete query
-were verified against the live warehouse on 2026-09-09; 31 qualifying movements
-were returned in the bounded service check.
+Feed do not establish ROM activity. The original bounded warehouse check verified
+classifications, but did not exercise a scenario site code. A live-session check
+on 2026-09-09 found and corrected the code/name mismatch. The CC scenario window
+17 August 19:51:49–18 August 19:51:49 AWST returned 621 qualifying movements after
+stockpile mapping (622 before mapping). The operation name is part of the exact
+cache request, so previous empty code-only results cannot be reused.
 
 Actual grade-block identity determines material type. The latest qualifying
 inbound timestamp establishes the detected physical destination, regardless of
@@ -672,13 +681,22 @@ most 24 snapshots.
 - **Progress:** detected destination, current build instance, previous/next
   instances, selection basis and remaining assignable ROM WMT per ROM/material.
   Selecting a row reveals its full extracted order and warnings.
-- **Build order:** dated build instances, planned tonnes and source CSV records.
-- **Activity evidence:** inbound timestamps, tonnes, source grade blocks,
+- **2WP Build order:** dated build instances, planned tonnes and source CSV records.
+- **Actual movements:** inbound timestamps, tonnes, source grade blocks,
   actual destination builds and movement IDs.
-- **2WP row audit:** each source record's inclusion/exclusion and order linkage.
+- **2WP row audit:** defaults to included ROM inbound records and order linkage.
+  The Show filter exposes Excluded ROM inbound, Reclaim evidence or All rows,
+  with displayed/total CSV record counts. Reclaim rows preserve the CSV destination
+  and identify the Reclaimed stockpile separately; they remain necessary for
+  build → reclaim → build detection. Unrelated rows remain available in All rows
+  and the database audit. Filtering does not change extraction or build instances.
 
 The Current build instance control permits an explicit reviewed selection and
-labels it User selected. Automatic detection remains separately visible. Blank
+labels it User selected. It overrides automatic detection of the current position
+within the existing 2WP order; it cannot add, replace or reorder planned
+destinations. The tab therefore remains named Progress. Automatic detection
+remains separately visible. Valid edits apply immediately to the current scenario;
+project Save persists them, so no separate Submit action is required. Blank
 remaining tonnes means not set; zero explicitly means no remaining capacity.
 Remaining tonnes belong to the physical build instance, so the same instance
 shown under different materials shares one value. Values retain full precision.
@@ -689,19 +707,72 @@ legacy projects. Scenario-time or source-signature changes clear previous
 selections/capacities with an inline notice. Lookback changes clear manual
 instance selection. Late asynchronous results cannot overwrite another context.
 Large read-only evidence tables render cells on demand; a 50,000-row audit was
-checked without dropping records.
+checked without dropping records. Extraction reads only the required CSV columns,
+while its source signature still covers the complete file. Reviewed-instance
+changes do not rebuild the unchanged evidence tables.
 
-Validation on 2026-09-09: 874 automated checks passed. Native Windows checks cover
+Validation on 2026-09-09: 879 automated checks passed. Native Windows checks cover
 loading, fresh/cached/offline data, no data, repeated-instance ambiguity, reviewed
 selection, capacity edits, compact layout and actual application project
 save/load (the unrelated warehouse inventory reload was stubbed). Illustrative
-screenshots are local under `docs/screenshots/task22/` and ignored by Git.
+screenshots are local under `docs/screenshots/task22/` and ignored by Git. The
+current-session review also verified 621 actual movements, all 51 unchanged build
+order entries, the corrected reclaim route and audit filters across 242,824 CSV
+records (26,868 included ROM inbound).
 
 Review: import 2WP Mining.csv, load Stockpile Inventories with Nearest Crusher,
 then open Destination Reconciliation. Compare the extracted order and activity, review
 any ambiguous current instance, enter remaining ROM WMT, and save/reopen the
-project. This checkpoint is setup only. Capacity consumption, primary allocation
-and fallback assignment remain for Tasks 23–25; Task 23 has not started.
+project. Task 23 adds the post-plan primary-allocation audit described below;
+fallback rules and Material Destination Plan publication remain for Tasks 24–25.
+
+### 9.4 Stateful primary-destination allocation (Task 23)
+
+`classes/PrimaryDestinationAllocator.py` consumes the final non-direct-tipped
+portion of each payload in AWST delivery order, with payload ID breaking equal
+timestamps. It uses the same payload-level direct-tip reconciliation as
+`MaterialDestinationPlan.build_payload_assignments`, before parent-grade-block
+aggregation. Direct-tip tonnes consume no ROM capacity. Payload IDs and full
+tonnage precision survive into the assignment and capacity ledgers.
+
+- The confirmed/selected current build instance starts with user-entered remaining
+  ROM WMT. Blank remains unresolved; zero advances without assigning tonnes.
+- Later instances start with their total 2WP planned ROM WMT across materials,
+  unless a remaining-capacity value was explicitly entered for that instance.
+  All material lanes sharing one physical instance share a single balance;
+  a later turnover at the same footprint has a separate balance.
+- A payload with 150 ROM WMT and 100 WMT remaining is assigned whole to the current
+  destination. Consumption is 150, overrun is 50, remaining capacity becomes zero,
+  and the next payload advances. An Allocate event and an Advance event record
+  the payload, instance, before/after capacity and next destination.
+- Unconfirmed current instances, missing ROM/material orders, invalid delivery
+  times and exhausted sequences retain unresolved tonnes and explicit reasons.
+  The allocator does not guess primary or fallback destinations.
+- Waste is outside ROM allocation. Deliveries before scenario start or at/after
+  the final solved report end consume no capacity. This prevents partial/failed
+  plans from consuming future candidate tonnes.
+- Each optimised, contingency and manual plan starts independently from frozen
+  scenario inputs. Recalculation replaces that plan's audit. Identical retries
+  within an allocator are idempotent; changed or out-of-order payloads require
+  recalculation from the starting state. Entered scenario capacities are never
+  decremented by a plan evaluation.
+
+The final-plan writers call the allocator and atomically publish
+`destination_allocation_runs`, `destination_primary_assignments`,
+`destination_capacity_ledger` and `destination_capacity_balances`. Tables have
+stable schemas in no-data states. A missing/stale/loading reconciliation context
+records Unavailable and clears the old audit for that plan. Optimisation restarts
+clear old optimised/contingency audits, while source invalidation clears all
+derived allocation audits. Scenario database snapshots retain them in `.prj`.
+
+This task produces the post-plan primary assignment audit. Task 24's fallback
+engine and Task 25's updated Material Destination Plan publication are still
+pending. No new submit step is needed in Destination Reconciliation.
+
+Validation: 894 automated checks passed. Native Windows validation also exercised
+the scenario input snapshot, manual final-plan hook, whole-payload overrun,
+preservation of entered capacity, and actual project save/load of settings and
+allocation audit (warehouse inventory reload stubbed).
 
 ## 10. Manual ratio rounding
 

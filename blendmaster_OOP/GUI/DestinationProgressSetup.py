@@ -1,6 +1,7 @@
 """Destination setup and evidence review; no payload allocation takes place here."""
 
 from copy import deepcopy
+from datetime import timedelta
 from pathlib import Path
 
 from PyQt5 import sip
@@ -19,6 +20,14 @@ from setup.ProductAssayHistory import awst
 
 def instance_label(row):
     return f"{row['order_position']}. {row['destination']} · build {row['build_instance']}" if row else "—"
+
+
+def context_key(scenario_id, site, start, path, areas):
+    try:
+        stat = Path(path).stat() if path else None
+    except OSError:
+        stat = None
+    return digest([scenario_id, site, start, str(path), (stat.st_size, stat.st_mtime_ns) if stat else None, areas])
 
 
 class EvidenceModel(QAbstractTableModel):
@@ -41,7 +50,10 @@ class EvidenceModel(QAbstractTableModel):
 
     def data(self, index, role=Qt.DisplayRole):
         if index.isValid() and role in (Qt.DisplayRole, Qt.ToolTipRole):
-            value = self.records[index.row()].get(self.columns[index.column()][0])
+            key = self.columns[index.column()][0]
+            value = self.records[index.row()].get(key)
+            if role == Qt.DisplayRole and key in ("wmt", "planned_wmt") and isinstance(value, (int, float)):
+                return f"{value:,.1f}"
             return ", ".join(map(str, value)) if isinstance(value, list) else "—" if value is None else str(value)
         return None
 
@@ -90,6 +102,10 @@ class DestinationProgressSetup(QWidget):
         self.refresh = QPushButton("Refresh")
         controls.addWidget(self.refresh)
         layout.addLayout(controls)
+        self.activity_window = QLabel("")
+        self.activity_window.setWordWrap(True)
+        self.activity_window.setToolTip("The window ends at scenario start, not the current clock time. Only undeleted PrimaryMovement / ExPit / Expit Ore / Expit Ore rows qualify. Destination FMS must match a stockpile with Nearest Crusher; source grade block and positive ROM WMT are required. Direct feed, waste and rehandle are excluded.")
+        layout.addWidget(self.activity_window)
         self.status = QLabel("Ready — open this tab after setting the scenario.")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("padding: 8px; background: #edf6ff; color: #1e4f8a; border-radius: 4px;")
@@ -113,20 +129,36 @@ class DestinationProgressSetup(QWidget):
         overview_layout.addWidget(self.details)
         self.tabs.addTab(overview, "Progress")
         self.order_table, self.activity_table, self.audit_table = [self.new_table(records=True) for _ in range(3)]
-        self.tabs.addTab(self.order_table, "Build order")
-        self.tabs.addTab(self.activity_table, "Activity evidence")
-        self.tabs.addTab(self.audit_table, "2WP row audit")
+        self.tabs.addTab(self.order_table, "2WP Build order")
+        self.tabs.addTab(self.activity_table, "Actual movements")
+        audit = QWidget()
+        audit_layout = QVBoxLayout(audit)
+        audit_controls = QHBoxLayout()
+        audit_controls.addWidget(QLabel("Show"))
+        self.audit_filter = QComboBox()
+        for label, key in (("ROM inbound", "included"), ("Excluded ROM inbound", "excluded_inbound"),
+                           ("Reclaim evidence", "reclaim"), ("All rows", "all")):
+            self.audit_filter.addItem(label, key)
+        self.audit_filter.setToolTip("Reclaim evidence identifies build → reclaim → build transitions. Other CSV rows are retained in All rows for traceability.")
+        audit_controls.addWidget(self.audit_filter)
+        self.audit_count = QLabel("")
+        audit_controls.addWidget(self.audit_count)
+        audit_controls.addStretch()
+        audit_layout.addLayout(audit_controls)
+        audit_layout.addWidget(self.audit_table)
+        self.tabs.addTab(audit, "2WP row audit")
         self.validation = QLabel("")
         self.validation.setWordWrap(True)
         self.validation.setStyleSheet("color: #a33b16;")
         layout.addWidget(self.validation)
-        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT; blank means not set and 0 means no remaining capacity. Settings save with the site scenario. This setup does not yet change Material Destination Plan assignments.")
+        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT; blank means not set and 0 means no remaining capacity. Valid edits apply immediately to the current scenario; save the project to retain them. This setup does not yet change Material Destination Plan assignments.")
         footer.setWordWrap(True)
         footer.setStyleSheet("color: #526474;")
         layout.addWidget(footer)
         self.refresh.clicked.connect(lambda: self.request_refresh(force=True))
         self.lookback.valueChanged.connect(self.lookback_changed)
         self.table.itemSelectionChanged.connect(self.show_details)
+        self.audit_filter.currentIndexChanged.connect(self.render_audit)
 
     @staticmethod
     def new_table(records=False):
@@ -182,17 +214,14 @@ class DestinationProgressSetup(QWidget):
         for table in (self.order_table, self.activity_table, self.audit_table):
             table.model().replace([], [])
         self.details.clear()
+        self.audit_count.clear()
         self.status.setText(message)
         self.validation.clear()
 
     def set_context(self, *, scenario_id, site, scenario_start, path, inventories, state=None):
         areas = inventory_areas(inventories)
-        try:
-            stat = Path(path).stat() if path else None
-        except OSError:
-            stat = None
         start = awst(scenario_start).isoformat() if scenario_start is not None else None
-        key = digest([scenario_id, site, start, str(path), (stat.st_size, stat.st_mtime_ns) if stat else None, areas])
+        key = context_key(scenario_id, site, start, path, areas)
         if key == self._context_key:
             return
         self.invalidate("Ready — Refresh to load destination reconciliation.")
@@ -203,8 +232,34 @@ class DestinationProgressSetup(QWidget):
         self.lookback.setValue(self._settings["lookback_hours"])
         self.lookback.blockSignals(False)
         self.context_label.setText(f"Site: {site or 'not set'} · Scenario start: {start or 'not set'} AWST · 2WP: {Path(path).name if path else 'not selected'}")
+        self.update_activity_window()
+
+    def allocation_context(self, *, scenario_id, site, scenario_start, path, inventories):
+        """Freeze reviewed inputs for a plan; never return an old scenario's data."""
+        if not self.snapshot or self._pending:
+            return None
+        start = awst(scenario_start).isoformat() if scenario_start is not None else None
+        if context_key(scenario_id, site, start, path, inventory_areas(inventories)) != self._context_key:
+            return None
+        if self._settings["context_signature"] != self.snapshot["context_signature"]:
+            return None
+        order = self.snapshot["order"]
+        return deepcopy(dict(order={k: order[k] for k in ("schema_version", "signature", "source_file", "orders", "areas")},
+                             activity=self.snapshot["activity"], settings=self._settings,
+                             context_signature=self.snapshot["context_signature"], scenario_id=scenario_id, site=site, start=start))
+
+    def update_activity_window(self):
+        context = getattr(self, "_context", {})
+        if not context.get("start"):
+            self.activity_window.clear()
+            return
+        end = awst(context["start"])
+        start = end - timedelta(hours=self.lookback.value())
+        operation = RecentDestinationActivity.warehouse_operation(context["site"]).title()
+        self.activity_window.setText(f"Activity window (AWST): {start:%d %b %Y %H:%M:%S} inclusive → {end:%d %b %Y %H:%M:%S} exclusive · {operation}")
 
     def lookback_changed(self):
+        self.update_activity_window()
         self._settings["lookback_hours"] = self.lookback.value()
         self._settings["selected_instances"] = {}
         self.emit_settings()
@@ -258,7 +313,7 @@ class DestinationProgressSetup(QWidget):
 
         self.run_async(work, success, failure)
 
-    def render(self):
+    def render(self, refresh_evidence=True):
         order, activity = self.snapshot["order"], self.snapshot["activity"] or {}
         self.rows = resolve_progress(order, activity, self._settings["selected_instances"])
         if not order["orders"]:
@@ -279,6 +334,7 @@ class DestinationProgressSetup(QWidget):
         self.capacity_fields = {}
         for i, row in enumerate(self.rows):
             combo = QComboBox()
+            combo.setToolTip("Select the current build instance from the 2WP Build order. A manual selection overrides automatic detection for this ROM area/material type. The planned destinations and their sequence remain as defined in 2WP.")
             combo.setMinimumWidth(combo.fontMetrics().horizontalAdvance("Automatic / review required") + 45)
             combo.addItem("Automatic / review required", "")
             for entry in row["sequence"]:
@@ -301,12 +357,41 @@ class DestinationProgressSetup(QWidget):
                 self.capacity_fields.setdefault(key, []).append(field)
             self.table.setCellWidget(i, 6, field)
         self.table.resizeRowsToContents()
-        self.fill(self.order_table, order["orders"], [("rom_area", "ROM area"), ("material_type", "Material type"), ("order_position", "Order"), ("destination", "Destination"), ("build_instance", "Build instance"), ("first_inbound", "First planned inbound (AWST)"), ("last_inbound", "Last planned inbound (AWST)"), ("planned_wmt", "Planned ROM WMT"), ("csv_records", "CSV records")])
-        self.fill(self.activity_table, activity.get("records", []), [("rom_area", "ROM area"), ("material_type", "Material type"), ("destination", "Destination"), ("observed_at", "Inbound time (AWST)"), ("wmt", "ROM WMT"), ("source_block", "Source grade block"), ("destination_build", "Actual destination build"), ("movement_id", "Movement ID")])
-        self.fill(self.audit_table, order["audit"], [("csv_record", "CSV record"), ("outcome", "Outcome"), ("reason", "Reason"), ("rom_area", "ROM area"), ("material_type", "Material type"), ("destination", "Destination"), ("build_instance", "Build instance"), ("order_position", "Order"), ("planned_wmt", "ROM WMT"), ("start", "Start (AWST)"), ("source", "2WP source")])
+        if refresh_evidence:
+            self.fill(self.order_table, order["orders"], [("rom_area", "ROM area"), ("material_type", "Material type"), ("order_position", "Order"), ("destination", "Destination"), ("build_instance", "Build instance"), ("first_inbound", "First planned inbound (AWST)"), ("last_inbound", "Last planned inbound (AWST)"), ("planned_wmt", "Planned ROM WMT"), ("csv_records", "CSV records")])
+            self.fill(self.activity_table, activity.get("records", []), [("rom_area", "ROM area"), ("material_type", "Material type"), ("destination", "Destination"), ("observed_at", "Inbound time (AWST)"), ("wmt", "ROM WMT"), ("source_block", "Source grade block"), ("destination_build", "Actual destination build"), ("movement_id", "Movement ID")])
+            self.render_audit()
         if self.rows:
             self.table.selectRow(0)
         self.show_details()
+
+    def render_audit(self):
+        if not self.snapshot:
+            return
+        records = self.snapshot["order"]["audit"]
+        mode = self.audit_filter.currentData()
+        if mode == "included":
+            rows = [r for r in records if r["outcome"] == "included"]
+        elif mode == "excluded_inbound":
+            rows = [r for r in records if r.get("row_type") == "rom_inbound" and r["outcome"] == "excluded"]
+        elif mode == "reclaim":
+            rows = [r for r in records if r.get("row_type") == "reclaim"]
+        else:
+            rows = records
+        columns = [("csv_record", "CSV record")]
+        if mode != "included":
+            columns.append(("outcome", "Outcome"))
+        columns += [("reason", "Reason"), ("rom_area", "ROM area")]
+        if mode != "reclaim":
+            columns.append(("material_type", "Material type"))
+        columns.append(("destination", "Destination"))
+        if mode in ("reclaim", "all"):
+            columns.append(("reclaimed_stockpile", "Reclaimed stockpile"))
+        if mode != "reclaim":
+            columns += [("build_instance", "Build instance"), ("order_position", "Order")]
+        columns += [("planned_wmt", "ROM WMT"), ("start", "Start (AWST)"), ("source", "2WP source")]
+        self.fill(self.audit_table, rows, columns)
+        self.audit_count.setText(f"{len(rows):,} of {len(records):,} CSV records")
 
     def choose_instance(self, key, value):
         if value:
@@ -314,7 +399,7 @@ class DestinationProgressSetup(QWidget):
         else:
             self._settings["selected_instances"].pop(key, None)
         self.emit_settings()
-        self.render()
+        self.render(refresh_evidence=False)
 
     def edit_capacity(self, key, field, text):
         if text and not field.hasAcceptableInput():

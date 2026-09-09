@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from classes.MaterialDestinationPlan import MaterialDestinationPlan
+from classes.PrimaryDestinationAllocator import AUDIT_COLUMNS, allocate_final_plan, write_allocation_audit
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.GradeStreams import ANALYTES, STREAMS
@@ -182,6 +183,7 @@ class DatabaseManager:
                 "optimisation_plan_product_build_report", "manual_plan_blend_report",
                 "two_wp_active_blend_report", "optimisation_plan_status", "closing_rom_stocks_compliance",
             }
+            derived.update(AUDIT_COLUMNS)
             for name in names:
                 if name in derived:
                     escaped = name.replace('"', '""')
@@ -206,6 +208,9 @@ class DatabaseManager:
                 connection.execute(
                     f'DROP TABLE IF EXISTS "{table_name}"'
                 )
+            for table_name in AUDIT_COLUMNS:
+                if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone():
+                    connection.execute(f'DELETE FROM "{table_name}" WHERE plan_type = ?', ("optimised",))
             connection.commit()
         finally:
             connection.close()
@@ -753,6 +758,7 @@ class DatabaseManager:
         crusher_destination=None,
         direct_tip_movement_rules=None,
         database_name=None,
+        destination_reconciliation=None,
     ):
         """Replace one plan's MDP rows while preserving other plan types."""
         database_name = database_name or get_database_path()
@@ -762,6 +768,11 @@ class DatabaseManager:
             plan_type=plan_type,
             plan_id=plan_id,
             crusher_destination=crusher_destination,
+            direct_tip_movement_rules=direct_tip_movement_rules,
+        )
+        allocation = allocate_final_plan(
+            payload_transactions, blend_report, destination_reconciliation,
+            plan_type=plan_type, plan_id=plan_id, crusher_destination=crusher_destination,
             direct_tip_movement_rules=direct_tip_movement_rules,
         )
         for column in (
@@ -863,6 +874,9 @@ class DatabaseManager:
             "Material destination plan "
             f"({plan_type}, {plan_id}) saved to database {database_name}"
         )
+        # Task 25 will combine these primary assignments with the Task 24
+        # fallback rules in the Material Destination Plan presentation.
+        write_allocation_audit(allocation, database_name)
         return material_destination_plan
 
     def write_material_destination_plan_from_database(

@@ -52,7 +52,7 @@ def resolve_progress(order, activity, selections=None):
         if len(latest_destinations) > 1:
             warnings.append("Latest movements have equal timestamps at different destinations. Select the current build instance after review.")
         elif active and not candidates:
-            warnings.append("Detected destination is outside the extracted order. Review the 2WP schedule and activity evidence.")
+            warnings.append("Detected destination is outside the extracted order. Review the 2WP Build order and Actual movements.")
         elif len(candidates) > 1:
             warnings.append("Detected destination has repeated build instances. Actual activity can lead or lag 2WP dates; select the current build instance after review.")
         if not evidence:

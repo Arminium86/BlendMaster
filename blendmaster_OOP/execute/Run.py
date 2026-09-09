@@ -687,6 +687,7 @@ class Run:
             direct_tip_movement_rules=(site_context or {}).get(
                 "direct_tip_movement_rules", []
             ),
+            destination_reconciliation=(site_context or {}).get("destination_reconciliation"),
         )
 
         self.case_bridge.print("Writing product build report to database...")
@@ -809,6 +810,7 @@ class Run:
                     direct_tip_movement_rules=(site_context or {}).get(
                         "direct_tip_movement_rules", []
                     ),
+                    destination_reconciliation=(site_context or {}).get("destination_reconciliation"),
                 )
                 reserved_signatures.update(
                     contingency.selected_plan_blend_signatures()
@@ -871,6 +873,7 @@ class Run:
                         direct_tip_movement_rules=(site_context or {}).get(
                             "direct_tip_movement_rules", []
                         ),
+                        destination_reconciliation=(site_context or {}).get("destination_reconciliation"),
                     )
                 self.case_bridge.print(
                     f"{plan_id} could not produce a compliant feasible "

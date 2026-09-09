@@ -1361,6 +1361,7 @@ class UserInputs(QMainWindow):
     def active_site_context(self):
         return {
             "scenario_id": self.active_scenario_id,
+            "destination_reconciliation": self.destination_allocation_context(),
             "hub": getattr(self, "hub_input_choice", None),
             "mine": getattr(self, "mine_input_choice", None),
             "opf": getattr(self, "opf_input_choice", None),
@@ -3256,6 +3257,17 @@ class UserInputs(QMainWindow):
         self.destination_progress.settingsChanged.connect(
             lambda state: setattr(self, "destination_progress_settings", copy.deepcopy(state)))
         self.destination_progress.auditReady.connect(self.store_destination_order_audit)
+
+    def destination_allocation_context(self):
+        panel = vars(self).get("destination_progress")
+        if panel is None:
+            return None
+        return panel.allocation_context(
+            scenario_id=getattr(self, "active_scenario_id", "active"),
+            site=getattr(self, "mine_input_choice", None),
+            scenario_start=getattr(self, "start_time_choice", None),
+            path=getattr(self, "file_path_choice", ""),
+            inventories=getattr(self, "stockpile_data", None) or {})
 
     def sync_destination_progress_context(self):
         self.destination_progress.set_context(
@@ -25038,6 +25050,7 @@ class UserInputs(QMainWindow):
             direct_tip_movement_rules=site_context.get(
                 "direct_tip_movement_rules", []
             ),
+            destination_reconciliation=site_context.get("destination_reconciliation"),
         )
 
     def manual_expit_payload_transactions(self, include_all_destinations=False):

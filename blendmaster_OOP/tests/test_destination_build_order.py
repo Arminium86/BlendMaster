@@ -44,6 +44,18 @@ class BuildOrderTests(unittest.TestCase):
         self.assertEqual(result["audit"][0]["instance_id"], result["audit"][2]["instance_id"])
         self.assertNotEqual(result["audit"][0]["instance_id"], result["audit"][4]["instance_id"])
 
+    def test_reclaim_audit_preserves_actual_route_and_identifies_reclaimed_stockpile(self):
+        for source_type, source in (("Stockpile", "Stockpiles/SP1"), ("Flow", "Flow/CR1_Product")):
+            with self.subTest(source_type=source_type):
+                frame = fixture()
+                frame.loc[3, "Source.Type"] = source_type
+                frame.loc[3, "Source.FullName"] = source
+                result = build_order(frame, {"SP1": "CR1", "SP2": "CR1", "SP3": "CR2"})
+                row = result["audit"][3]
+                self.assertEqual((row["source"], row["destination"], row["reclaimed_stockpile"]), (source, "CR1", "SP1"))
+                self.assertEqual((row["row_type"], row["rom_area"]), ("reclaim", "CR1"))
+                self.assertEqual(result["audit"][4]["build_instance"], 2)
+
     def test_overlap_cannot_invent_turnover(self):
         frame = fixture()
         frame.loc[3, "Time.StartTime"] = "2026-09-08 08:30"
@@ -58,6 +70,7 @@ class BuildOrderTests(unittest.TestCase):
         self.assertEqual(len(result["audit"]), 3)
         self.assertIn("Nearest Crusher", result["audit"][0]["reason"])
         self.assertEqual(len(result["warnings"]), 2)
+        self.assertEqual([r["row_type"] for r in result["audit"]], ["rom_inbound", "rom_inbound", "other"])
 
     def test_file_bytes_mapping_and_audit_roundtrip(self):
         with tempfile.TemporaryDirectory() as temp:

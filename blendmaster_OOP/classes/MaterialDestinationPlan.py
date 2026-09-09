@@ -361,7 +361,7 @@ class MaterialDestinationPlan:
         )
 
     @classmethod
-    def build(
+    def build_payload_assignments(
         cls,
         payload_transactions,
         blend_report,
@@ -543,10 +543,28 @@ class MaterialDestinationPlan:
         if not rows:
             return pd.DataFrame(columns=cls.COLUMNS)
 
-        # The report is a source-to-destination plan, not a payload or
-        # steady-state audit. Retain payload detail only while reconciling
-        # direct-tip tonnes above, then aggregate it away here.
-        result = pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    @classmethod
+    def build(
+        cls,
+        payload_transactions,
+        blend_report,
+        plan_type,
+        plan_id="Primary",
+        crusher_destination=None,
+        direct_tip_movement_rules=None,
+    ):
+        """Publish the existing source summary from final payload decisions."""
+        result = cls.build_payload_assignments(
+            payload_transactions, blend_report, plan_type, plan_id,
+            crusher_destination, direct_tip_movement_rules,
+        )
+        if result.empty:
+            return pd.DataFrame(columns=cls.COLUMNS)
+        payloads = cls._prepared_payloads(payload_transactions)
+        # Payload IDs remain available to the primary allocator before this
+        # display-oriented aggregation removes them.
         result["grade_block"] = result["grade_block"].map(
             parent_grade_block_name
         )

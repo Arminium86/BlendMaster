@@ -25,6 +25,14 @@ class RecentDestinationActivity:
     MAX_RECORDS = 200000
     SQL_PATH = Path(__file__).with_name("sql") / "recent_destination_activity.sql"
     SOURCE = "AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_EXPIT_REHANDLE_TRANSACTIONS"
+    # Scenario site codes differ from the warehouse's descriptive OPERATION values.
+    SITE_OPERATIONS = {"CC": "CHRISTMAS CREEK", "CB": "CLOUDBREAK", "KV": "KINGS", "VK": "KINGS",
+                       "FT": "FIRETAIL", "EW": "ELIWANA", "IB": "IRON BRIDGE"}
+
+    @classmethod
+    def warehouse_operation(cls, site):
+        site = clean_text(site).upper()
+        return cls.SITE_OPERATIONS.get(site, site)
 
     def __init__(self, inventory_loader=None, cache_directory=None, *, clock=None, cache_seconds=300):
         self.inventory_loader = inventory_loader or OpeningStockpileInventories()
@@ -43,7 +51,8 @@ class RecentDestinationActivity:
         if not site or not source_signature:
             raise ValueError("Site and source-data signature are required.")
         areas = {stockpile_key(k): clean_text(v).upper() for k, v in areas.items() if clean_text(v)}
-        return dict(version=self.VERSION, source=self.SOURCE, site=site, start=(end-timedelta(hours=hours)).isoformat(),
+        return dict(version=self.VERSION, source=self.SOURCE, site=site, operation=self.warehouse_operation(site),
+                    start=(end-timedelta(hours=hours)).isoformat(),
                     end=end.isoformat(), lookback_hours=hours, areas=areas, source_signature=source_signature,
                     query_signature=digest(self.SQL_PATH.read_text(encoding="utf-8")))
 
@@ -93,7 +102,7 @@ class RecentDestinationActivity:
             with connection.cursor() as cursor:
                 cursor.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 60")
                 cursor.execute(self.SQL_PATH.read_text(encoding="utf-8"),
-                               (request["start"] + " +08:00", request["end"] + " +08:00", request["site"], json.dumps(sorted(request["areas"]))))
+                               (request["start"] + " +08:00", request["end"] + " +08:00", request["operation"], json.dumps(sorted(request["areas"]))))
                 rows = cursor.fetchall()
                 if len(rows) > self.MAX_RECORDS:
                     raise ValueError("More than 200,000 inbound movements match. Reduce the activity lookback.")
@@ -105,7 +114,7 @@ class RecentDestinationActivity:
     def normalize(rows, request):
         records, warnings, seen = [], [], set()
         for row in rows:
-            if (clean_text(row.get("OPERATION")).upper() != request["site"] or row.get("MOVEMENT_TYPE") != "ExPit" or
+            if (clean_text(row.get("OPERATION")).upper() != request["operation"] or row.get("MOVEMENT_TYPE") != "ExPit" or
                 row.get("MOVEMENT_CLASSIFICATION") != "Expit Ore" or row.get("MOVEMENT_SUBCLASSIFICATION") != "Expit Ore"):
                 continue
             destination = stockpile_key(clean_text(row.get("DESTINATION_FMS")))

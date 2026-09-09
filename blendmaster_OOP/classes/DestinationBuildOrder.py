@@ -36,7 +36,10 @@ def inventory_areas(inventories):
 def extract_build_order(path, inventories):
     """Read one immutable file snapshot; fingerprints include bytes and ROM mapping."""
     content = Path(path).read_bytes()
-    frame = pd.read_csv(io.BytesIO(content))
+    # Mining.csv can contain over a thousand columns; this audit uses only these.
+    columns = {"Source.Type", "Source.FullName", "Destination.Type", "Destination.Name", "Destination.FullName",
+               "Time.StartTime", "Time.EndTime", "Mining.wetTonnes", "Agent.Name", "OriginalSource.Name"}
+    frame = pd.read_csv(io.BytesIO(content), usecols=lambda name: name in columns)
     return build_order(frame, inventory_areas(inventories),
                        source_signature=hashlib.sha256(content).hexdigest(), source_file=Path(path).name)
 
@@ -60,7 +63,7 @@ def build_order(frame, areas, *, source_signature=None, source_file="Mining.csv"
         tonnes = finite_number(row.get("Mining.wetTonnes"))
         record = dict(source_file=source_file, csv_record=number, source=source, destination=destination,
                       start=start.isoformat() if pd.notna(start) else "", end=end.isoformat() if pd.notna(end) else "",
-                      planned_wmt=tonnes, rom_area=areas.get(destination, ""), material_type="",
+                      planned_wmt=tonnes, rom_area=areas.get(destination, ""), material_type="", row_type="other", reclaimed_stockpile="",
                       instance_id="", build_instance=None, order_position=None, outcome="excluded", reason="Not a ROM inbound or reclaim row")
         audit.append(record)
         valid = pd.notna(start) and pd.notna(end) and end > start and tonnes is not None and tonnes > 0
@@ -68,14 +71,16 @@ def build_order(frame, areas, *, source_signature=None, source_file="Mining.csv"
                      (source_type == "flow" and clean_text(row.get("Agent.Name")).lower() == "plantagent"))
         if is_reclaim:
             name = stockpile_key(source if source_type == "stockpile" else clean_text(row.get("OriginalSource.Name")))
+            record.update(row_type="reclaim", reclaimed_stockpile=name, rom_area=areas.get(name, ""))
             if valid and name:
                 reclaim[name].append((start, end, record))
-                record.update(outcome="reclaim", reason="Reclaim evidence", destination=name)
+                record.update(outcome="reclaim", reason="Reclaim evidence")
             else:
                 record["reason"] = "Invalid reclaim time, tonnes or stockpile identity"
             continue
         if source_type != "reserve" or destination_type != "stockpile":
             continue
+        record["row_type"] = "rom_inbound"
         material = grade_block_material_type(source)
         record["material_type"] = material
         reason = ("Invalid inbound time or tonnes" if not valid else

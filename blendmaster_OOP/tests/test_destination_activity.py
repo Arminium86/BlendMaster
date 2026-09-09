@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import datetime
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, MagicMock
 
 from classes.DestinationBuildOrder import build_order
 from classes.DestinationProgress import resolve_progress, progress_settings
@@ -15,7 +15,7 @@ AREAS = {"SP1": "CR1", "SP2": "CR1", "SP3": "CR2"}
 
 
 def actual(destination="SP2", when="2026-09-09 05:00", **changes):
-    return dict(INTERNAL_ID=changes.pop("INTERNAL_ID", destination + when), OPERATION="CC", SOURCE="CC_PITA_01_396_118_405_HG12",
+    return dict(INTERNAL_ID=changes.pop("INTERNAL_ID", destination + when), OPERATION="Christmas Creek", SOURCE="CC_PITA_01_396_118_405_HG12",
                 DESTINATION_FMS=destination, DESTINATION=destination + "_BUILD", OBSERVED_AT=when, WMT=100,
                 MOVEMENT_TYPE="ExPit", MOVEMENT_CLASSIFICATION="Expit Ore", MOVEMENT_SUBCLASSIFICATION="Expit Ore", **changes)
 
@@ -40,6 +40,37 @@ class DestinationActivityTests(unittest.TestCase):
         self.assertEqual([r["observed_at"] for r in result], ["2026-09-08T18:00:00", "2026-09-09T05:00:00"])
         self.assertEqual(result[0]["material_type"], "HG")
         self.assertTrue(warnings)
+
+    def test_scenario_codes_match_warehouse_operation_names_without_cross_site_leakage(self):
+        service = self.service()
+        for site, operation in (("CC", "Christmas Creek"), ("CB", "Cloudbreak"), ("KV", "Kings"),
+                                ("VK", "Kings"), ("FT", "Firetail"), ("EW", "Eliwana"), ("IB", "Iron Bridge")):
+            with self.subTest(site=site):
+                request = service.request(site, START, 24, AREAS, "sig")
+                row = actual(); row["OPERATION"] = operation
+                other = actual(); other["OPERATION"] = "Christmas Creek Stockyard"
+                records, _ = service.normalize([row, other], request)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(request["operation"], operation.upper())
+
+    def test_query_binds_warehouse_name_and_old_code_only_cache_cannot_hide_activity(self):
+        service = self.service()
+        request = service.request("CC", START, 24, AREAS, "sig")
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = []
+        service.inventory_loader = Mock()
+        service.inventory_loader.connect_snowflake_with_service_account.return_value = connection
+        RecentDestinationActivity._query(service, request)
+        self.assertEqual(cursor.execute.call_args.args[1][2], "CHRISTMAS CREEK")
+        connection.close.assert_called_once()
+        legacy = dict(request); legacy.pop("operation")
+        self.assertNotEqual(service._path(legacy), service._path(request))
+        from classes.DestinationBuildOrder import digest
+        service._write_cache(dict(request=legacy, records=[], data_signature=digest([]), fetched_at=START.isoformat(), warnings=[]))
+        result = service.fetch("CC", START, 24, AREAS, "sig")
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(len(result["records"]), 1)
 
     def test_exact_cache_fresh_refresh_and_offline_states(self):
         service = self.service()
