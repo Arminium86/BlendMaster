@@ -2763,6 +2763,9 @@ class UserInputs(QMainWindow):
         low_fe_layout.addStretch()
         self.solver_config_layout.addLayout(low_fe_layout)
 
+        self.soft_grade_preferences_controls = SoftGradePreferenceControls(solver_content)
+        self.solver_config_layout.addWidget(self.soft_grade_preferences_controls)
+
         custom_constraints_label = QLabel("Custom Constraints")
         custom_constraints_label.setStyleSheet(
             "font-weight: bold; margin-top: 12px;"
@@ -2872,8 +2875,6 @@ class UserInputs(QMainWindow):
         layout.addWidget(description)
 
         blend_section = QLabel("Blend Composition")
-        self.soft_grade_preferences_controls = SoftGradePreferenceControls(decision_content)
-        layout.addWidget(self.soft_grade_preferences_controls)
         blend_section.setStyleSheet(
             "font-weight: bold; margin-top: 10px; color: #334155;"
         )
@@ -14246,7 +14247,7 @@ class UserInputs(QMainWindow):
                     "Each row has product_target_schema_version=2 and target_mode hard or soft; absent legacy modes become hard. "
                     "target_evaluation_basis is steady_state or cumulative_build; target_<analyte>_limit_mode is hard or soft. "
                     "Hard uses existing Min/Max. Soft uses Target deviation penalties with hard or soft LQL/HQL at the selected evaluation basis. "
-                    "Penalty preferences are under solver_config.soft_grade_preferences in Decision Levers. Calendar hard bounds remain independent. "
+                    "Penalty preferences are under solver_config.soft_grade_preferences in Setup > Solver Configuration > Soft Product Grades. Calendar hard bounds remain independent. "
                     "The app applies these rows through the Product Targets tab before Calendar."
                 ),
                 "hex_sequence_table_contract": (

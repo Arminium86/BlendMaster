@@ -167,13 +167,13 @@ class TargetModeUITests(unittest.TestCase):
         self.assertEqual(view.product_build_grade_view.currentText(), "Min / Max")
         self.assertEqual(view.read_product_targets_from_table(False)[0]["product_target_schema_version"], 2)
 
-    def test_keyboard_soft_selection_exposes_quality_fields_and_pending_notice(self):
+    def test_keyboard_soft_selection_exposes_quality_fields_and_configuration_notice(self):
         view = self.window()
         QTest.keyClick(self.mode(view), Qt.Key_End)
         self.assertEqual(self.mode(view).currentData(), "soft")
         self.assertTrue(view.product_target_mode_controls.evaluation.isEnabled())
         self.assertTrue(view.product_target_mode_notice.isVisible())
-        self.assertIn("Decision Levers", view.product_target_mode_notice.text())
+        self.assertIn("Setup > Solver Configuration > Soft Product Grades", view.product_target_mode_notice.text())
         self.assertEqual(view.product_build_grade_view.currentText(), "LQL / Target / HQL")
         self.assertFalse(view.product_build_table.isColumnHidden(view.product_build_headers.index("Fe Target")))
 

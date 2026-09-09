@@ -21,7 +21,7 @@ EVALUATION_LABELS = {
 }
 SOFT_MODE_NOTICE = (
     "Soft targets use the selected evaluation basis. Configure penalty weights "
-    "in Decision Levers. Calendar constraints remain independent hard bounds."
+    "in Setup > Solver Configuration > Soft Product Grades. Calendar constraints remain independent hard bounds."
 )
 
 

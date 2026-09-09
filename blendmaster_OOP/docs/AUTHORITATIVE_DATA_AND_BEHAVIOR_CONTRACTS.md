@@ -447,7 +447,7 @@ Contracts:
   sets. Compatible consecutive builds retain tonne-weighted Targets; different
   modes, evaluation bases or analyte limit modes prevent grouping.
 - Task 17 replaces the temporary Task 16 execution restriction. Soft builds can
-  run; the inline note points to **Decision Levers > Soft Product Grades**.
+  run; the inline note points to **Setup > Solver Configuration > Soft Product Grades**.
   Target deviation and optional Soft LQL/HQL breaches enter the objective.
   Hard LQL/HQL remain constraints even with zero/disabled penalty weights.
   Soft ignores the retained legacy Min/Max values. Calendar bounds and other
@@ -582,7 +582,7 @@ Legacy reports without this audit display a no-data explanation and need a fresh
 run/evaluation to populate it. The OPF Production Report remains observational.
 
 Review Tasks 17–19 by setting one build to Soft, choosing its evaluation basis
-and limit modes, then configuring **Soft Product Grades** in Decision Levers.
+and limit modes, then configuring **Soft Product Grades** in **Setup > Solver Configuration**.
 Run a plan (or evaluate a manual plan), open **Quality Results**, and compare the
 two evaluation views and the two column views. Check a Soft breach and its
 penalty, then compare Source similarity Off and Both. Save/reload the project
