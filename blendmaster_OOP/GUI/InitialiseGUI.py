@@ -50,7 +50,7 @@ from GUI.ProductTargetDelegate import (
 )
 from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
-from classes.DestinationBuildOrder import write_order_audit
+from classes.DestinationBuildOrder import write_order_audit, inventory_areas
 from classes.DestinationProgress import progress_settings
 from GUI.ProductTargetModeControls import ProductTargetModeControls
 from GUI.SoftGradePreferenceControls import SoftGradePreferenceControls
@@ -1362,6 +1362,7 @@ class UserInputs(QMainWindow):
         return {
             "scenario_id": self.active_scenario_id,
             "destination_reconciliation": self.destination_allocation_context(),
+            "destination_rules": self.destination_rule_context(),
             "hub": getattr(self, "hub_input_choice", None),
             "mine": getattr(self, "mine_input_choice", None),
             "opf": getattr(self, "opf_input_choice", None),
@@ -1548,7 +1549,7 @@ class UserInputs(QMainWindow):
             "available_24hr_expit_agents", "selected_24hr_expit_agents",
             "haul_cycle_file_path_choice",
             "available_haul_cycle_crushers",
-            "selected_haul_cycle_crushers", "haul_cycle_routes",
+            "selected_haul_cycle_crushers", "haul_cycle_routes", "destination_haul_routes",
             "haul_cycle_crusher_mapping_choice",
             "available_two_wp_product_crushers",
             "selected_two_wp_product_crushers",
@@ -1835,6 +1836,7 @@ class UserInputs(QMainWindow):
             self.haul_cycle_routes = copy.deepcopy(
                 state.get("haul_cycle_routes") or {}
             )
+            self.destination_haul_routes = copy.deepcopy(state.get("destination_haul_routes") or {})
             saved_mapping = state.get("haul_cycle_crusher_mapping_choice") or state.get("haul_cycle_crusher_mapping") or []
             self.haul_cycle_crusher_mapping_choice = (
                 [saved_mapping] if isinstance(saved_mapping, str) else list(saved_mapping)
@@ -3258,16 +3260,25 @@ class UserInputs(QMainWindow):
             lambda state: setattr(self, "destination_progress_settings", copy.deepcopy(state)))
         self.destination_progress.auditReady.connect(self.store_destination_order_audit)
 
+    def destination_rule_context(self):
+        return dict(
+            areas=inventory_areas(getattr(self, "stockpile_data", None) or {}),
+            haul_routes=copy.deepcopy(getattr(self, "destination_haul_routes", {}) or {}))
+
     def destination_allocation_context(self):
         panel = vars(self).get("destination_progress")
         if panel is None:
             return None
-        return panel.allocation_context(
+        context = panel.allocation_context(
             scenario_id=getattr(self, "active_scenario_id", "active"),
             site=getattr(self, "mine_input_choice", None),
             scenario_start=getattr(self, "start_time_choice", None),
             path=getattr(self, "file_path_choice", ""),
             inventories=getattr(self, "stockpile_data", None) or {})
+        if context is not None:
+            context["destination_rules"] = self.destination_rule_context()
+            context["destination_rules"]["guidance"] = copy.deepcopy(getattr(self, "aps_destination_guidance", {}) or {})
+        return context
 
     def sync_destination_progress_context(self):
         self.destination_progress.set_context(
@@ -11836,6 +11847,7 @@ class UserInputs(QMainWindow):
                 [], [], use_default=False
             )
             self.haul_cycle_routes = {}
+            self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
             self.load_haul_cycle_crusher_names(
                 show_messages=False,
@@ -12023,6 +12035,7 @@ class UserInputs(QMainWindow):
         self.selected_haul_cycle_crushers = selected
         if not file_path or not selected:
             self.haul_cycle_routes = {}
+            self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
             return False
         try:
@@ -12032,8 +12045,10 @@ class UserInputs(QMainWindow):
                     selected,
                 )
             )
+            self.destination_haul_routes = HaulCycleDataHandler.build_destination_routes(file_path)
         except Exception as exc:
             self.haul_cycle_routes = {}
+            self.destination_haul_routes = {}
             if show_errors:
                 QMessageBox.warning(
                     self,
@@ -13741,6 +13756,7 @@ class UserInputs(QMainWindow):
                 return
         else:
             self.haul_cycle_routes = {}
+            self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
         # Changing a planned tipping-point on Guidance can cause the live table
@@ -16279,6 +16295,7 @@ class UserInputs(QMainWindow):
             )
         if loaded_state.get("haul_cycle_routes") is None:
             loaded_state["haul_cycle_routes"] = {}
+        loaded_state.setdefault("destination_haul_routes", {})
         if (
             "file_path_24hr_choice" not in loaded_state
             and loaded_state.get("file_path_choice")
@@ -25109,6 +25126,7 @@ class UserInputs(QMainWindow):
                     "direct_tip_movement_rules", []
                 ),
                 destination_guidance=destination_guidance,
+                destination_rule_context=context.get("destination_rules"),
                 selected_agent_names=getattr(
                     self, "selected_24hr_expit_agents", []
                 ),
@@ -25911,6 +25929,7 @@ class UserInputs(QMainWindow):
                 "available_haul_cycle_crushers": self.available_haul_cycle_crushers,
                 "selected_haul_cycle_crushers": self.selected_haul_cycle_crushers,
                 "haul_cycle_routes": self.haul_cycle_routes,
+                "destination_haul_routes": copy.deepcopy(getattr(self, "destination_haul_routes", {})),
                 "product_brand_labels_choice": self.product_brand_labels_choice,
                 "selected_data_stream": self.selected_data_stream,
                 "crusher_tonnes_stream": self.crusher_tonnes_stream,
@@ -26323,6 +26342,7 @@ class UserInputs(QMainWindow):
         self.haul_cycle_routes = copy.deepcopy(
             loaded_state.get("haul_cycle_routes") or {}
         )
+        self.destination_haul_routes = copy.deepcopy(loaded_state.get("destination_haul_routes") or {})
         saved_mapping = loaded_state.get("haul_cycle_crusher_mapping_choice") or loaded_state.get("haul_cycle_crusher_mapping") or []
         self.haul_cycle_crusher_mapping_choice = (
             [saved_mapping] if isinstance(saved_mapping, str) else list(saved_mapping)
@@ -26750,6 +26770,7 @@ class UserInputs(QMainWindow):
         self.available_haul_cycle_crushers = []
         self.selected_haul_cycle_crushers = []
         self.haul_cycle_routes = {}
+        self.destination_haul_routes = {}
         self.haul_cycle_crusher_mapping_choice = ""
         self.available_two_wp_product_crushers = []
         self.selected_two_wp_product_crushers = []

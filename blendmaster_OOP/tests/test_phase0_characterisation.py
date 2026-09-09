@@ -519,7 +519,7 @@ class TwoWPColumnContractCharacterisation(unittest.TestCase):
 
     def test_guidance_version_is_pinned(self):
         """CHANGES IN Task 20. The version must increment with the contract."""
-        self.assertEqual(ExpitDataHandler.DESTINATION_GUIDANCE_VERSION, 3)
+        self.assertEqual(ExpitDataHandler.DESTINATION_GUIDANCE_VERSION, 4)
 
     def test_guidance_requires_its_documented_columns(self):
         """A missing contracted column must fail loudly, not silently."""

@@ -765,14 +765,93 @@ records Unavailable and clears the old audit for that plan. Optimisation restart
 clear old optimised/contingency audits, while source invalidation clears all
 derived allocation audits. Scenario database snapshots retain them in `.prj`.
 
-This task produces the post-plan primary assignment audit. Task 24's fallback
-engine and Task 25's updated Material Destination Plan publication are still
-pending. No new submit step is needed in Destination Reconciliation.
+This task produces the post-plan primary assignment audit. Task 24 adds the
+fallback candidates described in 9.5. Task 25's updated Material Destination
+Plan publication remains pending. No new submit step is needed in Destination
+Reconciliation.
 
 Validation: 894 automated checks passed. Native Windows validation also exercised
 the scenario input snapshot, manual final-plan hook, whole-payload overrun,
 preservation of entered capacity, and actual project save/load of settings and
 allocation audit (warehouse inventory reload stubbed).
+
+### 9.5 Destination fallback rules (Task 24)
+
+`classes/DestinationRules.py` indexes the entire imported 2WP guidance schedule.
+At APS ingestion, an exact parent-grade-block match keeps the existing nearest
+calendar-date, then highest-row-ROM-WMT choice. Saved undated legacy exact ratios
+remain supported. When an exact match is missing, fallback candidates supply the
+resolved destination. The old dominant-pit and last-stockpile shortcuts are no
+longer used. Missing evidence raises an explicit unresolved-source error rather
+than inventing a destination from another pit.
+
+Fallback 1 searches these levels in order, excluding the selected primary:
+
+| Order | Required match |
+| --- | --- |
+| 1 | Pit + stage + bench + flitch + material |
+| 2 | Pit + stage + bench + material |
+| 3 | Pit + stage + material |
+| 4 | Pit + material |
+| 5 | Pit + stage + bench + flitch + any non-waste material |
+
+Mine boundaries remain part of the address. Blast does not participate in this
+ladder. Numeric address tokens such as stage `01` and `1` compare equally. Malformed
+addresses cannot acquire invented levels. Waste history is excluded using its APS
+ore classification and the WS/WASTE material codes. When inventory mappings are
+supplied, fallback history must lead to a mapped ROM destination. Within one level,
+total historical ROM WMT ranks destinations, then destination name breaks ties.
+Evidence records the matched level, total WMT, contributing row count and a
+representative grade block. The imported guidance remains the complete row audit.
+
+Fallback 2 ranks measured **stockpile-to-stockpile cycles** from the resolved
+primary to another stockpile with the same displayed **Nearest Crusher**. If
+there is no primary, its origin is fallback 1, or a mapped original 24HR stockpile
+when neither historical role resolves. The CC haul-cycle export contains no
+Reserve-to-Stockpile routes; this implementation interprets “nearby” relative to
+the destination footprint. It does not substitute a stockpile-to-crusher reclaim
+cycle. At both route ends, `:In` takes precedence over an unqualified footprint;
+`:Out`, self-routes, missing/non-finite/non-positive cycles and unmapped/different
+ROM areas do not qualify. Primary and fallback 1 are excluded from fallback 2.
+Shortest cycle wins, with destination name breaking ties. Evidence retains both
+route nodes, the origin, ROM area and measured cycle. Missing route evidence leaves
+fallback 2 blank with an explicit reason. A **Use** flag controls stockpile feed,
+not eligibility to receive ROM tonnes, so an unused build destination can qualify.
+
+Primary, fallback 1, fallback 2 and the two ordered distinct alternates retain
+their own fields. Candidate evidence is limited to those reported choices; the
+full eligible-candidate count and input signature retain the search context
+without duplicating up to 100 rejected routes into every payload. APS grouping preserves this metadata through payload creation. After
+Task 23 allocates a final plan, the engine recalculates candidates relative to that
+payload's actual primary, so advancing to the next build changes its fallbacks.
+The `destination_primary_assignments` audit stores those separate roles, selected
+rules, JSON candidate evidence and a rule-input signature. Primary capacity
+allocation remains authoritative: fallback candidates do not consume tonnes or
+bypass an unconfirmed current instance or a blank remaining-capacity input.
+
+Optimised, manual and contingency plans keep separate audits. New inbound haul
+route snapshots persist with their site scenario and `.prj`, and clear/reload with
+the haul-cycle input. No extra user controls or Submit action were added. Task 25
+will publish the combined capacity and fallback information in Material Destination
+Plan; it has not started.
+
+Validation on 2026-09-09: 905 automated checks passed. Native Windows validation
+imported a haul-cycle fixture, froze scenario inputs, recalculated a manual plan
+across a capacity transition, and verified route data and separate primary/fallback
+roles through project save/load (warehouse inventory reload stubbed). Existing
+loading, cached, no-data and ambiguous-activity states still passed.
+
+A read-only review of the CC 18 August 2WP/24HR exports and
+`CC_Cycles_2WP.csv` checked 5,492 source/time combinations from 89 parent grade
+blocks: 5,238 exact and 210 spatial resolutions, all 5,448 with a nearby fallback.
+The remaining 44 combinations cover `CC1/HAL03/01/393/130/402/SG17` and
+`CC2/YOU80/01/372/001/381/SO69`. These have no eligible spatial fallback in the
+reviewed mapping; their generic 24HR HAL_ROM/CC2_ROM origins are also unmapped.
+They remain unresolved and require applicable destination/mapping evidence before
+ingestion can assign them. No arbitrary last-stockpile substitute is applied.
+The review is of imported files, not a mutation or rerun of the user's live plan.
+Generated screenshots and review records remain local and Git-ignored under
+`docs/screenshots/task24/`.
 
 ## 10. Manual ratio rounding
 

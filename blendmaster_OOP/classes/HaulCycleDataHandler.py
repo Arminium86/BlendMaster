@@ -1,4 +1,7 @@
 import pandas as pd
+import math
+
+from classes.DestinationRules import stockpile
 
 
 class HaulCycleDataHandler:
@@ -53,6 +56,37 @@ class HaulCycleDataHandler:
             errors="coerce",
         )
         return data
+
+    @classmethod
+    def build_destination_routes(cls, input_data):
+        """Measured stockpile-to-stockpile cycles for nearby ROM alternatives.
+
+        In/Out variants represent direction. Prefer :In at both ends over an
+        unqualified footprint, and never substitute a reclaim-to-crusher cycle.
+        """
+        candidates = {}
+        for row in cls._read_cycles(input_data).to_dict("records"):
+            source = str(row[cls.SOURCE_COLUMN]).strip().replace("\\", "/")
+            destination = str(row[cls.DESTINATION_COLUMN]).strip().replace("\\", "/")
+            cycle = row[cls.CYCLE_TIME_COLUMN]
+            if (not source.upper().startswith("STOCKPILES/")
+                    or source.upper().endswith(":OUT")
+                    or not destination.upper().startswith("STOCKPILES/")
+                    or destination.upper().endswith(":OUT")
+                    or pd.isna(cycle) or not math.isfinite(float(cycle)) or cycle <= 0):
+                continue
+            key = (stockpile(source), stockpile(destination))
+            if key[0] == key[1]:
+                continue
+            rank = (0 if source.upper().endswith(":IN") else 1,
+                    0 if destination.upper().endswith(":IN") else 1, float(cycle), source, destination)
+            if key not in candidates or rank < candidates[key][0]:
+                candidates[key] = (rank, dict(destination="Stockpiles/" + key[1],
+                                             cycle_time_minutes=float(cycle), source_node=source, destination_node=destination))
+        routes = {}
+        for (source, _), (_, route) in sorted(candidates.items()):
+            routes.setdefault(source, []).append(route)
+        return routes
 
     @classmethod
     def get_distinct_crusher_names(cls, input_data):

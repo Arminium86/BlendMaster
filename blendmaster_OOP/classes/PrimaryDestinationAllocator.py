@@ -16,6 +16,7 @@ from classes.DestinationBuildOrder import digest, stockpile_key
 from classes.DestinationProgress import progress_settings, resolve_progress
 from classes.GradeBlockIdentity import grade_block_material_type
 from classes.MaterialDestinationPlan import MaterialDestinationPlan
+from classes.DestinationRules import DestinationRuleEngine, METADATA_COLUMNS
 from setup.InventoryBuildLineage import clean_text, finite_number
 from setup.ProductAssayHistory import awst
 
@@ -27,6 +28,10 @@ AUDIT_COLUMNS = {
     "destination_capacity_ledger": "plan_type plan_id event_number payload_id source delivered_datetime rom_area material_type event instance_id destination build_instance order_position capacity_before_wmt capacity_after_wmt consumed_wmt overrun_wmt next_instance_id next_destination reason context_signature".split(),
     "destination_capacity_balances": "plan_type plan_id instance_id destination build_instance rom_area planned_wmt consumed_wmt overrun_wmt starting_wmt remaining_wmt capacity_basis".split(),
 }
+AUDIT_COLUMNS["destination_primary_assignments"].extend([
+    *METADATA_COLUMNS, "primary_rule", "alternate_destinations", "destination_rule_signature",
+])
+AUDIT_COLUMNS["destination_allocation_runs"].append("destination_rule_signature")
 
 
 class PrimaryDestinationAllocator:
@@ -256,6 +261,20 @@ def allocate_final_plan(payload_transactions, blend_report, context, *, plan_typ
                           route_only_waste=MaterialDestinationPlan._truthy(row.get("route_only_waste", False))))
     allocator.allocate(final)
     result = allocator.result()
+    rule_context = context.get("destination_rules") or {}
+    rules = DestinationRuleEngine(rule_context.get("guidance"),
+                                  areas=rule_context.get("areas", context["order"]["areas"]),
+                                  haul_routes=rule_context.get("haul_routes"))
+    by_id = {row["payload_id"]: row for row in final}
+    for row in result["assignments"]:
+        payload = by_id[row["payload_id"]]
+        decision = rules.resolve(row["source"], row["delivered_datetime"],
+                                 primary_destination=row["assigned_destination"], rom_area=row["rom_area"],
+                                 anchor_destination=row["planned_destination"],
+                                 route_only_waste=payload["route_only_waste"])
+        row.update(rules.metadata(decision), primary_rule=decision["primary_rule"],
+                   alternate_destinations=decision["alternate_destinations"], destination_rule_signature=rules.signature)
+    result["run"]["destination_rule_signature"] = rules.signature
     result["run"].update(input_signature=digest(final), scenario_context_signature=context["context_signature"],
                          allocation_window_start=start, allocation_window_end=end)
     return result

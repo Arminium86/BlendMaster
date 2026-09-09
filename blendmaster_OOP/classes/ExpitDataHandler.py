@@ -2,6 +2,7 @@ import math
 import pandas as pd
 import re
 from bisect import bisect_right
+from classes.DestinationRules import DestinationRuleEngine, METADATA_COLUMNS
 from datetime import timedelta
 from datetime import datetime
 from pandas import DataFrame
@@ -32,7 +33,7 @@ from classes.ExpitSequenceReconciler import (
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 
 class ExpitDataHandler:
-    DESTINATION_GUIDANCE_VERSION = 3
+    DESTINATION_GUIDANCE_VERSION = 4
     TRANSACTION_COLUMNS = {
         "Agent.Name",
         "Source.Type",
@@ -111,6 +112,7 @@ class ExpitDataHandler:
         source_property_kinds=None,
         source_property_weights=None,
         preserve_source_payloads_for_reconciliation=False,
+        destination_rule_context=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
@@ -125,19 +127,10 @@ class ExpitDataHandler:
         )
         self.use_destination_guidance = destination_guidance is not None
         self.destination_guidance = destination_guidance or {}
-        source_destination_lookup = (
-            self.destination_guidance.get("source_destinations", {}) or {}
-        )
-        self._source_destination_lookup = {
-            str(key).strip().upper(): value
-            for key, value in source_destination_lookup.items()
-        }
-        self._pit_destination_lookup = {
-            str(key).strip().upper(): value
-            for key, value in (
-                self.destination_guidance.get("pit_destinations", {}) or {}
-            ).items()
-        }
+        rule_context = destination_rule_context or {}
+        self.destination_rules = DestinationRuleEngine(
+            self.destination_guidance, areas=rule_context.get("areas"),
+            haul_routes=rule_context.get("haul_routes"))
         self.source_stockpile_fallbacks = {}
         self.configured_product_brands = configured_product_brands or []
         self.source_property_kinds = dict(source_property_kinds or {})
@@ -747,6 +740,7 @@ class ExpitDataHandler:
         read_columns = required_columns | {
             "Agent.Name",
             "OriginalSource.Name",
+            "MutexParcel.ORETYPE",
         }
         data = pd.read_csv(
             input_data,
@@ -937,6 +931,7 @@ class ExpitDataHandler:
                         else ""
                     ),
                     "source": str(row["source"]),
+                    "ore_type": str(row.get("MutexParcel.ORETYPE", "") or ""),
                     "row_order": int(row["_row_order"]),
                     **turnover,
                 })
@@ -1355,115 +1350,34 @@ class ExpitDataHandler:
         )
         return cls._stockpile_brand_guidance_from_rows(filtered)
 
+    def _destination_rule_result(self, row, primary_destination=None):
+        context_area = self.destination_rules.areas.get(
+            self.destination_guidance_stockpile_key(row.get("Destination.FullName")), "")
+        result = self.destination_rules.resolve(
+            row.get("Source.FullName"), row.get("Time.StartTime"),
+            primary_destination=primary_destination, rom_area=context_area,
+            anchor_destination=row.get("Destination.FullName"))
+        if primary_destination:
+            result.update(primary_rule="Exact 2WP grade block", resolution="exact_2wp")
+        return result
+
     def _destination_allocations_for_row(self, row):
-        source = str(row.get("Source.FullName", "") or "").strip()
-        pit = self._source_pit(row.get("Source.Pit", ""), source)
-        source_key = self.destination_guidance_source_key(source)
-        source_lookup = getattr(self, "_source_destination_lookup", {})
-        exact = source_lookup.get(source_key) or source_lookup.get(
-            source.upper()
-        )
-        if exact:
-            # Version 1 guidance stored full-horizon destination ratios and
-            # no row dates. Preserve that behaviour only for old saved
-            # projects whose 2WP file is no longer available to rebuild.
-            if not any(
-                allocation.get("guidance_datetime")
-                for allocation in exact
-            ):
-                return exact, "exact_2wp"
+        result = self._destination_rule_result(row)
+        source = row.get("Source.FullName", "")
+        selected = result["selected_destination"]
+        if not selected:
+            raise ValueError(f"24HR grade block '{source}': {result['reason']}")
+        exact = self.destination_rules.exact.get(self.destination_guidance_source_key(source), [])
+        # Retain saved version-1 exact ratios when no dated 2WP is available.
+        if result["resolution"] == "exact_2wp" and exact and not any(r.get("guidance_datetime") for r in exact):
+            return exact, "exact_2wp"
+        allocation = self.destination_rules.exact_allocation(source, row.get("Time.StartTime")) if result["resolution"] == "exact_2wp" else {}
+        return [{**(allocation or {}), "destination": selected, "ratio": 1.0}], result["resolution"]
 
-            candidates = list(exact)
-            if len(candidates) > 1:
-                transaction_datetime = self._parse_datetime_column(
-                    pd.Series([row.get("Time.StartTime")]),
-                    "Time.StartTime",
-                ).iloc[0]
-                dated_candidates = []
-                if pd.notna(transaction_datetime):
-                    transaction_date = transaction_datetime.normalize()
-                    for allocation in candidates:
-                        guidance_datetime = pd.to_datetime(
-                            allocation.get("guidance_datetime"),
-                            errors="coerce",
-                        )
-                        if pd.notna(guidance_datetime):
-                            dated_candidates.append(
-                                (
-                                    abs(
-                                        (
-                                            guidance_datetime.normalize()
-                                            - transaction_date
-                                        ).days
-                                    ),
-                                    allocation,
-                                )
-                            )
-                if dated_candidates:
-                    closest_days = min(
-                        distance for distance, _ in dated_candidates
-                    )
-                    candidates = [
-                        allocation
-                        for distance, allocation in dated_candidates
-                        if distance == closest_days
-                    ]
-
-            selected = max(
-                candidates,
-                key=lambda allocation: float(
-                    allocation.get("two_wp_tonnes", 0.0) or 0.0
-                ),
-            )
-            return [{**selected, "ratio": 1.0}], "exact_2wp"
-        pit_destination = getattr(self, "_pit_destination_lookup", {}).get(
-            pit.upper()
-        )
-        if pit_destination:
-            return [pit_destination], "pit_fallback"
-        last_destination = self.destination_guidance.get("last_destination") or {}
-        if last_destination.get("destination"):
-            return [last_destination], "last_destination_fallback"
-        raise ValueError(
-            f"24HR grade block '{source}' has no 2WP destination, no destination "
-            f"for pit '{pit or 'unknown'}', and no last 2WP stockpile destination."
-        )
-
-    def _alternate_destinations_for_row(
-        self, row, assigned_destination, resolution
-    ):
-        """Return the remaining destinations in the existing fallback chain.
-
-        The chain is the exact 2WP destination, then the most-used destination
-        for the source pit, then the last stockpile destination in the 2WP.
-        ``assigned_destination`` has already consumed one point in that chain,
-        so only later, distinct destinations are returned.
-        """
-        source = str(row.get("Source.FullName", "") or "").strip()
-        pit = self._source_pit(row.get("Source.Pit", ""), source)
-        candidates = []
-        if resolution == "exact_2wp":
-            pit_fallback = getattr(
-                self, "_pit_destination_lookup", {}
-            ).get(pit.upper()) or {}
-            candidates.append(pit_fallback.get("destination"))
-        if resolution in {"exact_2wp", "pit_fallback"}:
-            last_fallback = (
-                self.destination_guidance.get("last_destination") or {}
-            )
-            candidates.append(last_fallback.get("destination"))
-
-        assigned_key = str(assigned_destination or "").strip().upper()
-        alternates = []
-        seen = {assigned_key} if assigned_key else set()
-        for candidate in candidates:
-            destination = str(candidate or "").strip()
-            key = destination.upper()
-            if not destination or key in seen:
-                continue
-            seen.add(key)
-            alternates.append(destination)
-        return (alternates + ["", ""])[:2]
+    def _alternate_destinations_for_row(self, row, assigned_destination, resolution):
+        result = self._destination_rule_result(
+            row, assigned_destination if resolution == "exact_2wp" else None)
+        return (result["alternate_destinations"] + ["", ""])[:2]
 
     def _apply_2wp_destination_guidance(self, data):
         """Replace 24HR destinations and split tonnes using 2WP ratios."""
@@ -1544,6 +1458,10 @@ class ExpitDataHandler:
                     split_row["HaulageResult.NumberOfTrips"] = reported_trips * ratio
                 split_row["two_wp_destination_resolution"] = resolution
                 split_row["two_wp_destination_ratio"] = ratio
+                rule_result = self._destination_rule_result(
+                    row, destination if resolution == "exact_2wp" else None)
+                for key, value in self.destination_rules.metadata(rule_result).items():
+                    split_row[key] = value
                 (
                     split_row["alternate_destination_1"],
                     split_row["alternate_destination_2"],
@@ -1596,7 +1514,7 @@ class ExpitDataHandler:
         if "two_wp_destination_ratio" not in self.data.columns:
             self.data["two_wp_destination_ratio"] = 1.0
         for column in (
-            "alternate_destination_1", "alternate_destination_2"
+            "alternate_destination_1", "alternate_destination_2", *METADATA_COLUMNS,
         ):
             if column not in self.data.columns:
                 self.data[column] = ""
@@ -1776,6 +1694,7 @@ class ExpitDataHandler:
             else planned_destination
         )
         return {
+            **{key: row.get(key, "") for key in METADATA_COLUMNS},
             "destination": fallback_destination if is_crusher_destination else planned_destination,
             "destination_type": destination_type,
             "planned_destination": planned_destination,
@@ -2018,6 +1937,7 @@ class ExpitDataHandler:
                 "Destination.Name", "Destination.FullName",
                 "two_wp_destination_resolution", "two_wp_destination_ratio",
                 "alternate_destination_1", "alternate_destination_2",
+                *METADATA_COLUMNS,
                 "two_wp_turnover_guidance_applicable",
                 "two_wp_first_reclaim_datetime",
                 "two_wp_destination_turnover_priority",

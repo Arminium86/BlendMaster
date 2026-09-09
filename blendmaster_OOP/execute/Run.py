@@ -116,6 +116,7 @@ class Run:
                 "direct_tip_movement_rules", []
             ),
             destination_guidance=destination_guidance,
+            destination_rule_context=site_context.get("destination_rules"),
             selected_agent_names=selected_24hr_agents,
             grade_field_mappings=site_context.get(
                 "aps_grade_field_mappings", {}

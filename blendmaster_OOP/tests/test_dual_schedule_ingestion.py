@@ -382,14 +382,14 @@ class DualScheduleDestinationTests(unittest.TestCase):
                 "exact_2wp",
             )
 
-    def test_missing_block_uses_dominant_destination_for_same_pit(self):
+    def test_missing_block_uses_same_material_spatial_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             two_wp_path = self.write_csv(
                 temp_dir,
                 "2wp.csv",
                 [
                     reserve_row(
-                        "Reserves/EW/PIT_A/BLOCK_1",
+                        "Reserves/EW/PIT_A/1/100/1/105/HG01_1",
                         "PIT_A",
                         "Stockpiles/SP_A",
                         900,
@@ -397,7 +397,7 @@ class DualScheduleDestinationTests(unittest.TestCase):
                         "01/01/2026 01:00",
                     ),
                     reserve_row(
-                        "Reserves/EW/PIT_A/BLOCK_2",
+                        "Reserves/EW/PIT_A/1/100/2/105/HG02_2",
                         "PIT_A",
                         "Stockpiles/SP_B",
                         100,
@@ -411,7 +411,7 @@ class DualScheduleDestinationTests(unittest.TestCase):
                 "24hr.csv",
                 [
                     reserve_row(
-                        "Reserves/EW/PIT_A/UNKNOWN",
+                        "Reserves/EW/PIT_A/1/100/3/105/HG99_1",
                         "PIT_A",
                         "Stockpiles/IGNORED",
                         500,
@@ -434,7 +434,7 @@ class DualScheduleDestinationTests(unittest.TestCase):
             )
             self.assertEqual(
                 transactions.iloc[0]["two_wp_destination_resolution"],
-                "pit_fallback",
+                "spatial_fallback",
             )
             self.assertEqual(
                 transactions.iloc[0]["alternate_destination_1"],
@@ -444,14 +444,14 @@ class DualScheduleDestinationTests(unittest.TestCase):
                 transactions.iloc[0]["alternate_destination_2"], ""
             )
 
-    def test_missing_pit_uses_chronologically_last_2wp_destination(self):
+    def test_missing_pit_cannot_use_unrelated_last_2wp_destination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             two_wp_path = self.write_csv(
                 temp_dir,
                 "2wp.csv",
                 [
                     reserve_row(
-                        "Reserves/EW/PIT_A/BLOCK_1",
+                        "Reserves/EW/PIT_A/1/100/1/105/HG01_1",
                         "PIT_A",
                         "Stockpiles/SP_A",
                         100,
@@ -486,24 +486,8 @@ class DualScheduleDestinationTests(unittest.TestCase):
             guidance = ExpitDataHandler.build_2wp_destination_guidance(
                 two_wp_path
             )
-            transactions = ExpitDataHandler(
-                twenty_four_hour_path,
-                destination_guidance=guidance,
-            ).process_transactions()
-
-            self.assertEqual(
-                transactions.iloc[0]["destination"], "Stockpiles/SP_LAST"
-            )
-            self.assertEqual(
-                transactions.iloc[0]["two_wp_destination_resolution"],
-                "last_destination_fallback",
-            )
-            self.assertEqual(
-                transactions.iloc[0]["alternate_destination_1"], ""
-            )
-            self.assertEqual(
-                transactions.iloc[0]["alternate_destination_2"], ""
-            )
+            with self.assertRaisesRegex(ValueError, "No exact 2WP destination"):
+                ExpitDataHandler(twenty_four_hour_path, destination_guidance=guidance)
 
 
 class ExpitDigCircuitSelectionTests(unittest.TestCase):

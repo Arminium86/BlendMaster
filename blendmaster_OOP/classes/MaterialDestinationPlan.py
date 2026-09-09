@@ -137,7 +137,7 @@ class MaterialDestinationPlan:
             or cls._text(payload.get("planned_destination"))
         )
 
-        if resolution in {"pit_fallback", "last_destination_fallback"}:
+        if resolution in {"pit_fallback", "last_destination_fallback", "spatial_fallback", "nearby_fallback"}:
             return "", resolved_destination, resolution
 
         planned_destination = (
