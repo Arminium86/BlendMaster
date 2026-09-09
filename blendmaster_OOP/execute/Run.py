@@ -12,6 +12,7 @@ from classes.DataLoader import DataLoader
 from classes.PeriodManager import PeriodManager
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.ProductTargets import product_targets_value
+from classes.ProductTargetModes import require_supported_target_modes, target_mode_fields
 from classes.ProductBuildLanes import (
     normalize_byproduct_grade_fields,
     normalize_byproduct_quantity_fields,
@@ -195,10 +196,10 @@ class Run:
                 ((source_tonnes != 0) & (crusher_tonnes != 0))
                 | ((source_tonnes == 0) & (crusher_tonnes == 0))
             ]
-        results = case_modeller.group_grade_block_rows(results)
-        return ProductBuildProgress.annotate(
-            results, case_modeller.product_build_settings
+        results = ProductBuildProgress.annotate(
+            results, case_modeller.product_build_settings, solver_config=getattr(case_modeller, "solver_config", {})
         )
+        return case_modeller.group_grade_block_rows(results)
 
     @staticmethod
     def _completed_offspec_product_build_names(case_modeller):
@@ -208,6 +209,8 @@ class Run:
             case_modeller, "product_build_runtime_states", []
         ) or []
         for index, build_setting in enumerate(settings):
+            if target_mode_fields(build_setting)["target_mode"] == "soft":
+                continue  # Allowed Soft breaches are reported as breaches, not failed Hard solves.
             if index >= len(states):
                 continue
             build_state = states[index]
@@ -291,6 +294,7 @@ class Run:
         prepared_expit_payload_transactions=None,
         expit_input_cache_signature=None,
     ):
+        require_supported_target_modes(product_targets_value(calendar_inputs or {}, []))
         self.abort_requested = False
         self.case_bridge.print(
             "Preparing schedules and model inputs for the first steady state..."

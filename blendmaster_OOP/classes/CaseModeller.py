@@ -7,6 +7,8 @@ from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, with_quality_configuration
+from classes.ProductQualityReport import QUALITY_REPORT_SUFFIXES
+from classes.ProductTargetModes import TARGET_MODE_FIELDS, target_mode_fields, require_supported_target_modes
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
     PRODUCT_LANE,
@@ -129,6 +131,7 @@ class CaseModeller:
         reserved_blend_signatures: Optional[set] = None,
         site_context: Optional[dict] = None,
     ):
+        require_supported_target_modes(product_build_settings)
         self.stockpiles = stockpiles
         self.grade_blocks = grade_blocks
         self.equipment = equipment
@@ -329,6 +332,7 @@ class CaseModeller:
                 **{key: copy.deepcopy(value) for key, value in setting.items()
                    if key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"} or key.startswith("planning_")},
                 **quality_fields(setting),
+                **target_mode_fields(setting),
                 "build_id": int(setting.get("build_id") or index + 1),
                 "build_name": build_name,
                 "brand": explicit_brand,
@@ -517,10 +521,9 @@ class CaseModeller:
                     grade_value = float(
                         row.get(lane_grade_column(lane, grade)) or 0
                     )
+                    raw_weight = row.get(lane_grade_weight_column(lane, grade))
                     grade_weight = float(
-                        row.get(lane_grade_weight_column(lane, grade))
-                        or row.get(tonnes_column)
-                        or 0
+                        (row.get(tonnes_column) or 0) if raw_weight is None or pd.isna(raw_weight) else raw_weight
                     ) * allocation_fraction
                     build_state[f"grade_{grade}_metal"] += (
                         grade_weight * grade_value
@@ -589,8 +592,9 @@ class CaseModeller:
         candidate_states = set()
         if self.results is not None and not self.results.empty:
             report = ProductBuildProgress.annotate(
-                self.group_grade_block_rows(self.results),
+                self.results,
                 self.product_build_settings,
+                solver_config=getattr(self, "solver_config", {}),
             )
             required_columns = {
                 "product_build_id",
@@ -636,6 +640,8 @@ class CaseModeller:
 
     def request_product_build_repair(self, build_index, reason):
         if not self.product_build_repair_enabled():
+            return
+        if target_mode_fields(self.product_build_settings[build_index])["target_mode"] == "soft":
             return
         candidate_states = self.product_build_offspec_steady_states(build_index)
         build_name = self.product_build_settings[build_index]["build_name"]
@@ -2714,14 +2720,26 @@ class CaseModeller:
         for build in diagnostics.get("product_build_targets") or []:
             bounds = []
             for grade, values in (build.get("grade_targets") or {}).items():
-                bounds.append(
+                if build.get("target_mode") == "soft":
+                    bounds.append(f"{grade} Target {values.get('target')}; LQL/HQL {values.get('lql')}/{values.get('hql')} ({values.get('limit_mode')})")
+                else:
+                    bounds.append(
                     f"{grade} {float(values.get('target_min') or 0):g}-"
                     f"{float(values.get('target_max') if values.get('target_max') is not None else 100):g}"
-                )
+                    )
             lines.append(
-                f"  Product build {build.get('name')} [{build.get('brand') or 'unbranded'}]: "
+                f"  Product build {build.get('name')} [{build.get('brand') or 'unbranded'}; {build.get('target_mode', 'hard')}]: "
                 + ", ".join(bounds)
             )
+        if diagnostics.get("product_quality"):
+            lines.append(f"  Applied soft-grade penalty: {diagnostics.get('applied_soft_grade_penalty', 0):,.3f}; "
+                         f"source similarity penalty minus reward: {diagnostics.get('applied_source_similarity_penalty', 0):,.3f}.")
+            for row in diagnostics["product_quality"]:
+                if row["target_mode"] == "soft" and row["actual_grade"] is not None:
+                    lines.append(f"  {row['lane']} {row['analyte'].title()} ({row['evaluation_basis']}): "
+                                 f"actual {row['actual_grade']:.5g}; Target {row['target']}; deviation {row['target_deviation']}; "
+                                 f"below LQL {row['below_lql']:.5g}; above HQL {row['above_hql']:.5g}; "
+                                 f"limits {row['limit_mode']}; applied penalty {row['applied_penalty']:,.3f}.")
         for custom in diagnostics.get("custom_constraint_ranges") or []:
             lines.append(
                 f"  Custom constraint {custom.get('name')}: "
@@ -2926,6 +2944,8 @@ class CaseModeller:
                     "source_grade_al": transaction["grade_al"],
                     "source_grade_p": transaction["grade_p"],
                     "source_grade_mn": transaction["grade_mn"],
+                    **{key: value for key, value in transaction.items()
+                       if str(key).startswith("selected_grade_weight_")},
                     "selected_grade_stream": transaction.get("selected_grade_stream", ""),
                     "selected_grade_brand": transaction.get("selected_grade_brand", ""),
                     "grade_stream_warnings": str(transaction.get("grade_stream_warnings") or ""),
@@ -3026,13 +3046,20 @@ class CaseModeller:
         #self.results.to_excel(filename, index=False)
         #print(f"All results written to {filename}")
 
-        report_results = self.group_grade_block_rows(self.results)
         report_results = ProductBuildProgress.annotate(
-            report_results, self.product_build_settings
+            self.results, self.product_build_settings, solver_config=getattr(self, "solver_config", {})
         )
+        report_results = self.group_grade_block_rows(report_results)
         self.database_manager.write_optimised_blend_report_to_database(report_results, self.periods)
 
     def product_build_grade_on_spec(self, build_state, build_setting):
+        if target_mode_fields(build_setting)["target_mode"] == "soft":
+            return ProductBuildProgress._is_on_spec(
+                build_state["tonnes"],
+                {a: build_state.get(f"grade_{a}_metal", 0) for a in ANALYTES},
+                build_setting,
+                {a: build_state.get(f"grade_{a}_weight", build_state["tonnes"]) for a in ANALYTES},
+            )
         if build_state["tonnes"] <= Optimizer.SOLUTION_TOLERANCE:
             return False
         for grade in ["fe", "si", "al", "p", "mn"]:
@@ -3103,11 +3130,15 @@ class CaseModeller:
             "target_mn_max",
             "opf",
             *QUALITY_FIELDS,
+            *QUALITY_REPORT_SUFFIXES,
+            *[key for key in TARGET_MODE_FIELDS if key not in QUALITY_REPORT_SUFFIXES],
         ]
         if not self.product_build_settings or self.results is None or self.results.empty:
             return pd.DataFrame(columns=columns)
 
-        data = self.group_grade_block_rows(self.results).copy()
+        data = self.group_grade_block_rows(ProductBuildProgress.annotate(
+            self.results, self.product_build_settings, solver_config=getattr(self, "solver_config", {})
+        )).copy()
         data["source_actual_tonnes"] = pd.to_numeric(data.get("source_actual_tonnes"), errors="coerce").fillna(0)
         data["crusher_actual_tonnes"] = pd.to_numeric(data.get("crusher_actual_tonnes"), errors="coerce").fillna(0)
         data = data[
@@ -3212,6 +3243,8 @@ class CaseModeller:
 
                     records.append({
                         "product_build_id": build_setting["build_id"],
+                        **{key: row.get(f"product_build_{lane + '_' if lane != PRODUCT_LANE else ''}{key}")
+                           for key in QUALITY_REPORT_SUFFIXES},
                         "product_build_name": build_setting["build_name"],
                         "product_build_lane": lane,
                         "brand": build_setting["brand"],
@@ -3230,6 +3263,7 @@ class CaseModeller:
                         "build_on_spec": False,
                         "opf": build_setting.get("opf", ""),
                         **quality_fields(build_setting),
+                        **target_mode_fields(build_setting),
                         **{
                             f"build_grade_{grade}": 0
                             for grade in ("fe", "si", "al", "p", "mn")

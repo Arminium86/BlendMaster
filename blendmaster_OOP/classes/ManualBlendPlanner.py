@@ -10,6 +10,8 @@ import pandas as pd
 
 from classes.ProductBuildProgress import ProductBuildProgress
 from classes.ProductQualityLimits import with_quality_configuration
+from classes.ProductTargetModes import require_supported_target_modes
+from classes.SoftProductGrades import validate_similarity_stream
 from classes.MaterialFlowTopology import one_lane_topology
 from classes.GradeBlockReport import consolidate_parent_grade_block_rows
 from classes.ProductBuildLanes import (
@@ -154,6 +156,7 @@ class ManualBlendPlanner:
         self.product_build_settings = [
             with_quality_configuration(dict(row)) for row in (product_build_settings or [])
         ]
+        require_supported_target_modes(self.product_build_settings)
         self.calendar_inputs = dict(calendar_inputs or {})
         site_context = self.calendar_inputs.get("site_context") or {}
         solver_config = self.calendar_inputs.get("solver_config") or {}
@@ -195,6 +198,7 @@ class ManualBlendPlanner:
             or solver_config.get("selected_data_stream")
             or DEFAULT_STREAM
         ).strip().lower()
+        validate_similarity_stream(self.product_build_settings, solver_config.get("soft_grade_preferences"), self.selected_data_stream)
         self.crusher_tonnes_stream = str(
             site_context.get("crusher_tonnes_stream")
             or solver_config.get("crusher_tonnes_stream")
@@ -1560,6 +1564,7 @@ class ManualBlendPlanner:
             report,
             self.product_build_settings,
             byproducts_enabled=self.byproducts_enabled,
+            solver_config=self.solver_config,
         )
         report = consolidate_parent_grade_block_rows(
             report, self.solver_config

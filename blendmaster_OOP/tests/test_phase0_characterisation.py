@@ -46,6 +46,7 @@ from classes.GradeBlockIdentity import (  # noqa: E402
     parent_grade_block_name,
 )
 from classes.GradeStreams import ANALYTES, DEFAULT_STREAM, STREAMS  # noqa: E402
+from classes.ProductTargetModes import migrate_target_row
 from setup.AMTGradeBlockLineage import align_amt_grade_block_lineage  # noqa: E402
 from setup.AMTSpatialReconciliation import reconcile_amt_hex_rows  # noqa: E402
 from setup.DataStreamReconciliation import DataStreamReconciliation  # noqa: E402
@@ -626,10 +627,13 @@ class ProductBuildLaneCharacterisation(unittest.TestCase):
         for absent in ("contributing_opfs", "is_combined_build", "opf_mode"):
             self.assertNotIn(absent, build)
 
-    def test_no_hard_soft_target_mode_flag_exists(self):
-        """CHANGES IN Task 16. Hard mode is the only mode today."""
+    def test_legacy_target_build_migrates_to_explicit_hard_mode(self):
+        """Task 16: legacy bounds acquire a Hard mode without opting into Soft."""
         build = target_build(1, "CCFB", 1000, 58.0, datetime(2026, 9, 1))
-        self.assertNotIn("target_mode", build)
+        migrated = migrate_target_row(build)
+        self.assertEqual(migrated["target_mode"], "hard")
+        self.assertEqual(migrated["product_target_schema_version"], 2)
+        self.assertEqual({key: migrated[key] for key in build}, build)
 
 
 class SolverFormulationCharacterisation(unittest.TestCase):

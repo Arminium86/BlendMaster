@@ -4,6 +4,7 @@ import pandas as pd
 
 from classes.PeriodManager import PeriodManager
 from classes.ProductQualityLimits import quality_fields
+from classes.ProductTargetModes import target_mode_fields
 from setup.InventoryBuildLineage import finite_number
 from setup.OpeningStockpileInventories import OpeningStockpileInventories
 
@@ -303,6 +304,7 @@ class PlanningPlanTargets:
             }
             build.update({f"target_{grade}_target": value for grade, value in build["planning_grade_targets"].items()})
             build.update(quality_fields(build))
+            build.update(target_mode_fields(build))
             builds.append(build)
 
         brand_counts = {}
@@ -368,6 +370,7 @@ class PlanningPlanTargets:
             # Specifications belong to a build's OPF/brand/lane. Different
             # manual limits must not be averaged into a new specification.
             quality_key = (brand, str(build.get("opf") or "").strip().upper(),
+                           tuple(target_mode_fields(build).items()),
                            tuple(quality[f"target_{a}_{part}"] for a in ("fe", "si", "al", "p", "mn") for part in ("lql", "hql")))
             if not groups or groups[-1]["_quality_key"] != quality_key:
                 groups.append({
@@ -458,5 +461,6 @@ class PlanningPlanTargets:
                         sum(wmt * value for wmt, value in positive) / total
                         if total > 0 and all(value is not None for _, value in positive) else None)
             result.update(quality_fields(result))
+            result.update(target_mode_fields(result))
             combined.append(result)
         return combined

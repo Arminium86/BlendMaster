@@ -369,7 +369,7 @@ targets are explicitly current references; future builds are not assumed to
 describe historical production. Conflicting dated ownership is reported and
 omitted. No central target is inferred from hard Min/Max bounds; no combined
 quality specification is invented. The report is descriptive and introduces no
-hard/soft mode or optimisation penalty (Task 16 remains unstarted).
+optimisation penalty. Task 16 adds target-mode configuration in Product Targets.
 
 See [OPF Production Report](OPF_PRODUCTION_REPORT.md) for service bounds,
 the UI review guide and instructions for generating local screenshots.
@@ -382,8 +382,9 @@ Current behavior: `setup/PlanningPlanTargets.py` builds product-build rows with
 planning period fields. Grades arrive as `fe`, `si`, `al`, `p`, `mn`. 2WP gives
 an Fe lower bound and contaminant upper bounds, leaving opposite bounds open.
 Task 12 additionally seeds `target_<analyte>_target` from the planned grade and
-provides optional row-owned LQL/HQL fields. Existing Min/Max remain active;
-the new specifications are reference values until the scheduled enforcement work.
+provides optional row-owned LQL/HQL fields. Task 16 adds an explicit Hard/Soft
+mode per build. Hard retains existing Min/Max enforcement. Tasks 17–19 now
+implement Soft optimisation, source similarity and quality-result reporting.
 
 Contracts:
 
@@ -419,8 +420,8 @@ Contracts:
   rows; different manual quality limits prevent merging. Legacy hard bounds
   do not imply a central Target. The validated versioned reference configuration
   reaches solver inputs; quality fields also reach product/progress reports.
-  Hard/soft enforcement remains assigned to Tasks 16–17, and current on-spec
-  checks still use Min/Max.
+  In Hard mode, on-spec checks still use Min/Max. Soft checks use the entered
+  LQL/HQL; a permitted Soft breach is reported as a breach and carries its penalty.
 - Three displayed decimals apply only to 2WP-imported product targets;
   calculations keep full precision and everything else is unchanged (Q51).
 - Task 13 is implemented: imported-row Min/Max and central Target cells format
@@ -428,8 +429,51 @@ Contracts:
   project/agent round trips, solver inputs and numeric reports retain the full
   value. Manual-row and LQL/HQL formats remain unchanged. Previously rounded
   saved values require a fresh 2WP import to recover the planned precision.
+- Task 16 is implemented: each build has a **Target mode** (Hard or Soft).
+  Selecting Soft exposes its LQL/Target/HQL columns and enables the selected
+  build's **Evaluate targets against** control and five analyte **LQL/HQL**
+  controls. Evaluation choices are **Steady-state product output** and
+  **Cumulative active build average**. Each analyte independently selects
+  **Hard limits** or **Soft limits (higher penalty)**. These choices belong to
+  the row, including its OPF and lump/fines lane; they are not global settings.
+- `product_target_schema_version=2` persists `target_mode`,
+  `target_evaluation_basis` and `target_<analyte>_limit_mode`. Absent/v1 settings
+  migrate to Hard, steady-state evaluation and hard LQL/HQL defaults. Existing
+  Min/Max values and open bounds remain unchanged. Unknown versions or modes
+  are rejected rather than silently converted to Hard. Active/inactive
+  scenarios, calendar inputs and agent payloads preserve these settings.
+- Changing mode preserves both sets of grade values and the saved Soft settings.
+  **Grade fields** remains a display choice; **All grade fields** can show both
+  sets. Compatible consecutive builds retain tonne-weighted Targets; different
+  modes, evaluation bases or analyte limit modes prevent grouping.
+- Task 17 replaces the temporary Task 16 execution restriction. Soft builds can
+  run; the inline note points to **Decision Levers > Soft Product Grades**.
+  Target deviation and optional Soft LQL/HQL breaches enter the objective.
+  Hard LQL/HQL remain constraints even with zero/disabled penalty weights.
+  Soft ignores the retained legacy Min/Max values. Calendar bounds and other
+  operational constraints remain independent. Legacy Hard repair/completion
+  switches do not change the selected Soft evaluation basis or turn permitted
+  Soft breaches into failed Hard solves.
+
+Task 16 UI review: open **Product Targets**, confirm an existing build opens in
+**Hard**, then change one row to **Soft**. Enter/review its LQL/Target/HQL, select
+an evaluation basis and change an analyte's LQL/HQL behavior. Select another row
+to check independence, switch back to Hard and Soft to check retained values,
+then Save/Load Project to check persistence. Soft execution is now available;
+the Tasks 17–19 review steps appear below.
+
+Validation (2026-09-09): all 823 automated checks passed, including migration,
+UI interaction, row ownership,
+grouping, precision and execution-boundary checks; native Windows application
+`.prj` save/restore (warehouse reload stubbed). Illustrative native screenshots
+are local under `docs/screenshots/task16/` and ignored by Git.
 
 ### 8.1 Penalty formulation
+
+Task 17 is implemented. The following choices are saved per scenario under
+`solver_config.soft_grade_preferences` (schema v1), including project and agent
+round trips. Each build retains its independent mode, evaluation basis and
+analyte limit modes.
 
 The solver is PuLP with CBC (`classes/Optimizer.py`), a mixed integer linear
 programme. CBC cannot express a true quadratic objective.
@@ -446,9 +490,38 @@ Reference shape from operations (Q60):
 Per-analyte inputs normalise the differing scales of Fe, Si/Al and P/Mn. A
 larger multiplier applies beyond LQL/HQL when those are configured as soft.
 
+The editable starting defaults are Target weight 1, analyte penalty weights 1,
+LQL/HQL breach multiplier 5, and scales of 1 percentage point for Fe/Si/Al and
+0.01 percentage points for P/Mn. Penalty-enabled checkboxes control both Target
+and Soft-limit penalties for an analyte. A zero Target weight disables those
+penalties; it does not disable hard bounds. Existing throughput/cost and other
+incentives keep their existing weights, so these preferences trade against them
+in the same objective. These are objective units, not a financial forecast.
+
+For normalized distance `d = abs(actual - Target) / scale`, the default increasing
+shape is `f(d) = d + 2*max(d-1, 0) + 2*max(d-2, 0)`, with marginal slopes 1, 3 and
+5. **Linear absolute deviation** instead uses `f(d) = d`. Target penalty is
+`100 * Target weight * analyte weight * W * f(d)`. Soft-limit breaches add
+`100 * Target weight * analyte weight * W * breach multiplier *
+(below LQL + above HQL) / scale`. Missing specifications contribute no penalty.
+
+`W` is the analyte's declared grade-weight tonnes (typically product DMT), the
+same denominator used to calculate its actual grade. It is not silently replaced
+by physical ROM WMT or a different product quantity. The LP uses grade-metal
+deviation and scaled tonne breakpoints, avoiding division by variable tonnes.
+The one-product transaction/report path now preserves these declared weights
+through the runtime accumulator as well as lump/fines paths.
+
 Evaluation basis is user-selectable between per-steady-state product output and
 cumulative active build average, and applies whether or not the build completes
 within the horizon (Q61, Q62).
+
+**Steady-state product output** evaluates only the incoming addition.
+**Cumulative active build average** evaluates the opening build plus that addition,
+and its objective contribution is closing penalty minus the fixed opening penalty.
+This avoids charging prior material twice and allows negative applied penalties
+when a decision corrects an earlier deviation. Every partial cumulative build
+uses the selected rules; enforcement does not wait for build completion.
 
 ### 8.2 Source similarity
 
@@ -461,6 +534,68 @@ within the horizon (Q61, Q62).
 - User-configurable weights rank soft-target and similarity against throughput,
   cash/cost, direct-tip, brand guidance, balance and existing source
   preference levers (Q66).
+
+Task 18 is implemented under **Soft Product Grades**. **Source similarity** has
+Off (default), Closeness reward, Dispersion penalty and Both choices, separate
+global closeness/dispersion weights (default 1), and per-analyte enable/weight
+controls (default enabled/1). Similarity is independent of the Target-penalty
+checkboxes. **Include direct-tip grade blocks** is off by default; inventory and
+AMT stockpiles are included whenever similarity is active.
+
+Each source uses `d = abs(source product grade - Target) / scale`. Closeness earns
+`100 * closeness weight * analyte similarity weight * W / (1+d)`; dispersion adds
+`100 * dispersion weight * analyte similarity weight * W * d^2`. These are linear
+coefficients of selected source tonnes, since each source grade is fixed for a
+solve. Dispersion is squared distance to Target, not variance around the selected
+blend's mean. Thus a 50/50 mixture of Fe 56 and 60 at Target 58 has zero blended
+Target deviation but dispersion score 4 at scale 1; a source at Fe 58 scores 0.
+
+The active build's brand and selected product grade stream drive the one-product
+comparison. Lump/fines use the same explicitly mapped lane product grades and
+weights as their quality constraints. Similarity rejects an insitu/ROM stream
+instead of comparing it with a product Target. A missing Target disables that
+analyte's similarity. Only newly selected source material enters each decision's
+similarity objective; cumulative report scores also describe material already
+in the build. Source metrics are calculated before parent grade-block grouping,
+so averaging displayed sources cannot erase their dispersion.
+
+### 8.3 Quality results and UI review
+
+Task 19 is implemented. **Product Targets > Quality Results** reads the current
+optimised or manual plan's saved quality audit. Choose either evaluation grain,
+filter an analyte/build/OPF/brand, and switch **Grades and limits**, **Penalties and
+similarity** or **All fields**. The viewer shows Actual grade, Target, LQL/HQL,
+signed Target deviation, both breach magnitudes, limit mode, status, grade-weight
+tonnes, penalty components and source scores. All fields also includes the active
+lower/upper bounds, hard-limit status, evaluation basis and timestamp. **Export
+CSV** exports the filtered rows at full precision, including hidden fields.
+
+Audit rows are unique per build/lane/steady state/analyte. Repeated source rows do
+not multiply totals. Applied penalties appear only at the build's selected
+evaluation basis; a blank in the other view means it was not the applied basis.
+Source closeness is the weighted mean of `1/(1+d)` (higher is closer); dispersion
+is the weighted mean of `d^2` (lower is closer). Applied similarity penalty is
+dispersion penalty minus closeness reward for the new addition. Target mode and
+quality status accompany saved blend/product-build reports; diagnostics and
+product-grade chart hovers identify Soft targets and limit modes explicitly.
+Legacy reports without this audit display a no-data explanation and need a fresh
+run/evaluation to populate it. The OPF Production Report remains observational.
+
+Review Tasks 17–19 by setting one build to Soft, choosing its evaluation basis
+and limit modes, then configuring **Soft Product Grades** in Decision Levers.
+Run a plan (or evaluate a manual plan), open **Quality Results**, and compare the
+two evaluation views and the two column views. Check a Soft breach and its
+penalty, then compare Source similarity Off and Both. Save/reload the project
+to check settings, and export a filtered CSV to inspect full precision. Existing
+Calendar hard bounds may limit which blends are feasible independently of Soft
+product preferences.
+
+Validation on 2026-09-09: all 855 automated checks passed, including actual CBC
+decisions, declared-weight and
+cumulative accounting, manual/optimised report agreement, source grouping,
+SQLite/CSV round trips, native filter/empty states, and a full Windows application
+project save/load with warehouse reload stubbed. Illustrative screenshots are
+local and Git-ignored under `docs/screenshots/task19/`.
 
 ## 9. Destination sequencing and ownership
 
@@ -609,8 +744,8 @@ Contract for when it is built:
 | Q42 | No confidence or uncertainty metric | Task 6, 8 |
 | Q43 | No grade-block lineage for inventory stockpiles | Task 5 |
 | Q52 | No LQL/HQL fields on product-build rows | Task 12 |
-| Q57 | No hard/soft target mode | Task 16 |
-| Q59 | No piecewise-linear deviation penalty | Task 17 |
+| Q57 | Hard/Soft configuration and Soft execution implemented | Tasks 16–17 complete |
+| Q59 | Configurable linear and increasing piecewise-linear penalties implemented | Task 17 complete |
 | Q19 | No stockpile `Subset` column or Rehandle Movement Rules | Task 28 |
 | Q20 | Max Reclaim Rate not per stockpile x crusher route | Task 28 |
 | Q21 | Product-build rows have no owning-OPF property for combined mode | Task 29 |

@@ -49,6 +49,10 @@ from GUI.ProductTargetDelegate import (
     IMPORTED_GRADE_ROLE, PRECISION_TOOLTIP, ProductTargetDelegate,
 )
 from GUI.OPFProductionReport import OPFProductionReport
+from GUI.ProductTargetModeControls import ProductTargetModeControls
+from GUI.SoftGradePreferenceControls import SoftGradePreferenceControls
+from GUI.ProductQualityReview import ProductQualityReview
+from classes.SoftProductGrades import objective_config
 from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
@@ -122,6 +126,9 @@ from classes.ProductTargets import (
     product_targets_identifier, product_targets_value,
 )
 from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields
+from classes.ProductTargetModes import (
+    target_mode_fields, TARGET_MODE_LABELS, SOFT_MODE_NOTICE, require_supported_target_modes,
+)
 from classes.ProductBuildLanes import (
     ANALYTES as PRODUCT_BUILD_ANALYTES,
     BYPRODUCT_LANES,
@@ -2865,6 +2872,8 @@ class UserInputs(QMainWindow):
         layout.addWidget(description)
 
         blend_section = QLabel("Blend Composition")
+        self.soft_grade_preferences_controls = SoftGradePreferenceControls(decision_content)
+        layout.addWidget(self.soft_grade_preferences_controls)
         blend_section.setStyleSheet(
             "font-weight: bold; margin-top: 10px; color: #334155;"
         )
@@ -3143,6 +3152,7 @@ class UserInputs(QMainWindow):
         top_layout.addWidget(self.group_2wp_build_targets_checkbox)
         self.product_build_grade_view = QComboBox()
         self.product_build_grade_view.addItems(["Min / Max", "LQL / Target / HQL", "All grade fields"])
+        self.product_build_grade_view.setMinimumWidth(190)
         self.product_build_grade_view.setToolTip("Choose the grade columns to view; this does not change solver enforcement.")
         top_layout.addWidget(QLabel("Grade fields"))
         top_layout.addWidget(self.product_build_grade_view)
@@ -3156,7 +3166,7 @@ class UserInputs(QMainWindow):
             self.product_build_plan_scenario_label
         )
 
-        quality_note = QLabel("Min/Max are the active solver bounds. LQL (lower quality limit), Target and HQL (higher quality limit) are saved reference specifications for each build; they do not currently constrain the solver. Leave unspecified values blank.")
+        quality_note = QLabel("Choose a Target mode for each build. Hard uses Min/Max. Soft uses Target with LQL (lower quality limit) and HQL (higher quality limit). Select a build to configure its soft settings below. Changing mode preserves all grade values; leave unspecified quality values blank.")
         quality_note.setWordWrap(True)
         quality_note.setStyleSheet("color: #526474;")
         self.product_build_layout.addWidget(quality_note)
@@ -3170,6 +3180,7 @@ class UserInputs(QMainWindow):
             "Brand",
             "By-product",
             "OPF",
+            "Target mode",
             "Target Tonnes",
             "Fe Min",
             "Fe Max",
@@ -3194,6 +3205,16 @@ class UserInputs(QMainWindow):
         self.product_build_grade_view.currentIndexChanged.connect(self.update_product_build_grade_view)
         self.update_product_build_grade_view()
 
+        self.product_target_mode_controls = ProductTargetModeControls(self.product_build_tab)
+        self.product_target_mode_controls.changed.connect(self.update_selected_product_target_modes)
+        self.product_build_table.currentCellChanged.connect(self.refresh_product_target_mode_controls)
+        self.product_build_layout.addWidget(self.product_target_mode_controls)
+        self.product_target_mode_notice = QLabel(SOFT_MODE_NOTICE)
+        self.product_target_mode_notice.setWordWrap(True)
+        self.product_target_mode_notice.setStyleSheet("padding: 7px; color: #805200; background: #fff3d9; border-radius: 4px;")
+        self.product_target_mode_notice.hide()
+        self.product_build_layout.addWidget(self.product_target_mode_notice)
+
         button_layout = QHBoxLayout()
         self.product_build_submit_button = QPushButton("Submit")
         self.product_build_submit_button.clicked.connect(self.handle_product_targets_submit)
@@ -3201,10 +3222,17 @@ class UserInputs(QMainWindow):
         self.product_build_delete_button.clicked.connect(self.delete_selected_product_build_rows)
         button_layout.addWidget(self.product_build_submit_button)
         button_layout.addWidget(self.product_build_delete_button)
+        self.product_quality_results_button = QPushButton("Quality Results")
+        self.product_quality_results_button.clicked.connect(self.show_product_quality_results)
+        button_layout.addWidget(self.product_quality_results_button)
         button_layout.addStretch()
         self.product_build_layout.addLayout(button_layout)
 
         self.populate_product_build_table()
+
+    def show_product_quality_results(self):
+        self.product_quality_results_dialog = ProductQualityReview(get_database_path, self)
+        self.product_quality_results_dialog.show()
 
     def setup_opf_production_report_tab(self):
         self.opf_production_report = OPFProductionReport(
@@ -3376,7 +3404,7 @@ class UserInputs(QMainWindow):
         self.product_build_plan_scenario_label.setVisible(True)
 
     def populate_product_build_table_row(self, row_idx, setting=None):
-        setting = setting or {}
+        setting = {**(setting or {}), **target_mode_fields(setting or {})}
         brand_combo = QComboBox()
         brand_combo.addItems(self.product_brand_options())
         selected_brand = str(setting.get("brand") or "").strip().upper()
@@ -3415,6 +3443,14 @@ class UserInputs(QMainWindow):
         opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         opf_item.setToolTip("The OPF carried with this build. New manual rows use the active OPF.")
         self.product_build_table.setItem(row_idx, self.product_build_headers.index("OPF"), opf_item)
+        mode_combo = QComboBox()
+        for value, label in TARGET_MODE_LABELS.items():
+            mode_combo.addItem(value.title(), value)
+            mode_combo.setItemData(mode_combo.count() - 1, label, Qt.ToolTipRole)
+        mode_combo.setCurrentIndex(mode_combo.findData(setting["target_mode"]))
+        mode_combo.setToolTip("Hard: existing Min/Max constraints. Soft: Target with configurable LQL/HQL behavior.")
+        self.product_build_table.setCellWidget(row_idx, self.product_build_headers.index("Target mode"), mode_combo)
+        mode_combo.currentIndexChanged.connect(lambda _index: self.product_target_mode_changed(mode_combo))
         brand_combo.currentTextChanged.connect(
             lambda _text: self.renumber_product_build_rows()
         )
@@ -3475,11 +3511,50 @@ class UserInputs(QMainWindow):
             label = f"{grade.title()} {part.upper() if part != 'target' else 'Target'}"
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
-            item.setToolTip("Optional reference specification (%). When supplied, LQL ≤ Target ≤ HQL. Blank means unspecified.")
+            item.setToolTip("Quality specification (%). When supplied, LQL ≤ Target ≤ HQL. Blank means unspecified. Hard mode retains these as reference values; Soft mode uses these target settings.")
             if imported_2wp and part == "target":
                 item.setData(IMPORTED_GRADE_ROLE, True)
                 item.setToolTip(item.toolTip() + " " + PRECISION_TOOLTIP)
             self.product_build_table.setItem(row_idx, self.product_build_headers.index(label), item)
+
+    def product_target_mode_changed(self, combo):
+        column = self.product_build_headers.index("Target mode")
+        row = next((r for r in range(self.product_build_table.rowCount()) if self.product_build_table.cellWidget(r, column) is combo), -1)
+        if row < 0:
+            return
+        item = self.product_build_table.item(row, 0)
+        data = copy.deepcopy(item.data(Qt.UserRole) or {})
+        data["target_mode"] = combo.currentData()
+        item.setData(Qt.UserRole, {**data, **target_mode_fields(data)})
+        self.product_build_table.setCurrentCell(row, column)
+        if self.product_build_grade_view.currentText() != "All grade fields":
+            self.product_build_grade_view.setCurrentText("Min / Max" if combo.currentData() == "hard" else "LQL / Target / HQL")
+        self.refresh_product_target_mode_controls()
+
+    def refresh_product_target_mode_controls(self, *_):
+        if not hasattr(self, "product_target_mode_controls"):
+            return
+        row = self.product_build_table.currentRow()
+        item = self.product_build_table.item(row, 0) if row >= 0 else None
+        self.product_target_mode_controls.set_row(item.data(Qt.UserRole) if item else None, item.text() if item else "")
+        changed_build = item is not getattr(self, "_product_target_mode_selected_item", None)
+        self._product_target_mode_selected_item = item
+        if item and changed_build and self.product_build_grade_view.currentText() != "All grade fields":
+            mode = target_mode_fields(item.data(Qt.UserRole) or {})["target_mode"]
+            self.product_build_grade_view.setCurrentText("Min / Max" if mode == "hard" else "LQL / Target / HQL")
+        column = self.product_build_headers.index("Target mode")
+        soft = any(isinstance(self.product_build_table.cellWidget(r, column), QComboBox)
+                   and self.product_build_table.cellWidget(r, column).currentData() == "soft"
+                   for r in range(self.product_build_table.rowCount()))
+        if hasattr(self, "product_target_mode_notice"):
+            self.product_target_mode_notice.setVisible(soft)
+
+    def update_selected_product_target_modes(self, values):
+        row = self.product_build_table.currentRow()
+        item = self.product_build_table.item(row, 0) if row >= 0 else None
+        if item is not None:
+            data = {**copy.deepcopy(item.data(Qt.UserRole) or {}), **values}
+            item.setData(Qt.UserRole, {**data, **target_mode_fields(data)})
 
     def update_product_build_grade_view(self, *_):
         if not hasattr(self, "product_build_grade_view"):
@@ -3496,7 +3571,13 @@ class UserInputs(QMainWindow):
             return
         for col_idx in range(self.product_build_table.columnCount()):
             self.product_build_table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeToContents)
-        self.product_build_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.product_build_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        name_width = max((self.product_build_table.fontMetrics().horizontalAdvance(self.product_build_table.item(r, 0).text())
+                          for r in range(self.product_build_table.rowCount()) if self.product_build_table.item(r, 0)), default=130)
+        self.product_build_table.setColumnWidth(0, max(160, name_width + 28))
+        if self.product_build_table.rowCount() and self.product_build_table.currentRow() < 0:
+            self.product_build_table.setCurrentCell(0, 0)
+        self.refresh_product_target_mode_controls()
 
     def read_product_targets_from_table(self, show_errors=True):
         if not hasattr(self, "product_build_table"):
@@ -3564,6 +3645,7 @@ class UserInputs(QMainWindow):
                 "byproduct": byproduct,
                 "target_tonnes": target_tonnes,
                 "opf": self.product_build_table.item(row_idx, self.product_build_headers.index("OPF")).text().strip(),
+                "target_mode": self.product_build_table.cellWidget(row_idx, self.product_build_headers.index("Target mode")).currentData(),
             }
             for grade_label, (min_key, max_key) in grade_keys.items():
                 min_col = self.product_build_headers.index(f"{grade_label} Min")
@@ -3589,6 +3671,7 @@ class UserInputs(QMainWindow):
                 setting[key] = item.text().strip() if item else None
             try:
                 setting.update(quality_fields(setting))
+                setting.update(target_mode_fields(setting))
             except ValueError as exc:
                 if show_errors:
                     QMessageBox.warning(self, "Invalid Input", f"Product Targets row {row_idx + 1}: {exc}")
@@ -4019,6 +4102,7 @@ class UserInputs(QMainWindow):
 
     def normalized_solver_config(self, solver_config=None):
         defaults = {
+            "soft_grade_preferences": objective_config(),
             "throughput_incentive_per_tonne": 1_000_100.0,
             "source_selection_tie_break_penalty": 0.001,
             "stockpile_feasibility_mode": "stockpile_must_be_feasible",
@@ -4084,6 +4168,7 @@ class UserInputs(QMainWindow):
             )
         contaminant_thresholds = incoming.pop("contaminant_thresholds", None)
         merged.update(incoming)
+        merged["soft_grade_preferences"] = objective_config(merged.get("soft_grade_preferences"))
         if isinstance(contaminant_thresholds, dict):
             merged["contaminant_thresholds"].update(contaminant_thresholds)
         if "brand_guidance_enabled" not in incoming:
@@ -14158,7 +14243,10 @@ class UserInputs(QMainWindow):
                     "target_al_min, target_al_max, target_p_min, target_p_max, target_mn_min, and target_mn_max. "
                     "Optional row-owned quality specifications use target_<analyte>_lql, target_<analyte>_target and target_<analyte>_hql; "
                     "blank/null means unspecified. Preserve opf and byproduct ownership. Values must satisfy LQL <= Target <= HQL where present. "
-                    "Quality specifications are reference values; Min/Max remain the active solver bounds. "
+                    "Each row has product_target_schema_version=2 and target_mode hard or soft; absent legacy modes become hard. "
+                    "target_evaluation_basis is steady_state or cumulative_build; target_<analyte>_limit_mode is hard or soft. "
+                    "Hard uses existing Min/Max. Soft uses Target deviation penalties with hard or soft LQL/HQL at the selected evaluation basis. "
+                    "Penalty preferences are under solver_config.soft_grade_preferences in Decision Levers. Calendar hard bounds remain independent. "
                     "The app applies these rows through the Product Targets tab before Calendar."
                 ),
                 "hex_sequence_table_contract": (
@@ -14587,6 +14675,7 @@ class UserInputs(QMainWindow):
                 row[f"target_{grade}_min"] = nested_grade_value(setting, grade, "min", 0)
                 row[f"target_{grade}_max"] = nested_grade_value(setting, grade, "max", 100)
             row.update(quality_fields(setting, validate=False))
+            row.update(target_mode_fields(setting))
             for key, value in setting.items():
                 if str(key).startswith("planning_") or key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"}:
                     row[key] = copy.deepcopy(value)
@@ -15166,6 +15255,9 @@ class UserInputs(QMainWindow):
     def is_known_agent_target(self, target):
         target = product_targets_identifier(target)
         key = self.normalized_agent_target(target)
+
+        if key == "soft_grade_preferences":
+            return hasattr(self, "soft_grade_preferences_controls")
         if target in {"site_configuration", "site_config"}:
             return True
         if target in {"selected_stockpiles", "selected_amt_stockpiles", "amt_stockpiles"}:
@@ -15760,8 +15852,8 @@ class UserInputs(QMainWindow):
         payload = getattr(self, "agent_workflow_payload", {}) or {}
         product_builds = product_targets_value(payload)
         if isinstance(product_builds, (list, dict)):
-            candidates = self.normalized_agent_product_targets(product_builds)
             try:
+                candidates = self.normalized_agent_product_targets(product_builds)
                 for row in candidates:
                     row.update(quality_fields(row))
             except ValueError as exc:
@@ -15772,6 +15864,12 @@ class UserInputs(QMainWindow):
 
         if not self.store_product_targets(show_errors=False):
             self.stop_agent_workflow_apply("Agent workflow stopped: Product Targets inputs are not valid.")
+            return
+
+        try:
+            require_supported_target_modes(self.product_targets)
+        except ValueError as exc:
+            self.stop_agent_workflow_apply(f"Product Targets saved. {exc}")
             return
 
         self.setup_calendar()
@@ -16337,8 +16435,8 @@ class UserInputs(QMainWindow):
         if target == "product_targets":
             if not hasattr(self, "product_build_table"):
                 return False
-            candidates = self.normalized_agent_product_targets(value)
             try:
+                candidates = self.normalized_agent_product_targets(value)
                 for row in candidates:
                     row.update(quality_fields(row))
             except ValueError:
@@ -16352,6 +16450,13 @@ class UserInputs(QMainWindow):
             return self.apply_agent_amt_chunking_target(target, value)
 
         key = self.normalized_agent_target(target)
+
+        if key == "soft_grade_preferences":
+            try:
+                self.soft_grade_preferences_controls.set_config(value)
+            except ValueError:
+                return False
+            return self.store_solver_config_inputs(show_errors=False)
 
         def set_line_edit(widget, proposed_value):
             widget.setText("" if proposed_value is None else str(proposed_value))
@@ -20094,6 +20199,8 @@ class UserInputs(QMainWindow):
 
         solver_config = self.normalized_solver_config()
         self.solver_config = copy.deepcopy(solver_config)
+        if hasattr(self, "soft_grade_preferences_controls"):
+            self.soft_grade_preferences_controls.set_config(solver_config.get("soft_grade_preferences"))
         self.throughput_incentive_input.setText(str(
             solver_config.get("throughput_incentive_per_tonne", 1_000_100.0)
         ))
@@ -20546,7 +20653,16 @@ class UserInputs(QMainWindow):
                         "Rehandle Cycle Time Penalty is enabled.",
                     )
                 return False
+        try:
+            soft_grade_preferences = (self.soft_grade_preferences_controls.config()
+                                      if hasattr(self, "soft_grade_preferences_controls")
+                                      else objective_config(self.solver_config.get("soft_grade_preferences")))
+        except ValueError as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Invalid Soft Product Grades", str(exc))
+            return False
         self.solver_config = {
+            "soft_grade_preferences": soft_grade_preferences,
             "throughput_incentive_per_tonne": throughput_incentive_per_tonne,
             "source_selection_tie_break_penalty": source_selection_tie_break_penalty,
             "stockpile_feasibility_mode": stockpile_feasibility_mode,

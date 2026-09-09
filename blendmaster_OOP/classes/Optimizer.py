@@ -15,6 +15,8 @@ optimizer.
 
 from datetime import timedelta
 from copy import deepcopy
+from classes.ProductTargetModes import require_supported_target_modes, target_mode_fields
+from classes.SoftProductGrades import add_soft_objective, solution_audit, similarity_coefficients, similarity_summary, SIMILARITY_TOTALS
 import time
 from typing import List, Optional
 from types import SimpleNamespace
@@ -562,6 +564,11 @@ class Optimizer:
         excluded_stockpile_sets: Optional[List[set]] = None,
     ):
         """Core optimisation logic using a mixed integer solver."""
+        config = solver_config or {}
+        target_rows = list((config.get("target_product_builds") or {}).values())
+        if config.get("target_product_build"):
+            target_rows.append(config["target_product_build"])
+        require_supported_target_modes(target_rows)
 
         if min_stockpile_contribution_ratio is None:
             min_stockpile_contribution_ratio = Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO
@@ -870,7 +877,9 @@ class Optimizer:
                         for event in event_pool
                     ]
                     coefficients = list(grade_weight_coefficients[analyte])
-                    available = [True for _ in event_pool]
+                    available = ([v is not None and c > 0 for v, c in zip(values, coefficients)]
+                                 if target_mode_fields(target_product_builds[lane])["target_mode"] == "soft"
+                                 else [True for _ in event_pool])
                 else:
                     grade_field = byproduct_grade_fields[lane][analyte]
                     weight_field = source_property_weights.get(grade_field)
@@ -1484,6 +1493,8 @@ class Optimizer:
             or {}
         )
         for lane, target_product_build in target_product_builds.items():
+            if target_mode_fields(target_product_build)["target_mode"] == "soft":
+                continue
             target_product_build_state = target_product_build_states.get(lane) or {}
             lane_quantity_coefficients = product_build_coefficients_by_lane[lane]
             opening_product_tonnes = safe_float(target_product_build_state.get("tonnes"), 0.0)
@@ -1822,6 +1833,17 @@ class Optimizer:
                 )
 
         objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
+        objective += add_soft_objective(
+            prob, x_vars, target_product_builds, target_product_build_states,
+            product_build_grade_values, product_build_grade_weight_coefficients,
+            solver_config.get("soft_grade_preferences"),
+        )
+        source_similarity = similarity_coefficients(
+            event_pool, target_product_builds, product_build_grade_values,
+            product_build_grade_weight_coefficients, solver_config.get("soft_grade_preferences"), selected_data_stream,
+        )
+        objective += lpSum(x_vars[i] * (item["dispersion_penalty"] - item["closeness_reward"])
+                           for items in source_similarity.values() for i, item in enumerate(items))
         fewer_stockpiles_incentive = max(
             safe_float(
                 solver_config.get(
@@ -2039,9 +2061,26 @@ class Optimizer:
             solver_status,
             selected_tonnes,
             solver_config,
+            product_build_grade_values,
         )
 
         if result.success:
+
+            diagnostics["product_quality"] = solution_audit(
+                target_product_builds, target_product_build_states,
+                product_build_grade_values, product_build_grade_weight_coefficients,
+                solution_values, solver_config.get("soft_grade_preferences"),
+            )
+            diagnostics["applied_soft_grade_penalty"] = sum(
+                row["applied_penalty"] for row in diagnostics["product_quality"]
+            )
+            for row in diagnostics["product_quality"]:
+                items = source_similarity.get((row["lane"], row["analyte"]), [])
+                row.update(similarity_summary({k: sum(x * item[k] for x, item in zip(solution_values, items))
+                                              for k in SIMILARITY_TOTALS}))
+            diagnostics["applied_source_similarity_penalty"] = sum(
+                row["applied_similarity_penalty"] for row in diagnostics["product_quality"]
+            )
 
             custom_constraint_fields = {}
             custom_constraint_source_fields = []
@@ -2360,6 +2399,7 @@ class Optimizer:
         solver_status,
         selected_tonnes,
         solver_config=None,
+        product_build_grade_values=None,
     ):
         solver_config = solver_config or {}
 
@@ -2623,6 +2663,8 @@ class Optimizer:
             }
         for lane, build in target_builds.items():
             state = target_states.get(lane) or {}
+            modes = target_mode_fields(build)
+            soft = modes["target_mode"] == "soft"
             grade_targets = {}
             for grade_key, label in grade_names.items():
                 target_min = safe_float(
@@ -2631,9 +2673,16 @@ class Optimizer:
                 target_max = safe_float(
                     build.get(f"target_{grade_key}_max"), 100.0
                 )
+                if soft:
+                    hard = modes[f"target_{grade_key}_limit_mode"] == "hard"
+                    target_min = safe_float(build.get(f"target_{grade_key}_lql"), 0.0) if hard else 0.0
+                    target_max = safe_float(build.get(f"target_{grade_key}_hql"), 100.0) if hard else 100.0
                 values = [
                     source[f"grade_{grade_key}"] for source in positive_sources
                 ]
+                lane_values = (product_build_grade_values or {}).get(lane, {}).get(grade_key)
+                if lane_values is not None:
+                    values = [g for g, bound in zip(lane_values, bounds) if g is not None and bound[1] > Optimizer.SOLUTION_TOLERANCE]
                 available_min = min(values) if values else None
                 available_max = max(values) if values else None
                 current_weight = safe_float(
@@ -2647,6 +2696,10 @@ class Optimizer:
                         / current_weight
                     )
                 grade_targets[label] = {
+                    "target": build.get(f"target_{grade_key}_target"),
+                    "lql": build.get(f"target_{grade_key}_lql"),
+                    "hql": build.get(f"target_{grade_key}_hql"),
+                    "limit_mode": modes[f"target_{grade_key}_limit_mode"] if soft else "hard",
                     "target_min": target_min,
                     "target_max": target_max,
                     "available_min": available_min,
@@ -2665,7 +2718,9 @@ class Optimizer:
                     )
             product_build_targets.append({
                 "lane": lane,
-                "name": build.get("name") or str(lane),
+                "name": build.get("build_name") or build.get("name") or str(lane),
+                "target_mode": modes["target_mode"],
+                "evaluation_basis": modes["target_evaluation_basis"],
                 "brand": build.get("brand") or "",
                 "opening_tonnes": safe_float(state.get("tonnes"), 0.0),
                 "target_tonnes": safe_float(build.get("target_tonnes"), 0.0),

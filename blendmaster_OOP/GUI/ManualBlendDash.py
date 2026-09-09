@@ -1262,6 +1262,7 @@ class DrawOptimisedGradeProfiles:
         output_columns = [
             "time", "grade", "element", "series", "steady_state_number",
             "target_min", "target_max", "tonnes", "target_tonnes",
+            "quality_caption",
         ]
         if df.empty:
             return pd.DataFrame(columns=output_columns)
@@ -1307,10 +1308,27 @@ class DrawOptimisedGradeProfiles:
             "build_closing_tonnes": "first",
             "target_tonnes": "first",
         }
+        if "target_mode" not in df:
+            df["target_mode"] = "hard"
+        aggregation["target_mode"] = "first"
         for grade_key in ["fe", "si", "al", "p", "mn"]:
             aggregation[f"build_grade_{grade_key}"] = "first"
             aggregation[f"target_{grade_key}_min"] = "first"
             aggregation[f"target_{grade_key}_max"] = "first"
+            for part in ("lql", "target", "hql", "limit_mode"):
+                key = f"target_{grade_key}_{part}"
+                if key not in df:
+                    df[key] = None
+                aggregation[key] = "first"
+
+        def quality_caption(row, grade):
+            def number(value):
+                return "unspecified" if pd.isna(value) else f"{float(value):.5g}"
+            if row.get("target_mode") == "soft":
+                return (f"Soft · Target {number(row.get(f'target_{grade}_target'))}; "
+                        f"LQL {number(row.get(f'target_{grade}_lql'))}; HQL {number(row.get(f'target_{grade}_hql'))} "
+                        f"({row.get(f'target_{grade}_limit_mode') or 'hard'} limits)")
+            return f"Hard · Min {number(row.get(f'target_{grade}_min'))}; Max {number(row.get(f'target_{grade}_max'))}"
 
         events = (
             df.dropna(subset=["steady_state_start_datetime", "steady_state_end_datetime"])
@@ -1441,6 +1459,7 @@ class DrawOptimisedGradeProfiles:
                     "target_max": first_event.get(f"target_{grade_key}_max", 100),
                     "tonnes": first_event.get("build_opening_tonnes", 0),
                     "target_tonnes": first_event.get("target_tonnes", 0),
+                    "quality_caption": quality_caption(first_event, grade_key),
                 })
 
                 for _, row in build_events.iterrows():
@@ -1454,6 +1473,7 @@ class DrawOptimisedGradeProfiles:
                         "target_max": row.get(f"target_{grade_key}_max", 100),
                         "tonnes": row.get("build_closing_tonnes", 0),
                         "target_tonnes": row.get("target_tonnes", 0),
+                        "quality_caption": quality_caption(row, grade_key),
                     })
 
             previous_end_time_by_lane[build_lane] = (
@@ -1521,12 +1541,12 @@ class DrawOptimisedGradeProfiles:
                     mode="lines",
                     line=dict(color=build_palette[index % len(build_palette)], width=2, dash="dot"),
                     customdata=series_data[[
-                        "steady_state_number", "target_min", "target_max", "tonnes", "target_tonnes"
+                        "steady_state_number", "target_min", "target_max", "tonnes", "target_tonnes", "quality_caption"
                     ]].to_numpy(dtype=object),
                     hovertemplate=(
                         "<b>%{x|%Y-%m-%d %H:%M}</b><br>"
                         f"{truncated_title}: " + "%{y:.2f}%<br>"
-                        "Target: %{customdata[1]:.2f}-%{customdata[2]:.2f}%<br>"
+                        "%{customdata[5]}<br>"
                         "Steady State: %{customdata[0]}<br>"
                         "Build Tonnes: %{customdata[3]:,.2f} / %{customdata[4]:,.2f} WMT<extra></extra>"
                     ),

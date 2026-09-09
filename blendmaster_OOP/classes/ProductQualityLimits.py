@@ -1,4 +1,4 @@
-"""Row-owned product specifications; Min/Max remain the active solver bounds.
+"""Row-owned specifications and mode configuration; Hard retains Min/Max bounds.
 
 Flat target_<analyte>_{lql,target,hql} fields are the editable/persisted values.
 The existing versioned PhaseSchemas record is derived for runtime consumers.
@@ -9,6 +9,7 @@ from copy import deepcopy
 import math
 
 from classes.PhaseSchemas import SCHEMA_ANALYTES, product_quality_limits
+from classes.ProductTargetModes import target_mode_fields
 
 
 QUALITY_PARTS = ("lql", "target", "hql")
@@ -54,8 +55,9 @@ def quality_fields(row, *, validate=True):
 
 
 def with_quality_configuration(row):
-    """Validate and attach a detached reference configuration for this build."""
-    result = {**deepcopy(row), **quality_fields(row)}
+    """Validate and attach this build's selected mode and specifications."""
+    modes = target_mode_fields(row)
+    result = {**deepcopy(row), **quality_fields(row), **modes}
     planning = row.get("planning_grade_targets") or {}
     limits = {}
     for a in SCHEMA_ANALYTES:
@@ -63,10 +65,12 @@ def with_quality_configuration(row):
         limits[a] = {
             "minimum": row.get(f"target_{a}_min"), "maximum": row.get(f"target_{a}_max"),
             **{part: result[f"target_{a}_{part}"] for part in QUALITY_PARTS},
+            "limit_mode": modes[f"target_{a}_limit_mode"],
             "target_source": "" if target is None else "2wp" if planning.get(a) == target else "manual",
         }
     result["quality_limits"] = {
-        **product_quality_limits(row.get("opf"), row.get("brand"), row.get("byproduct") or "product", limits=limits),
-        "enforcement": "reference_only",
+        **product_quality_limits(row.get("opf"), row.get("brand"), row.get("byproduct") or "product", limits=limits,
+                                 target_mode=modes["target_mode"], evaluation_basis=modes["target_evaluation_basis"]),
+        "enforcement": "hard_min_max" if modes["target_mode"] == "hard" else "soft_target",
     }
     return result

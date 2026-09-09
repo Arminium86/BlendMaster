@@ -100,12 +100,12 @@ class QualityDataTests(unittest.TestCase):
         self.assertIsNone(result["target_fe_target"])
         self.assertEqual(result["target_fe_lql"], 57)
 
-    def test_runtime_schema_is_detached_row_owned_and_reference_only(self):
+    def test_runtime_schema_is_detached_row_owned_and_defaults_to_hard_min_max(self):
         row = build(byproduct="fines", planning_grade_targets={"fe": 58.123456789})
         result = with_quality_configuration(row)
         record = result["quality_limits"]
         self.assertEqual((record["schema_version"], record["opf"], record["brand"], record["lane"]), (1, "OPF1", "FB", "fines"))
-        self.assertEqual(record["enforcement"], "reference_only")
+        self.assertEqual(record["enforcement"], "hard_min_max")
         self.assertEqual(record["limits"]["fe"]["target_source"], "2wp")
         edited = with_quality_configuration({**row, "target_fe_target": 59})
         self.assertEqual(edited["quality_limits"]["limits"]["fe"]["target_source"], "manual")

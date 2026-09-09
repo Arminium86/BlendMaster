@@ -5,6 +5,8 @@ workflow payloads use ``product_targets``; explicit current values, including
 an empty list, always take precedence over legacy aliases.
 """
 
+from classes.ProductTargetModes import migrate_target_row
+
 PRODUCT_TARGET_KEYS = (
     "product_targets",
     "product_targets_tab",
@@ -32,7 +34,7 @@ def product_targets_identifier(identifier):
 
 
 def migrate_product_target_state(state):
-    """Copy known state containers and migrate names without touching row data.
+    """Copy known state containers, migrate names and default legacy rows to Hard.
 
     Avoid walking arbitrary dictionaries (or copying large inventory tables).
     Inactive scenarios and their calendar inputs must migrate as well as the
@@ -42,7 +44,8 @@ def migrate_product_target_state(state):
         return state
     migrated = dict(state)
     if any(key in state for key in PRODUCT_TARGET_KEYS):
-        migrated["product_targets"] = product_targets_value(state)
+        rows = product_targets_value(state)
+        migrated["product_targets"] = [migrate_target_row(row) if isinstance(row, dict) else row for row in rows] if isinstance(rows, list) else rows
         for key in PRODUCT_TARGET_KEYS[1:]:
             migrated.pop(key, None)
     calendar = state.get("calendar_inputs")

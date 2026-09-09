@@ -10,6 +10,7 @@ from classes.ProductTargets import (
     migrate_product_target_state,
     product_targets_value,
 )
+from classes.ProductTargetModes import migrate_target_row
 
 
 def targets():
@@ -41,8 +42,8 @@ class ProductTargetStateTests(unittest.TestCase):
         loaded = window.normalized_agent_project_state(pickle.loads(pickle.dumps(legacy)))
         saved = pickle.loads(pickle.dumps(migrate_product_target_state(loaded)))
         for record in (saved, saved["site_scenarios"]["inactive"]):
-            self.assertEqual(record["product_targets"], targets())
-            self.assertEqual(record["calendar_inputs"]["product_targets"], targets())
+            self.assertEqual(record["product_targets"], [migrate_target_row(r) for r in targets()])
+            self.assertEqual(record["calendar_inputs"]["product_targets"], [migrate_target_row(r) for r in targets()])
             self.assertNotIn("product_build_settings", record)
             self.assertNotIn("product_build_settings", record["calendar_inputs"])
         self.assertEqual(saved["tab_states"], {"product_targets": True, "calendar": False})
@@ -189,8 +190,8 @@ class ProductTargetAgentTests(unittest.TestCase):
         window.product_targets = targets()
         window.calendar_inputs = {"product_build_settings": targets()}
         context = UserInputs.build_agent_context(window)
-        self.assertEqual(context["product_targets"], targets())
-        self.assertEqual(context["calendar_inputs"]["product_targets"], targets())
+        self.assertEqual(context["product_targets"], [migrate_target_row(r) for r in targets()])
+        self.assertEqual(context["calendar_inputs"]["product_targets"], [migrate_target_row(r) for r in targets()])
         self.assertNotIn("product_build_settings", str(context))
         self.assertNotIn("Product Build Settings", str(context))
         self.assertIn("product_targets_contract", context["agent_result_contract"])

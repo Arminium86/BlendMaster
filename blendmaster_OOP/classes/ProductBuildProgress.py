@@ -4,6 +4,9 @@ from typing import Iterable, Mapping, Optional
 
 import pandas as pd
 from classes.ProductQualityLimits import QUALITY_FIELDS, with_quality_configuration
+from classes.ProductTargetModes import require_supported_target_modes, target_mode_fields
+from classes.SoftProductGrades import analyte_audit, objective_config, source_preference, SIMILARITY_TOTALS
+from classes.ProductQualityReport import QUALITY_REPORT_SUFFIXES, quality_state_audit, serialize_audit
 
 from classes.ProductBuildLanes import (
     BYPRODUCT_LANES,
@@ -25,6 +28,7 @@ _PRODUCT_BUILD_BASE_SUFFIXES = [
         for grade in _PRODUCT_BUILD_GRADES for bound in ("min", "max")
     ],
     *QUALITY_FIELDS,
+    *QUALITY_REPORT_SUFFIXES,
 ]
 
 
@@ -102,6 +106,7 @@ class ProductBuildProgress:
 
     @classmethod
     def _is_on_spec(cls, tonnes, grade_metal, build, grade_weights=None):
+        require_supported_target_modes([build])
         if tonnes <= 0:
             return False
         for grade in cls.GRADES:
@@ -109,7 +114,10 @@ class ProductBuildProgress:
             if denominator <= 0:
                 return False
             value = grade_metal[grade] / denominator
-            if (
+            if target_mode_fields(build)["target_mode"] == "soft":
+                if not analyte_audit(build, grade, grade_metal[grade], denominator)["within_limits"]:
+                    return False
+            elif (
                 value < build[f"target_{grade}_min"] - 1e-7
                 or value > build[f"target_{grade}_max"] + 1e-7
             ):
@@ -122,6 +130,7 @@ class ProductBuildProgress:
         report,
         product_build_settings: Optional[Iterable[Mapping]],
         byproducts_enabled=None,
+        solver_config=None,
     ):
         result = (
             report.copy()
@@ -157,6 +166,7 @@ class ProductBuildProgress:
                     lane_builds,
                     lane=lane,
                     prefix=f"product_build_{lane}",
+                    solver_config=solver_config,
                 )
             return result
         return cls._annotate_lane(
@@ -164,10 +174,11 @@ class ProductBuildProgress:
             builds,
             lane=PRODUCT_LANE,
             prefix="product_build",
+            solver_config=solver_config,
         )
 
     @classmethod
-    def _annotate_lane(cls, result, builds, *, lane, prefix):
+    def _annotate_lane(cls, result, builds, *, lane, prefix, solver_config=None):
         tonnes_column = lane_source_tonnes_column(lane)
         required = {
             "crusher_actual_tonnes",
@@ -214,6 +225,8 @@ class ProductBuildProgress:
         build_tonnes = 0.0
         grade_metal = {grade: 0.0 for grade in cls.GRADES}
         grade_weights = {grade: 0.0 for grade in cls.GRADES}
+        preferences = objective_config((solver_config or {}).get("soft_grade_preferences"))
+        cumulative_sources = {a: dict.fromkeys(SIMILARITY_TOTALS, 0.0) for a in cls.GRADES}
 
         for _, state_rows in data.groupby(
             group_columns, sort=False, dropna=False
@@ -241,6 +254,8 @@ class ProductBuildProgress:
                 if product_tonnes > 0 else 0.0
             )
 
+            opening_metal, opening_weights = dict(grade_metal), dict(grade_weights)
+            source_totals = {a: dict.fromkeys(SIMILARITY_TOTALS, 0.0) for a in cls.GRADES}
             for grade in cls.GRADES:
                 for _, row in state_rows.iterrows():
                     weight = cls._number(
@@ -254,6 +269,13 @@ class ProductBuildProgress:
                     grade_metal[grade] += weight * cls._number(
                         row.get(lane_grade_column(lane, grade)), 0.0
                     )
+                    if target_mode_fields(build)["target_mode"] == "soft":
+                        source = source_preference(grade, cls._number(row.get(lane_grade_column(lane, grade))),
+                                  build.get(f"target_{grade}_target"), weight,
+                                  str(row.get("source_type", "")).lower() in {"grade_block", "direct_tip"}, preferences)
+                        for key in SIMILARITY_TOTALS:
+                            source_totals[grade][key] += source[key]
+                            cumulative_sources[grade][key] += source[key]
 
             build_tonnes = min(
                 opening_tonnes + added_tonnes,
@@ -283,6 +305,21 @@ class ProductBuildProgress:
                     current_on_spec if complete else None
                 ),
             }
+            audit = quality_state_audit(build, opening_metal, opening_weights,
+                       {a: grade_metal[a] - opening_metal[a] for a in cls.GRADES},
+                       {a: grade_weights[a] - opening_weights[a] for a in cls.GRADES},
+                       source_totals, cumulative_sources, preferences)
+            selected = [r for r in audit["rows"] if r["grain"] == r["evaluation_basis"]]
+            status = ("Hard limit breached" if any(r["quality_status"] == "Hard limit breached" for r in selected)
+                      else "Soft limit breached" if any(r["quality_status"] == "Soft limit breached" for r in selected)
+                      else "No production" if not added_tonnes else "Within limits")
+            values.update({f"{prefix}_target_mode": build["target_mode"],
+                           f"{prefix}_evaluation_basis": build["target_evaluation_basis"],
+                           f"{prefix}_quality_status": status,
+                           f"{prefix}_hard_limits_satisfied": all(r["hard_limits_satisfied"] for r in selected),
+                           f"{prefix}_soft_grade_penalty": sum(r["applied_penalty"] for r in selected),
+                           f"{prefix}_source_similarity_penalty": sum(r["applied_similarity_penalty"] for r in selected),
+                           f"{prefix}_quality_audit": serialize_audit(audit)})
             for grade in cls.GRADES:
                 values[f"{prefix}_grade_{grade}"] = (
                     grade_metal[grade] / grade_weights[grade]
@@ -300,6 +337,7 @@ class ProductBuildProgress:
                     result.at[original_index, column] = value
 
             if complete:
+                cumulative_sources = {a: dict.fromkeys(SIMILARITY_TOTALS, 0.0) for a in cls.GRADES}
                 build_index += 1
                 build_tonnes = 0.0
                 grade_metal = {
