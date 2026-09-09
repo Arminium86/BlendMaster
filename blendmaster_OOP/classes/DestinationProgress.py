@@ -10,13 +10,13 @@ from setup.InventoryBuildLineage import finite_number
 def progress_settings(value=None):
     value = value or {}
     if not isinstance(value, dict) or type(value.get("schema_version", 1)) is not int or value.get("schema_version", 1) != 1:
-        raise ValueError("Unsupported destination-progress settings.")
+        raise ValueError("Unsupported destination reconciliation settings.")
     hours = finite_number(value.get("lookback_hours", 12))
     if hours is None or not 0 < hours <= 744:
         raise ValueError("Activity lookback must be greater than 0 and at most 744 hours.")
     remaining, choices = value.get("remaining_wmt", {}), value.get("selected_instances", {})
     if not isinstance(remaining, dict) or not isinstance(choices, dict):
-        raise ValueError("Invalid destination-progress settings.")
+        raise ValueError("Invalid destination reconciliation settings.")
     clean = {}
     for key, raw in remaining.items():
         number = finite_number(raw)

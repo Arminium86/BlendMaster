@@ -665,9 +665,9 @@ No matching cache is an unavailable state, not a zero-movement result. Queries
 have a 60-second statement timeout and a 200,000-record bound; caches retain at
 most 24 snapshots.
 
-### 9.3 Destination Progress setup (Task 22)
+### 9.3 Destination Reconciliation setup (Task 22)
 
-**Setup > Destination Progress**, after Guidance Schedules, shows:
+**Setup > Destination Reconciliation**, immediately after Stockpile Inventories, shows:
 
 - **Progress:** detected destination, current build instance, previous/next
   instances, selection basis and remaining assignable ROM WMT per ROM/material.
@@ -698,7 +698,7 @@ save/load (the unrelated warehouse inventory reload was stubbed). Illustrative
 screenshots are local under `docs/screenshots/task22/` and ignored by Git.
 
 Review: import 2WP Mining.csv, load Stockpile Inventories with Nearest Crusher,
-then open Destination Progress. Compare the extracted order and activity, review
+then open Destination Reconciliation. Compare the extracted order and activity, review
 any ambiguous current instance, enter remaining ROM WMT, and save/reopen the
 project. This checkpoint is setup only. Capacity consumption, primary allocation
 and fallback assignment remain for Tasks 23–25; Task 23 has not started.

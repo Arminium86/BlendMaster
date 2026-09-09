@@ -69,7 +69,7 @@ class DestinationProgressSetup(QWidget):
         self.snapshot, self.rows, self.capacity_fields = None, [], {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
-        title = QLabel("Destination Progress")
+        title = QLabel("Destination Reconciliation")
         title.setStyleSheet("font-size: 20px; font-weight: 750; color: #172033;")
         layout.addWidget(title)
         note = QLabel("Review the 2WP ROM build order against actual inbound activity, then enter remaining assignable tonnes for the current build instance. ROM area uses Nearest Crusher from Stockpile Inventories.")
@@ -170,7 +170,7 @@ class DestinationProgressSetup(QWidget):
 
     def reset_context(self):
         self._context_key = None
-        self.invalidate("Scenario changed — open this tab to load destination progress.")
+        self.invalidate("Scenario changed — open this tab to load destination reconciliation.")
 
     def invalidate(self, message):
         self._generation += 1
@@ -195,7 +195,7 @@ class DestinationProgressSetup(QWidget):
         key = digest([scenario_id, site, start, str(path), (stat.st_size, stat.st_mtime_ns) if stat else None, areas])
         if key == self._context_key:
             return
-        self.invalidate("Ready — Refresh to load destination progress.")
+        self.invalidate("Ready — Refresh to load destination reconciliation.")
         self._context_key = key
         self._context = dict(scenario_id=scenario_id, site=site, start=start, path=str(path or ""), inventories=deepcopy(inventories or {}))
         self._settings = progress_settings(state)
@@ -208,7 +208,7 @@ class DestinationProgressSetup(QWidget):
         self._settings["lookback_hours"] = self.lookback.value()
         self._settings["selected_instances"] = {}
         self.emit_settings()
-        self.invalidate("Activity lookback changed — refreshing destination progress.")
+        self.invalidate("Activity lookback changed — refreshing destination reconciliation.")
         self.request_refresh()
 
     def request_refresh(self, force=False):
@@ -218,7 +218,7 @@ class DestinationProgressSetup(QWidget):
         if not context["site"] or not context["start"] or not context["path"]:
             self.invalidate("Set the scenario site and start, and select 2WP Mining.csv in Guidance Schedules.")
             return
-        self.invalidate("Loading destination progress…")
+        self.invalidate("Loading destination reconciliation…")
         self._pending = True
         generation = self._generation
         hours = self.lookback.value()
@@ -254,7 +254,7 @@ class DestinationProgressSetup(QWidget):
         def failure(error):
             if sip.isdeleted(self) or generation != self._generation:
                 return
-            self.invalidate(f"Unable to load destination progress: {error}")
+            self.invalidate(f"Unable to load destination reconciliation: {error}")
 
         self.run_async(work, success, failure)
 

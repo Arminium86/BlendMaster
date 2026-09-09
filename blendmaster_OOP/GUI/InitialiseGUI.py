@@ -3249,10 +3249,10 @@ class UserInputs(QMainWindow):
     def setup_destination_progress_tab(self):
         self.destination_progress = DestinationProgressSetup(
             self, run_async=lambda work, success, failure: self.run_background_task(
-                "Loading destination progress…", work, success, failure, show_progress=False))
+                "Loading destination reconciliation…", work, success, failure, show_progress=False))
         self.destination_progress_tab_index = self.register_page(
             "destination_progress", self.setup_tabs, self.destination_progress,
-            "Destination Progress", position=self.setup_tabs.indexOf(self.guidance_schedules_tab) + 1)
+            "Destination Reconciliation", position=self.setup_tabs.indexOf(self.stockpile_tab) + 1)
         self.destination_progress.settingsChanged.connect(
             lambda state: setattr(self, "destination_progress_settings", copy.deepcopy(state)))
         self.destination_progress.auditReady.connect(self.store_destination_order_audit)
