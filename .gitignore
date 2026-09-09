@@ -12,3 +12,8 @@ blendmaster_OOP/input/
 *.txt
 blendmaster_OOP/.blendmaster_agent_bridge/
 agent_runs/
+
+# Keep durable feature guides and tests versioned. Task completion notes and
+# generated UI review captures stay local; captures can be regenerated.
+/blendmaster_OOP/docs/TASK_*.md
+/blendmaster_OOP/docs/screenshots/

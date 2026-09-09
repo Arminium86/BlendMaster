@@ -162,9 +162,15 @@ inferred direction, method and status remain available for audit.
 `RAW_HEX_STOCKPILE_WMT` stores the raw sum used by the positivity guard;
 the legacy `RAW_STOCKPILE_WMT` still includes unattributed movements.
 `AMT_FOOTPRINT_AUDIT` and `SPATIAL_RECON_REASON` record the outcome and reason,
-including the original signed inventory balance. See
-[Task 9](TASK_9_NON_POSITIVE_AMT_FOOTPRINTS.md) for snapshot migration and the
-downstream chunk/solver rules.
+including the original signed inventory balance.
+
+Saved snapshots are repaired from their raw evidence before SQLite restoration,
+enrichment and table preparation. Repair is idempotent and does not require a
+warehouse query; missing raw evidence does not imply a confirmed zero total.
+Zeroed footprints are removed from canonical, map and solver chunk snapshots.
+Rebuilding saved chunks discards chunks whose known member hexes are all
+non-positive. An AMT source without a positive chunk has zero opening balance
+and generates no reclaim events; positive inventory cannot recreate its material.
 
 ### Coordinate outlier quarantine
 
@@ -203,8 +209,20 @@ audit without adding the excluded footprint to reports.
 
 Recheck the box and use **Refresh AMT Data from Snowflake** to restore the
 footprint, then regenerate its chunks. If every AMT footprint is excluded,
-Submit requires a selected conventional inventory stockpile. See
-[Task 10](TASK_10_AMT_FOOTPRINT_EXCLUSION.md) for persistence and report behavior.
+Submit requires a selected conventional inventory stockpile.
+
+`AMT_footprint_exclusions` persists per scenario and project; legacy projects
+default to no exclusions. Exclusion retains the original inventory selection
+and the pre-exclusion tonnage audit, and restoration records its time. Excluded
+footprints are omitted from the scenario's SQLite opening inventory and AMT
+tables as well as reports. Changing participation invalidates generated
+scheduling reports while preserving input and unrelated user tables.
+
+Request, enrichment, evidence-review and Database View signatures include
+participation. Compatible retained warehouse rows can be reused; a restored
+footprint whose rows are missing requires a fresh read. Late worker responses
+for an earlier selection are discarded, and map/solver boundaries independently
+filter stale chunks.
 
 ## Grade-block linkage
 

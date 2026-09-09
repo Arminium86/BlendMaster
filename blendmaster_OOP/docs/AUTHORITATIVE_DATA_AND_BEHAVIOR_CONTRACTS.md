@@ -371,8 +371,8 @@ omitted. No central target is inferred from hard Min/Max bounds; no combined
 quality specification is invented. The report is descriptive and introduces no
 hard/soft mode or optimisation penalty (Task 16 remains unstarted).
 
-See `TASK_14_PRODUCT_ASSAY_HISTORY.md` and `TASK_15_OPF_PRODUCTION_REPORT.md` for
-service bounds, screenshot evidence and the UI review guide.
+See [OPF Production Report](OPF_PRODUCTION_REPORT.md) for service bounds,
+the UI review guide and instructions for generating local screenshots.
 
 ## 8. Product Targets, LQL/HQL and target modes
 
@@ -391,7 +391,11 @@ Contracts:
   project/scenario/calendar key and agent workflow section are `product_targets`.
   Older `product_build_settings` projects and agent payloads remain readable;
   explicit current values (including an empty list) take precedence over aliases.
-  See `docs/TASK_11_PRODUCT_TARGETS.md` for the migration contract and validation.
+  Migration includes active/inactive scenarios and calendar inputs. Saved page
+  names and legacy flat-tab indices still resolve; explicit current page state
+  wins. Omitted agent sections leave rows unchanged, while an explicit empty
+  list clears them. Internal solver/reporting `product_build_settings` APIs
+  retain their established parameters; new saves use the current key.
 - LQL and HQL are properties of a brand, and therefore of a product-build row,
   per analyte. They are row entries like the existing Min and Max, not a
   separate table (Q52, Q55).
@@ -415,8 +419,8 @@ Contracts:
   rows; different manual quality limits prevent merging. Legacy hard bounds
   do not imply a central Target. The validated versioned reference configuration
   reaches solver inputs; quality fields also reach product/progress reports.
-  See [Task 12](TASK_12_PRODUCT_QUALITY_LIMITS.md). Hard/soft enforcement remains
-  assigned to Tasks 16–17, and current on-spec checks still use Min/Max.
+  Hard/soft enforcement remains assigned to Tasks 16–17, and current on-spec
+  checks still use Min/Max.
 - Three displayed decimals apply only to 2WP-imported product targets;
   calculations keep full precision and everything else is unchanged (Q51).
 - Task 13 is implemented: imported-row Min/Max and central Target cells format
@@ -424,7 +428,6 @@ Contracts:
   project/agent round trips, solver inputs and numeric reports retain the full
   value. Manual-row and LQL/HQL formats remain unchanged. Previously rounded
   saved values require a fresh 2WP import to recover the planned precision.
-  See [Task 13](TASK_13_TARGET_PRECISION.md).
 
 ### 8.1 Penalty formulation
 
@@ -550,12 +553,12 @@ Contracts:
 - When inventory is at or below zero, zero the footprint. For a positive raw
   footprint with inventory unavailable, retain spatially reconciled AMT tonnes
   (Q48). A non-positive raw footprint always stays zero.
-- Task 9 implementation and validation are recorded in
-  [Task 9: non-positive AMT footprints](TASK_9_NON_POSITIVE_AMT_FOOTPRINTS.md).
+- See [AMT tonnage reconciliation](AMT_OPENING_HEXES_AND_GRADE_BLOCK_LINEAGE.md)
+  for snapshot migration and downstream chunk/solver rules.
   Raw evidence and the zeroing reason survive persistence; zeroed material
   cannot re-enter through cached chunks, inventory fallback or solver events.
-- Task 10 whole-footprint exclusion is implemented in AMT setup; see
-  [Task 10: whole-footprint exclusion](TASK_10_AMT_FOOTPRINT_EXCLUSION.md).
+- Whole-footprint exclusion is implemented in AMT setup; see
+  [Whole-footprint exclusion](AMT_OPENING_HEXES_AND_GRADE_BLOCK_LINEAGE.md#whole-footprint-exclusion).
 - Excluded footprints are skipped before Snowflake and AMT processing and do
   not appear on reports (Q49, Q50).
 - If every footprint is excluded, the user may proceed when at least one
