@@ -346,6 +346,34 @@ For the OPF Production Report:
 - Refresh is on demand plus a configurable interval. When Snowflake is
   unavailable, show an explicit message and render from cached data (Q72).
 
+Tasks 14–15 implementation (7 September 2026): the report uses production
+`TRANSACTION_DATETIME` in AWST from the reconciliation product table,
+`AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_OPF_PRODUCT`. Assay sample time
+and warehouse update time are separate provenance; missing sample times never
+move or remove a production observation. This timestamp choice follows inspection
+of the warehouse schema and records; Q68 explicitly confirms AWST and scenario-
+relative defaults, but does not name a source timestamp column.
+
+Raw observations retain production records, shift aggregates use source shift
+assignments (06:00/18:00), and daily aggregates use AWST calendar days. Both
+weighted grains use valid-assay positive DMT independently per analyte. Queries
+include the start and exclude the end; edge periods can be partial. Combined
+values are calculated from constituent records and identify partial OPF coverage.
+Cache fallback matches the exact source/query/window/OPFs and retains its original
+fetch timestamp. Refresh intervals run while the report is visible and keep the
+selected window fixed.
+
+Target/LQL/HQL lines use canonical Product Targets specifications, with dated
+planning intervals clipped to the window and build changes marked. Undated
+targets are explicitly current references; future builds are not assumed to
+describe historical production. Conflicting dated ownership is reported and
+omitted. No central target is inferred from hard Min/Max bounds; no combined
+quality specification is invented. The report is descriptive and introduces no
+hard/soft mode or optimisation penalty (Task 16 remains unstarted).
+
+See `TASK_14_PRODUCT_ASSAY_HISTORY.md` and `TASK_15_OPF_PRODUCTION_REPORT.md` for
+service bounds, screenshot evidence and the UI review guide.
+
 ## 8. Product Targets, LQL/HQL and target modes
 
 Current behavior: `setup/PlanningPlanTargets.py` builds product-build rows with

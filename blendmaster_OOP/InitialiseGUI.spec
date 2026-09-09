@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\BlendMaster\\blendmaster_OOP\\GUI\\InitialiseGUI.py'],
     pathex=['C:\\BlendMaster\\blendmaster_OOP'],
     binaries=[],
-    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\setup\\sql\\opf_daily_reconciliation.sql', 'setup\\sql'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\expit_excavator.png', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v4.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v3.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v2.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background.PNG', 'resources')],
+    datas=[('C:\\BlendMaster\\blendmaster_OOP\\requirements.txt', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\blendmaster.db', '.'), ('C:\\BlendMaster\\blendmaster_OOP\\setup\\sql\\opf_daily_reconciliation.sql', 'setup\\sql'), ('C:\\BlendMaster\\blendmaster_OOP\\setup\\sql\\opf_product_assay_history.sql', 'setup\\sql'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\expit_excavator.png', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v4.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v3.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background_v2.PNG', 'resources'), ('C:\\BlendMaster\\blendmaster_OOP\\resources\\background.PNG', 'resources')],
     hiddenimports=['reportlab.graphics.shapes', 'reportlab.platypus'],
     hookspath=[],
     hooksconfig={},

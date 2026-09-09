@@ -48,6 +48,7 @@ from GUI.ManualSteadyStateDialog import ManualSteadyStateDialog
 from GUI.ProductTargetDelegate import (
     IMPORTED_GRADE_ROLE, PRECISION_TOOLTIP, ProductTargetDelegate,
 )
+from GUI.OPFProductionReport import OPFProductionReport
 from database.SQLiteDatabase import DatabaseManager
 from database.DatabaseContext import get_database_path, set_database_path
 from setup.PlanningPlanTargets import PlanningPlanTargets
@@ -581,6 +582,7 @@ class UserInputs(QMainWindow):
 
         # Add Product Targets tab
         self.setup_product_targets_tab()
+        self.setup_opf_production_report_tab()
 
         # Decision Levers is the user-facing home for the simplified solver
         # controls introduced in the dedicated Decision Levers task.
@@ -1539,7 +1541,7 @@ class UserInputs(QMainWindow):
             "available_two_wp_product_crushers",
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
-            "product_brand_labels_choice", "product_targets",
+            "product_brand_labels_choice", "product_targets", "product_assay_report_settings",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
             "product_build_tonnes_stream", "byproducts_enabled",
             "byproduct_quantity_fields", "byproduct_grade_fields",
@@ -1619,6 +1621,8 @@ class UserInputs(QMainWindow):
         self.refresh_scenario_selector()
 
     def reset_workflow_tabs_for_scenario(self):
+        if hasattr(self, "opf_production_report"):
+            self.opf_production_report.reset_context()
         for tab_index in [
             self.define_fields_tab_index, self.map_fields_tab_index,
             self.data_streams_tab_index, self.guidance_schedules_tab_index,
@@ -1679,6 +1683,10 @@ class UserInputs(QMainWindow):
         """Defer heavyweight report/chart work until the user opens that tab."""
         if self.scenario_switch_in_progress:
             return
+
+        if tab_index == getattr(self, "opf_production_report_tab_index", None):
+            self.sync_opf_production_report_context()
+            QTimer.singleShot(0, self.opf_production_report.request_refresh)
 
         if (
             tab_index == self.database_view_tab_index
@@ -1878,6 +1886,7 @@ class UserInputs(QMainWindow):
                 state.get("data_stream_planning_categories")
             )
             self.product_targets = copy.deepcopy(state.get("product_targets") or [])
+            self.product_assay_report_settings = copy.deepcopy(state.get("product_assay_report_settings") or {})
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
             )
@@ -3197,6 +3206,37 @@ class UserInputs(QMainWindow):
 
         self.populate_product_build_table()
 
+    def setup_opf_production_report_tab(self):
+        self.opf_production_report = OPFProductionReport(
+            self, run_async=lambda work, success, failure: self.run_background_task(
+                "Loading product assay history…", work, success, failure, show_progress=False))
+        self.opf_production_report_tab_index = self.register_page(
+            "opf_production_report", self.workspace_tabs, self.opf_production_report,
+            "OPF Production Report", position=self.workspace_tabs.indexOf(self.product_build_tab) + 1)
+        self.opf_production_report.settingsChanged.connect(
+            lambda state: setattr(self, "product_assay_report_settings", copy.deepcopy(state)))
+
+    def sync_opf_production_report_context(self):
+        report = getattr(self, "opf_production_report", None)
+        if report is None:
+            return
+        active_opf = getattr(self, "opf_input_choice", None)
+        opfs, targets = [active_opf] if active_opf else [], []
+        for scenario_id, state in (getattr(self, "site_scenarios", {}) or {}).items():
+            if scenario_id == getattr(self, "active_scenario_id", None):
+                continue
+            opf = state.get("opf_input_choice")
+            if opf:
+                opfs.append(opf)
+                targets.extend({**row, "opf": row.get("opf") or opf} for row in product_targets_value(state, []) or [])
+        current = self.read_product_targets_from_table(show_errors=False) if hasattr(self, "product_build_table") else None
+        targets.extend({**row, "opf": row.get("opf") or active_opf}
+                       for row in (current if current is not None else getattr(self, "product_targets", []) or []))
+        report.set_context(scenario_id=getattr(self, "active_scenario_id", "active"),
+                           scenario_start=getattr(self, "start_time_choice", None), opfs=opfs, active_opf=active_opf,
+                           brands=self.product_brand_options(), targets=targets,
+                           state=getattr(self, "product_assay_report_settings", {}))
+
     def default_product_brand_labels(self):
         return ["FB", "SS", "SF", "FF", "KF"]
 
@@ -3636,6 +3676,8 @@ class UserInputs(QMainWindow):
         self.calendar_inputs["product_targets"] = copy.deepcopy(self.product_targets)
         self.calendar_inputs["product_brand_labels"] = copy.deepcopy(self.product_brand_options())
         self.refresh_product_build_plan_scenario_label()
+        if vars(self).get("opf_production_report") is not None and self.opf_production_report.isVisible():
+            self.sync_opf_production_report_context()
         return True
 
     def navigate_to_product_targets(self):
@@ -25726,6 +25768,7 @@ class UserInputs(QMainWindow):
                 "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
                 "data_stream_planning_categories": self.data_stream_planning_categories,
                 "product_targets": self.product_targets,
+                "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
                     self.group_2wp_build_targets_by_brand_choice
@@ -26181,6 +26224,9 @@ class UserInputs(QMainWindow):
         self.product_targets = self.normalized_agent_product_targets(
             loaded_state.get("product_targets", []) or []
         )
+        self.product_assay_report_settings = copy.deepcopy(loaded_state.get("product_assay_report_settings") or {})
+        if hasattr(self, "opf_production_report"):
+            self.opf_production_report.reset_context()
         self.auto_load_2wp_targets_choice = bool(
             loaded_state.get("auto_load_2wp_targets_choice", True)
         )
@@ -26564,6 +26610,7 @@ class UserInputs(QMainWindow):
         self.data_stream_input_cache_result = {}
         self.data_stream_input_request_inflight = ""
         self.product_targets = []
+        self.product_assay_report_settings = {}
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}
