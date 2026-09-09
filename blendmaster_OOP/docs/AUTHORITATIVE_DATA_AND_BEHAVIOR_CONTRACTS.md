@@ -616,6 +616,93 @@ local and Git-ignored under `docs/screenshots/task19/`.
   not haul-distance grouping (Q2). Source:
   `classes/HaulCycleDataHandler.py` `build_nearest_crusher_routes`.
 
+### 9.1 2WP ROM build order (Task 20)
+
+Implemented in `classes/DestinationBuildOrder.py`. The extractor reads the same
+Mining.csv source, destination, time and wet-tonne columns as the existing 2WP
+guidance. Only positive Reserve-to-Stockpile movements enter the order. ROM area
+uses the stockpile's displayed Nearest Crusher; material type uses the existing
+leading-letter parser. Missing/conflicting ROM mappings, invalid records and
+non-ROM movements remain visible in the row audit.
+
+Orders are per ROM area and material type, ordered by first inbound time with
+CSV record order breaking equal-time ties explicitly. Interleaved returns to a
+stockpile remain in the same build instance. A completed reclaim interval between
+inbound build periods starts a new instance. Reclaim evidence uses the existing
+Flow/PlantAgent/OriginalSource-to-Crusher convention and explicit Stockpile-to-
+Crusher records. Overlapping build/reclaim periods raise warnings; they do not
+invent a turnover. Physical build-instance identity is shared across materials.
+
+The input signature covers the file contents, ROM mapping and extractor version.
+The active scenario database receives `destination_build_order` and
+`destination_build_order_audit`, including source signatures, CSV record links,
+planned ROM WMT, build instances, sequence positions and exclusion reasons.
+
+### 9.2 Recent destination activity (Task 21)
+
+Implemented in `setup/RecentDestinationActivity.py` and
+`setup/sql/recent_destination_activity.sql`. The query window is half-open:
+`[scenario start - lookback, scenario start)`, in AWST. Default lookback is
+12 hours; the UI allows 0.01–744 hours. It filters the selected site (`OPERATION`),
+mapped stockpile footprints (`DESTINATION_FMS`), undeleted PrimaryMovement rows,
+and ExPit / Expit Ore / Expit Ore classifications. Waste and Expit Ore Direct
+Feed do not establish ROM activity. These classifications and the complete query
+were verified against the live warehouse on 2026-09-09; 31 qualifying movements
+were returned in the bounded service check.
+
+Actual grade-block identity determines material type. The latest qualifying
+inbound timestamp establishes the detected physical destination, regardless of
+tonnes. Several active destinations produce a warning; equal latest timestamps
+remain ambiguous. A detected destination outside the planned order is explicit.
+When the same stockpile has several planned build instances, dates alone cannot
+resolve which instance is active because actual progress may lead or lag 2WP.
+
+Cache keys include site, scenario time, lookback, full source-data signature,
+ROM mapping and query version/content. Cached payloads carry a record signature
+and fetched timestamp. Fresh cache reuse lasts five minutes; Refresh re-queries.
+Offline fallback uses only an exact matching request and is labelled explicitly.
+No matching cache is an unavailable state, not a zero-movement result. Queries
+have a 60-second statement timeout and a 200,000-record bound; caches retain at
+most 24 snapshots.
+
+### 9.3 Destination Progress setup (Task 22)
+
+**Setup > Destination Progress**, after Guidance Schedules, shows:
+
+- **Progress:** detected destination, current build instance, previous/next
+  instances, selection basis and remaining assignable ROM WMT per ROM/material.
+  Selecting a row reveals its full extracted order and warnings.
+- **Build order:** dated build instances, planned tonnes and source CSV records.
+- **Activity evidence:** inbound timestamps, tonnes, source grade blocks,
+  actual destination builds and movement IDs.
+- **2WP row audit:** each source record's inclusion/exclusion and order linkage.
+
+The Current build instance control permits an explicit reviewed selection and
+labels it User selected. Automatic detection remains separately visible. Blank
+remaining tonnes means not set; zero explicitly means no remaining capacity.
+Remaining tonnes belong to the physical build instance, so the same instance
+shown under different materials shares one value. Values retain full precision.
+
+Settings use `destination_progress_settings` schema v1, persist per site scenario
+and through `.prj` save/load, and default to 12 hours with no entered capacity in
+legacy projects. Scenario-time or source-signature changes clear previous
+selections/capacities with an inline notice. Lookback changes clear manual
+instance selection. Late asynchronous results cannot overwrite another context.
+Large read-only evidence tables render cells on demand; a 50,000-row audit was
+checked without dropping records.
+
+Validation on 2026-09-09: 874 automated checks passed. Native Windows checks cover
+loading, fresh/cached/offline data, no data, repeated-instance ambiguity, reviewed
+selection, capacity edits, compact layout and actual application project
+save/load (the unrelated warehouse inventory reload was stubbed). Illustrative
+screenshots are local under `docs/screenshots/task22/` and ignored by Git.
+
+Review: import 2WP Mining.csv, load Stockpile Inventories with Nearest Crusher,
+then open Destination Progress. Compare the extracted order and activity, review
+any ambiguous current instance, enter remaining ROM WMT, and save/reopen the
+project. This checkpoint is setup only. Capacity consumption, primary allocation
+and fallback assignment remain for Tasks 23–25; Task 23 has not started.
+
 ## 10. Manual ratio rounding
 
 - Optional. When disabled, exact optimiser ratios prepopulate (Q13).
@@ -737,8 +824,8 @@ Contract for when it is built:
 
 | Ref | Gap | Lands in |
 | --- | --- | --- |
-| Q1 | Destination-type stockpile filter and per-material-type ordering absent from guidance builder | Task 20 |
-| Q7 | No planned-versus-actual destination order reconciliation | Task 21, 23 |
+| Q1 | Stockpile-only ROM build order and material grouping implemented in the dedicated extractor | Task 20 complete |
+| Q7 | Activity detection and setup review implemented; payload allocation pending | Tasks 21–22 complete; Task 23 pending |
 | Q32 | No spatial factor resolution layer; factors applied globally | Task 5, 6, 7 |
 | Q32 | Daily reconciliation SQL does not retain contributing grade blocks | Task 5 |
 | Q42 | No confidence or uncertainty metric | Task 6, 8 |

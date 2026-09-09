@@ -49,6 +49,9 @@ from GUI.ProductTargetDelegate import (
     IMPORTED_GRADE_ROLE, PRECISION_TOOLTIP, ProductTargetDelegate,
 )
 from GUI.OPFProductionReport import OPFProductionReport
+from GUI.DestinationProgressSetup import DestinationProgressSetup
+from classes.DestinationBuildOrder import write_order_audit
+from classes.DestinationProgress import progress_settings
 from GUI.ProductTargetModeControls import ProductTargetModeControls
 from GUI.SoftGradePreferenceControls import SoftGradePreferenceControls
 from GUI.ProductQualityReview import ProductQualityReview
@@ -590,6 +593,7 @@ class UserInputs(QMainWindow):
         # Add Product Targets tab
         self.setup_product_targets_tab()
         self.setup_opf_production_report_tab()
+        self.setup_destination_progress_tab()
 
         # Decision Levers is the user-facing home for the simplified solver
         # controls introduced in the dedicated Decision Levers task.
@@ -1548,7 +1552,7 @@ class UserInputs(QMainWindow):
             "available_two_wp_product_crushers",
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
-            "product_brand_labels_choice", "product_targets", "product_assay_report_settings",
+            "product_brand_labels_choice", "product_targets", "product_assay_report_settings", "destination_progress_settings",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
             "product_build_tonnes_stream", "byproducts_enabled",
             "byproduct_quantity_fields", "byproduct_grade_fields",
@@ -1628,6 +1632,8 @@ class UserInputs(QMainWindow):
         self.refresh_scenario_selector()
 
     def reset_workflow_tabs_for_scenario(self):
+        if hasattr(self, "destination_progress"):
+            self.destination_progress.reset_context()
         if hasattr(self, "opf_production_report"):
             self.opf_production_report.reset_context()
         for tab_index in [
@@ -1694,6 +1700,10 @@ class UserInputs(QMainWindow):
         if tab_index == getattr(self, "opf_production_report_tab_index", None):
             self.sync_opf_production_report_context()
             QTimer.singleShot(0, self.opf_production_report.request_refresh)
+
+        if tab_index == getattr(self, "destination_progress_tab_index", None):
+            self.sync_destination_progress_context()
+            QTimer.singleShot(0, self.destination_progress.request_refresh)
 
         if (
             tab_index == self.database_view_tab_index
@@ -1894,6 +1904,7 @@ class UserInputs(QMainWindow):
             )
             self.product_targets = copy.deepcopy(state.get("product_targets") or [])
             self.product_assay_report_settings = copy.deepcopy(state.get("product_assay_report_settings") or {})
+            self.destination_progress_settings = progress_settings(state.get("destination_progress_settings"))
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
             )
@@ -3234,6 +3245,33 @@ class UserInputs(QMainWindow):
     def show_product_quality_results(self):
         self.product_quality_results_dialog = ProductQualityReview(get_database_path, self)
         self.product_quality_results_dialog.show()
+
+    def setup_destination_progress_tab(self):
+        self.destination_progress = DestinationProgressSetup(
+            self, run_async=lambda work, success, failure: self.run_background_task(
+                "Loading destination progress…", work, success, failure, show_progress=False))
+        self.destination_progress_tab_index = self.register_page(
+            "destination_progress", self.setup_tabs, self.destination_progress,
+            "Destination Progress", position=self.setup_tabs.indexOf(self.guidance_schedules_tab) + 1)
+        self.destination_progress.settingsChanged.connect(
+            lambda state: setattr(self, "destination_progress_settings", copy.deepcopy(state)))
+        self.destination_progress.auditReady.connect(self.store_destination_order_audit)
+
+    def sync_destination_progress_context(self):
+        self.destination_progress.set_context(
+            scenario_id=getattr(self, "active_scenario_id", "active"),
+            site=getattr(self, "mine_input_choice", None),
+            scenario_start=getattr(self, "start_time_choice", None),
+            path=getattr(self, "file_path_choice", ""),
+            inventories=getattr(self, "stockpile_data", None) or {},
+            state=getattr(self, "destination_progress_settings", None))
+
+    def store_destination_order_audit(self, snapshot):
+        try:
+            write_order_audit(snapshot, get_database_path())
+            self.scenario_report_refresh_pending = True
+        except (sqlite3.Error, OSError) as exc:
+            self.destination_progress.validation.setText(f"Build order loaded, but the SQLite audit could not be saved: {exc}")
 
     def setup_opf_production_report_tab(self):
         self.opf_production_report = OPFProductionReport(
@@ -25886,6 +25924,7 @@ class UserInputs(QMainWindow):
                 "data_stream_planning_categories": self.data_stream_planning_categories,
                 "product_targets": self.product_targets,
                 "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
+                "destination_progress_settings": progress_settings(getattr(self, "destination_progress_settings", None)),
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
                     self.group_2wp_build_targets_by_brand_choice
@@ -26342,6 +26381,9 @@ class UserInputs(QMainWindow):
             loaded_state.get("product_targets", []) or []
         )
         self.product_assay_report_settings = copy.deepcopy(loaded_state.get("product_assay_report_settings") or {})
+        self.destination_progress_settings = progress_settings(loaded_state.get("destination_progress_settings"))
+        if hasattr(self, "destination_progress"):
+            self.destination_progress.reset_context()
         if hasattr(self, "opf_production_report"):
             self.opf_production_report.reset_context()
         self.auto_load_2wp_targets_choice = bool(
@@ -26728,6 +26770,7 @@ class UserInputs(QMainWindow):
         self.data_stream_input_request_inflight = ""
         self.product_targets = []
         self.product_assay_report_settings = {}
+        self.destination_progress_settings = progress_settings()
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}
