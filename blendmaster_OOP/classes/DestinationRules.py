@@ -12,13 +12,14 @@ import pandas as pd
 from classes.GradeBlockIdentity import parent_grade_block_name, grade_block_material_type
 
 
-VERSION = 1
+VERSION = 2
 LEVELS = (
     ("Pit + stage + bench + flitch + material", (0, 1, 2, 4, 5)),
     ("Pit + stage + bench + material", (0, 1, 2, 5)),
     ("Pit + stage + material", (0, 1, 5)),
     ("Pit + material", (0, 5)),
     ("Pit + stage + bench + flitch + any non-waste material", (0, 1, 2, 4)),
+    ("Pit area + material", (6, 5)),
 )
 METADATA_COLUMNS = (
     "primary_destination", "fallback_1_destination", "fallback_2_destination",
@@ -53,6 +54,17 @@ def address(value):
     return mine, tuple(parts[:-1] + [grade_block_material_type(parts[-1])])
 
 
+def history_address(value):
+    location = address(value)
+    if location is None:
+        return None
+    mine, parts = location
+    # YOU80, YOU02 and YOU13 share the YOU pit area. Keep the full pit
+    # identifier in the existing, more specific levels.
+    pit_area = re.sub(r"\d+$", "", parts[0])
+    return mine, (*parts, pit_area)
+
+
 def timestamp(value):
     try:
         result = pd.to_datetime(value, dayfirst="/" in text(value), errors="coerce")
@@ -76,6 +88,7 @@ class DestinationRuleEngine:
 
     Fallback 1 ranks spatial level, then total 2WP ROM WMT, then name.
     Fallback 2 requires a measured stockpile cycle and a matching Nearest Crusher.
+    The last resort uses the latest dated non-waste 2WP movement in the same mine.
     Neither role establishes or consumes a physical build's remaining capacity.
     """
 
@@ -85,6 +98,7 @@ class DestinationRuleEngine:
         self.routes = {stockpile(k): v for k, v in (haul_routes or {}).items()}
         self.exact = defaultdict(list)
         self.index = [defaultdict(dict) for _ in LEVELS]
+        self.latest = {}
         self.cache = {}
         self.signature = hashlib.sha256(json.dumps(
             [VERSION, self.guidance, self.areas, self.routes], sort_keys=True, default=str).encode()).hexdigest()
@@ -99,12 +113,30 @@ class DestinationRuleEngine:
                     continue
                 item = dict(raw, source=source, destination="Stockpiles/" + dest)
                 self.exact[source_key(key)].append(item)
-                location = address(source)
+                location = history_address(source)
                 if not location or not tonnes:
                     continue
                 mine, parts = location
+                start = timestamp(raw.get("guidance_datetime"))
+                end = timestamp(raw.get("guidance_end_datetime"))
+                used_at = end if end is not None else start
+                if mine and used_at is not None and (not self.areas or self.areas.get(dest)):
+                    # The complete guidance horizon is authoritative. End time,
+                    # then start time and file order identify its latest use.
+                    rank = (-used_at.value, -start.value if start is not None else math.inf,
+                            -positive(raw.get("row_order")), dest, source)
+                    if mine not in self.latest or rank < self.latest[mine][0]:
+                        self.latest[mine] = (rank, dict(
+                            destination=item["destination"], rule="Latest 2WP destination within the same mine",
+                            mine=mine, evidence_source=source, history_wmt=tonnes, history_rows=1,
+                            guidance_datetime=start.isoformat() if start is not None else "",
+                            guidance_end_datetime=end.isoformat() if end is not None else "",
+                            latest_use_datetime=used_at.isoformat(), row_order=raw.get("row_order", 0)))
                 for index, (_, axes) in zip(self.index, LEVELS):
-                    bucket = index[(mine, *(parts[i] for i in axes))]
+                    values = tuple(parts[i] for i in axes)
+                    if not all(values):
+                        continue
+                    bucket = index[(mine, *values)]
                     record = bucket.setdefault(dest, dict(destination="Stockpiles/" + dest, history_wmt=0.0,
                                                           history_rows=0, evidence_source=source))
                     record["history_wmt"] += tonnes
@@ -123,7 +155,7 @@ class DestinationRuleEngine:
         return min(choices, key=rank)
 
     def _history(self, source):
-        location = address(source)
+        location = history_address(source)
         if not location:
             return []
         mine, parts = location
@@ -148,6 +180,7 @@ class DestinationRuleEngine:
         result = dict(schema_version=VERSION, primary_destination="Stockpiles/" + primary if primary else "",
                       primary_rule="2WP build order" if primary_destination is not None and primary else "Exact 2WP grade block" if primary else "",
                       fallback_1_destination="", fallback_2_destination="", fallback_1_rule="", fallback_2_rule="",
+                      last_resort_destination="", last_resort_rule="",
                       selected_destination="", resolution="unresolved", alternate_destinations=[], candidates=[], reason="")
         if route_only_waste or grade_block_material_type(source) in {"WS", "WASTE"}:
             result.update(primary_destination="", primary_rule="", reason="Waste is outside ROM destination rules.")
@@ -177,6 +210,14 @@ class DestinationRuleEngine:
             result.update(fallback_2_destination=nearby[0]["destination"], fallback_2_rule=nearby[0]["rule"])
         selected = result["primary_destination"] or result["fallback_1_destination"] or result["fallback_2_destination"]
         candidates = ([first] if first else []) + nearby[:1] + history[1:] + nearby[1:]
+        latest = None
+        if not selected:
+            location = address(source)
+            latest = self.latest.get(location[0], (None, None))[1] if location else None
+            if latest:
+                selected = latest["destination"]
+                candidates.append(latest)
+                result.update(last_resort_destination=selected, last_resort_rule=latest["rule"])
         seen = {primary}
         for candidate in candidates:
             dest = stockpile(candidate["destination"])
@@ -192,10 +233,10 @@ class DestinationRuleEngine:
         reported = {selected, *result["alternate_destinations"]}
         result["candidates"] = [r for r in result["candidates"] if r["destination"] in reported]
         result.update(selected_destination=selected,
-                      resolution=("primary_build_order" if primary_destination is not None else "exact_2wp") if primary else "spatial_fallback" if first else "nearby_fallback" if nearby else "unresolved",
+                      resolution=("primary_build_order" if primary_destination is not None else "exact_2wp") if primary else "spatial_fallback" if first else "nearby_fallback" if nearby else "last_destination_fallback" if latest else "unresolved",
                       reason="" if nearby else "No distinct eligible stockpile-to-stockpile haul route from a mapped origin in the ROM area.")
         if not selected:
-            result["reason"] = "No exact 2WP destination, matching spatial history or eligible stockpile-to-stockpile haul route."
+            result["reason"] = "No exact 2WP destination, matching spatial history, eligible stockpile-to-stockpile haul route or dated destination history within the same mine."
         self.cache[key] = result
         return deepcopy(result)
 

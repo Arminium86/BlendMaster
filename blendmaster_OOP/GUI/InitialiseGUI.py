@@ -52,6 +52,7 @@ from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
 from GUI.MaterialDestinationPlanView import MaterialDestinationPlanView
 from classes.DestinationBuildOrder import write_order_audit, inventory_areas
+from classes.DestinationRules import VERSION as DESTINATION_RULE_VERSION
 from classes.DestinationProgress import progress_settings
 from GUI.ProductTargetModeControls import ProductTargetModeControls
 from GUI.SoftGradePreferenceControls import SoftGradePreferenceControls
@@ -167,7 +168,8 @@ APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
 AMT_OPENING_CACHE_VERSION = 1
 AMT_CHUNK_RECONCILIATION_VERSION = 3
-EXPIT_INPUT_CACHE_VERSION = 2
+# Older Database View caches may contain an empty frame from a failed import.
+EXPIT_INPUT_CACHE_VERSION = 3
 APS_GUIDANCE_CACHE_VERSION = 1
 
 SITE_OPF_OPTIONS = {
@@ -5636,6 +5638,7 @@ class UserInputs(QMainWindow):
         )
         signature = {
             "cache_version": EXPIT_INPUT_CACHE_VERSION,
+            "destination_rule_version": DESTINATION_RULE_VERSION,
             "destination_guidance_version": (
                 ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
             ),
@@ -6747,8 +6750,10 @@ class UserInputs(QMainWindow):
                     )
                 )
             except Exception as exc:
-                warnings.append(f"APS 24HR payload preparation failed: {exc}")
-                transactions = pd.DataFrame()
+                # A failed import is not a valid inventory-only run. Let the
+                # existing error handler clear the snapshot and block Continue;
+                # successful empty imports still follow the normal cache path.
+                raise ValueError(f"APS 24HR payload preparation failed: {exc}") from exc
 
         periods = self.database_view_periods()
         window_start = pd.Timestamp(

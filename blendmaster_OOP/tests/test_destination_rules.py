@@ -56,14 +56,93 @@ class DestinationRuleTests(unittest.TestCase):
         rules = DestinationRuleEngine(guidance((block(stage="2"), "SAME", 1), (block(material="BA01"), "OTHER", 10000)))
         self.assertEqual(rules.resolve(SOURCE)["fallback_1_destination"], "Stockpiles/SAME")
 
-    def test_no_cross_mine_cross_pit_waste_or_invented_address_fallback(self):
-        history = guidance((block(pit="PIT_B"), "OTHER_PIT", 100), (block(mine="CC2"), "OTHER_MINE", 100),
+    def test_no_cross_mine_waste_or_invented_address_fallback(self):
+        history = guidance((block(mine="CC2"), "OTHER_MINE", 100),
                            (block(material="WS01"), "WASTE", 100), (block(material="BA01"), "FLAGGED", 100, {"ore_type": "Waste"}),
                            ("Reserves/CC1/PIT_A/BROKEN", "MALFORMED", 100))
         history.update(pit_destinations={"PIT_A": {"destination": "Stockpiles/OLD"}}, last_destination={"destination": "Stockpiles/LAST"})
         result = DestinationRuleEngine(history).resolve(SOURCE)
         self.assertEqual(result["resolution"], "unresolved")
         self.assertEqual(result["candidates"], [])
+
+    def test_missing_pit_stage_matches_pit_area_and_material_by_total_wmt(self):
+        source = block(pit="YOU80", material="SO69", mine="CC2")
+        history = guidance((block(pit="YOU02", material="SO01", mine="CC2"), "A", 60),
+                           (block(pit="YOU02", material="SO02", mine="CC2"), "A", 60),
+                           (block(pit="YOU13", material="SO03", mine="CC2"), "B", 119),
+                           (block(pit="YOU13", material="HG01", mine="CC2"), "OTHER_MATERIAL", 10000),
+                           (block(pit="YOU130", material="SO01", mine="CC1"), "OTHER_MINE", 10000),
+                           (block(pit="YOUWEST02", material="SO01", mine="CC2"), "OTHER_PIT", 10000))
+        result = DestinationRuleEngine(history).resolve(source)
+        self.assertEqual(result["selected_destination"], "Stockpiles/A")
+        self.assertEqual(result["fallback_1_rule"], "Pit area + material")
+        self.assertEqual(result["candidates"][0]["level"], 6)
+        self.assertEqual(result["candidates"][0]["history_wmt"], 120)
+        self.assertEqual(result["candidates"][0]["history_rows"], 2)
+        self.assertEqual(result["alternate_destinations"], ["Stockpiles/B"])
+        self.assertEqual(result["last_resort_destination"], "")
+
+    def test_specific_pit_history_precedes_broader_pit_area(self):
+        source = block(pit="YOU80", material="SO69")
+        history = guidance((block(pit="YOU80", material="BA01"), "SPECIFIC", 1),
+                           (block(pit="YOU02", material="SO01"), "AREA", 10000))
+        result = DestinationRuleEngine(history).resolve(source)
+        self.assertEqual(result["fallback_1_destination"], "Stockpiles/SPECIFIC")
+        self.assertEqual(result["fallback_1_rule"], LEVELS[4][0])
+
+    def test_last_resort_uses_latest_dated_movement_within_same_mine(self):
+        history = guidance((block(pit="OTHER01"), "HEAVY", 10000, {"guidance_end_datetime": "2026-09-03T07:00:00"}),
+                           (block(pit="OTHER02"), "LATEST", 1, {"guidance_end_datetime": "2026-09-04T07:00:00"}),
+                           (block(pit="OTHER03", mine="CC2"), "OTHER_MINE", 100, {"guidance_end_datetime": "2026-09-05T07:00:00"}))
+        result = DestinationRuleEngine(history).resolve(SOURCE, "2026-09-01")
+        self.assertEqual(result["resolution"], "last_destination_fallback")
+        self.assertEqual(result["selected_destination"], "Stockpiles/LATEST")
+        self.assertEqual(result["last_resort_destination"], "Stockpiles/LATEST")
+        self.assertEqual(result["primary_destination"], "")
+        self.assertEqual(result["fallback_1_destination"], "")
+        self.assertEqual(result["fallback_2_destination"], "")
+        self.assertEqual(result["alternate_destinations"], [])
+        evidence = result["candidates"][0]
+        self.assertEqual(evidence["mine"], "CC1")
+        self.assertEqual(evidence["evidence_source"], block(pit="OTHER02"))
+        self.assertEqual(evidence["latest_use_datetime"], "2026-09-04T07:00:00+08:00")
+
+    def test_last_resort_requires_eligible_positive_dated_history_and_valid_mine(self):
+        source = block(pit="UNSCHEDULED80")
+        history = guidance((block(), "VALID", 1, {"guidance_datetime": "2026-08-31"}),
+                           (block(), "UNDATED", 100, {"guidance_datetime": None}),
+                           (block(), "ZERO", 0), (block(), "NAN", float("nan")),
+                           (block(), "UNMAPPED", 100),
+                           (block(material="WS01"), "WASTE", 100),
+                           (block(), "FLAGGED", 100, {"ore_type": "Waste"}),
+                           (block(), "ROUTE_WASTE", 100, {"route_only_waste": True}))
+        areas = {name: "CR1" for name in ["VALID", "UNDATED", "ZERO", "NAN", "WASTE", "FLAGGED", "ROUTE_WASTE"]}
+        rules = DestinationRuleEngine(history, areas=areas)
+        result = rules.resolve(source)
+        self.assertEqual(result["selected_destination"], "Stockpiles/VALID")
+        self.assertEqual(result["candidates"][0]["latest_use_datetime"], "2026-08-31T00:00:00+08:00")
+        for invalid in ("Reserves/CC1/BROKEN", "UNSCHEDULED80/1/100/21/105/HG01", block(pit="UNSCHEDULED80", material="WS01")):
+            with self.subTest(source=invalid):
+                self.assertEqual(rules.resolve(invalid)["selected_destination"], "")
+        self.assertEqual(rules.resolve(source, route_only_waste=True)["selected_destination"], "")
+
+    def test_last_resort_ties_use_start_time_then_file_order(self):
+        history = guidance((block(pit="OTHER01"), "A", 100, {"guidance_datetime": "2026-09-01T07:00:00", "row_order": 99}),
+                           (block(pit="OTHER02"), "B", 100, {"guidance_datetime": "2026-09-01T08:00:00", "row_order": 1}),
+                           (block(pit="OTHER03"), "C", 1, {"guidance_datetime": "2026-09-01T08:00:00", "row_order": 2}))
+        for rows in history["source_destinations"].values():
+            rows[0]["guidance_end_datetime"] = "2026-09-01T09:00:00"
+        result = DestinationRuleEngine(history).resolve(SOURCE)
+        self.assertEqual(result["selected_destination"], "Stockpiles/C")
+
+    def test_last_resort_does_not_override_nearby_destination(self):
+        rules = DestinationRuleEngine(guidance((block(pit="OTHER01"), "LATEST", 100)),
+                                      areas={name: "CR1" for name in ["ORIGIN", "NEAR", "LATEST"]},
+                                      haul_routes={"ORIGIN": [route("NEAR", 3, "ORIGIN")]})
+        result = rules.resolve(SOURCE, anchor_destination="ORIGIN")
+        self.assertEqual(result["selected_destination"], "Stockpiles/NEAR")
+        self.assertEqual(result["resolution"], "nearby_fallback")
+        self.assertEqual(result["last_resort_destination"], "")
 
     def test_entire_history_ranks_total_wmt_and_name_with_trace(self):
         history = guidance((block(), "B", 60), (block(), "B", 60), (block(material="HG02"), "A", 120),
@@ -143,6 +222,29 @@ class DestinationRuleTests(unittest.TestCase):
         report = MaterialDestinationPlan.build(payloads, pd.DataFrame(), "manual")
         self.assertEqual(set(report["planned_2wp_destination"]), {""})
 
+    def test_pit_area_and_last_resort_survive_ingestion_without_inventing_exact_guidance(self):
+        for pit, resolution in (("YOU80", "spatial_fallback"), ("OTHER80", "last_destination_fallback")):
+            with self.subTest(pit=pit):
+                source = block(pit=pit, material="SO69", mine="CC2")
+                history = guidance((block(pit="YOU02", material="SO01", mine="CC2"), "BUILD", 100))
+                row = reserve_row(source, pit, "Stockpiles/CC2_ROM", 150, "09/09/2026 06:00", "09/09/2026 07:00")
+                with TemporaryDirectory() as temp:
+                    path = Path(temp)/"24hr.csv"
+                    pd.DataFrame([row]).to_csv(path, index=False)
+                    handler = ExpitDataHandler(path, destination_guidance=history,
+                                               destination_rule_context=dict(areas={"BUILD": "CR1"}))
+                    payloads = handler.process_transactions()
+                self.assertAlmostEqual(payloads["payload"].sum(), 150)
+                self.assertEqual(set(payloads["destination"]), {"Stockpiles/BUILD"})
+                self.assertEqual(set(payloads["two_wp_destination_resolution"]), {resolution})
+                for record in payloads.to_dict("records"):
+                    decision = json.loads(record["destination_rule_trace"])
+                    self.assertEqual(decision["resolution"], resolution)
+                    self.assertEqual(decision["primary_destination"], "")
+                    self.assertEqual(decision["candidates"][0]["evidence_source"], block(pit="YOU02", material="SO01", mine="CC2"))
+                report = MaterialDestinationPlan.build(payloads, pd.DataFrame(), "manual")
+                self.assertEqual(set(report["planned_2wp_destination"]), {""})
+
     def test_final_primary_recomputes_fallbacks_without_consuming_them(self):
         ctx = context()
         ctx["destination_rules"] = dict(guidance=guidance((block(), "SP1", 200), (block(material="HG02"), "SP2", 100)),
@@ -177,6 +279,18 @@ class DestinationRuleTests(unittest.TestCase):
         assigned = result["assignments"][0]
         self.assertEqual(assigned["primary_destination"], "")
         self.assertEqual(assigned["fallback_1_destination"], "Stockpiles/SP2")
+        self.assertEqual(assigned["unresolved_wmt"], 100)
+        self.assertEqual(result["ledger"], [])
+
+    def test_last_resort_cannot_bypass_blank_primary_capacity(self):
+        ctx = context(capacity=None)
+        ctx["destination_rules"] = dict(guidance=guidance((block(pit="OTHER01"), "SP2", 100)))
+        row = payload(1, 100); row["source"] = SOURCE
+        result = allocate_final_plan(transactions([row]), pd.DataFrame(), ctx)
+        assigned = result["assignments"][0]
+        decision = json.loads(assigned["destination_rule_trace"])
+        self.assertEqual(decision["last_resort_destination"], "Stockpiles/SP2")
+        self.assertEqual(assigned["primary_destination"], "")
         self.assertEqual(assigned["unresolved_wmt"], 100)
         self.assertEqual(result["ledger"], [])
 

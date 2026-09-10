@@ -802,9 +802,9 @@ allocation audit (warehouse inventory reload stubbed).
 At APS ingestion, an exact parent-grade-block match keeps the existing nearest
 calendar-date, then highest-row-ROM-WMT choice. Saved undated legacy exact ratios
 remain supported. When an exact match is missing, fallback candidates supply the
-resolved destination. The old dominant-pit and last-stockpile shortcuts are no
-longer used. Missing evidence raises an explicit unresolved-source error rather
-than inventing a destination from another pit.
+resolved destination. Missing evidence after all fallback searches raises an
+explicit unresolved-source error. Legacy dominant-pit and last-stockpile summary
+fields alone do not establish evidence; the rules index the actual guidance rows.
 
 Fallback 1 searches these levels in order, excluding the selected primary:
 
@@ -815,6 +815,7 @@ Fallback 1 searches these levels in order, excluding the selected primary:
 | 3 | Pit + stage + material |
 | 4 | Pit + material |
 | 5 | Pit + stage + bench + flitch + any non-waste material |
+| 6 | Pit area + material |
 
 Mine boundaries remain part of the address. Blast does not participate in this
 ladder. Numeric address tokens such as stage `01` and `1` compare equally. Malformed
@@ -824,6 +825,10 @@ supplied, fallback history must lead to a mapped ROM destination. Within one lev
 total historical ROM WMT ranks destinations, then destination name breaks ties.
 Evidence records the matched level, total WMT, contributing row count and a
 representative grade block. The imported guidance remains the complete row audit.
+For level 6, the pit area removes trailing digits from the full pit identifier:
+`YOU80`, `YOU02` and `YOU13` share `YOU`. Material still matches its grade-block
+code (for example, `SO69` and `SO03` share `SO`). This handles a 24HR pit stage
+missing from the 2WP while preserving the priority of the five existing levels.
 
 Fallback 2 ranks measured **stockpile-to-stockpile cycles** from the resolved
 primary to another stockpile with the same displayed **Nearest Crusher**. If
@@ -839,12 +844,24 @@ route nodes, the origin, ROM area and measured cycle. Missing route evidence lea
 fallback 2 blank with an explicit reason. A **Use** flag controls stockpile feed,
 not eligibility to receive ROM tonnes, so an unused build destination can qualify.
 
+If exact, spatial and measured nearby searches all fail, the final resort uses
+the latest eligible destination in the **same mine**, across the full imported
+2WP horizon. It ranks positive-tonnage non-waste guidance rows by end time
+(start time when the end is absent), then start time and file order. A valid mine
+address and a date are required; supplied inventory mappings must identify a ROM
+destination. This final resort may cross pit areas and material codes within that
+mine. Its trace records `last_destination_fallback`, the selected destination,
+source block, mine, timestamps, row order and WMT. It does not fabricate an exact
+2WP match, spatial match or haul route, or bypass primary build capacity.
+
 Primary, fallback 1, fallback 2 and the two ordered distinct alternates retain
 their own fields. Candidate evidence is limited to those reported choices; the
 full eligible-candidate count and input signature retain the search context
 without duplicating up to 100 rejected routes into every payload. APS grouping preserves this metadata through payload creation. After
 Task 23 allocates a final plan, the engine recalculates candidates relative to that
 payload's actual primary, so advancing to the next build changes its fallbacks.
+The APS payload cache signature includes the destination-rule version, so projects
+saved under older rules rebuild their import instead of reusing stale decisions.
 The `destination_primary_assignments` audit stores those separate roles, selected
 rules, JSON candidate evidence and a rule-input signature. Primary capacity
 allocation remains authoritative: fallback candidates do not consume tonnes or
@@ -865,11 +882,12 @@ loading, cached, no-data and ambiguous-activity states still passed.
 A read-only review of the CC 18 August 2WP/24HR exports and
 `CC_Cycles_2WP.csv` checked 5,492 source/time combinations from 89 parent grade
 blocks: 5,238 exact and 210 spatial resolutions, all 5,448 with a nearby fallback.
-The remaining 44 combinations cover `CC1/HAL03/01/393/130/402/SG17` and
+Under the original five-level rules, the remaining 44 combinations covered `CC1/HAL03/01/393/130/402/SG17` and
 `CC2/YOU80/01/372/001/381/SO69`. These have no eligible spatial fallback in the
-reviewed mapping; their generic 24HR HAL_ROM/CC2_ROM origins are also unmapped.
-They remain unresolved and require applicable destination/mapping evidence before
-ingestion can assign them. No arbitrary last-stockpile substitute is applied.
+original mapping; their generic 24HR HAL_ROM/CC2_ROM origins are also unmapped.
+The September 10 edge-case extension resolves YOU80 SO material to
+`OPF02_RP01_0201` using YOU13 SO guidance. HAL03 SG uses the final same-mine
+fallback to `HAL01_RP01_0304`, supported by the latest eligible CC1 guidance row.
 The review is of imported files, not a mutation or rerun of the user's live plan.
 Generated screenshots and review records remain local and Git-ignored under
 `docs/screenshots/task24/`.

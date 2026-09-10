@@ -1,15 +1,19 @@
 import copy
 from contextlib import closing
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pandas as pd
 
 from database.DatabaseContext import get_database_path, set_database_path
 from database.SQLiteDatabase import DatabaseManager
 from execute.Run import Run
+from GUI.InitialiseGUI import UserInputs
 from tests.test_dual_schedule_ingestion import reserve_row
 
 
@@ -82,6 +86,73 @@ class ExpitPayloadPersistenceTests(unittest.TestCase):
                     self.assertEqual(connection.execute(
                         "SELECT COUNT(*) FROM expit_payload_transactions"
                     ).fetchone()[0], 0)
+
+    @staticmethod
+    def database_view():
+        return SimpleNamespace(
+            database_view_stockpile_rows=lambda: [{"source_type": "Stockpile", "tonnes": 100}],
+            file_path_24hr_choice="24hr.csv", start_time_choice=pd.Timestamp("2026-08-18"),
+            expit_mode_choice=2, active_site_context=lambda: {"mine": "CC"},
+            run_program=Mock(), database_view_periods=lambda: SimpleNamespace(
+                horizon_end=lambda: pd.Timestamp("2026-08-20")),
+            database_view_grade_block_rows=lambda _: [],
+            database_view_input_signature=lambda: "current-inputs",
+        )
+
+    def test_failed_aps_preparation_cannot_return_an_empty_solver_snapshot(self):
+        view = self.database_view()
+        message = "24HR grade block 'SO69_459': No exact 2WP destination."
+        view.run_program.prepare_expit_payload_transactions.side_effect = ValueError(message)
+        with self.assertRaisesRegex(ValueError, "APS 24HR payload preparation failed") as caught:
+            UserInputs.prepare_database_view_data(view)
+        self.assertIn(message, str(caught.exception))
+        # The background task delivers the exception to this existing handler.
+        view.database_view_expit_payload_transactions = pd.DataFrame()
+        view.database_view_snapshot_signature = "previous-inputs"
+        for name in ("database_view_refresh_button", "database_view_continue_button",
+                     "database_view_table", "database_view_warning_label", "database_view_summary_label"):
+            setattr(view, name, Mock())
+        UserInputs.handle_database_view_error(view, str(caught.exception))
+        self.assertIsNone(view.database_view_expit_payload_transactions)
+        self.assertIsNone(view.database_view_snapshot_signature)
+        self.assertTrue(view.database_view_refresh_pending)
+        view.database_view_continue_button.setEnabled.assert_called_once_with(False)
+
+    def test_successful_empty_aps_preparation_remains_valid(self):
+        view = self.database_view()
+        empty = pd.DataFrame()
+        empty.attrs["source_property_warnings"] = []
+        view.run_program.prepare_expit_payload_transactions.return_value = empty
+        result = UserInputs.prepare_database_view_data(view)
+        self.assertIs(result["transactions"], empty)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(len(result["records"]), 1)
+
+    def test_old_database_view_failure_cache_is_not_reused(self):
+        view = SimpleNamespace(
+            time_mode_choice=2, expit_mode_choice=2, expit_refresh_tolerance_minutes=30,
+            expit_signatures_match_except_start_time=UserInputs.expit_signatures_match_except_start_time,
+        )
+        signature = UserInputs.expit_input_cache_signature(
+            view, start_time=pd.Timestamp("2026-08-18"), site_context={"mine": "CC"},
+            schedule_path=str(self.schedule), two_wp_path=str(self.reference), selected_agents=["EX01"],
+            expit_mode=2, reevaluate_direct_tip=False, selected_crusher=[],
+        )
+        for old_format in ("failed_import", "missing_rule_version", "older_rule_version"):
+            old = json.loads(signature)
+            if old_format == "failed_import":
+                old["cache_version"] = 2
+            elif old_format == "missing_rule_version":
+                old.pop("destination_rule_version")
+            else:
+                old["destination_rule_version"] -= 1
+            self.manager.write_expit_input_cache(pd.DataFrame(), json.dumps(old, sort_keys=True),
+                                                metadata={"source": "database_view"})
+            for time_mode in (1, 2):
+                with self.subTest(old_format=old_format, time_mode=time_mode):
+                    view.time_mode_choice = time_mode
+                    cached, _ = UserInputs.read_reusable_expit_input_cache(view, signature)
+                    self.assertIsNone(cached)
 
 
 if __name__ == "__main__":
