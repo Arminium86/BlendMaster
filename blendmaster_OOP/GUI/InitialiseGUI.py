@@ -19371,7 +19371,7 @@ class UserInputs(QMainWindow):
         # rows before rebuilding any already-generated chunk snapshots.
         draw_AMT_map.excluded_footprints = self.excluded_amt_footprints()
         draw_AMT_map.data = draw_AMT_map.fetch_data()
-        self.reconcile_saved_AMT_chunk_grade_streams()
+        self.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
         draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
         draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table or [])
         draw_AMT_map.unique_footprints = draw_AMT_map.get_unique_footprints()
@@ -19409,7 +19409,7 @@ class UserInputs(QMainWindow):
             payload, sort_keys=True, default=str, separators=(",", ":")
         )
 
-    def reconcile_saved_AMT_chunk_grade_streams(self, force=False):
+    def reconcile_saved_AMT_chunk_grade_streams(self, force=False, *, allow_pending=False):
         """Refresh derived brand streams in saved AMT chunks.
 
         Projects saved before partial-lineage aggregation was corrected can
@@ -19418,6 +19418,12 @@ class UserInputs(QMainWindow):
         brand copies and historical reconciliation layers are rebuilt here.
         """
         self.prune_zeroed_amt_chunks()
+        if allow_pending and self.reconciliation_factors_pending():
+            # The map and project loader can restore raw AMT data before Data
+            # Streams fetches factors. Keep saved chunks intact and uncached so
+            # their grades are rebuilt after enrichment has actually completed.
+            self.AMT_chunk_reconciliation_signature = ""
+            return 0
         request_signature = self.AMT_chunk_reconciliation_request_signature()
         if (
             not force
@@ -26621,7 +26627,7 @@ class UserInputs(QMainWindow):
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
         self.AMT_footprint_exclusions = normalize_amt_exclusions(loaded_state.get("AMT_footprint_exclusions"))
-        self.reconcile_saved_AMT_chunk_grade_streams()
+        self.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
         self.database_view_selected_columns = copy.deepcopy(
             loaded_state.get("database_view_selected_columns")
         )

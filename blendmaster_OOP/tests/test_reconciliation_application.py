@@ -328,6 +328,79 @@ class ChunkAndIntegrationTests(unittest.TestCase):
         self.assertTrue(view.AMT_enrichment_signature)
         self.assertIn("reconciliation", view.AMT_stockpile_data["SP1"][0])
 
+    def test_amt_fetch_callback_refreshes_raw_map_then_reconciles_after_factors_load(self):
+        previous = get_database_path()
+        for saved_chunks in (False, True):
+            with self.subTest(saved_chunks=saved_chunks), tempfile.TemporaryDirectory() as directory:
+                view = window()
+                view.historical_recon_factors = {}
+                view.updated_stockpile_data = {"SP1": {"amt": True, "balance": 100, "build": "SP1_26001"}}
+                view.stockpile_data = {}
+                view.AMT_chunk_settings = {}
+                view.hex_sequence_table = []
+                if saved_chunks:
+                    view.hex_sequence_table = [chart().build_chunk_row(
+                        "SP1", 1, [chunk_row("H1", GB, 100, 50, 60, 100)], 100
+                    )]
+                expected_chunks = copy.deepcopy(view.hex_sequence_table)
+                view.hex_sequence_table_argument = copy.deepcopy(expected_chunks)
+                view.opening_stockpile_inventories = OpeningStockpileInventories()
+                view.draw_AMT_map = chart()
+                view.draw_AMT_map.source_property_weights = {}
+                view.draw_AMT_map.db_path = os.path.join(directory, "amt.db")
+                view.AMT_stockpile_table = Mock()
+                view.store_AMT_chunk_settings = Mock(return_value=True)
+                view.ensure_AMT_map_panel = Mock()
+                view.start_dash_AMT_map_thread = Mock()
+                view.set_AMT_cache_status = Mock()
+                view.map_fields_available_list = Mock()
+                view.refresh_map_available_fields = Mock()
+                view.project_load_restore_in_progress = False
+                view.project_load_waiting_for_AMT = False
+                view.agent_workflow_waiting_for_amt = False
+                try:
+                    set_database_path(view.draw_AMT_map.db_path)
+                    # Exercise the actual fetch completion, raw SQLite write,
+                    # map reload and chunk refresh from the reported traceback.
+                    view.finish_AMT_stockpile_table_from_fetch(
+                        view.updated_stockpile_data, {"SP1": [raw_hex()]}
+                    )
+                    self.assertEqual(list(view.draw_AMT_map.unique_footprints), ["SP1"])
+                    self.assertEqual(view.draw_AMT_map.data.iloc[0]["hex"], "H1")
+                    self.assertEqual(view.hex_sequence_table, expected_chunks)
+                    self.assertEqual(view.hex_sequence_table_argument, expected_chunks)
+                    self.assertEqual(view.AMT_chunk_reconciliation_signature, "")
+                    self.assertNotIn("grade_streams", view.AMT_stockpile_data["SP1"][0])
+                    view.AMT_stockpile_table.blockSignals.assert_called_with(False)
+                    # Calculations still reject missing factors; only setup
+                    # refreshes may defer them.
+                    with self.assertRaisesRegex(ValueError, "standard factor record"):
+                        view.reconcile_saved_AMT_chunk_grade_streams(force=True)
+                    view.historical_recon_factors = {"SF": standard()}
+                    self.assertTrue(view.refresh_AMT_enrichment_if_needed())
+                    stored = view.draw_AMT_map.data.iloc[0]
+                    self.assertAlmostEqual(stored["grade_streams"]["adjusted_product"]["SF"]["fe"], 54)
+                    self.assertTrue(stored["reconciliation"])
+                    self.assertTrue(view.AMT_chunk_reconciliation_signature)
+                    if saved_chunks:
+                        self.assertEqual(view.hex_sequence_table[0]["member_hexes"], expected_chunks[0]["member_hexes"])
+                        self.assertAlmostEqual(view.hex_sequence_table[0]["grade_streams"]["adjusted_product"]["SF"]["fe"], 54)
+                finally:
+                    set_database_path(previous)
+
+    def test_pending_chunk_refresh_clears_cache_and_does_not_hide_invalid_factors(self):
+        view = window()
+        view.historical_recon_factors = {}
+        view.hex_sequence_table = []
+        view.hex_sequence_table_argument = []
+        view.AMT_chunk_reconciliation_signature = view.AMT_chunk_reconciliation_request_signature()
+        self.assertEqual(view.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True), 0)
+        self.assertEqual(view.AMT_chunk_reconciliation_signature, "")
+        # A nonempty but incomplete factor set is invalid, not a pending fetch.
+        view.historical_recon_factors = {"SF": {}}
+        with self.assertRaisesRegex(ValueError, "effective standard"):
+            view.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
+
     def test_chunk_grades_use_per_hex_adjustments_and_declared_product_weights(self):
         rows = [chunk_row("H1", GB, 40, 50, 60, 10), chunk_row("H2", REMOTE, 60, 30, 40, 90)]
         chunk = chart().build_chunk_row("SP1", 1, rows, 100)
