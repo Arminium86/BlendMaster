@@ -129,7 +129,7 @@ from classes.ProductTargets import (
     PRODUCT_TARGET_KEYS, migrate_product_target_state,
     product_targets_identifier, product_targets_value,
 )
-from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields
+from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, quality_label, quality_order_note, QUALITY_DIRECTION_NOTE
 from classes.ProductTargetModes import (
     target_mode_fields, TARGET_MODE_LABELS, SOFT_MODE_NOTICE, require_supported_target_modes,
 )
@@ -3187,7 +3187,7 @@ class UserInputs(QMainWindow):
             self.product_build_plan_scenario_label
         )
 
-        quality_note = QLabel("Choose a Target mode for each build. Hard uses Min/Max. Soft uses Target with LQL (lower quality limit) and HQL (higher quality limit). Select a build to configure its soft settings below. Changing mode preserves all grade values; leave unspecified quality values blank.")
+        quality_note = QLabel("Choose a Target mode for each build. Hard uses Min/Max. Soft uses Target with LQL/HQL. " + QUALITY_DIRECTION_NOTE + " Select a build to configure its soft settings below. Leave unspecified quality values blank.")
         quality_note.setWordWrap(True)
         quality_note.setStyleSheet("color: #526474;")
         self.product_build_layout.addWidget(quality_note)
@@ -3213,7 +3213,7 @@ class UserInputs(QMainWindow):
             "P Max",
             "Mn Min",
             "Mn Max",
-            *[f"{grade} {part}" for grade in ("Fe", "Si", "Al", "P", "Mn") for part in ("LQL", "Target", "HQL")],
+            *[f"{grade} {quality_label(grade, part)}" for grade in ("Fe", "Si", "Al", "P", "Mn") for part in ("lql", "target", "hql")],
         ]
         self.product_build_table.setColumnCount(len(self.product_build_headers))
         self.product_build_table.setHorizontalHeaderLabels(self.product_build_headers)
@@ -3576,10 +3576,10 @@ class UserInputs(QMainWindow):
 
         for key, value in quality_fields(setting, validate=False).items():
             _, grade, part = key.split("_")
-            label = f"{grade.title()} {part.upper() if part != 'target' else 'Target'}"
+            label = f"{grade.title()} {quality_label(grade, part)}"
             item = QTableWidgetItem("" if value is None else str(value))
             item.setTextAlignment(Qt.AlignCenter)
-            item.setToolTip("Quality specification (%). When supplied, LQL ≤ Target ≤ HQL. Blank means unspecified. Hard mode retains these as reference values; Soft mode uses these target settings.")
+            item.setToolTip("Quality specification (%). " + quality_order_note(grade) + " Blank means unspecified. Hard mode retains these as reference values; Soft mode uses these target settings.")
             if imported_2wp and part == "target":
                 item.setData(IMPORTED_GRADE_ROLE, True)
                 item.setToolTip(item.toolTip() + " " + PRECISION_TOOLTIP)
@@ -3734,7 +3734,7 @@ class UserInputs(QMainWindow):
                 setting[max_key] = max_value
             for key in QUALITY_FIELDS:
                 _, grade, part = key.split("_")
-                label = f"{grade.title()} {part.upper() if part != 'target' else 'Target'}"
+                label = f"{grade.title()} {quality_label(grade, part)}"
                 item = self.product_build_table.item(row_idx, self.product_build_headers.index(label))
                 setting[key] = item.text().strip() if item else None
             try:
@@ -14327,7 +14327,8 @@ class UserInputs(QMainWindow):
                     "target_tonnes, target_fe_min, target_fe_max, target_si_min, target_si_max, "
                     "target_al_min, target_al_max, target_p_min, target_p_max, target_mn_min, and target_mn_max. "
                     "Optional row-owned quality specifications use target_<analyte>_lql, target_<analyte>_target and target_<analyte>_hql; "
-                    "blank/null means unspecified. Preserve opf and byproduct ownership. Values must satisfy LQL <= Target <= HQL where present. "
+                    "blank/null means unspecified. Preserve opf and byproduct ownership. For backward compatibility the serialized _lql/_hql keys mean numerical lower/upper bounds for every analyte, and must satisfy _lql <= _target <= _hql where present. "
+                    "UI quality labels are Fe: LQL <= Target <= HQL; contaminants Si/Al/P/Mn: HQL <= Target <= LQL. Thus contaminant HQL maps to _lql and contaminant LQL maps to _hql. "
                     "Each row has product_target_schema_version=2 and target_mode hard or soft; absent legacy modes become hard. "
                     "target_evaluation_basis is steady_state or cumulative_build; target_<analyte>_limit_mode is hard or soft. "
                     "Hard uses existing Min/Max. Soft uses Target deviation penalties with hard or soft LQL/HQL at the selected evaluation basis. "

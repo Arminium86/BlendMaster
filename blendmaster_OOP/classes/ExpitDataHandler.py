@@ -1768,6 +1768,8 @@ class ExpitDataHandler:
         return False
 
     def _group_data(self):
+        if self.data.empty:
+            return
         # Preserve non-contiguous returns to the same grade block. Grouping on
         # source/destination alone previously collapsed A > B > A into one A
         # record and removed the evidence needed to detect face reversals.
@@ -2309,6 +2311,7 @@ class ExpitDataHandler:
                         })
 
             return pd.DataFrame(self.results)
+        return pd.DataFrame()
     
 
     def get_latest_block_and_mined_tonnes(self, agent):

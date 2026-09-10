@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
                              QPushButton, QTableWidget, QTableWidgetItem, QAbstractItemView, QFileDialog, QMessageBox)
 from classes.ProductQualityReport import quality_report_rows
+from classes.ProductQualityLimits import quality_audit_for_display, QUALITY_DIRECTION_NOTE
 from classes.ProductTargetModes import EVALUATION_LABELS
 
 
@@ -17,7 +18,7 @@ class ProductQualityReview(QDialog):
         ("steady_state_number", "Steady\nstate"), ("build_name", "Build"), ("opf", "OPF"), ("brand", "Brand"),
         ("lane", "By-product"), ("analyte", "Analyte"), ("target_mode", "Target\nmode"),
         ("actual_grade", "Actual grade\n(%)"), ("target", "Target\n(%)"), ("lql", "LQL\n(%)"), ("hql", "HQL\n(%)"),
-        ("target_deviation", "Target deviation\n(pp)"), ("below_lql", "Below LQL\n(pp)"), ("above_hql", "Above HQL\n(pp)"),
+        ("target_deviation", "Target deviation\n(pp)"), ("lql_breach", "LQL breach\n(pp)"), ("hql_breach", "HQL breach\n(pp)"),
         ("limit_mode", "LQL/HQL\nmode"), ("quality_status", "Status"), ("grade_weight_tonnes", "Grade-weight\ntonnes"),
         ("target_penalty", "Target\npenalty"), ("limit_penalty", "Limit\npenalty"), ("opening_penalty", "Opening\npenalty"),
         ("applied_penalty", "Applied grade\npenalty"), ("source_closeness_score", "Source closeness\n(0–1)"),
@@ -38,6 +39,7 @@ class ProductQualityReview(QDialog):
         layout.addWidget(title)
         description = QLabel("Review the saved plan at either grain. Applied penalties appear only at the build's selected evaluation basis. A negative applied penalty is an improvement or a reward. Penalties are objective units; they are not financial forecasts. Hard mode uses Min/Max; LQL/Target/HQL remain reference values.")
         description.setWordWrap(True)
+        description.setText(description.text() + " " + QUALITY_DIRECTION_NOTE)
         layout.addWidget(description)
         controls = QHBoxLayout()
         self.plan = QComboBox()
@@ -107,7 +109,7 @@ class ProductQualityReview(QDialog):
     def render(self, *_):
         rows = quality_report_rows(self.report, grain=self.grain.currentData(), analyte=self.analyte.currentData())
         term = self.search.text().strip().lower()
-        self.rows = [r for r in rows if not term or term in " ".join(str(r.get(k, "")) for k in ("build_name", "opf", "brand")).lower()]
+        self.rows = [quality_audit_for_display(r) for r in rows if not term or term in " ".join(str(r.get(k, "")) for k in ("build_name", "opf", "brand")).lower()]
         self.table.setRowCount(len(self.rows))
         for i, row in enumerate(self.rows):
             for j, (key, _) in enumerate(self.FIELDS):
@@ -130,7 +132,7 @@ class ProductQualityReview(QDialog):
                 self.table.setItem(i, j, item)
         self.table.resizeColumnsToContents()
         overview = {"steady_state_number", "build_name", "opf", "brand", "lane", "analyte", "target_mode", "actual_grade",
-                    "target", "lql", "hql", "target_deviation", "below_lql", "above_hql", "limit_mode", "quality_status"}
+                    "target", "lql", "hql", "target_deviation", "lql_breach", "hql_breach", "limit_mode", "quality_status"}
         penalties = {"steady_state_number", "build_name", "opf", "analyte", "target_mode", "grade_weight_tonnes", "target_penalty",
                      "limit_penalty", "opening_penalty", "applied_penalty", "source_closeness_score", "source_dispersion_score", "applied_similarity_penalty"}
         visible = overview if self.columns.currentIndex() == 0 else penalties if self.columns.currentIndex() == 1 else {k for k, _ in self.FIELDS}

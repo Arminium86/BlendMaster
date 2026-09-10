@@ -2,6 +2,7 @@
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox, QCheckBox, QSizePolicy
 from classes.SoftProductGrades import objective_config
+from classes.ProductQualityLimits import QUALITY_DIRECTION_NOTE
 
 
 class SoftGradePreferenceControls(QWidget):
@@ -14,6 +15,7 @@ class SoftGradePreferenceControls(QWidget):
         layout.addWidget(title)
         description = QLabel("Applies to Soft builds in Product Targets. Weights trade against throughput, cost and the other incentives in Solver Configuration. Hard LQL/HQL remain constraints even when a penalty is disabled.")
         description.setWordWrap(True)
+        description.setToolTip(QUALITY_DIRECTION_NOTE)
         layout.addWidget(description)
         top = QHBoxLayout()
         self.target_weight = QLineEdit()

@@ -1184,8 +1184,11 @@ class DatabaseManager:
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
 
-        results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        # No eligible APS payloads can produce a frame with no columns. Still
+        # clear the report and write its audits, but only format actual rows.
+        if not results.empty:
+            results['start_datetime'] = pd.to_datetime(results['start_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            results['delivered_datetime'] = pd.to_datetime(results['delivered_datetime']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
         # Insert each row from the DataFrame into the database
         for _, row in results.iterrows():

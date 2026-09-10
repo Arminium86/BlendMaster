@@ -16,6 +16,7 @@ import matplotlib.dates as mdates
 
 from classes.GradeStreams import normalise_opf
 from classes.ProductAssayReport import target_overlays
+from classes.ProductQualityLimits import quality_label, QUALITY_DIRECTION_NOTE
 from setup.ProductAssayHistory import ProductAssayHistory, ProductAssayUnavailable, GRAINS, awst
 
 
@@ -360,7 +361,7 @@ class OPFProductionReport(QWidget):
             return awst(value).strftime("%d %b %Y %H:%M AWST") if value else "Not available"
         self.timestamps.setText(f"Fetched: {stamp(self.snapshot['fetched_at'])} · Latest production record: {stamp(latest)} · Warehouse updated: {stamp(self.snapshot.get('data_last_updated'))}")
         note = "Production time is the transaction time (AWST). Weighted averages use valid assay DMT for each analyte. Edge periods may be partial."
-        self.notes.setText(note + ("\n" + " ".join(dict.fromkeys(warnings)) if warnings else ""))
+        self.notes.setText(note + " " + QUALITY_DIRECTION_NOTE + ("\n" + " ".join(dict.fromkeys(warnings)) if warnings else ""))
 
     def render_charts(self, start, end):
         self.figure.clear()
@@ -388,7 +389,8 @@ class OPFProductionReport(QWidget):
                 if i == 1:
                     legend.append(Line2D([], [], color=colors[opf], marker="o", label=opf.replace("_", " ")))
             for overlay in self.overlays:
-                for part, style in (("lql", "--"), ("target", "-"), ("hql", ":")):
+                for part in ("lql", "target", "hql"):
+                    style = {"LQL": "--", "Target": "-", "HQL": ":"}[quality_label(analyte, part)]
                     value = overlay["values"].get(f"target_{analyte}_{part}")
                     if value is not None:
                         ax.plot([awst(overlay["start"]), awst(overlay["end"])], [value, value],
@@ -421,7 +423,8 @@ class OPFProductionReport(QWidget):
             period = "Undated current reference" if o["reference_only"] else f"{awst(o['start']):%d %b %Y %H:%M} – {awst(o['end']):%d %b %Y %H:%M} AWST (visible interval)"
             values = []
             for analyte, label in LABELS.items():
-                specs = " / ".join(str(o["values"].get(f"target_{analyte}_{part}")) if o["values"].get(f"target_{analyte}_{part}") is not None else "—" for part in ("lql", "target", "hql"))
+                parts = ("lql", "target", "hql") if analyte == "fe" else ("hql", "target", "lql")
+                specs = " / ".join(str(o["values"].get(f"target_{analyte}_{part}")) if o["values"].get(f"target_{analyte}_{part}") is not None else "—" for part in parts)
                 values.append(f"{label}: {specs}")
             details.append(f"{o['opf']} · {o['name']} · {period}\nLQL / Target / HQL (%): " + " · ".join(values))
         self.target_details.setPlainText("\n\n".join(details) or "No matching target specifications for this selection.")

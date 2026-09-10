@@ -4,6 +4,7 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox
 
 from classes.ProductTargetModes import EVALUATION_LABELS, LIMIT_MODE_LABELS, target_mode_fields
+from classes.ProductQualityLimits import quality_order_note
 
 
 class ProductTargetModeControls(QWidget):
@@ -33,7 +34,7 @@ class ProductTargetModeControls(QWidget):
             field = QComboBox()
             for value, text in LIMIT_MODE_LABELS.items():
                 field.addItem(text, value)
-            field.setToolTip("Hard: LQL/HQL cannot be breached. Soft: breaches receive a higher penalty than Target deviation. Blank limits stay unspecified.")
+            field.setToolTip(quality_order_note(a) + " Hard: LQL/HQL cannot be breached. Soft: breaches receive a higher penalty than Target deviation. Blank limits stay unspecified.")
             field.setMinimumWidth(max(field.fontMetrics().horizontalAdvance(text) for text in LIMIT_MODE_LABELS.values()) + 55)
             limits.addWidget(QLabel(label + " LQL/HQL"), 0, column)
             limits.addWidget(field, 1, column)

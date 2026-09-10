@@ -357,8 +357,10 @@ def analyte_quality_limit(
 ) -> Dict[str, Any]:
     """Return the quality settings for one analyte.
 
-    ProductQualityLimits validates LQL <= target <= HQL at input and runtime
-    boundaries. Keeping absent bounds as ``None`` prevents an open
+    ProductQualityLimits validates numerical lower <= target <= upper at input
+    and runtime boundaries. Legacy lql/hql keys store numerical lower/upper;
+    UI captions reverse for contaminants (HQL <= Target <= LQL).
+    Keeping absent bounds as ``None`` prevents an open
     upper bound from becoming a literal zero.
     """
     return {

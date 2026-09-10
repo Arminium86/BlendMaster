@@ -13,6 +13,7 @@ import math
 from datetime import date, datetime
 from classes.ManualBlendSummary import ManualBlendSummary
 from classes.ManualBlendRules import ManualBlendRules
+from classes.ProductQualityLimits import quality_label
 
 
 def grade_profile_y_axis_settings(values):
@@ -1326,7 +1327,7 @@ class DrawOptimisedGradeProfiles:
                 return "unspecified" if pd.isna(value) else f"{float(value):.5g}"
             if row.get("target_mode") == "soft":
                 return (f"Soft · Target {number(row.get(f'target_{grade}_target'))}; "
-                        f"LQL {number(row.get(f'target_{grade}_lql'))}; HQL {number(row.get(f'target_{grade}_hql'))} "
+                        f"{quality_label(grade, 'lql')} {number(row.get(f'target_{grade}_lql'))}; {quality_label(grade, 'hql')} {number(row.get(f'target_{grade}_hql'))} "
                         f"({row.get(f'target_{grade}_limit_mode') or 'hard'} limits)")
             return f"Hard · Min {number(row.get(f'target_{grade}_min'))}; Max {number(row.get(f'target_{grade}_max'))}"
 

@@ -414,10 +414,30 @@ Contracts:
   safe because `classes/CloudbreakProductSplit.py` back-calculates lump grades
   so lump and fines recombine to the adjusted head grade (Q53).
 - LQL/HQL are manually entered for now (Q54).
+- Quality-direction caption clarification (10 September 2026): Fe uses
+  **LQL ≤ Target ≤ HQL**; contaminants Si, Al, P and Mn use
+  **HQL ≤ Target ≤ LQL**. LQL/HQL mean lower/higher *quality*, not necessarily
+  lower/higher numerical grade. Equality at a limit retains existing acceptance.
+  Product Targets, chart legends/details, manual grade profiles, solver messages
+  and Product Quality Results/CSV use these analyte-specific labels. Breach
+  columns are **LQL breach** and **HQL breach**, with the direction determined
+  by the analyte.
+  For saved-project and raw database compatibility, schema-v1 quality records,
+  schema-v2 target rows and raw audit `_lql`/`_hql` fields retain their original
+  numerical lower/upper meanings. Contaminant HQL therefore maps to the legacy
+  `_lql` key and contaminant LQL to `_hql`; raw `below_lql`/`above_hql` remain
+  numerical lower/upper breaches. The presentation mapping also applies to old
+  saved audits. No stored value, numerical constraint or penalty changes, and
+  agent payload instructions explicitly document this compatibility mapping.
+  Validation: 113 focused checks passed, including real CBC boundary/penalty
+  decisions, saved-target round trips, saved-audit CSV, chart line styles and
+  manual profile captions. Product Targets and Product Quality Results were
+  rendered and visually checked using illustrative test data.
 - Task 12 is implemented: **Grade fields** selects Min/Max, LQL/Target/HQL or
   all columns on the existing Product Targets rows. Blank specifications remain
-  `None`; finite supplied percentages must satisfy LQL <= Target <= HQL wherever
-  those values are present. Zero is preserved. OPF/lane ownership and planning
+  `None`; finite supplied percentages must satisfy numerical lower bound <=
+  Target <= numerical upper bound wherever those values are present, using the
+  quality-direction captions above. Zero is preserved. OPF/lane ownership and planning
   provenance follow the row through edits, deletion, persistence and agents.
 - Targets group by tonnes only within compatible consecutive OPF/brand/lane
   rows; different manual quality limits prevent merging. Legacy hard bounds
@@ -506,7 +526,9 @@ shape is `f(d) = d + 2*max(d-1, 0) + 2*max(d-2, 0)`, with marginal slopes 1, 3 a
 5. **Linear absolute deviation** instead uses `f(d) = d`. Target penalty is
 `100 * Target weight * analyte weight * W * f(d)`. Soft-limit breaches add
 `100 * Target weight * analyte weight * W * breach multiplier *
-(below LQL + above HQL) / scale`. Missing specifications contribute no penalty.
+(LQL breach + HQL breach) / scale`. For Fe these are below LQL and above HQL;
+for contaminants they are above LQL and below HQL. Missing specifications
+contribute no penalty.
 
 `W` is the analyte's declared grade-weight tonnes (typically product DMT), the
 same denominator used to calculate its actual grade. It is not silently replaced

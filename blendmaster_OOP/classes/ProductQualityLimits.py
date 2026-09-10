@@ -3,6 +3,8 @@
 Flat target_<analyte>_{lql,target,hql} fields are the editable/persisted values.
 The existing versioned PhaseSchemas record is derived for runtime consumers.
 Missing values stay open (None); legacy Min/Max are never inferred as targets.
+For compatibility, persisted lql/hql keys retain numerical lower/upper meaning.
+UI quality labels reverse for contaminants, whose higher quality is lower grade.
 """
 
 from copy import deepcopy
@@ -14,6 +16,32 @@ from classes.ProductTargetModes import target_mode_fields
 
 QUALITY_PARTS = ("lql", "target", "hql")
 QUALITY_FIELDS = tuple(f"target_{a}_{part}" for a in SCHEMA_ANALYTES for part in QUALITY_PARTS)
+
+QUALITY_DIRECTION_NOTE = (
+    "LQL is the lower quality limit; HQL is the higher quality limit. "
+    "Fe: LQL ≤ Target ≤ HQL. Contaminants (Si, Al, P, Mn): HQL ≤ Target ≤ LQL."
+)
+
+
+def quality_label(analyte, part):
+    """Map a legacy numerical bound key to its analyte's quality caption."""
+    part = part.lower()
+    if part == "target":
+        return "Target"
+    if analyte.lower() != "fe":
+        part = {"lql": "hql", "hql": "lql"}[part]
+    return part.upper()
+
+
+def quality_order_note(analyte):
+    return f"{analyte.title()}: {quality_label(analyte, 'lql')} ≤ Target ≤ {quality_label(analyte, 'hql')}."
+
+
+def quality_audit_for_display(row):
+    """Present saved numerical-bound audits without rewriting historical data."""
+    lower, upper = ("lql", "hql") if row["analyte"].lower() == "fe" else ("hql", "lql")
+    return {**row, lower: row.get("lql"), upper: row.get("hql"),
+            f"{lower}_breach": row.get("below_lql"), f"{upper}_breach": row.get("above_hql")}
 
 
 def quality_fields(row, *, validate=True):
@@ -42,13 +70,14 @@ def quality_fields(row, *, validate=True):
             except (TypeError, ValueError, OverflowError):
                 value = math.nan
             if isinstance(raw, bool) or not math.isfinite(value) or not 0 <= value <= 100:
-                raise ValueError(f"{a.title()} {part.upper() if part != 'target' else 'Target'} must be a finite number from 0 to 100, or blank.")
+                raise ValueError(f"{a.title()} {quality_label(a, part)} must be a finite number from 0 to 100, or blank.")
             values[key] = value
         if validate:
             low, target, high = (values[f"target_{a}_{part}"] for part in QUALITY_PARTS)
-            for left, right, label in ((low, high, "LQL must not exceed HQL"),
-                                       (low, target, "Target must be at least LQL"),
-                                       (target, high, "Target must not exceed HQL")):
+            lower_label, upper_label = quality_label(a, "lql"), quality_label(a, "hql")
+            for left, right, label in ((low, high, f"{lower_label} must not exceed {upper_label}"),
+                                       (low, target, f"Target must be at least {lower_label}"),
+                                       (target, high, f"Target must not exceed {upper_label}")):
                 if left is not None and right is not None and left > right:
                     raise ValueError(f"{a.title()}: {label}.")
     return values

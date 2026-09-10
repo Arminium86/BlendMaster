@@ -180,7 +180,7 @@ class ProductTargetPrecisionTests(unittest.TestCase):
         self.assertEqual(self.displayed(view, "P Min"), self.displayed(view, "P Max"))
         self.assertIsNone(view.read_product_targets_from_table(False))
         self.item(view, "P Min").setText("0")
-        self.item(view, "P HQL").setText("0.0851")
+        self.item(view, "P LQL").setText("0.0851")
         self.assertIsNone(view.read_product_targets_from_table(False))
 
     def test_row_resizing_deletion_and_repopulation_preserve_survivor_precision(self):

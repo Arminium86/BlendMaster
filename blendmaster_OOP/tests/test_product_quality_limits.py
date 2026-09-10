@@ -254,7 +254,7 @@ class QualityInputTests(unittest.TestCase):
         view = self.window()
         self.edit(view, 0, "Fe LQL", "")
         self.edit(view, 0, "P Target", "0")
-        self.edit(view, 0, "P HQL", "0")
+        self.edit(view, 0, "P LQL", "0")
         self.assertTrue(view.store_product_targets(False))
         saved = pickle.loads(pickle.dumps(view.calendar_inputs))
         view.product_targets = saved["product_targets"]

@@ -6,7 +6,7 @@ from classes.StockpileData import StockpileData
 from classes.GradeBlockData import GradeBlockData
 from classes.Optimizer import Optimizer
 from classes.ProductBuildProgress import ProductBuildProgress
-from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, with_quality_configuration
+from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, with_quality_configuration, quality_label
 from classes.ProductQualityReport import QUALITY_REPORT_SUFFIXES
 from classes.ProductTargetModes import TARGET_MODE_FIELDS, target_mode_fields, require_supported_target_modes
 from classes.ProductBuildLanes import (
@@ -2721,7 +2721,7 @@ class CaseModeller:
             bounds = []
             for grade, values in (build.get("grade_targets") or {}).items():
                 if build.get("target_mode") == "soft":
-                    bounds.append(f"{grade} Target {values.get('target')}; LQL/HQL {values.get('lql')}/{values.get('hql')} ({values.get('limit_mode')})")
+                    bounds.append(f"{grade} Target {values.get('target')}; {quality_label(grade, 'lql')}/{quality_label(grade, 'hql')} {values.get('lql')}/{values.get('hql')} ({values.get('limit_mode')})")
                 else:
                     bounds.append(
                     f"{grade} {float(values.get('target_min') or 0):g}-"
@@ -2738,7 +2738,7 @@ class CaseModeller:
                 if row["target_mode"] == "soft" and row["actual_grade"] is not None:
                     lines.append(f"  {row['lane']} {row['analyte'].title()} ({row['evaluation_basis']}): "
                                  f"actual {row['actual_grade']:.5g}; Target {row['target']}; deviation {row['target_deviation']}; "
-                                 f"below LQL {row['below_lql']:.5g}; above HQL {row['above_hql']:.5g}; "
+                                 f"below {quality_label(row['analyte'], 'lql')} {row['below_lql']:.5g}; above {quality_label(row['analyte'], 'hql')} {row['above_hql']:.5g}; "
                                  f"limits {row['limit_mode']}; applied penalty {row['applied_penalty']:,.3f}.")
         for custom in diagnostics.get("custom_constraint_ranges") or []:
             lines.append(
