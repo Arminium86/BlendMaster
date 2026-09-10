@@ -8779,7 +8779,7 @@ class UserInputs(QMainWindow):
     def handle_map_fields_submit(self):
         self.capture_map_fields_table()
         self.apply_canonical_field_mappings()
-        self.apply_grade_streams_to_inventory()
+        self.apply_grade_streams_to_inventory(allow_pending=True)
         # AMT mappings are held in memory here. Data Streams owns the next
         # reconciliation-dependent enrichment and persists the completed hex
         # snapshot once, avoiding an intermediate full-table rewrite.
@@ -9861,6 +9861,14 @@ class UserInputs(QMainWindow):
             result["warnings"].append(f"Inventory lineage unavailable; using standard global factors. {exc}")
         return result
 
+    def reconciliation_factors_pending(self):
+        """Advanced settings survive an opening refresh; their factors do not."""
+        state = vars(self)
+        return (
+            normalise_reconciliation_settings(state.get("reconciliation_settings"))["method"] != "standard"
+            and not state.get("historical_recon_factors")
+        )
+
     def reconciliation_application(self):
         state = vars(self)
         settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
@@ -10636,7 +10644,11 @@ class UserInputs(QMainWindow):
                 self.apply_cb_split_to_amt_chunk(chunk)
         return chunks
 
-    def apply_grade_streams_to_inventory(self):
+    def apply_grade_streams_to_inventory(self, *, allow_pending=False):
+        # Setup pages precede the Data Streams fetch. Leave their raw fields
+        # available without presenting unreconciled values as adjusted grades.
+        if allow_pending and self.reconciliation_factors_pending():
+            return
         application = self.reconciliation_application()
         source_prefixes = tuple(
             f"{name}:" for name in (self.stockpile_data or {})
@@ -13679,17 +13691,17 @@ class UserInputs(QMainWindow):
             self.set_page_enabled(self.guidance_schedules_tab_index, True)
             self.set_page_enabled(self.stockpile_tab_index, True)
             self.apply_canonical_field_mappings()
-            self.apply_grade_streams_to_inventory()
+            self.apply_grade_streams_to_inventory(allow_pending=True)
         self.validate_form()
 
         if restoring_project and getattr(
             self, "project_load_waiting_for_inventory", False
         ):
             self.project_load_waiting_for_inventory = False
-            if getattr(self, "project_load_refresh_current_time", False):
-                # A new opening timestamp invalidates AMT chunks, calendars
-                # and results. Keep matching saved selections visible, then
-                # return control to the user before any downstream work runs.
+            if fresh_site_configuration:
+                # A new opening snapshot invalidates downstream inputs,
+                # including reconciliation factors. Resume setup before
+                # Data Streams fetches the factors for this opening context.
                 self.project_load_restore_in_progress = False
                 self.project_load_continuation_pending = False
                 self.reset_workflow_tabs_for_scenario()
@@ -18520,13 +18532,27 @@ class UserInputs(QMainWindow):
         }
 
     def refresh_AMT_enrichment_if_needed(
-        self, data_source=None, force=False, persist=True, refresh_map=True
+        self, data_source=None, force=False, persist=True, refresh_map=True,
+        allow_pending=False
     ):
         """Rebuild and persist AMT hex fields only when their inputs changed."""
         self.prune_excluded_AMT_state()
         if not getattr(self, "AMT_stockpile_data", None):
             self.AMT_enrichment_signature = ""
             self.AMT_chunk_reconciliation_signature = ""
+            return False
+        if allow_pending and self.reconciliation_factors_pending():
+            # Inventory submission fetches raw AMT fields for Map Fields before
+            # Data Streams has loaded reconciliation. Persist that raw snapshot
+            # but leave enrichment pending so submission calculates it later.
+            self.AMT_enrichment_signature = ""
+            self.AMT_chunk_reconciliation_signature = ""
+            if persist:
+                self.opening_stockpile_inventories.save_AMT_to_database(
+                    self.AMT_stockpile_data
+                )
+            if refresh_map:
+                self.refresh_AMT_map_data_from_database()
             return False
         signature = self.AMT_enrichment_request_signature()
         if (
@@ -18905,7 +18931,8 @@ class UserInputs(QMainWindow):
         if not reuse_prepared:
             if self.AMT_stockpile_data:
                 self.refresh_AMT_enrichment_if_needed(
-                    data_source, force=True, persist=True, refresh_map=False
+                    data_source, force=True, persist=True, refresh_map=False,
+                    allow_pending=True
                 )
             else:
                 self.opening_stockpile_inventories.clear_AMT_stockpile_database()

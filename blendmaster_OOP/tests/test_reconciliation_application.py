@@ -213,6 +213,121 @@ class ApplicationTests(unittest.TestCase):
 
 
 class ChunkAndIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def restoring_view(*, current_time=False):
+        view = SimpleNamespace(**vars(window()))
+        view.is_project_loaded = True
+        view.project_load_restore_in_progress = True
+        view.project_load_waiting_for_inventory = True
+        view.project_load_refresh_current_time = current_time
+        view.site_scenarios = {"site_test": {}}
+        view.active_scenario_id = "site_test"
+        view.hub_input_choice = "Chichester"
+        view.mine_input_choice = "CB"
+        view.crusher_input_choice = "CB1"
+        view.crusher_contribution_ratio_choice = 1.0
+        view.haul_cycle_file_path_choice = ""
+        view.project_load_saved_stockpile_use_column = {"SP1": True}
+        view.project_load_saved_stockpile_AMT_column = {"SP1": True}
+        view.planning_period_count = lambda: 3
+        view.normalized_solver_config = lambda values: dict(values or {})
+        view.included_stockpile_data = lambda: {}
+        view.included_AMT_snapshot = lambda rows: rows
+        view.aps_grade_mapping_warnings = lambda: []
+        for name in (
+            "submit_button", "save_button", "opening_stockpile_inventories",
+            "restore_table_snapshot", "populate_product_build_table",
+            "refresh_aps_stockpile_brand_map", "apply_aps_brand_guidance_to_stockpile_data",
+            "populate_aps_grade_mapping_table", "populate_aps_source_property_mapping_table",
+            "load_cb_lump_fines_settings", "load_byproduct_build_settings",
+            "populate_recon_factor_table", "apply_haul_cycle_routes_to_stockpile_data",
+            "save_active_scenario_state", "setup_stockpile_table", "populate_define_fields_table",
+            "refresh_map_field_brands", "ensure_field_mapping_migration", "populate_map_fields_table",
+            "refresh_map_available_fields", "set_page_enabled", "apply_canonical_field_mappings",
+            "validate_form", "reset_workflow_tabs_for_scenario", "finish_project_load_ui",
+            "show_page", "store_stockpile_table", "continue_project_load_after_stockpile_setup",
+        ):
+            setattr(view, name, Mock())
+        view.site_config_tab_index = "site_configuration"
+        view.guidance_schedules_tab_index = "guidance_schedules"
+        view.stockpile_tab_index = "stockpile_inventories"
+        view.reconciliation_factors_pending = lambda: UserInputs.reconciliation_factors_pending(view)
+        view.reconciliation_application = lambda: UserInputs.reconciliation_application(view)
+        view.apply_grade_streams_to_inventory = Mock(
+            side_effect=lambda **kw: UserInputs.apply_grade_streams_to_inventory(view, **kw)
+        )
+        view.reset_downstream_inputs_for_new_site_configuration = lambda **kw: (
+            UserInputs.reset_downstream_inputs_for_new_site_configuration(view, **kw)
+        )
+        return view
+
+    def test_refreshed_project_defers_advanced_factors_and_resumes_inventory_setup(self):
+        for current_time in (True, False):
+            with self.subTest(current_time=current_time):
+                view = self.restoring_view(current_time=current_time)
+                inventory = {"SP1": {"BALANCE": 100}}
+                with patch("GUI.InitialiseGUI.DatabaseManager.clear_all_tables"):
+                    UserInputs.finish_site_config_submit(view, {
+                        "stockpile_data": inventory, "inventory_data_request_signature": "new-opening",
+                    })
+                self.assertEqual(view.historical_recon_factors, {})
+                self.assertEqual(view.reconciliation_inputs, {})
+                self.assertEqual(view.reconciliation_settings["method"], "spatial_compositional")
+                self.assertNotIn("GRADE_STREAMS", inventory["SP1"])
+                self.assertFalse(view.project_load_restore_in_progress)
+                self.assertFalse(view.project_load_waiting_for_inventory)
+                view.finish_project_load_ui.assert_called_once_with(success=True)
+                view.show_page.assert_called_once_with("stockpile_inventories", force=True)
+                view.store_stockpile_table.assert_not_called()
+                view.continue_project_load_after_stockpile_setup.assert_not_called()
+                if current_time:
+                    self.assertEqual(view.stockpile_data_use_column, {"SP1": True})
+                    self.assertEqual(view.stockpile_data_AMT_column, {"SP1": True})
+
+    def test_saved_opening_restore_keeps_factors_and_continues(self):
+        view = self.restoring_view()
+        expected = copy.deepcopy(view.historical_recon_factors)
+        UserInputs.finish_site_config_submit(view, {})
+        self.assertEqual(view.historical_recon_factors, expected)
+        self.assertIsInstance(view.reconciliation_application(), ReconciliationApplication)
+        view.apply_grade_streams_to_inventory.assert_called_once_with(allow_pending=True)
+        view.store_stockpile_table.assert_called_once_with()
+        view.continue_project_load_after_stockpile_setup.assert_called_once_with()
+
+    def test_map_fields_reaches_data_streams_before_advanced_factors_are_loaded(self):
+        view = window()
+        view.historical_recon_factors = {}
+        for name in ("capture_map_fields_table", "apply_canonical_field_mappings",
+                     "set_page_enabled", "save_active_scenario_state", "show_page"):
+            setattr(view, name, Mock())
+        view.data_streams_tab_index = "data_streams"
+        UserInputs.handle_map_fields_submit(view)
+        view.show_page.assert_called_once_with("data_streams", force=True)
+        # Data Streams submission still requires an actual factor record.
+        with self.assertRaisesRegex(ValueError, "standard factor record"):
+            view.apply_grade_streams_to_inventory()
+
+    def test_raw_amt_waits_for_factors_then_enriches_on_data_streams_submission(self):
+        view = window()
+        view.historical_recon_factors = {}
+        view.AMT_stockpile_data = {"SP1": [raw_hex()]}
+        raw = copy.deepcopy(view.AMT_stockpile_data)
+        view.AMT_enrichment_signature = "old"
+        view.prune_excluded_AMT_state = Mock()
+        view.prune_zeroed_amt_chunks = Mock()
+        view.opening_stockpile_inventories = Mock()
+        view.refresh_AMT_map_data_from_database = Mock()
+        self.assertFalse(view.refresh_AMT_enrichment_if_needed({}, allow_pending=True))
+        self.assertEqual(view.AMT_stockpile_data, raw)
+        self.assertEqual(view.AMT_enrichment_signature, "")
+        view.opening_stockpile_inventories.save_AMT_to_database.assert_called_once_with(raw)
+        with self.assertRaisesRegex(ValueError, "standard factor record"):
+            view.refresh_AMT_enrichment_if_needed({})
+        view.historical_recon_factors = {"SF": standard()}
+        self.assertTrue(view.refresh_AMT_enrichment_if_needed({}))
+        self.assertTrue(view.AMT_enrichment_signature)
+        self.assertIn("reconciliation", view.AMT_stockpile_data["SP1"][0])
+
     def test_chunk_grades_use_per_hex_adjustments_and_declared_product_weights(self):
         rows = [chunk_row("H1", GB, 40, 50, 60, 10), chunk_row("H2", REMOTE, 60, 30, 40, 90)]
         chunk = chart().build_chunk_row("SP1", 1, rows, 100)
