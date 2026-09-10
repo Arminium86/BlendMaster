@@ -723,8 +723,8 @@ records (26,868 included ROM inbound).
 Review: import 2WP Mining.csv, load Stockpile Inventories with Nearest Crusher,
 then open Destination Reconciliation. Compare the extracted order and activity, review
 any ambiguous current instance, enter remaining ROM WMT, and save/reopen the
-project. Task 23 adds the post-plan primary-allocation audit described below;
-fallback rules and Material Destination Plan publication remain for Tasks 24–25.
+project. Tasks 23–25 add final primary allocation, fallback rules and Material
+Destination Plan publication as described below.
 
 ### 9.4 Stateful primary-destination allocation (Task 23)
 
@@ -766,9 +766,8 @@ clear old optimised/contingency audits, while source invalidation clears all
 derived allocation audits. Scenario database snapshots retain them in `.prj`.
 
 This task produces the post-plan primary assignment audit. Task 24 adds the
-fallback candidates described in 9.5. Task 25's updated Material Destination
-Plan publication remains pending. No new submit step is needed in Destination
-Reconciliation.
+fallback candidates described in 9.5, and Task 25 publishes these results in 9.6.
+No new submit step is needed in Destination Reconciliation.
 
 Validation: 894 automated checks passed. Native Windows validation also exercised
 the scenario input snapshot, manual final-plan hook, whole-payload overrun,
@@ -832,8 +831,8 @@ bypass an unconfirmed current instance or a blank remaining-capacity input.
 Optimised, manual and contingency plans keep separate audits. New inbound haul
 route snapshots persist with their site scenario and `.prj`, and clear/reload with
 the haul-cycle input. No extra user controls or Submit action were added. Task 25
-will publish the combined capacity and fallback information in Material Destination
-Plan; it has not started.
+publishes the combined capacity and fallback information in Material Destination
+Plan as described in 9.6.
 
 Validation on 2026-09-09: 905 automated checks passed. Native Windows validation
 imported a haul-cycle fixture, froze scenario inputs, recalculated a manual plan
@@ -852,6 +851,76 @@ ingestion can assign them. No arbitrary last-stockpile substitute is applied.
 The review is of imported files, not a mutation or rerun of the user's live plan.
 Generated screenshots and review records remain local and Git-ignored under
 `docs/screenshots/task24/`.
+
+### 9.6 Final Material Destination Plan publication (Task 25)
+
+`classes/DestinationPlanReport.py` publishes the final payload decisions produced
+by Tasks 23–24. It uses the existing payload-level direct-tip reconciliation, then
+replaces the remaining ROM assignment with the capacity allocator's actual result.
+It never presents the original ingestion destination as a confirmed primary when
+capacity, current build instance or scenario context is unresolved.
+
+- **Assignments** groups parent grade blocks by assigned destination, physical
+  build instance, 2WP order position, status and fallback choices. Repeated builds
+  at the same footprint remain separate. Direct-tip and ROM assignments are
+  separate rows; fallback columns add no assigned tonnes.
+- **Payload audit** retains original sliced grade blocks, payload IDs, AWST
+  delivery times, exact quantity buckets, before/after capacity, rule evidence and
+  transitions. Assigned, unresolved, waste and outside-window quantities reconcile
+  to the payload population. `source_tonnes` is repeated per parent grade block;
+  `reported_wmt` and the quantity buckets are additive across rows.
+- **Capacity balances** shows each physical build once per plan with starting,
+  consumed, remaining and overrun ROM WMT. The summary's before/after values are
+  the balance before its first payload and after its last payload; other sources
+  can consume the same balance between them. Its consumed capacity is only the
+  tonnes assigned by that summary row. Starting capacity must not be added across
+  summary rows that reference the same instance.
+- **Transitions** shows the Advance ledger events, including zero-capacity skips,
+  payload IDs, previous/next destinations and reasons. Whole-payload overruns do
+  not split the payload; the following payload advances.
+- **Actual movements** retains the exact activity records used for this plan,
+  independently of later refreshes. The assignment summary includes detected
+  destination, latest inbound, movement count/WMT and user-selected versus detected
+  current-instance basis. The run retains activity status, fetched timestamp and
+  the AWST request window, including cached/offline provenance and ambiguity.
+
+Publication is one SQLite transaction covering `material_destination_plan`,
+`material_destination_plan_payloads`, `material_destination_plan_activity` and the
+four allocation/capacity audit tables. Failure rolls back the complete snapshot.
+Recalculation replaces only its plan type/ID; optimised, manual and contingency
+plans remain independent. Source invalidation clears all derived publications;
+optimisation restart clears only optimised/contingency results.
+
+Existing saved MDP schemas migrate in place. Old rows are labelled **Legacy
+snapshot — recalculate** and retain their original assigned tonnes/destination.
+Opening a saved project does not reconstruct current capacity or overwrite the
+plan's old evidence. A newly calculated plan without a valid reconciliation context
+shows its confirmed direct-tip tonnes and explicitly unavailable/unresolved ROM
+quantities. Empty publications retain stable schemas.
+
+**Results > Reports > Material Destination Plan** provides the five views above,
+plan selection, filtering and **Export current CSV**. Selecting an assignment shows
+its capacity basis, actual-movement evidence and fallback rules/haul route. Numeric
+cells display one decimal for WMT and preserve full precision in tooltips/exports.
+**Reload saved results** reads a consistent saved snapshot; it does not recalculate
+from changed inputs. Loading and failed-reload states are explicit; a failed reload
+can retain only the same scenario's previous snapshot. Late results from another
+scenario are discarded. Virtual tables avoid creating a widget for every payload
+cell. The existing Manual Blend Plan XLSX includes the updated MDP summary, and the
+Database Reports exports expose the detailed audit tables.
+
+Validation on 2026-09-10: 920 automated checks passed, followed by focused checks
+of the final report/UI adjustments. Native Windows checks exercised optimised,
+manual and contingency selection, the five views, loading, no-data and failed
+reload states, and exact publication retention through real `.prj` save/load.
+The unrelated warehouse inventory reload was stubbed. Screenshots use illustrative
+fixtures and remain local/Git-ignored under `docs/screenshots/task25/`.
+
+Review: restart BlendMaster and recalculate an existing plan, then open **Results >
+Reports > Material Destination Plan**. Choose the plan and select an assignment;
+compare its primary/fallback rules with **Capacity balances**, **Transitions** and
+**Actual movements**. Recalculate after changing Destination Reconciliation inputs.
+Task 26 has not started.
 
 ## 10. Manual ratio rounding
 

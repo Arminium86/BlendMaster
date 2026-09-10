@@ -403,7 +403,7 @@ class MaterialDestinationPlan:
                 == "grade_block"
             ].copy()
             report["_assigned_tonnes"] = pd.to_numeric(
-                report.get("source_actual_tonnes"), errors="coerce"
+                report.get("source_actual_tonnes", pd.Series(0.0, index=report.index)), errors="coerce"
             ).fillna(0.0)
             report = report[
                 report["_assigned_tonnes"] > cls.TOLERANCE

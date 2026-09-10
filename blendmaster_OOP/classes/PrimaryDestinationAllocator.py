@@ -32,6 +32,8 @@ AUDIT_COLUMNS["destination_primary_assignments"].extend([
     *METADATA_COLUMNS, "primary_rule", "alternate_destinations", "destination_rule_signature",
 ])
 AUDIT_COLUMNS["destination_allocation_runs"].append("destination_rule_signature")
+AUDIT_COLUMNS["destination_allocation_runs"].extend(
+    "report_version activity_status activity_fetched_at activity_window_start activity_window_end".split())
 
 
 class PrimaryDestinationAllocator:
@@ -280,7 +282,7 @@ def allocate_final_plan(payload_transactions, blend_report, context, *, plan_typ
     return result
 
 
-def write_allocation_audit(result, database_path):
+def write_allocation_audit_to_connection(result, connection):
     """Atomically replace this plan's audit without consuming another plan's state."""
     owner = result["run"]
     tables = {
@@ -289,18 +291,23 @@ def write_allocation_audit(result, database_path):
         "destination_capacity_ledger": result["ledger"],
         "destination_capacity_balances": [dict(plan_type=owner["plan_type"], plan_id=owner["plan_id"], **row) for row in result["capacities"]],
     }
+    for name, rows in tables.items():
+        connection.execute(f'CREATE TABLE IF NOT EXISTS "{name}" (plan_type TEXT, plan_id TEXT)')
+        existing = {r[1] for r in connection.execute(f'PRAGMA table_info("{name}")')}
+        columns = AUDIT_COLUMNS[name]
+        for column in columns:
+            if column not in existing:
+                # Column names originate from the fixed allocator output.
+                kind = "REAL" if column.endswith("_wmt") else "INTEGER" if column in {"event_number", "build_instance", "order_position", "payload_count", "schema_version"} else "TEXT"
+                connection.execute(f'ALTER TABLE "{name}" ADD COLUMN "{column}" {kind}')
+        connection.execute(f'DELETE FROM "{name}" WHERE plan_type = ? AND plan_id = ?', (owner["plan_type"], owner["plan_id"]))
+        if rows:
+            names = ", ".join(f'"{c}"' for c in columns)
+            connection.executemany(f'INSERT INTO "{name}" ({names}) VALUES ({", ".join("?" for _ in columns)})',
+                                   [[json.dumps(row.get(c)) if isinstance(row.get(c), (dict, list)) else row.get(c) for c in columns] for row in rows])
+
+
+def write_allocation_audit(result, database_path):
+    """Atomically replace this plan's audit without consuming another plan's state."""
     with closing(sqlite3.connect(database_path)) as connection, connection:
-        for name, rows in tables.items():
-            connection.execute(f'CREATE TABLE IF NOT EXISTS "{name}" (plan_type TEXT, plan_id TEXT)')
-            existing = {r[1] for r in connection.execute(f'PRAGMA table_info("{name}")')}
-            columns = AUDIT_COLUMNS[name]
-            for column in columns:
-                if column not in existing:
-                    # Column names originate from the fixed allocator output.
-                    kind = "REAL" if column.endswith("_wmt") else "INTEGER" if column in {"event_number", "build_instance", "order_position", "payload_count", "schema_version"} else "TEXT"
-                    connection.execute(f'ALTER TABLE "{name}" ADD COLUMN "{column}" {kind}')
-            connection.execute(f'DELETE FROM "{name}" WHERE plan_type = ? AND plan_id = ?', (owner["plan_type"], owner["plan_id"]))
-            if rows:
-                names = ", ".join(f'"{c}"' for c in columns)
-                connection.executemany(f'INSERT INTO "{name}" ({names}) VALUES ({", ".join("?" for _ in columns)})',
-                                       [[json.dumps(row.get(c)) if isinstance(row.get(c), (dict, list)) else row.get(c) for c in columns] for row in rows])
+        write_allocation_audit_to_connection(result, connection)

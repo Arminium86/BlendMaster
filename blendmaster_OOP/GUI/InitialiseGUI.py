@@ -50,6 +50,7 @@ from GUI.ProductTargetDelegate import (
 )
 from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
+from GUI.MaterialDestinationPlanView import MaterialDestinationPlanView
 from classes.DestinationBuildOrder import write_order_audit, inventory_areas
 from classes.DestinationProgress import progress_settings
 from GUI.ProductTargetModeControls import ProductTargetModeControls
@@ -1713,6 +1714,9 @@ class UserInputs(QMainWindow):
         ):
             QTimer.singleShot(0, self.refresh_database_view)
 
+        if tab_index == self.sqlite_reports_tab_index:
+            self.refresh_material_destination_plan_view()
+
         if (
             tab_index == self.sqlite_reports_tab_index
             and getattr(self, "scenario_report_refresh_pending", False)
@@ -2300,6 +2304,8 @@ class UserInputs(QMainWindow):
             # Reports and Dash views can be expensive (large SQLite previews,
             # Dash reloads and AMT map data fetches). They refresh on demand
             # when their tab is next opened or its Load/Update button is used.
+            if hasattr(self, "material_destination_plan_view"):
+                self.material_destination_plan_view.set_context(get_database_path(), self.active_scenario_id)
             self.scenario_report_refresh_pending = True
             self.update_chart_database_context(
                 reload_views=False,
@@ -22014,6 +22020,13 @@ class UserInputs(QMainWindow):
         self.manual_blend_plan_column_widths = {}
         self.manual_blend_plan_wrap_text = True
         self.reports_child_tabs.addTab(self.blend_plan_page, "Blend Plan")
+        self.material_destination_plan_view = MaterialDestinationPlanView(
+            self, run_async=lambda work, success, failure: self.run_background_task(
+                "Loading saved destination plan…", work, success, failure, show_progress=False))
+        self.reports_child_tabs.addTab(self.material_destination_plan_view, "Material Destination Plan")
+        self.reports_child_tabs.currentChanged.connect(
+            lambda: self.refresh_material_destination_plan_view()
+            if self.reports_child_tabs.currentWidget() is self.material_destination_plan_view else None)
 
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Report Table:"))
@@ -22087,7 +22100,14 @@ class UserInputs(QMainWindow):
             QMessageBox.warning(self, "Reports", f"Unable to list SQLite tables: {e}")
             return []
 
+    def refresh_material_destination_plan_view(self):
+        panel = getattr(self, "material_destination_plan_view", None)
+        if panel is not None:
+            panel.set_context(get_database_path(), getattr(self, "active_scenario_id", "active"))
+            panel.request_refresh()
+
     def refresh_sqlite_reports(self):
+        self.refresh_material_destination_plan_view()
         current_table = self.sqlite_report_selector.currentText()
         current_query = self.sqlite_report_query.text().strip()
         DatabaseManager().ensure_two_wp_grade_block_turnover_audit(

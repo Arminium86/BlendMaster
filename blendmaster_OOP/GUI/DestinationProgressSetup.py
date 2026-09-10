@@ -151,7 +151,7 @@ class DestinationProgressSetup(QWidget):
         self.validation.setWordWrap(True)
         self.validation.setStyleSheet("color: #a33b16;")
         layout.addWidget(self.validation)
-        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT; blank means not set and 0 means no remaining capacity. Valid edits apply immediately to the current scenario; save the project to retain them. This setup does not yet change Material Destination Plan assignments.")
+        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT; blank means not set and 0 means no remaining capacity. Valid edits apply immediately to the current scenario; save the project to retain them. Recalculate the plan to apply these inputs to Material Destination Plan assignments; saved results retain the inputs used for their calculation.")
         footer.setWordWrap(True)
         footer.setStyleSheet("color: #526474;")
         layout.addWidget(footer)
