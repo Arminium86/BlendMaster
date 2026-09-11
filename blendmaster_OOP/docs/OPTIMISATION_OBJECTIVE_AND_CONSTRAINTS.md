@@ -501,8 +501,14 @@ BlendMaster searches for another option.
 ### Minimum Stockpile Feed Duration
 
 If configured, the selected stockpile blend must be capable of sustaining its
-selected reclaim rates for at least the requested duration. The estimate uses
-the earliest depletion time among the selected stockpiles.
+selected reclaim rates for at least the smaller of the requested duration and
+the candidate's final steady-state duration. The estimate uses the earliest
+depletion time among the selected stockpiles. The cap is applied after dynamic
+boundary adjustment, so Calendar period ends, depletion, Auto turnover and
+product-build completion can shorten the required duration. For example, a
+three-hour setting becomes one hour for a one-hour state. The saved setting
+remains three hours and applies again to longer states. The trace reports when
+the effective minimum is capped.
 
 ### Minimum Grade Block Pair Duration
 

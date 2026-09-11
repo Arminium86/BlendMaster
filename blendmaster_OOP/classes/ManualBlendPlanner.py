@@ -655,6 +655,7 @@ class ManualBlendPlanner:
                     "stockpile_source_tonnes": deepcopy(
                         fixed_source_tonnes
                     ) if isinstance(fixed_source_tonnes, Mapping) else None,
+                    "rounding_audit": deepcopy(sequence_row.get("_rounding_audit") or {}),
                 })
                 consumed_product_tonnes = 0.0
                 direct_tip_tonnes = max(
@@ -1569,12 +1570,20 @@ class ManualBlendPlanner:
         report = consolidate_parent_grade_block_rows(
             report, self.solver_config
         )
-        return report.reindex(columns=[
+        report = report.reindex(columns=[
             *base_columns,
             *source_property_columns,
             *custom_columns,
             *ProductBuildProgress.COLUMNS,
         ])
+        if any(state.get("rounding_audit") for state in states):
+            from classes.ManualRatioRounding import AUDIT_COLUMNS
+            by_state = {state["steady_state_number"]: state.get("rounding_audit", {}) for state in states}
+            for column in AUDIT_COLUMNS:
+                report[column] = [by_state.get(row["steady_state_number"], {}).get(
+                    f"{row['source_type']}|{str(row['source']).upper()}", {}).get(column)
+                    for _, row in report.iterrows()]
+        return report
 
     def state_summaries(self, states, allocations=None):
         report = self.build_report(states, allocations or {})

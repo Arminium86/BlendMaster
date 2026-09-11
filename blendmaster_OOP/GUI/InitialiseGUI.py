@@ -26,6 +26,10 @@ from classes.ManualBlendPlanner import (
     ManualBlendPlanningError,
 )
 from classes.OptimisedToManualPlan import OptimisedToManualPlan
+from classes.ManualRatioRounding import rounding_settings, recalculate_rounded_plan, rounding_audit_rows
+from GUI.ManualRatioRoundingControls import ManualRatioRoundingControls
+from GUI.BlendPlanBackupControls import BlendPlanBackupControls
+from classes.BlendPlanBackups import backup_choices, backup_publication
 from classes.ManualBlendSummary import ManualBlendSummary
 from classes.BlendPlanPDF import BlendPlanPDF, BlendPlanPDFError
 from classes.SpreadsheetReportExporter import (
@@ -1602,6 +1606,8 @@ class UserInputs(QMainWindow):
             "stored_blend_sequence_table_for_gantt",
             "stored_blend_sequence_table_for_gantt_default",
             "manual_direct_tip_allocations", "manual_steady_states",
+            "manual_ratio_rounding",
+            "blend_plan_backup_destinations",
             "manual_plan_states", "active_manual_plan_id",
             "default_start_datetime",
             "default_end_datetime", "default_start_datetime_str", "default_end_datetime_str",
@@ -2083,6 +2089,10 @@ class UserInputs(QMainWindow):
             self.manual_blend_plan_selected_columns = copy.deepcopy(
                 state.get("manual_blend_plan_selected_columns")
             )
+            self.manual_ratio_rounding = rounding_settings(state.get("manual_ratio_rounding"))
+            self.blend_plan_backup_destinations = copy.deepcopy(state.get("blend_plan_backup_destinations") or {})
+            if hasattr(self, "manual_ratio_rounding_controls"):
+                self.manual_ratio_rounding_controls.set_settings(self.manual_ratio_rounding)
             self.manual_blend_plan_column_aliases = copy.deepcopy(
                 state.get("manual_blend_plan_column_aliases") or {}
             )
@@ -2461,6 +2471,11 @@ class UserInputs(QMainWindow):
         min_feed_duration_layout = QHBoxLayout()
         self.min_feed_duration_input = QLineEdit()
         self.min_feed_duration_input.setPlaceholderText("Optional")
+        self.min_feed_duration_input.setToolTip(
+            "Minimum time the stockpile blend must sustain its selected reclaim rates. "
+            "Automatically capped to the actual steady-state duration when it is shorter. "
+            "The entered value still applies to longer steady states."
+        )
         self.min_feed_duration_input.setFixedWidth(100)
         self.min_feed_duration_input.setValidator(threshold_validator)
         min_feed_duration_layout.addWidget(QLabel("Min Stockpile Feed Duration:"))
@@ -17533,6 +17548,7 @@ class UserInputs(QMainWindow):
             connection.close()
 
     MANUAL_PLAN_STATE_FIELDS = (
+        "blend_plan_backup_destinations",
         "blend_config_table_inputs",
         "saved_blends_for_schedule",
         "stored_blend_sequence_table_for_gantt",
@@ -17653,6 +17669,7 @@ class UserInputs(QMainWindow):
         )
         self.manual_physical_balance_history = []
         self.manual_gantt_legend_and_tooltip = []
+        self.blend_plan_backup_destinations = {}
 
     def clear_manual_blending_plan(self):
         has_manual_data = bool(
@@ -17789,6 +17806,7 @@ class UserInputs(QMainWindow):
                 "manual_direct_tip_allocations",
                 "manual_steady_states",
                 "manual_blend_report",
+                "manual_gantt_legend_and_tooltip",
                 "crusher_rate",
                 "crusher_rate_input_value",
                 "crusher_rate_input_values",
@@ -17827,14 +17845,26 @@ class UserInputs(QMainWindow):
             )
 
             planner = self.create_manual_blend_planner()
-            states = planner.build_steady_states()
-            allocations = OptimisedToManualPlan.direct_tip_allocations(
-                states, transfer["direct_tip_rows"]
-            )
-            report = planner.build_report(states, allocations)
+            rounding = rounding_settings(getattr(self, "manual_ratio_rounding", None))
+            if rounding["enabled"]:
+                transfer, states, allocations, report = recalculate_rounded_plan(optimised_report, planner, rounding["increment"])
+                self.blend_config_table_inputs = copy.deepcopy(transfer["blend_config_table_inputs"])
+                self.saved_blends_for_schedule = copy.deepcopy(transfer["blend_definitions"])
+                imported_sequence = copy.deepcopy(transfer["sequence_rows"])
+                self.stored_blend_sequence_table_for_gantt = imported_sequence
+            else:
+                states = planner.build_steady_states()
+                allocations = OptimisedToManualPlan.direct_tip_allocations(states, transfer["direct_tip_rows"])
+                report = planner.build_report(states, allocations)
         except Exception as error:
             for field, value in previous_manual_state.items():
                 setattr(self, field, value)
+            for period, widget in (getattr(self, "crusher_rate_inputs", {}) or {}).items():
+                rate = (previous_manual_state.get("crusher_rate_input_values") or {}).get(period)
+                if rate is not None:
+                    blocked = widget.blockSignals(True)
+                    widget.setText(f"{float(rate):g}")
+                    widget.blockSignals(blocked)
             if automatic:
                 print(
                     "Manual prepopulation from optimized result was not "
@@ -17883,6 +17913,7 @@ class UserInputs(QMainWindow):
         # optimized-state metadata used to preserve exact decision boundaries
         # and per-state crusher rates.
         self.stored_blend_sequence_table_for_gantt = imported_sequence
+        self.update_remaining_hrs()
         self.manual_gantt_legend_and_tooltip = (
             self.saved_blends_for_schedule
         )
@@ -17903,7 +17934,10 @@ class UserInputs(QMainWindow):
                 f"state(s) using {transfer['blend_count']} manual blend "
                 f"definition(s).\n\n"
                 f"Transferred selected direct tip: "
-                f"{transfer['direct_tip_tonnes']:,.0f} t.",
+                f"{transfer['direct_tip_tonnes']:,.0f} t."
+                + ("\n\nRatios were rounded and the plan recalculated. Review achieved grades versus targets and timing adjustments in Ratio Rounding Audit before publishing." if rounding["enabled"] else "")
+                + (f"\n\n{transfer['rounding_stop_reason']}\nOnly the successfully recalculated portion has been populated; later blends are omitted." if transfer.get("rounding_stop_reason") else "")
+                + (f"\n\nThe rounded plan ends {transfer['rounding_unfilled_hours']:.2f} hours before the original horizon. Review the remaining time." if transfer.get("rounding_unfilled_hours", 0) > 1e-6 else ""),
             )
             self.show_page(self.blend_sequence_tab_index)
         return True
@@ -22017,6 +22051,15 @@ class UserInputs(QMainWindow):
         )
         blend_plan_controls.addWidget(self.export_blend_plan_xlsx_button)
         blend_plan_layout.addLayout(blend_plan_controls)
+        self.manual_rounding_status_label = QLabel()
+        self.manual_rounding_status_label.setWordWrap(True)
+        self.manual_rounding_status_label.setTextFormat(Qt.PlainText)
+        self.manual_rounding_status_label.setStyleSheet("background: #fff3cd; color: #664d03; padding: 8px;")
+        self.manual_rounding_status_label.hide()
+        blend_plan_layout.addWidget(self.manual_rounding_status_label)
+        self.blend_plan_backup_controls = BlendPlanBackupControls()
+        self.blend_plan_backup_controls.changed.connect(self.update_blend_plan_backups)
+        blend_plan_layout.addWidget(self.blend_plan_backup_controls)
         self.blend_plan_gantt_view = CustomWebEngineView()
         self.blend_plan_gantt_view.setMinimumHeight(360)
         blend_plan_layout.addWidget(self.blend_plan_gantt_view, stretch=2)
@@ -22054,6 +22097,9 @@ class UserInputs(QMainWindow):
         self.manual_blend_plan_lower_tabs.addTab(
             blend_summary_page, "Blend Summary"
         )
+        self.manual_rounding_audit_table = CustomTableWidget()
+        self.manual_rounding_audit_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.manual_blend_plan_lower_tabs.addTab(self.manual_rounding_audit_table, "Ratio Rounding Audit")
         self.manual_blend_plan_selected_columns = None
         self.manual_blend_plan_column_aliases = {}
         self.manual_blend_plan_column_widths = {}
@@ -22175,6 +22221,26 @@ class UserInputs(QMainWindow):
         self.refresh_manual_blend_plan_report()
         self.refresh_closing_rom_stocks_compliance()
 
+    def current_blend_plan_backup_choices(self):
+        points = getattr(self, "selected_site_crushers", None) or [getattr(self, "crusher_input_choice", "")]
+        if any(str(point).upper().replace("-", "_") == "TOTAL_FEED_PC" for point in points):
+            points = getattr(self, "aps_ratio_crusher_choices", None) or getattr(self, "aps_direct_tip_crusher_choice", None) or []
+        areas = inventory_areas(getattr(self, "stockpile_data", None) or {})
+        evidence = self.manual_material_destination_plan_report()
+        def matches(area, point):
+            return area.upper() == str(point).upper() or ExpitDataHandler.crusher_destination_matches(
+                area, getattr(self, "mine_input_choice", ""), point, getattr(self, "opf_input_choice", ""))
+        return backup_choices(points, evidence.to_dict("records"), areas, matches)
+
+    def update_blend_plan_backups(self, selections):
+        self.blend_plan_backup_destinations = copy.deepcopy(selections)
+        self.capture_active_manual_plan_state()
+        self.save_active_scenario_state()
+        self.refresh_manual_blend_plan_report()
+
+    def validated_blend_plan_backups(self):
+        return backup_publication(self.current_blend_plan_backup_choices(), getattr(self, "blend_plan_backup_destinations", None) or {})
+
     def fetch_manual_blend_plan_report(self):
         connection = sqlite3.connect(get_database_path())
         try:
@@ -22204,6 +22270,8 @@ class UserInputs(QMainWindow):
             or DEFAULT_STREAM
         )
         for summary in summaries:
+            selections = getattr(self, "blend_plan_backup_destinations", None) or {}
+            summary["Backup destinations"] = "; ".join(f"{point}: {name}" for point, name in selections.items() if name)
             if not summary.get("Optimiser Grade Stream"):
                 summary["Optimiser Grade Stream"] = selected_stream
         sequence = getattr(
@@ -22257,6 +22325,28 @@ class UserInputs(QMainWindow):
         if table is None:
             return
         raw_report = self.fetch_manual_blend_plan_report()
+        if hasattr(self, "blend_plan_backup_controls"):
+            backup_choices = self.current_blend_plan_backup_choices()
+            unavailable_reason = ""
+            if not raw_report.empty and not any(backup_choices.values()):
+                evidence = self.manual_material_destination_plan_report()
+                unavailable_reason = " ".join(dict.fromkeys(
+                    str(row.get("reason") or "").strip()
+                    for row in evidence.to_dict("records")
+                    if str(row.get("status") or "").lower() == "unavailable"
+                    and str(row.get("reason") or "").strip()
+                ))
+            self.blend_plan_backup_controls.set_context(backup_choices,
+                getattr(self, "blend_plan_backup_destinations", None) or {}, not raw_report.empty,
+                unavailable_reason=unavailable_reason)
+        rounding_audit = rounding_audit_rows(
+            getattr(self, "stored_blend_sequence_table_for_gantt", None) or [])
+        if hasattr(self, "manual_rounding_audit_table"):
+            self.populate_dataframe_table(self.manual_rounding_audit_table, pd.DataFrame(rounding_audit))
+        if hasattr(self, "manual_rounding_status_label"):
+            partial_status = next((row["Sequence status"] for row in rounding_audit if row.get("Sequence status")), "")
+            self.manual_rounding_status_label.setText(partial_status)
+            self.manual_rounding_status_label.setVisible(bool(partial_status) and not raw_report.empty)
         summaries = self.update_manual_gantt_blend_summaries(raw_report)
         self.populate_manual_blend_summary_table(summaries)
         report = order_balance_triplets(raw_report)
@@ -22324,6 +22414,11 @@ class UserInputs(QMainWindow):
         )
 
     def export_manual_blend_plan_pdf(self):
+        try:
+            backups = self.validated_blend_plan_backups()
+        except ValueError as exc:
+            QMessageBox.information(self, "Blend Plan backup destinations", str(exc))
+            return
         raw_report = self.fetch_manual_blend_plan_report()
         sequence = getattr(
             self, "stored_blend_sequence_table_for_gantt", []
@@ -22382,6 +22477,8 @@ class UserInputs(QMainWindow):
                     "background_v2.PNG", "background.PNG",
                 ),
                 report_datetime=datetime.now(),
+                backup_destinations=backups,
+                rounding_audit=rounding_audit_rows(sequence),
             )
         except (BlendPlanPDFError, OSError, ValueError) as exc:
             QMessageBox.warning(
@@ -22419,6 +22516,11 @@ class UserInputs(QMainWindow):
             connection.close()
 
     def export_manual_blend_plan_xlsx(self):
+        try:
+            backups = self.validated_blend_plan_backups()
+        except ValueError as exc:
+            QMessageBox.information(self, "Blend Plan backup destinations", str(exc))
+            return
         raw_report = self.fetch_manual_blend_plan_report()
         sequence = getattr(
             self, "stored_blend_sequence_table_for_gantt", []
@@ -22471,6 +22573,8 @@ class UserInputs(QMainWindow):
                 file_path,
                 [
                     ("Blend Summary", blend_summary),
+                    ("Backup Destinations", pd.DataFrame(backups, columns=["Tipping point", "Backup destination", "Applies to"])),
+                    ("Ratio Rounding Audit", pd.DataFrame(rounding_audit_rows(sequence))),
                     ("Detailed Report", detailed_report),
                     ("Material Destination Plan", material_destination_plan),
                 ],
@@ -23420,6 +23524,9 @@ class UserInputs(QMainWindow):
             button_layout.addStretch()  # Push the button to the left
 
             self.setup_blends_tab_layout.addLayout(button_layout)
+            self.manual_ratio_rounding_controls = ManualRatioRoundingControls(getattr(self, "manual_ratio_rounding", None))
+            self.manual_ratio_rounding_controls.changed.connect(self.update_manual_ratio_rounding)
+            self.setup_blends_tab_layout.addWidget(self.manual_ratio_rounding_controls)
 
             self.setup_blends_tab_first_call = False
 
@@ -23428,6 +23535,10 @@ class UserInputs(QMainWindow):
 
         # Populate weights and Blend IDs if project is loaded
         self.populate_blend_config_weights_and_ids()
+
+    def update_manual_ratio_rounding(self, settings):
+        self.manual_ratio_rounding = rounding_settings(settings)
+        self.save_active_scenario_state()
 
     def setup_blend_config_table(self):
         headers = [
@@ -23873,7 +23984,7 @@ class UserInputs(QMainWindow):
                         except ValueError:
                             source_index = -1
                         is_optimised_rate = (
-                            config.get("rate_mode") == "optimised"
+                            config.get("rate_mode") in {"optimised", "rounded"}
                             and source_index >= 0
                         )
                         if is_optimised_rate:
@@ -24166,7 +24277,7 @@ class UserInputs(QMainWindow):
                     ]
                     source_ratio = None
                     configured_reclaim_rate = None
-                    if config.get("rate_mode") == "optimised":
+                    if config.get("rate_mode") in {"optimised", "rounded"}:
                         try:
                             configured_index = (
                                 configured_sources.index(
@@ -24231,7 +24342,7 @@ class UserInputs(QMainWindow):
 
                 balance = min(data["balances"])
                 if (
-                    data.get("rate_mode") == "optimised"
+                    data.get("rate_mode") in {"optimised", "rounded"}
                     and float(data.get("max_duration") or 0) > 0
                 ):
                     max_duration = float(data["max_duration"])
@@ -24646,7 +24757,7 @@ class UserInputs(QMainWindow):
                 # Remaining hours
                 elif key == "Remaining Hrs":
                     remaining_hrs_item = QTableWidgetItem()
-                    remaining_hrs_item.setFlags(remaining_hrs_item.flags() | ~Qt.ItemIsEditable) 
+                    remaining_hrs_item.setFlags(remaining_hrs_item.flags() & ~Qt.ItemIsEditable)
                     remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
                     self.blend_sequence_table.setItem(row, col, remaining_hrs_item)
                     
@@ -24918,7 +25029,7 @@ class UserInputs(QMainWindow):
             "_optimised_steady_state", "_fixed_steady_state",
             "_crusher_rate", "_period_name", "_exact_start", "_exact_end",
             "_physical_feed_tonnes", "_stockpile_source_tonnes",
-            "_product_build_actual_tonnes",
+            "_product_build_actual_tonnes", "_rounding_audit",
             "Direct Tip Tonnes", "Direct Tip Ratio",
         }
         for index, row in enumerate(rows or []):
@@ -24930,10 +25041,16 @@ class UserInputs(QMainWindow):
             unchanged = all(
                 str(row.get(key) or "") == str(existing.get(key) or "")
                 for key in (
-                    "Blend ID", "Start Datetime",
-                    "Duration (hrs)", "End Datetime",
+                    "Blend ID", "Start Datetime", "End Datetime",
                 )
             )
+            try:
+                unchanged = unchanged and (
+                    float(row.get("Duration (hrs)"))
+                    == float(existing.get("Duration (hrs)"))
+                )
+            except (TypeError, ValueError):
+                unchanged = False
             if not unchanged:
                 continue
             for key in metadata_keys:
@@ -24966,7 +25083,9 @@ class UserInputs(QMainWindow):
             for row_index, row_data in enumerate(updated_rows[:self.blend_sequence_table.rowCount()]):
                 blend_widget = self.blend_sequence_table.cellWidget(row_index, blend_col)
                 if isinstance(blend_widget, QComboBox) and row_data.get("Blend ID") is not None:
+                    blocked = blend_widget.blockSignals(True)
                     blend_widget.setCurrentText(str(row_data.get("Blend ID")))
+                    blend_widget.blockSignals(blocked)
 
                 origin_item = self.blend_sequence_table.item(row_index, origin_col)
                 if origin_item is None:
@@ -24980,7 +25099,9 @@ class UserInputs(QMainWindow):
                 if isinstance(start_widget, QDateTimeEdit) and start_value:
                     parsed_start = QDateTime.fromString(start_value, "yyyy-MM-dd HH:mm")
                     if parsed_start.isValid():
+                        blocked = start_widget.blockSignals(True)
                         start_widget.setDateTime(parsed_start)
+                        start_widget.blockSignals(blocked)
 
                 duration_item = self.blend_sequence_table.item(row_index, duration_col)
                 if duration_item is None:
@@ -25008,14 +25129,24 @@ class UserInputs(QMainWindow):
         finally:
             self.blend_sequence_table.blockSignals(False)
 
+        # Carry exact quantities through hydration, but only for unchanged rows.
+        previous_rows = self.stored_blend_sequence_table_for_gantt
+        self.stored_blend_sequence_table_for_gantt = updated_rows
+        collected = self.preserve_optimised_sequence_metadata(
+            self.collect_blend_sequence_table_rows()
+        )
+        self.stored_blend_sequence_table_for_gantt = previous_rows
+        self.stored_blend_sequence_table_for_gantt = (
+            self.preserve_optimised_sequence_metadata(collected)
+        )
         self.update_early_start_conditional_format()
         self.update_remaining_hrs()
-        self.stored_blend_sequence_table_for_gantt = self.collect_blend_sequence_table_rows()
 
     def submit_blend_sequence_table_to_gantt(self):
                 
         headers = ["Blend ID", "Origin", "Start Datetime", "Duration (hrs)", "End Datetime", "Early Start Flag", "Remaining Hrs"]
                 
+        self.update_remaining_hrs()
         # Check for negative values in "Remaining Hrs"
         for row in range(self.blend_sequence_table.rowCount()):
             item = self.blend_sequence_table.item(row, headers.index("Remaining Hrs"))
@@ -25078,7 +25209,8 @@ class UserInputs(QMainWindow):
             )
             return False
 
-        # If all rows are valid, store data
+        # Keep the last accepted sequence if validation fails.
+        previous_rows = self.stored_blend_sequence_table_for_gantt
         self.stored_blend_sequence_table_for_gantt = candidate_rows
 
         try:
@@ -25086,6 +25218,7 @@ class UserInputs(QMainWindow):
                 show_dialog=False, preserve_allocations=True
             )
         except (ManualBlendPlanningError, OSError, ValueError) as error:
+            self.stored_blend_sequence_table_for_gantt = previous_rows
             QMessageBox.warning(
                 self, "Manual Blend Sequence", str(error)
             )
@@ -25615,39 +25748,7 @@ class UserInputs(QMainWindow):
         while self.blend_sequence_table.rowCount() < len(stored_sequence):
             self.add_blank_row()  # Use the method to insert rows with the correct format
 
-        # Iterate through the stored data and update the table
-        for row_index, row_data in enumerate(stored_sequence):
-            # Update "Blend ID" (QComboBox)
-            blend_id = row_data.get("Blend ID")
-            combo_box = self.blend_sequence_table.cellWidget(row_index, 0)
-            if isinstance(combo_box, QComboBox) and blend_id is not None:
-                combo_box.setCurrentText(blend_id)
-
-            # Update "Start Datetime" (QDateTimeEdit)
-            start_datetime = row_data.get("Start Datetime")
-            datetime_widget = self.blend_sequence_table.cellWidget(row_index, 2)
-            if isinstance(datetime_widget, QDateTimeEdit) and start_datetime is not None:
-                datetime_widget.setDateTime(QDateTime.fromString(start_datetime, "yyyy-MM-dd HH:mm"))
-
-            # Update "Duration (hrs)" (QTableWidgetItem)
-            duration = row_data.get("Duration (hrs)")
-            duration_item = self.blend_sequence_table.item(row_index, 3)
-            if isinstance(duration_item, QTableWidgetItem):
-                duration_item.setText(
-                    f"{float(duration):.1f}"
-                    if duration is not None else ""
-                )
-            else:  # Create a new QTableWidgetItem if not already set
-                self.blend_sequence_table.setItem(
-                    row_index, 3,
-                    QTableWidgetItem(
-                        f"{float(duration):.1f}"
-                        if duration is not None else ""
-                    ),
-                )
-            
-            self.on_cell_changed(row_index,3)
-            self.update_blend_id(row_index)
+        self.apply_manual_gantt_rows_to_table(copy.deepcopy(stored_sequence))
 
     def update_remaining_hrs(self):
         """
@@ -25656,11 +25757,17 @@ class UserInputs(QMainWindow):
         """
         row_count = self.blend_sequence_table.rowCount()
         blend_remaining_map = {}  # Tracks remaining hours for each Blend ID
+        sequence = self.preserve_optimised_sequence_metadata(
+            self.collect_blend_sequence_table_rows()
+        )
 
         for row in range(row_count):
             # Get the "Duration (Hrs)" value
             duration_item = self.blend_sequence_table.item(row, 3) 
             scheduled_duration = float(duration_item.text()) if duration_item and duration_item.text() else 0
+            interval = ManualBlendRules.sequence_interval(sequence[row])
+            if sequence[row].get("_fixed_steady_state") and interval:
+                scheduled_duration = (interval[1] - interval[0]).total_seconds() / 3600
 
             # Get the Blend ID value
             blend_id_widget = self.blend_sequence_table.cellWidget(row, 0) 
@@ -25686,28 +25793,36 @@ class UserInputs(QMainWindow):
                 previous_remaining = blend_remaining_map[blend_id]
                 remaining_hrs = previous_remaining - scheduled_duration
 
+            # Imported maximum hours are stored to six decimal places.
+            if abs(remaining_hrs) < 1e-6:
+                remaining_hrs = 0.0
             # Update the map with the current remaining hours for this Blend ID
             blend_remaining_map[blend_id] = remaining_hrs
 
-            # Update the "Remaining Hrs" column
-            remaining_hrs_item = self.blend_sequence_table.item(row, 6)  
-            if remaining_hrs_item is None:
-                # Create a new item if it doesn't exist
-                remaining_hrs_item = QTableWidgetItem()
-                self.blend_sequence_table.setItem(row, 6, remaining_hrs_item)
+            # Derived cells must not recursively emit user-edit callbacks.
+            blocked = self.blend_sequence_table.blockSignals(True)
+            try:
+                # Update the "Remaining Hrs" column
+                remaining_hrs_item = self.blend_sequence_table.item(row, 6)
+                if remaining_hrs_item is None:
+                    # Create a new item if it doesn't exist
+                    remaining_hrs_item = QTableWidgetItem()
+                    self.blend_sequence_table.setItem(row, 6, remaining_hrs_item)
 
-            # Set the value of "Remaining Hrs" and conditionally format
-            remaining_hrs_item.setText(f"{remaining_hrs:.2f}")
-            if remaining_hrs >= 0:
-                remaining_hrs_item.setBackground(QColor("green"))
-                remaining_hrs_item.setForeground(QColor("white"))
-            else:
-                remaining_hrs_item.setBackground(QColor("red"))
-                remaining_hrs_item.setForeground(QColor("white"))
+                # Set the value of "Remaining Hrs" and conditionally format
+                remaining_hrs_item.setText(f"{remaining_hrs:.2f}")
+                if remaining_hrs >= 0:
+                    remaining_hrs_item.setBackground(QColor("green"))
+                    remaining_hrs_item.setForeground(QColor("white"))
+                else:
+                    remaining_hrs_item.setBackground(QColor("red"))
+                    remaining_hrs_item.setForeground(QColor("white"))
 
-            # Center align the text
-            remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
-            remaining_hrs_item.setFlags(remaining_hrs_item.flags() | ~Qt.ItemIsEditable) 
+                # Center align the text
+                remaining_hrs_item.setTextAlignment(Qt.AlignCenter)
+                remaining_hrs_item.setFlags(remaining_hrs_item.flags() & ~Qt.ItemIsEditable)
+            finally:
+                self.blend_sequence_table.blockSignals(blocked)
 
     def start_or_update_dash_manual_chart_thread(self):
         """Update or start the Dash app."""
@@ -26060,6 +26175,8 @@ class UserInputs(QMainWindow):
                 "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
                 "manual_direct_tip_allocations": self.manual_direct_tip_allocations,
                 "manual_steady_states": self.manual_steady_states,
+                "manual_ratio_rounding": rounding_settings(getattr(self, "manual_ratio_rounding", None)),
+                "blend_plan_backup_destinations": copy.deepcopy(getattr(self, "blend_plan_backup_destinations", None) or {}),
                 "time_mode_choice": self.time_mode_choice,
                 "updated_stockpile_data": self.updated_stockpile_data,
                 "blend_config_table_inputs":  self.blend_config_table_inputs,
@@ -26588,6 +26705,10 @@ class UserInputs(QMainWindow):
         self.manual_steady_states = copy.deepcopy(
             loaded_state.get("manual_steady_states") or []
         )
+        self.manual_ratio_rounding = rounding_settings(loaded_state.get("manual_ratio_rounding"))
+        self.blend_plan_backup_destinations = copy.deepcopy(loaded_state.get("blend_plan_backup_destinations") or {})
+        if hasattr(self, "manual_ratio_rounding_controls"):
+            self.manual_ratio_rounding_controls.set_settings(self.manual_ratio_rounding)
         self.manual_plan_states = copy.deepcopy(
             loaded_state.get("manual_plan_states") or {}
         )

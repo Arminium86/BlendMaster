@@ -1056,7 +1056,7 @@ class CaseModeller:
         excluded_source_sets = []
         excluded_stockpile_sets = []
         candidate_source_signatures = set()
-        required_min_feed_duration = self.configured_min_feed_duration_hours()
+        configured_min_feed_duration = self.configured_min_feed_duration_hours()
         blend_option_timeout_seconds = self.configured_blend_option_timeout_seconds()
         max_decision_blend_options = self.configured_max_decision_blend_options()
         step_solver_config = self.solver_config_for_current_step()
@@ -1245,6 +1245,23 @@ class CaseModeller:
                         continue
 
                     potential_feed_duration = self.candidate_potential_feed_duration(result)
+                    # Depletion, turnover or build completion can shorten the
+                    # initial Calendar window. Apply the guardrail to this
+                    # candidate's final window without changing the user input.
+                    required_min_feed_duration = self.required_min_feed_duration(
+                        result.get("steady_state_duration", initial_steady_state_duration)
+                    )
+                    if (
+                        required_min_feed_duration is not None
+                        and configured_min_feed_duration is not None
+                        and required_min_feed_duration + Optimizer.SOLUTION_TOLERANCE
+                        < configured_min_feed_duration
+                    ):
+                        print(
+                            f"Min Stockpile Feed Duration for blend option {self.blend_option} "
+                            f"is capped at {required_min_feed_duration:.2f} hours by its "
+                            f"steady-state duration (configured {configured_min_feed_duration:.2f} hours)."
+                        )
                     if (
                         required_min_feed_duration is not None
                         and potential_feed_duration + Optimizer.SOLUTION_TOLERANCE < required_min_feed_duration
@@ -2182,6 +2199,7 @@ class CaseModeller:
                 self.grade_block_pair_locks[source] = tuple(stockpiles)
 
     def required_min_feed_duration(self, available_window_duration):
+        """Cap the configured minimum to the candidate's final steady-state window."""
         configured_duration = self.configured_min_feed_duration_hours()
         if configured_duration is None:
             return None

@@ -8,6 +8,42 @@ from GUI.ManualBlendDash import ManualBlendDash
 
 
 class ManualBlendSummaryTests(unittest.TestCase):
+    def test_adjacent_same_blend_bars_do_not_double_count_second_precision_reports(self):
+        start = datetime(2026, 8, 20, 3, 6, 46, 250000)
+        middle = datetime(2026, 8, 20, 3, 25, 33, 625000)
+        end = datetime(2026, 8, 20, 3, 57, 31, 250000)
+        sequence, records = [], []
+        for state, (left, right) in enumerate(((start, middle), (middle, end)), 8):
+            hours = (right - left).total_seconds() / 3600
+            sequence.append({
+                "Blend ID": "8", "_fixed_steady_state": True,
+                "_exact_start": left.isoformat(), "_exact_end": right.isoformat(),
+                "Start Datetime": left.strftime("%Y-%m-%d %H:%M"),
+                "End Datetime": right.strftime("%Y-%m-%d %H:%M"),
+                "Duration (hrs)": round(hours, 1),
+            })
+            for source, ratio in (("CAT27", .525), ("OPF02", .475)):
+                records.append({
+                    "steady_state_number": state, "blend_ID": 8,
+                    "start_datetime": left, "end_datetime": right,
+                    "source": source, "source_type": "stockpile",
+                    "source_actual_tonnes": 5176.888869 * ratio * hours,
+                    "crusher_actual_tonnes": 5176.888869 * hours,
+                    "source_blend_ratio": ratio,
+                    "crusher_actual_grade_fe": 54.69,
+                })
+        precise = pd.DataFrame(records)
+        saved = precise.copy()
+        for column in ("start_datetime", "end_datetime"):
+            saved[column] = saved[column].dt.strftime("%Y-%m-%d %H:%M:%S")
+        expected = ManualBlendSummary.build(sequence, precise)
+        actual = ManualBlendSummary.build(sequence, saved)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual[0]["Source Rates"], actual[1]["Source Rates"])
+        self.assertNotEqual(actual[0]["Source Tonnes"], actual[1]["Source Tonnes"])
+        totals = sum(sum(float(n) for n in row["Source Tonnes"].split(",")) for row in actual)
+        self.assertAlmostEqual(totals, precise.source_actual_tonnes.sum(), places=5)
+
     def test_bar_grades_use_selected_stream_analyte_weights(self):
         start = datetime(2026, 1, 1, 6)
         sequence = [{

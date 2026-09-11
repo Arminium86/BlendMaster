@@ -172,6 +172,8 @@ class BlendPlanPDF:
         plan_id="Manual",
         logo_path=None,
         report_datetime=None,
+        backup_destinations=None,
+        rounding_audit=None,
     ):
         try:
             from reportlab.graphics.shapes import Drawing, Line, Rect, String
@@ -582,6 +584,33 @@ class BlendPlanPDF:
             return header
 
         story = report_header()
+        if backup_destinations:
+            story.append(Paragraph("Backup destinations — whole plan, all trucks including direct tip", styles["BlendPlanSection"]))
+            for backup in backup_destinations:
+                story.append(paragraph(f"{backup['Tipping point']}: {backup['Backup destination']}"))
+            story.append(Spacer(1, 9))
+        if rounding_audit:
+            story.append(Paragraph("Rounded manual plan — review achieved grades versus targets", styles["BlendPlanSection"]))
+            for status in dict.fromkeys(audit.get("Sequence status") for audit in rounding_audit):
+                if status:
+                    story.append(paragraph(status))
+            timing_notes = set()
+            for audit in rounding_audit:
+                reason = audit.get("Timing adjustment")
+                key = (audit["Blend ID"], reason)
+                if reason and key not in timing_notes:
+                    timing_notes.add(key)
+                    story.append(paragraph(f"Blend {audit['Blend ID']}: {reason}"))
+            seen = set()
+            for audit in rounding_audit:
+                key = (audit["Blend ID"], audit["Source"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                story.append(paragraph(f"Blend {audit['Blend ID']} — {audit['Source']}: "
+                    f"original {audit['Original ratio (%)']:.6g}%; rounded {audit['Rounded ratio (%)']:.6g}% "
+                    f"({audit['Increment (%)']}% increment)"))
+            story.append(Spacer(1, 9))
         story.extend([
             Paragraph("Blend Details", styles["BlendPlanSection"]),
             make_detail_cards(),

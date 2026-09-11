@@ -5,6 +5,9 @@ class ManualBlendRules:
     """Pure validation helpers shared by the PyQt and manual Gantt UIs."""
 
     DATETIME_FORMATS = (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
     )
@@ -51,11 +54,16 @@ class ManualBlendRules:
 
     @classmethod
     def sequence_interval(cls, row):
-        start = cls.parse_datetime(row.get("Start Datetime"))
+        fixed = row.get("_fixed_steady_state")
+        start = cls.parse_datetime(
+            row.get("_exact_start") if fixed else None
+        ) or cls.parse_datetime(row.get("Start Datetime"))
         if start is None:
             return None
 
-        end = cls.parse_datetime(row.get("End Datetime"))
+        end = cls.parse_datetime(
+            row.get("_exact_end") if fixed else None
+        ) or cls.parse_datetime(row.get("End Datetime"))
         if end is None:
             try:
                 duration = float(row.get("Duration (hrs)") or 0)

@@ -25,6 +25,7 @@ class ManualBlendSummary:
         "Grade Mn",
         "Sources and Ratios",
         "Direct Tip Grade Blocks",
+        "Backup destinations",
     ]
 
     @staticmethod
@@ -83,9 +84,15 @@ class ManualBlendSummary:
             return report.iloc[0:0]
         blend_key = cls._blend_key(sequence_row.get("Blend ID"))
         blend_mask = report["_blend_key"].eq(blend_key)
+        starts_within = report["_start"] >= start
+        if sequence_row.get("_exact_start"):
+            # Saved report timestamps can lose subsecond precision while the
+            # rounded sequence retains it. Include that same start second;
+            # otherwise the overlap fallback can also pull in the next state.
+            starts_within |= report["_start"].eq(start.floor("s"))
         contained = report[
             blend_mask
-            & (report["_start"] >= start)
+            & starts_within
             & (report["_end"] <= end)
         ]
         if not contained.empty:

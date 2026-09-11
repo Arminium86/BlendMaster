@@ -964,6 +964,57 @@ Task 26 has not started.
 
 ## 10. Manual ratio rounding
 
+Task 26 implemented 11 September 2026. **Manual Blending Dashboard > Setup
+Blends** has **Round ratios when prepopulating** (off by default) and **Increment**
+(default 5%; options 1, 2, 5, 10, 20, 25, 50). These are scenario settings and
+apply on the next optimised-to-manual conversion. Existing manual plans are
+not rounded again when a control changes or a project is restored.
+
+The rounded path groups each original steady state separately, even when the
+optimiser reused a Blend ID. It rounds full physical-feed WMT shares across
+stockpiles and direct-tip sources together; these sum to 100%. Source order is
+the report's stable order. Whole-percent and increment ties round half-up;
+earlier sources retain their snapped shares, later sources absorb overshoot,
+and the first positive source receives residual increment units. Zero original
+sources are never introduced by rebalancing.
+
+Each recipe is replayed using its original physical feed rate. Mapped crusher
+and product rates, additive properties, grades and build outcomes are calculated
+from the new physical withdrawals. Inventory/chunk and product-build boundaries
+are recalculated; depletion-controlled recipe ends may move, and subsequent
+contiguous recipes are recalculated within the original planning horizon.
+Calendar boundaries and explicit gaps remain absolute. Direct-tip eligibility
+is rechecked in each recalculated window. A direct-tip shortage first shortens
+the recipe at the same rounded ratios and physical feed rate. Delivery times
+are rechecked until the shorter window fits every required source. Feasible
+states already completed before a build/chunk boundary are retained if no
+further duration fits. Subsequent contiguous recipes move earlier where
+calendar anchors permit; an unfilled tail is reported in the completion message.
+The timing adjustment appears in Ratio Rounding Audit and PDF/XLSX outputs.
+If no positive direct-tip duration fits (including after a build/chunk boundary),
+retry that recipe from its opening stock with direct tip removed. Split the total
+rounded grade-block share into equal percentage-point additions across all
+stockpile sources listed in that recipe, including any rounded to zero. Round
+the redistributed shares again to the selected increment, using the original
+source order to resolve ties and retain a 100% total (52.5/47.5 becomes 55/45
+at a 5% increment). Recalculate depletion,
+product-build boundaries, grades and downstream timing using the resulting mix.
+Attempts are isolated: discarded attempts cannot consume stock or advance build
+progress in their replacements. If both attempts fail, retain the longest valid
+contiguous portion from one attempt, plus earlier accepted recipes, then stop;
+never combine overlapping attempts or skip ahead to later recipes. If no states
+are valid, leave the previous plan unchanged. The completion message, Blend Plan
+notice, rounding audit and PDF/XLSX outputs identify a partial sequence and its
+stopping reason; this metadata survives save/load and unchanged submission.
+No fallback invents inventory or applies optimiser grade constraints to manual
+blending. Explicit reclaim-only fallback is the only step that changes the mix.
+
+Successful results become fixed, editable manual starting states, preserving
+exact source tonnes and subsecond timing for restoration. **Results > Reports >
+Blend Plan > Ratio Rounding Audit** shows original/rounded shares and original/
+recalculated timing, including sources rounded to zero. Raw manual reports retain
+rounding provenance; the PDF and XLSX exports include the conversion audit.
+
 - Optional. When disabled, exact optimiser ratios prepopulate (Q13).
 - Applies to both stockpile blend ratios and direct-tip acceptance ratios
   (Q13).
@@ -981,6 +1032,34 @@ Task 26 has not started.
   publishing (Q16).
 
 ## 11. Backup destinations
+
+Task 27 implemented 11 September 2026. **Results > Reports > Blend Plan** has a
+backup selector for each configured tipping point. Choices are the active manual
+plan's saved Material Destination Plan fallback 1/2 destinations, restricted to
+stockpiles whose current Nearest Crusher mapping matches that tipping point.
+No new fallback search or physical allocation is performed by this selector.
+For the existing Total_Feed mode, explicitly configured APS crusher choices
+identify the tipping points for these publication instructions; Task 28's
+simultaneous lane refactor has not started.
+
+Choices are owned by the manual plan (including contingency plans), are saved
+with the scenario/project, and are rechecked at export. If choices exist, a
+selection is required before publishing. An obsolete saved choice remains
+visibly unavailable until corrected/cleared. If no eligible fallback exists,
+the published instruction explicitly says **No eligible fallback**. The PDF
+and XLSX publish the backup instruction for all trucks for the whole plan.
+Selecting a backup does not alter the Material Destination Plan or consume
+capacity. Clearing a manual plan also clears its backup choices.
+
+Tasks 26–27 validation: the 966-test regression suite passed, followed by 16
+focused checks after the final rollback and gap-preservation adjustments. Native Qt checks
+exercised exact/rounded prepopulation, backup selection, no-data/stale-choice
+states and actual `.prj` save/load. The application's PDF/XLSX exporters were
+run; new PDF sections and workbook sheets were read and rendered for visual
+review. Tests used illustrative data and isolated databases, with warehouse
+reload, the Gantt web server and unrelated destination recalculation stubbed.
+Screenshots/exports and the short review guide remain local under
+`docs/screenshots/task27/` and `docs/TASK_26_27_UI_REVIEW.md`. Stop after Task 27.
 
 - Chosen per tipping point for the whole plan at the Blend Plan tab, not per
   period or steady state (Q17).
@@ -1118,3 +1197,15 @@ Contract for when it is built:
 8. Hard mode behavior is frozen; soft mode is strictly additive.
 9. Excluded AMT footprints must not reach Snowflake, processing or reports.
 10. The non-positive footprint guard runs before inventory allocation.
+
+### Manual sequence handover correction (11 September 2026)
+
+- Imported exact and rounded states retain exact boundaries and per-source tonnes through sequence hydration, reload and unchanged submission. The one-decimal duration is display precision only; Remaining Hrs uses the preserved exact interval and tolerates the six-decimal maximum-duration storage precision.
+- Real schedule edits invalidate fixed-state quantities and trigger normal manual recalculation. Rejected submissions retain the previously accepted sequence metadata. Remaining Hrs is derived and read-only; refreshing it does not emit user-edit callbacks.
+- Validation: 148 focused checks passed, including depleted inventory with direct tip, repeated hydration, real edits, rejected submission, Qt signal handling and exact microsecond overlap boundaries. Isolated native application checks passed for exact and rounded prepopulation, reload and submission with preserved tonnes. Task 28 remains unstarted.
+
+Direct-tip duration fallback validation (11 September 2026): 160 focused checks passed. Native rounded prepopulation, submission, actual project save/load, PDF and XLSX exports passed using limited direct-tip evidence. Delivery exclusion, multiple required sources, calendar anchors, product-build boundaries and a retained feasible portion of a recipe are covered. Task 28 remains unstarted.
+
+Reclaim-only and partial-sequence fallback validation (11 September 2026): 169 focused checks passed. Isolated native prepopulation and submission passed for both outcomes, including the persistent partial-plan notice, actual project save/load, and PDF/XLSX outputs. Equal percentage-point redistribution, unchanged rounding increments, recalculated depletion, isolated retries, retained valid states and report-construction failures are covered. Task 28 remains unstarted.
+
+Post-redistribution rounding validation (11 September 2026): 89 focused checks passed, including 52.5/47.5 becoming 55/45, recomputed depletion and grades, and all supported increments. Native prepopulation/submission, project save/load and PDF/XLSX outputs passed with 55/45 final ratios. Task 28 remains unstarted.
