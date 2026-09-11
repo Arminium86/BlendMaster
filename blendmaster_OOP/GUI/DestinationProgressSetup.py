@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                             QLineEdit, QPlainTextEdit, QTableView)
 
 from classes.DestinationBuildOrder import extract_build_order, inventory_areas, digest
-from classes.DestinationProgress import progress_settings, resolve_progress
+from classes.DestinationProgress import progress_settings, resolve_progress, remaining_2wp_estimates, ESTIMATED_CAPACITY_BASIS
 from setup.RecentDestinationActivity import RecentDestinationActivity
 from setup.ProductAssayHistory import awst
 
@@ -151,7 +151,7 @@ class DestinationProgressSetup(QWidget):
         self.validation.setWordWrap(True)
         self.validation.setStyleSheet("color: #a33b16;")
         layout.addWidget(self.validation)
-        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT; blank means not set and 0 means no remaining capacity. Valid edits apply immediately to the current scenario; save the project to retain them. Recalculate the plan to apply these inputs to Material Destination Plan assignments; saved results retain the inputs used for their calculation.")
+        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT. Blank uses an estimate from remaining 2WP deliveries for the current build; 0 means no remaining capacity. Estimates share one physical build balance across material types. Valid edits apply immediately; save the project to retain them. Recalculate the plan to update Material Destination Plan assignments.")
         footer.setWordWrap(True)
         footer.setStyleSheet("color: #526474;")
         layout.addWidget(footer)
@@ -332,6 +332,7 @@ class DestinationProgressSetup(QWidget):
                           current="", previous=instance_label(r["previous"]), next=instance_label(r["next"]), remaining="", basis=r["selection_basis"]) for r in self.rows]
         self.fill(self.table, summaries, [("rom_area", "ROM area"), ("material_type", "Material type"), ("detected", "Detected destination"), ("current", "Current build instance"), ("previous", "Previous"), ("next", "Next"), ("remaining", "Remaining (ROM WMT)"), ("basis", "Selection basis")])
         self.capacity_fields = {}
+        self.capacity_estimates = remaining_2wp_estimates(order, self._context.get("start"))
         for i, row in enumerate(self.rows):
             combo = QComboBox()
             combo.setToolTip("Select the current build instance from the 2WP Build order. A manual selection overrides automatic detection for this ROM area/material type. The planned destinations and their sequence remain as defined in 2WP.")
@@ -351,6 +352,10 @@ class DestinationProgressSetup(QWidget):
             if current:
                 key = current["instance_id"]
                 value = self._settings["remaining_wmt"].get(key)
+                estimate = self.capacity_estimates.get(key)
+                if estimate is not None:
+                    field.setPlaceholderText(f"Estimated: {estimate:,.1f}")
+                field.setToolTip(f"{ESTIMATED_CAPACITY_BASIS}: {estimate:,.1f} ROM WMT. Used when blank; an entered value, including zero, overrides it. Shared across material types in this physical build. Intervals crossing scenario start are prorated by time." if estimate is not None else "No remaining 2WP delivery estimate is available. Enter remaining ROM WMT or refresh the 2WP inputs.")
                 field.setText(str(value) if value is not None else "")
                 field.textEdited.connect(lambda text, key=key, field=field: self.edit_capacity(key, field, text))
                 field.editingFinished.connect(lambda key=key, field=field: self.finish_capacity(key, field))
@@ -416,6 +421,7 @@ class DestinationProgressSetup(QWidget):
                 sibling.setText(text)
         self.validation.clear()
         self.emit_settings()
+        self.show_details()
 
     def finish_capacity(self, key, field):
         if field.text() and not field.hasAcceptableInput():
@@ -437,5 +443,10 @@ class DestinationProgressSetup(QWidget):
                      "  →  ".join(instance_label(r) for r in row["sequence"]),
                      f"Latest inbound: {row['latest_inbound'] or 'none'} AWST · Activity: {row['activity_wmt']:,.1f} ROM WMT · {row['selection_basis']}"]
             notes = row["warnings"] + notes
+            if row["current"]:
+                key = row["current"]["instance_id"]
+                value = self._settings["remaining_wmt"].get(key)
+                estimate = self.capacity_estimates.get(key)
+                lines.append(f"Remaining (ROM WMT): {value:,.1f} · User entered" if value is not None else f"Remaining (ROM WMT): {estimate:,.1f} · {ESTIMATED_CAPACITY_BASIS}" if estimate is not None else "Remaining (ROM WMT): Not set — no 2WP estimate available.")
         lines.extend(notes)
         self.details.setPlainText("\n\n".join(lines))

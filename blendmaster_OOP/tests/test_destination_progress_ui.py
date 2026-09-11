@@ -154,6 +154,30 @@ class DestinationProgressUITests(unittest.TestCase):
         self.assertEqual(self.view.settings()["remaining_wmt"], {})
         self.assertIn("re-enter", self.view.validation.text())
 
+    def test_blank_shows_estimate_and_round_trips_without_becoming_override(self):
+        from datetime import datetime
+        from classes.DestinationProgress import ESTIMATED_CAPACITY_BASIS
+        start = datetime(2026, 9, 8, 7, 30)
+        self.service._query.return_value = [actual("SP2", when="2026-09-08 07:00")]
+        self.context(scenario_start=start)
+        self.load()
+        field = self.view.table.cellWidget(0, 6)
+        self.assertEqual(field.text(), "")
+        self.assertEqual(field.placeholderText(), "Estimated: 50.0")
+        self.assertIn(ESTIMATED_CAPACITY_BASIS, self.view.details.toPlainText())
+        QTest.keyClicks(field, "0")
+        self.assertIn("User entered", self.view.details.toPlainText())
+        QTest.keyClick(field, Qt.Key_A, Qt.ControlModifier)
+        QTest.keyClick(field, Qt.Key_Backspace)
+        self.assertIn(ESTIMATED_CAPACITY_BASIS, self.view.details.toPlainText())
+        state = pickle.loads(pickle.dumps(self.view.settings()))
+        self.assertEqual(state["remaining_wmt"], {})
+        self.view.reset_context()
+        self.context(scenario_start=start, state=state)
+        self.load()
+        self.assertEqual(self.view.table.cellWidget(0, 6).placeholderText(), "Estimated: 50.0")
+        self.assertEqual(self.view.settings(), state)
+
     def test_old_async_response_cannot_overwrite_new_scenario(self):
         self.view.request_refresh()
         self.context(scenario_id="b", site="CB")

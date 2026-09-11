@@ -73,9 +73,12 @@ class DestinationPlanReportTests(unittest.TestCase):
         self.assertEqual(len(sp1), 2)
         self.assertEqual(set(sp1.build_instance), {1, 2})
 
-    def test_unavailable_and_blank_capacity_do_not_publish_an_aps_guess_as_assignment(self):
+    def test_unavailable_and_missing_capacity_evidence_do_not_publish_an_aps_guess_as_assignment(self):
         rows, report, _ = fixture()
-        for ctx in (None, context(None)):
+        legacy = context(None)
+        for entry in legacy["order"]["orders"]:
+            entry.pop("inbound_windows")
+        for ctx in (None, legacy):
             frames, _ = publish(rows, report, ctx)
             summary = frames["material_destination_plan"]
             self.assertEqual(summary.assigned_tonnes.sum(), 40)

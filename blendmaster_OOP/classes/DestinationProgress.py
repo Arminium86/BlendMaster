@@ -5,6 +5,37 @@ from copy import deepcopy
 
 from classes.DestinationBuildOrder import digest
 from setup.InventoryBuildLineage import finite_number
+from setup.ProductAssayHistory import awst
+
+
+ESTIMATED_CAPACITY_BASIS = "Estimated from remaining 2WP deliveries"
+
+
+def remaining_2wp_estimates(order, scenario_start):
+    """Sum future material deliveries into each shared physical build balance.
+
+    Intervals crossing scenario start use uniform delivery over their duration.
+    Missing interval evidence stays unavailable; a fully elapsed build yields zero.
+    """
+    if scenario_start is None:
+        return {}
+    start = awst(scenario_start)
+    totals, invalid = defaultdict(float), set()
+    for entry in order["orders"]:
+        key = entry["instance_id"]
+        windows = entry.get("inbound_windows")
+        if not windows:
+            invalid.add(key)
+            continue
+        for begin, end, tonnes in windows:
+            begin, end = awst(begin), awst(end)
+            quantity = finite_number(tonnes)
+            if end <= begin or quantity is None or quantity < 0:
+                invalid.add(key)
+                continue
+            fraction = max(0.0, min(1.0, (end - start).total_seconds() / (end - begin).total_seconds()))
+            totals[key] += quantity * fraction
+    return {key: value for key, value in totals.items() if key not in invalid}
 
 
 def progress_settings(value=None):

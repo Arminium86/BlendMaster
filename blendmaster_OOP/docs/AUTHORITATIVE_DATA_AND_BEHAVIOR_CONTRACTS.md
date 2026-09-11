@@ -758,7 +758,15 @@ aggregation. Direct-tip tonnes consume no ROM capacity. Payload IDs and full
 tonnage precision survive into the assignment and capacity ledgers.
 
 - The confirmed/selected current build instance starts with user-entered remaining
-  ROM WMT. Blank remains unresolved; zero advances without assigning tonnes.
+  ROM WMT. If blank, use **Estimated from remaining 2WP deliveries**: sum the
+  current physical build's inbound intervals from scenario start onward, across
+  its material rows. Exclude elapsed intervals and other build instances; prorate
+  an interval crossing scenario start uniformly by its remaining duration. This
+  is a planned receiving allowance, not measured physical free space. Missing
+  interval evidence remains unresolved. An entered value (including zero)
+  overrides the estimate; zero advances without assigning tonnes. Estimates do
+  not become saved manual overrides. Setup placeholders/details and published
+  capacity-basis fields distinguish the estimate from user-entered capacity.
 - Later instances start with their total 2WP planned ROM WMT across materials,
   unless a remaining-capacity value was explicitly entered for that instance.
   All material lanes sharing one physical instance share a single balance;
@@ -865,7 +873,7 @@ saved under older rules rebuild their import instead of reusing stale decisions.
 The `destination_primary_assignments` audit stores those separate roles, selected
 rules, JSON candidate evidence and a rule-input signature. Primary capacity
 allocation remains authoritative: fallback candidates do not consume tonnes or
-bypass an unconfirmed current instance or a blank remaining-capacity input.
+bypass an unconfirmed current instance or unavailable remaining-capacity evidence.
 
 Optimised, manual and contingency plans keep separate audits. New inbound haul
 route snapshots persist with their site scenario and `.prj`, and clear/reload with

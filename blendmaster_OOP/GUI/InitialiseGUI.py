@@ -29,7 +29,7 @@ from classes.OptimisedToManualPlan import OptimisedToManualPlan
 from classes.ManualRatioRounding import rounding_settings, recalculate_rounded_plan, rounding_audit_rows
 from GUI.ManualRatioRoundingControls import ManualRatioRoundingControls
 from GUI.BlendPlanBackupControls import BlendPlanBackupControls
-from classes.BlendPlanBackups import backup_choices, backup_publication
+from classes.BlendPlanBackups import backup_choices, backup_publication, backup_unavailable_reason
 from classes.ManualBlendSummary import ManualBlendSummary
 from classes.BlendPlanPDF import BlendPlanPDF, BlendPlanPDFError
 from classes.SpreadsheetReportExporter import (
@@ -22221,7 +22221,7 @@ class UserInputs(QMainWindow):
         self.refresh_manual_blend_plan_report()
         self.refresh_closing_rom_stocks_compliance()
 
-    def current_blend_plan_backup_choices(self):
+    def current_blend_plan_backup_choices(self, with_reason=False):
         points = getattr(self, "selected_site_crushers", None) or [getattr(self, "crusher_input_choice", "")]
         if any(str(point).upper().replace("-", "_") == "TOTAL_FEED_PC" for point in points):
             points = getattr(self, "aps_ratio_crusher_choices", None) or getattr(self, "aps_direct_tip_crusher_choice", None) or []
@@ -22230,7 +22230,9 @@ class UserInputs(QMainWindow):
         def matches(area, point):
             return area.upper() == str(point).upper() or ExpitDataHandler.crusher_destination_matches(
                 area, getattr(self, "mine_input_choice", ""), point, getattr(self, "opf_input_choice", ""))
-        return backup_choices(points, evidence.to_dict("records"), areas, matches)
+        rows = evidence.to_dict("records")
+        choices = backup_choices(points, rows, areas, matches)
+        return (choices, backup_unavailable_reason(choices, rows, areas)) if with_reason else choices
 
     def update_blend_plan_backups(self, selections):
         self.blend_plan_backup_destinations = copy.deepcopy(selections)
@@ -22326,16 +22328,7 @@ class UserInputs(QMainWindow):
             return
         raw_report = self.fetch_manual_blend_plan_report()
         if hasattr(self, "blend_plan_backup_controls"):
-            backup_choices = self.current_blend_plan_backup_choices()
-            unavailable_reason = ""
-            if not raw_report.empty and not any(backup_choices.values()):
-                evidence = self.manual_material_destination_plan_report()
-                unavailable_reason = " ".join(dict.fromkeys(
-                    str(row.get("reason") or "").strip()
-                    for row in evidence.to_dict("records")
-                    if str(row.get("status") or "").lower() == "unavailable"
-                    and str(row.get("reason") or "").strip()
-                ))
+            backup_choices, unavailable_reason = self.current_blend_plan_backup_choices(with_reason=True)
             self.blend_plan_backup_controls.set_context(backup_choices,
                 getattr(self, "blend_plan_backup_destinations", None) or {}, not raw_report.empty,
                 unavailable_reason=unavailable_reason)

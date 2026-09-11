@@ -4,7 +4,8 @@ import unittest
 from copy import deepcopy
 from types import SimpleNamespace
 import pickle
-from classes.BlendPlanBackups import backup_choices, backup_publication
+from classes.BlendPlanBackups import backup_choices, backup_publication, backup_unavailable_reason
+from classes.ExpitDataHandler import ExpitDataHandler
 from GUI.BlendPlanBackupControls import BlendPlanBackupControls
 from GUI.InitialiseGUI import UserInputs
 from PyQt5.QtWidgets import QApplication
@@ -32,6 +33,28 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(rows[0]["Backup destination"], "SP1")
         self.assertEqual(rows[1]["Backup destination"], "No eligible fallback")
         self.assertIn("direct tip", rows[0]["Applies to"])
+
+    def test_refreshed_rch_fallbacks_do_not_belong_to_opf01(self):
+        rows = [{"fallback_1_destination": "Stockpiles/OPF02_RP01_0201",
+                 "fallback_2_destination": "Stockpiles/HAL01_RP01_0308"}]
+        areas = {"OPF02_RP01_0201": "RCH", "HAL01_RP01_0308": "HAL CRUSHER"}
+        matches = lambda area, point: ExpitDataHandler.crusher_destination_matches(area, "CC", point)
+        choices = backup_choices(["OPF01_PC"], rows, areas, matches)
+        self.assertEqual(choices, {"OPF01_PC": []})
+        reason = backup_unavailable_reason(choices, rows, areas)
+        self.assertIn("OPF01_PC", reason)
+        self.assertIn("RCH", reason)
+        self.assertIn("HAL CRUSHER", reason)
+        self.assertNotIn("Refresh", reason)
+        choices = backup_choices(["OPF02_PC"], rows, areas, matches)
+        self.assertEqual(choices, {"OPF02_PC": ["OPF02_RP01_0201"]})
+        self.assertEqual(backup_unavailable_reason(choices, rows, areas), "")
+
+    def test_missing_mapping_and_missing_reconciliation_have_distinct_reasons(self):
+        reason = backup_unavailable_reason({"OPF01_PC": []}, [{"fallback_1_destination": "SP1"}], {})
+        self.assertIn("Nearest Crusher mapping is unavailable", reason)
+        reason = backup_unavailable_reason({"OPF01_PC": []}, [{"status": "Unavailable", "reason": "Refresh reconciliation"}], {})
+        self.assertEqual(reason, "Refresh reconciliation")
 
     def test_controls_no_plan_empty_stale_and_selection_round_trip(self):
         view = BlendPlanBackupControls()

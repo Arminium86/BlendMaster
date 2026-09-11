@@ -271,8 +271,10 @@ class DestinationRuleTests(unittest.TestCase):
             self.assertEqual(stored[0][:2], ("Stockpiles/SP2", "Stockpiles/NEAR"))
             self.assertEqual(json.loads(stored[0][2])["candidates"][1]["cycle_time_minutes"], 3)
 
-    def test_fallback_candidates_do_not_bypass_blank_primary_capacity(self):
+    def test_fallback_candidates_do_not_bypass_unavailable_primary_capacity(self):
         ctx = context(capacity=None)
+        for entry in ctx["order"]["orders"]:
+            entry.pop("inbound_windows")
         ctx["destination_rules"] = dict(guidance=guidance((block(), "SP2", 100)))
         row = payload(1, 100); row["source"] = SOURCE
         result = allocate_final_plan(transactions([row]), pd.DataFrame(), ctx)
@@ -282,8 +284,10 @@ class DestinationRuleTests(unittest.TestCase):
         self.assertEqual(assigned["unresolved_wmt"], 100)
         self.assertEqual(result["ledger"], [])
 
-    def test_last_resort_cannot_bypass_blank_primary_capacity(self):
+    def test_last_resort_cannot_bypass_unavailable_primary_capacity(self):
         ctx = context(capacity=None)
+        for entry in ctx["order"]["orders"]:
+            entry.pop("inbound_windows")
         ctx["destination_rules"] = dict(guidance=guidance((block(pit="OTHER01"), "SP2", 100)))
         row = payload(1, 100); row["source"] = SOURCE
         result = allocate_final_plan(transactions([row]), pd.DataFrame(), ctx)

@@ -115,10 +115,11 @@ def build_order(frame, areas, *, source_signature=None, source_file="Mining.csv"
         key = (record["rom_area"], record["material_type"], record["instance_id"])
         if key not in grouped:
             grouped[key] = {k: record[k] for k in ("rom_area", "material_type", "destination", "instance_id", "build_instance")}
-            grouped[key].update(first_inbound=record["start"], last_inbound=record["end"], planned_wmt=0., csv_records=[], source_blocks=[])
+            grouped[key].update(first_inbound=record["start"], last_inbound=record["end"], planned_wmt=0., csv_records=[], source_blocks=[], inbound_windows=[])
         item = grouped[key]
         item["last_inbound"] = max(item["last_inbound"], record["end"])
         item["planned_wmt"] += record["planned_wmt"]
+        item["inbound_windows"].append([record["start"], record["end"], record["planned_wmt"]])
         item["csv_records"].append(record["csv_record"])
         block = canonical_block(record["source"])
         if block and block not in item["source_blocks"]:

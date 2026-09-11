@@ -199,6 +199,7 @@ class MaterialDestinationPlanView(QWidget):
             self.details.setPlainText("\n".join(f"{label}: {display(row.get(key))}" for key, label in VIEWS[self.tabs.currentIndex()][2]))
             return
         lines = [f"{display(row.get('grade_block'))} · {display(row.get('status'))}", display(row.get("reason")),
+                 f"Capacity basis: {display(row.get('capacity_basis'))}",
                  f"Build instance {display(row.get('build_instance'))} · 2WP order {display(row.get('order_position'))} · {display(row.get('selection_basis'))}",
                  f"Capacity WMT — starting: {display(row.get('starting_capacity_wmt'))}; before first payload: {display(row.get('capacity_before_wmt'))}; consumed by this row: {display(row.get('consumed_capacity_wmt'))}; after last payload: {display(row.get('capacity_after_wmt'))}. Shared capacity also changes with other sources.",
                  f"Actual movements — detected {display(row.get('detected_destination'))}; latest {display(row.get('latest_inbound'))}; {display(row.get('activity_rows'))} movements, {display(row.get('activity_wmt'))} WMT.",

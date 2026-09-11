@@ -13,7 +13,7 @@ import math
 import sqlite3
 
 from classes.DestinationBuildOrder import digest, stockpile_key
-from classes.DestinationProgress import progress_settings, resolve_progress
+from classes.DestinationProgress import progress_settings, resolve_progress, remaining_2wp_estimates, ESTIMATED_CAPACITY_BASIS
 from classes.GradeBlockIdentity import grade_block_material_type
 from classes.MaterialDestinationPlan import MaterialDestinationPlan
 from classes.DestinationRules import DestinationRuleEngine, METADATA_COLUMNS
@@ -21,7 +21,7 @@ from setup.InventoryBuildLineage import clean_text, finite_number
 from setup.ProductAssayHistory import awst
 
 
-VERSION = 1
+VERSION = 2
 AUDIT_COLUMNS = {
     "destination_allocation_runs": "plan_type plan_id schema_version context_signature status payload_count payload_wmt direct_tipped_wmt non_direct_wmt assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt overrun_wmt reason input_signature scenario_context_signature allocation_window_start allocation_window_end".split(),
     "destination_primary_assignments": "plan_type plan_id payload_id source delivered_datetime payload_wmt direct_tipped_wmt non_direct_wmt rom_area material_type planned_destination assigned_destination instance_id build_instance order_position assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt capacity_before_wmt capacity_after_wmt overrun_wmt capacity_basis selection_basis status reason context_signature".split(),
@@ -39,13 +39,13 @@ AUDIT_COLUMNS["destination_allocation_runs"].extend(
 class PrimaryDestinationAllocator:
     """One chronological capacity ledger for one plan and immutable input context."""
 
-    def __init__(self, order, activity, settings, *, plan_type="optimised", plan_id="Primary"):
+    def __init__(self, order, activity, settings, *, plan_type="optimised", plan_id="Primary", scenario_start=None):
         self.order = deepcopy(order)
         self.settings = progress_settings(settings)
         self.owner = dict(plan_type=clean_text(plan_type).lower(), plan_id=clean_text(plan_id) or "Primary")
         if not self.owner["plan_type"] or not order.get("signature"):
             raise ValueError("Plan type and build-order signature are required.")
-        self.context_signature = digest([VERSION, order["signature"], order["orders"], order["areas"], activity, self.settings])
+        self.context_signature = digest([VERSION, order["signature"], order["orders"], order["areas"], activity, self.settings, scenario_start])
         self.areas = {stockpile_key(k): clean_text(v).upper() for k, v in order["areas"].items() if clean_text(v)}
         self.lanes, self.positions, self.instances = {}, {}, {}
         self.ledger, self.assignments, self.seen = [], [], {}
@@ -70,14 +70,15 @@ class PrimaryDestinationAllocator:
                     raise ValueError("One build instance cannot identify different physical stockpiles or ROM areas.")
                 item = self.instances.setdefault(key, dict(physical=physical, planned_wmt=0.0, consumed_wmt=0.0, overrun_wmt=0.0))
                 item["planned_wmt"] += tonnes
+        estimates = remaining_2wp_estimates(order, scenario_start)
         for key, item in self.instances.items():
             # All materials share one physical capacity. A currently active
-            # instance needs an entered remainder; a later instance uses the
-            # total planned build tonnes across its material rows.
+            # instance uses an entered remainder or estimated future deliveries;
+            # a later instance uses total planned tonnes across its material rows.
             entered = self.settings["remaining_wmt"].get(key)
-            initial = entered if entered is not None else None if key in current_ids else item["planned_wmt"]
+            initial = entered if entered is not None else estimates.get(key) if key in current_ids else item["planned_wmt"]
             item.update(starting_wmt=initial, remaining_wmt=initial,
-                        capacity_basis="User entered" if entered is not None else "Not set" if initial is None else "2WP planned ROM WMT")
+                        capacity_basis="User entered" if entered is not None else "Not set" if initial is None else ESTIMATED_CAPACITY_BASIS if key in current_ids else "2WP planned ROM WMT")
 
     @staticmethod
     def _payload(raw):
@@ -225,7 +226,7 @@ def allocate_final_plan(payload_transactions, blend_report, context, *, plan_typ
     settings = progress_settings(context["settings"])
     if settings["context_signature"] != context["context_signature"]:
         raise ValueError("Destination Reconciliation settings do not match the scenario/source context.")
-    allocator = PrimaryDestinationAllocator(context["order"], context.get("activity") or {}, settings, plan_type=plan_type, plan_id=plan_id)
+    allocator = PrimaryDestinationAllocator(context["order"], context.get("activity") or {}, settings, plan_type=plan_type, plan_id=plan_id, scenario_start=context.get("start"))
     payloads = MaterialDestinationPlan._prepared_payloads(payload_transactions)
     report = MaterialDestinationPlan._frame(blend_report)
     start = awst(context["start"]).isoformat() if context.get("start") else None
