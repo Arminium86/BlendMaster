@@ -100,16 +100,24 @@ class DestinationProgressUITests(unittest.TestCase):
         self.assertIn("08 Sep 2026 06:00:00 inclusive", self.view.activity_window.text())
         self.runner.finish()
 
-    def test_no_data_and_no_cache_outage_keep_order_unconfirmed(self):
+    def test_no_data_assumes_first_but_no_cache_outage_stays_unconfirmed(self):
         self.service._query.return_value = []
         self.load()
         self.assertIn("No qualifying", self.view.status.text())
-        self.assertFalse(self.view.table.cellWidget(0, 6).isEnabled())
+        self.assertTrue(self.view.table.cellWidget(0, 6).isEnabled())
+        self.assertEqual(self.view.table.item(0, 2).text(), "Not detected")
+        self.assertIn("Assumed first 2WP build", self.view.table.item(0, 7).text())
+        self.assertEqual(self.view.rows[0]["current"]["order_position"], 1)
+        self.assertEqual(self.view.settings()["selected_instances"], {})
+        self.load()
+        self.assertIn("Cached activity", self.view.status.text())
+        self.assertIn("Assumed first 2WP build", self.view.table.item(0, 7).text())
         self.assertEqual(self.view.order_table.model().rowCount(), 4)
         self.service._query.side_effect = ConnectionError("offline")
         self.view.lookback.setValue(13)
         self.runner.finish()
         self.assertIn("Activity unavailable", self.view.status.text())
+        self.assertFalse(self.view.table.cellWidget(0, 6).isEnabled())
         self.assertEqual(self.view.order_table.model().rowCount(), 4)
 
     def test_ambiguous_instance_review_and_capacity_keyboard_edit(self):

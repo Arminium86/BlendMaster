@@ -682,9 +682,10 @@ stockpile mapping (622 before mapping). The operation name is part of the exact
 cache request, so previous empty code-only results cannot be reused.
 
 Actual grade-block identity determines material type. The latest qualifying
-inbound timestamp establishes the detected physical destination, regardless of
-tonnes. Several active destinations produce a warning; equal latest timestamps
-remain ambiguous. A detected destination outside the planned order is explicit.
+inbound timestamp within that ROM area/material type's 2WP order establishes the
+detected physical destination, regardless of tonnes. Several matching active
+destinations produce a warning; equal latest timestamps remain ambiguous.
+Outside-order destinations are excluded from detection and retained in the audit.
 When the same stockpile has several planned build instances, dates alone cannot
 resolve which instance is active because actual progress may lead or lag 2WP.
 
@@ -719,9 +720,24 @@ within the existing 2WP order; it cannot add, replace or reorder planned
 destinations. The tab therefore remains named Progress. Automatic detection
 remains separately visible. Valid edits apply immediately to the current scenario;
 project Save persists them, so no separate Submit action is required. Blank
-remaining tonnes means not set; zero explicitly means no remaining capacity.
+remaining tonnes uses the remaining-2WP estimate described in section 9.4 when
+available; zero explicitly means no remaining capacity.
 Remaining tonnes belong to the physical build instance, so the same instance
 shown under different materials shares one value. Values retain full precision.
+
+Detection considers only actual movements whose destination belongs to the
+specific ROM area/material type's 2WP order. Other movements remain in Actual
+movements and are counted in an exclusion warning; they cannot displace an older
+matching movement. Latest matching inbound wins, while equal latest timestamps
+at different destinations or repeated build instances still require review.
+If a successful fresh or cached lookup has no matching activity, Current build
+instance uses the first 2WP build with selection basis **Assumed first 2WP build —
+no matching activity**. Detected destination remains **Not detected**. This is
+a planning assumption, not evidence that the stockpile has never been used.
+Failed/unavailable lookups (including an offline empty cache) do not trigger the
+assumption. Explicit user selections retain priority. Assumed selections are
+derived again on refresh, never persisted as manual overrides. Allocation and
+saved report provenance use the same resolution and remaining-tonnage estimate.
 
 Settings use `destination_progress_settings` schema v1, persist per site scenario
 and through `.prj` save/load, and default to 12 hours with no entered capacity in

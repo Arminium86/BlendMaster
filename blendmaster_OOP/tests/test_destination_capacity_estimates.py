@@ -8,6 +8,23 @@ from classes.PrimaryDestinationAllocator import allocate_final_plan
 
 
 class DestinationCapacityEstimateTests(unittest.TestCase):
+    def test_assumed_first_build_uses_estimate_and_publishes_both_bases(self):
+        import pandas as pd
+        from tests.test_destination_plan_report import publish
+        from classes.DestinationProgress import ASSUMED_FIRST_BUILD_BASIS
+        ctx = context(None)
+        ctx["settings"]["selected_instances"] = {}
+        ctx["activity"] = {"status": "fresh", "records": []}
+        ctx["start"] = "2026-09-08T08:30:00"
+        frames, result = publish(transactions([payload(1, 60)]), pd.DataFrame(), ctx)
+        row = frames["material_destination_plan"].iloc[0]
+        self.assertEqual(row.assigned_destination, "SP1")
+        self.assertEqual(row.selection_basis, ASSUMED_FIRST_BUILD_BASIS)
+        self.assertEqual(row.capacity_basis, ESTIMATED_CAPACITY_BASIS)
+        self.assertEqual(row.overrun_wmt, 10)
+        self.assertEqual(result["run"]["status"], "Complete")
+        self.assertEqual(ctx["settings"]["selected_instances"], {})
+
     def engine(self, ctx, start="2026-09-08T08:30:00"):
         return PrimaryDestinationAllocator(ctx["order"], ctx["activity"], ctx["settings"], scenario_start=start)
 

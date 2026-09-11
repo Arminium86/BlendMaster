@@ -84,7 +84,7 @@ class DestinationProgressSetup(QWidget):
         title = QLabel("Destination Reconciliation")
         title.setStyleSheet("font-size: 20px; font-weight: 750; color: #172033;")
         layout.addWidget(title)
-        note = QLabel("Review the 2WP ROM build order against actual inbound activity, then enter remaining assignable tonnes for the current build instance. ROM area uses Nearest Crusher from Stockpile Inventories.")
+        note = QLabel("Detection uses actual inbound movements to destinations in each ROM area/material type's 2WP order. A successful lookup with no matching activity assumes the first build. Review the current build and remaining ROM WMT. ROM area uses Nearest Crusher from Stockpile Inventories.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.context_label = QLabel("Set the scenario start, import 2WP Mining.csv and load Stockpile Inventories.")
@@ -335,7 +335,7 @@ class DestinationProgressSetup(QWidget):
         self.capacity_estimates = remaining_2wp_estimates(order, self._context.get("start"))
         for i, row in enumerate(self.rows):
             combo = QComboBox()
-            combo.setToolTip("Select the current build instance from the 2WP Build order. A manual selection overrides automatic detection for this ROM area/material type. The planned destinations and their sequence remain as defined in 2WP.")
+            combo.setToolTip("Select the current build instance from the 2WP Build order. A manual selection overrides automatic detection or the assumed first build for this ROM area/material type. The planned destinations and their sequence remain as defined in 2WP.")
             combo.setMinimumWidth(combo.fontMetrics().horizontalAdvance("Automatic / review required") + 45)
             combo.addItem("Automatic / review required", "")
             for entry in row["sequence"]:

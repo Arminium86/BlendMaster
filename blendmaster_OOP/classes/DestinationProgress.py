@@ -9,6 +9,7 @@ from setup.ProductAssayHistory import awst
 
 
 ESTIMATED_CAPACITY_BASIS = "Estimated from remaining 2WP deliveries"
+ASSUMED_FIRST_BUILD_BASIS = "Assumed first 2WP build — no matching activity"
 
 
 def remaining_2wp_estimates(order, scenario_start):
@@ -63,7 +64,7 @@ def lane_key(area, material):
 
 
 def resolve_progress(order, activity, selections=None):
-    """Physical destination follows actual recency; dates do not guess build cycles."""
+    """Match actuals to each 2WP lane; an empty successful lookup starts its order."""
     lanes, movements = defaultdict(list), defaultdict(list)
     for row in order["orders"]:
         lanes[(row["rom_area"], row["material_type"])].append(row)
@@ -71,8 +72,13 @@ def resolve_progress(order, activity, selections=None):
         movements[(row["rom_area"], row["material_type"])].append(row)
     result = []
     for lane, sequence in sorted(lanes.items()):
-        evidence = sorted(movements[lane], key=lambda r: (r["observed_at"], r["destination"]), reverse=True)
+        allowed = {r["destination"] for r in sequence}
+        evidence = sorted((r for r in movements[lane] if r["destination"] in allowed),
+                          key=lambda r: (r["observed_at"], r["destination"]), reverse=True)
         warnings = []
+        excluded = len(movements[lane]) - len(evidence)
+        if excluded:
+            warnings.append(f"{excluded} actual movements were excluded from detection because their destinations are outside this ROM area/material type's 2WP order. They remain visible in Actual movements.")
         latest = evidence[0]["observed_at"] if evidence else None
         latest_destinations = sorted({r["destination"] for r in evidence if r["observed_at"] == latest})
         active = latest_destinations[0] if len(latest_destinations) == 1 else None
@@ -82,20 +88,23 @@ def resolve_progress(order, activity, selections=None):
             warnings.append("Multiple destinations were active; the latest inbound movement determines the detected destination.")
         if len(latest_destinations) > 1:
             warnings.append("Latest movements have equal timestamps at different destinations. Select the current build instance after review.")
-        elif active and not candidates:
-            warnings.append("Detected destination is outside the extracted order. Review the 2WP Build order and Actual movements.")
         elif len(candidates) > 1:
             warnings.append("Detected destination has repeated build instances. Actual activity can lead or lag 2WP dates; select the current build instance after review.")
-        if not evidence:
-            warnings.append("No qualifying inbound activity in this window; the current build instance is unconfirmed.")
+        assumed = not evidence and str(activity.get("status", "")).lower() in {"fresh", "cached"} and not activity.get("error")
+        if assumed:
+            current = min(sequence, key=lambda r: r["order_position"])
+        elif not evidence:
+            warnings.append("No matching activity and no successful activity lookup is available; the current build instance is unconfirmed.")
         key = lane_key(*lane)
         selected = (selections or {}).get(key)
         manual = next((r for r in sequence if r["instance_id"] == selected), None)
         if manual:
             current = manual
+        elif assumed:
+            warnings.append("No matching activity in the lookback window. Starting at the first 2WP build is a planning assumption; it does not prove the stockpile has not been used.")
         index = sequence.index(current) if current else None
         result.append(dict(lane_key=key, rom_area=lane[0], material_type=lane[1], sequence=deepcopy(sequence),
-                           detected_destination=active, current=deepcopy(current), selection_basis="User selected" if manual else "Latest inbound" if current else "Unconfirmed",
+                           detected_destination=active, current=deepcopy(current), selection_basis="User selected" if manual else ASSUMED_FIRST_BUILD_BASIS if assumed else "Latest inbound" if current else "Unconfirmed",
                            previous=deepcopy(sequence[index-1]) if index is not None and index > 0 else None,
                            next=deepcopy(sequence[index+1]) if index is not None and index+1 < len(sequence) else None,
                            latest_inbound=latest, activity_wmt=sum(r["wmt"] for r in evidence), evidence=deepcopy(evidence),

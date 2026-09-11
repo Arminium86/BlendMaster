@@ -21,7 +21,7 @@ from setup.InventoryBuildLineage import clean_text, finite_number
 from setup.ProductAssayHistory import awst
 
 
-VERSION = 2
+VERSION = 3
 AUDIT_COLUMNS = {
     "destination_allocation_runs": "plan_type plan_id schema_version context_signature status payload_count payload_wmt direct_tipped_wmt non_direct_wmt assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt overrun_wmt reason input_signature scenario_context_signature allocation_window_start allocation_window_end".split(),
     "destination_primary_assignments": "plan_type plan_id payload_id source delivered_datetime payload_wmt direct_tipped_wmt non_direct_wmt rom_area material_type planned_destination assigned_destination instance_id build_instance order_position assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt capacity_before_wmt capacity_after_wmt overrun_wmt capacity_basis selection_basis status reason context_signature".split(),
