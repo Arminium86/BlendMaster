@@ -42,6 +42,7 @@ from classes.GradeBlockIdentity import (
     parent_grade_block_name,
 )
 from classes.ProductBuildLanes import (
+    lane_kind,
     BYPRODUCT_LANES,
     PRODUCT_LANE,
     lane_actual_tonnes_column,
@@ -548,7 +549,22 @@ class Optimizer:
         )
 
     @staticmethod
-    def run_blending_optimization(
+    def run_blending_optimization(*args, **kwargs):
+        """Build, solve and report one lane using the common model boundary."""
+        steps = Optimizer.blending_problem_steps(*args, **kwargs)
+        try:
+            problem = next(steps)
+        except StopIteration as finished:
+            return finished.value
+        problem["problem"].solve(RetryingCBCSolver(msg=False, timeLimit=problem["time_limit"]))
+        try:
+            next(steps)
+        except StopIteration as finished:
+            return finished.value
+        raise RuntimeError("Unexpected second optimisation model boundary.")
+
+    @staticmethod
+    def blending_problem_steps(
         event_pool: List[EventData],
         period_crusher_target,
         steady_state_duration,
@@ -698,6 +714,8 @@ class Optimizer:
         # unbranded values in that stream remain valid for every brand, but a
         # lower-stream/legacy substitution is a setup error.
         for event in event_pool:
+            if getattr(event, "_multi_materialized", False):
+                continue
             warnings = apply_selected_stream(
                 event, selected_data_stream, target_product_brand
             )
@@ -755,8 +773,8 @@ class Optimizer:
         )
         product_build_quantity_fields = {
             lane: (
-                byproduct_quantity_fields[lane]
-                if byproducts_enabled and lane in BYPRODUCT_LANES
+                byproduct_quantity_fields[lane_kind(lane)]
+                if byproducts_enabled and lane_kind(lane) in BYPRODUCT_LANES
                 else product_build_tonnes_stream
             )
             for lane in product_build_lanes
@@ -790,7 +808,8 @@ class Optimizer:
         ]
         product_build_stream_tonnes_by_lane = {
             lane: [
-                capacity_stream_tonnes(event, field_name, physical)
+                (capacity_stream_tonnes(event, field_name, physical)
+                 if not target_product_builds[lane].get("contributing_opfs") or getattr(event, "_multi_opf", None) in target_product_builds[lane]["contributing_opfs"] else 0.0)
                 for event, physical in zip(event_pool, physical_tonnes)
             ]
             for lane, field_name in product_build_quantity_fields.items()
@@ -835,10 +854,11 @@ class Optimizer:
         }
 
         def used_grade_stream(event, analyte):
+            selected = getattr(event, "selected_grade_stream", None) or selected_data_stream
             for warning in getattr(event, "grade_stream_warnings", []) or []:
                 if str(warning.get("analyte") or "").lower() == analyte:
-                    return str(warning.get("used_stream") or selected_data_stream).lower()
-            return selected_data_stream
+                    return str(warning.get("used_stream") or selected).lower()
+            return selected
 
         grade_weight_coefficients = {}
         for analyte in ("fe", "si", "al", "p", "mn"):
@@ -871,7 +891,7 @@ class Optimizer:
             product_build_grade_weight_coefficients[lane] = {}
             product_build_grade_weight_available[lane] = {}
             for analyte in ("fe", "si", "al", "p", "mn"):
-                if lane == PRODUCT_LANE:
+                if lane_kind(lane) == PRODUCT_LANE:
                     values = [
                         safe_float(getattr(event, f"grade_{analyte}", None), None)
                         for event in event_pool
@@ -881,7 +901,7 @@ class Optimizer:
                                  if target_mode_fields(target_product_builds[lane])["target_mode"] == "soft"
                                  else [True for _ in event_pool])
                 else:
-                    grade_field = byproduct_grade_fields[lane][analyte]
+                    grade_field = byproduct_grade_fields[lane_kind(lane)][analyte]
                     weight_field = source_property_weights.get(grade_field)
                     values = []
                     coefficients = []
@@ -902,6 +922,10 @@ class Optimizer:
                             and physical > Optimizer.SOLUTION_TOLERANCE
                             else 0.0
                         )
+                contributors = target_product_builds[lane].get("contributing_opfs")
+                if contributors:
+                    coefficients = [c if getattr(e, "_multi_opf", None) in contributors else 0.0 for e, c in zip(event_pool, coefficients)]
+                    available = [v if getattr(e, "_multi_opf", None) in contributors else True for e, v in zip(event_pool, available)]
                 product_build_grade_values[lane][analyte] = values
                 product_build_grade_weight_coefficients[lane][analyte] = coefficients
                 product_build_grade_weight_available[lane][analyte] = available
@@ -1833,7 +1857,7 @@ class Optimizer:
                 )
 
         objective = lpSum(c[i] * x_vars[i] for i in range(len(event_pool)))
-        objective += add_soft_objective(
+        product_objective = add_soft_objective(
             prob, x_vars, target_product_builds, target_product_build_states,
             product_build_grade_values, product_build_grade_weight_coefficients,
             solver_config.get("soft_grade_preferences"),
@@ -1842,8 +1866,9 @@ class Optimizer:
             event_pool, target_product_builds, product_build_grade_values,
             product_build_grade_weight_coefficients, solver_config.get("soft_grade_preferences"), selected_data_stream,
         )
-        objective += lpSum(x_vars[i] * (item["dispersion_penalty"] - item["closeness_reward"])
+        product_objective += lpSum(x_vars[i] * (item["dispersion_penalty"] - item["closeness_reward"])
                            for items in source_similarity.values() for i, item in enumerate(items))
+        objective += product_objective
         fewer_stockpiles_incentive = max(
             safe_float(
                 solver_config.get(
@@ -2026,8 +2051,13 @@ class Optimizer:
         # Objective function
         prob += objective
 
-        # Solve the problem
-        prob.solve(RetryingCBCSolver(msg=False, timeLimit=blend_option_timeout_seconds))
+        # A simultaneous-lane coordinator can combine these exact constraints
+        # before solving. Resume only after the variable values/status are set.
+        yield dict(problem=prob, variables=x_vars, events=event_pool,
+                   product_objective=product_objective,
+                   time_limit=blend_option_timeout_seconds,
+                   crusher_coefficients=crusher_coefficients,
+                   reclaimer_coefficients=reclaimer_coefficients)
 
         solver_status = LpStatus[prob.status]
         success = solver_status == "Optimal"
@@ -2190,7 +2220,7 @@ class Optimizer:
                             "crusher_source_tonnes": result.x[i] * crusher_coefficients[i],
                             "product_build_source_tonnes": (
                                 combined_product_build_tonnes
-                                if byproducts_enabled
+                                if byproducts_enabled or any("@" in lane for lane in product_build_lanes)
                                 else result.x[i] * product_build_coefficients[i]
                             ),
                             **lane_transaction_fields,
@@ -2359,7 +2389,7 @@ class Optimizer:
                         )
                         for coefficients in product_build_coefficients_by_lane.values()
                     )
-                    if byproducts_enabled else
+                    if byproducts_enabled or any("@" in lane for lane in product_build_lanes) else
                     sum(result.x[i] * product_build_coefficients[i] for i in range(len(event_pool)))
                 ),
                 **{

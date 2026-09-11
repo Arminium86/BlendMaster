@@ -1218,9 +1218,9 @@ Contract for when it is built:
 | Q52 | No LQL/HQL fields on product-build rows | Task 12 |
 | Q57 | Hard/Soft configuration and Soft execution implemented | Tasks 16–17 complete |
 | Q59 | Configurable linear and increasing piecewise-linear penalties implemented | Task 17 complete |
-| Q19 | No stockpile `Subset` column or Rehandle Movement Rules | Task 28 |
-| Q20 | Max Reclaim Rate not per stockpile x crusher route | Task 28 |
-| Q21 | Product-build rows have no owning-OPF property for combined mode | Task 29 |
+| Q19 | Editable stockpile `Subset` and Rehandle Movement Rules implemented | Task 28 complete |
+| Q20 | Max Reclaim Rate is enforced per stockpile x tipping-point route | Task 28 complete |
+| Q21 | Product builds own separate OPFs or an explicit shared OPF group | Task 29 complete |
 | Q26 | No conveyor or COS model | Task 30 |
 
 ## 16. Deferred by agreement
@@ -1256,3 +1256,13 @@ Direct-tip duration fallback validation (11 September 2026): 160 focused checks 
 Reclaim-only and partial-sequence fallback validation (11 September 2026): 169 focused checks passed. Isolated native prepopulation and submission passed for both outcomes, including the persistent partial-plan notice, actual project save/load, and PDF/XLSX outputs. Equal percentage-point redistribution, unchanged rounding increments, recalculated depletion, isolated retries, retained valid states and report-construction failures are covered. Task 28 remains unstarted.
 
 Post-redistribution rounding validation (11 September 2026): 89 focused checks passed, including 52.5/47.5 becoming 55/45, recomputed depletion and grades, and all supported increments. Native prepopulation/submission, project save/load and PDF/XLSX outputs passed with 55/45 final ratios. Task 28 remains unstarted.
+
+### Tasks 28–29: simultaneous tipping points and combined OPFs (11 September 2026)
+
+- Task 28 is complete: a joint linear mixed-integer solve links physical tipping-point models to one shared stockpile/payload ledger. Each point owns its rate, grade stream, grade limits, direct-tip limits, source count and route eligibility. A stockpile may feed at most one point at a time; route reclaim capacities apply across equipment events. Existing single-point execution remains supported. Legacy Total_Feed setup proposes physical points for review in Decision Levers.
+- Task 29 is complete: Product Targets names one OPF or a comma-separated shared group. Separate groups advance independently; a shared group requires the compensation control. An OPF cannot belong to overlapping groups. Crusher constraints remain local, including when compensation is enabled; users may relax those constraints explicitly. Three OPFs are supported.
+- Combined mode requires independently prepared OPF reconciliation scenarios for the same mine and scenario start. Namespaced source properties preserve each OPF/brand's reconciled grades and weights through incoming material, mixing and depletion. Physical ROM WMT is shared and never duplicated by OPF. Inconsistent opening balances/build identities or missing profiles fail with a setup explanation.
+- Optimised transactions, product-build contributions, SQLite and exports retain tipping-point and OPF identity. Backup controls use current optimised destination evidence for simultaneous results without requiring manual conversion; database XLSX exports include validated per-point backups. Backup instructions do not change physical allocation.
+- Settings, profile selections, Subsets, routes, capacities and backups persist through project save/load. The validation example feeds 600 ROM WMT across two points over three hours, leaves 700 ROM WMT in each opening 1,000 WMT stockpile, and builds 600 WMT at 58% Fe. Separate build completion and three-OPF reconciliation are also tested.
+- Validation: 364 automated checks passed plus isolated native Qt review, actual project save/load, SQLite/CSV/XLSX numerical inspection, and PDF detailed-report render inspection. Local screenshots and guide are in ignored `docs/screenshots/task29/` and `docs/TASK_28_29_UI_REVIEW.md`.
+- Task 30 has not started: all links remain zero latency. Task 33 still owns separate operational manual Blend Plans per tipping point. Simultaneous manual conversion is guarded until then; current simultaneous publication is through optimiser/database reports, not a flattened manual sequence. The PDF validation demonstrates detailed-report identity and backups only, not the deferred multi-plan layout.

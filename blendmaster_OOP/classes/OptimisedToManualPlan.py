@@ -174,6 +174,8 @@ class OptimisedToManualPlan:
 
     def build(self):
         data = self._prepared_report()
+        if 'tipping_point' in data and data['tipping_point'].dropna().nunique() > 1:
+            raise ValueError('This result has simultaneous tipping points. Review or export the Optimised Blend Report. Manual Blend Sequence conversion currently supports a single tipping point.')
         data["_source_name"] = (
             data["source"].astype(str).str.strip().str.upper()
         )

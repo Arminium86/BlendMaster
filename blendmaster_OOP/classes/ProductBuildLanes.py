@@ -66,15 +66,20 @@ def byproduct_grade_source_field(lane, analyte):
 
 
 def normalized_build_lane(setting, byproducts_enabled=False):
-    if not byproducts_enabled:
-        return PRODUCT_LANE
-    lane = str((setting or {}).get("byproduct") or "").strip().lower()
-    return lane if lane in BYPRODUCT_LANES else ""
+    lane = str((setting or {}).get("byproduct") or "").strip().lower() if byproducts_enabled else PRODUCT_LANE
+    if byproducts_enabled and lane not in BYPRODUCT_LANES:
+        return ""
+    scope = (setting or {}).get("opf_scope")
+    return f"{lane}@{scope}" if scope else lane
+
+
+def lane_kind(lane):
+    return str(lane).split("@", 1)[0]
 
 
 def active_build_indices(settings, states, byproducts_enabled=False):
     """Return the first incomplete build in each sequential build lane."""
-    lanes = BYPRODUCT_LANES if byproducts_enabled else (PRODUCT_LANE,)
+    lanes = list(dict.fromkeys(normalized_build_lane(s, byproducts_enabled) for s in settings or []))
     active = {}
     for lane in lanes:
         for index, setting in enumerate(settings or []):

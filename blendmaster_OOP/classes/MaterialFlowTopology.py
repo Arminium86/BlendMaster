@@ -3,7 +3,7 @@
 The graph describes possible routes, not actual movements or new constraints.
 It is rebuilt from model inputs on request and is never a second owner of solver
 state. Conveyor and COS nodes are explicit zero-delay pass-throughs until Task 30.
-Total_Feed remains one synthetic tipping point until Task 28.
+Simultaneous modes derive physical tipping points with shared source nodes.
 """
 
 from copy import deepcopy
@@ -27,6 +27,67 @@ from classes.ProductBuildLanes import (
     PRODUCT_LANE,
     normalized_build_lane,
 )
+from classes.MultiFeedSettings import multi_feed_settings, route_allowed, scoped_builds
+
+
+def planning_topology(*, multi_feed=None, **kwargs):
+    settings = multi_feed_settings(multi_feed)
+    if settings["mode"] == "single":
+        return one_lane_topology(**kwargs)
+    context = kwargs.get("site_context") or {}
+    sources = list(kwargs.get("sources") or [])
+    nodes, edges = {}, {}
+    for point in settings["tipping_points"]:
+        allowed = [r for r in sources if r["source_type"] != "stockpile" or route_allowed(settings, r["source"], point["name"])]
+        graph = one_lane_topology(**{**kwargs, "sources": allowed,
+                                    "site_context": {**context, "opf": point["opf"], "crusher": point["name"]},
+                                    "crusher_targets": point["targets_by_period"]})
+        remap = {}
+        for node in graph["nodes"]:
+            props = node["properties"]
+            identity = node["node_id"]
+            if node["node_type"] == TOPOLOGY_NODE_SOURCE:
+                identity = _identifier("source", context.get("hub"), context.get("mine"), props["source_type"], props["source"])
+            elif node["node_type"] == TOPOLOGY_NODE_OPF:
+                identity = _identifier("opf", context.get("hub"), context.get("mine"), point["opf"])
+            elif node["node_type"] == TOPOLOGY_NODE_PRODUCT_BUILD_LANE:
+                identity = _identifier("build_lane", context.get("hub"), context.get("mine"), point["opf"], props["lane"])
+            remap[node["node_id"]] = identity
+        for node in graph["nodes"]:
+            item = deepcopy(node)
+            item["node_id"] = remap[item["node_id"]]
+            for key in ("opf_node_id",):
+                if key in item["properties"]:
+                    item["properties"][key] = remap[item["properties"][key]]
+            if "opf_node_ids" in item["properties"]:
+                item["properties"]["opf_node_ids"] = [remap[k] for k in item["properties"]["opf_node_ids"]]
+            nodes[item["node_id"]] = item
+        for edge in graph["edges"]:
+            item = deepcopy(edge)
+            item["source_node_id"] = remap[item["source_node_id"]]
+            item["target_node_id"] = remap[item["target_node_id"]]
+            item["edge_id"] = _identifier("flow", item["source_node_id"], item["target_node_id"])
+            edges[item["edge_id"]] = item
+    if settings['mode'] == 'combined_opf':
+        build_nodes = {key for key, node in nodes.items() if node['node_type'] == TOPOLOGY_NODE_PRODUCT_BUILD_LANE}
+        nodes = {key: node for key, node in nodes.items() if key not in build_nodes}
+        edges = {key: edge for key, edge in edges.items() if edge['target_node_id'] not in build_nodes}
+        builds = scoped_builds(kwargs.get('product_build_settings'), settings)
+        for lane in dict.fromkeys(normalized_build_lane(b, kwargs.get('byproducts_enabled', False)) for b in builds):
+            indices = [i for i, b in enumerate(builds) if normalized_build_lane(b, kwargs.get('byproducts_enabled', False)) == lane]
+            opfs = builds[indices[0]]['contributing_opfs']
+            opf_ids = [_identifier('opf', context.get('hub'), context.get('mine'), opf) for opf in opfs]
+            identity = _identifier('build_lane', context.get('hub'), context.get('mine'), lane)
+            nodes[identity] = topology_node(identity, TOPOLOGY_NODE_PRODUCT_BUILD_LANE, label=lane,
+                                           properties=dict(lane=lane, opf_node_ids=opf_ids, build_indices=indices))
+            for opf_id in opf_ids:
+                edge_id = _identifier('flow', opf_id, identity)
+                edges[edge_id] = topology_edge(edge_id, opf_id, identity, latency_hours=0.0)
+    return material_flow_topology(_identifier("multi_feed", context.get("hub"), context.get("mine")),
+                                  mode="total_feed" if settings["mode"] == "multi_tipping_point" else "combined_opf",
+                                  nodes=list(nodes.values()), edges=list(edges.values()),
+                                  properties=dict(adapter=settings["mode"], latency_enabled=False,
+                                                  shared_physical_balances=True, stockpile_exclusive_tipping_point=True))
 
 
 def _text(value):

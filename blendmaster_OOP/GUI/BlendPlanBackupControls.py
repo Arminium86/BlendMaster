@@ -50,13 +50,13 @@ class BlendPlanBackupControls(QWidget):
         self.table.setColumnWidth(0, 200)
         self.table.setColumnWidth(1, 380)
         if not has_plan:
-            message = "Submit or load a manual plan to choose backups."
+            message = "Submit a manual plan or run simultaneous optimisation to choose backups."
         elif not any(choices.values()):
             message = "No eligible backup destinations were resolved for this plan. " + (
-                unavailable_reason or "Refresh Destination Reconciliation and recalculate the manual plan; backups must resolve to the same ROM area."
+                unavailable_reason or "Refresh Destination Reconciliation and recalculate the plan; backups must resolve to the same ROM area."
             )
         else:
-            message = "Saved choices are checked again when exporting. Recalculate the manual plan if fallback evidence needs refreshing."
+            message = "Saved choices are checked again when exporting. Recalculate the plan if fallback evidence needs refreshing. Simultaneous results include backups in database XLSX exports."
         self.status.setText(message)
 
     def emit_changed(self, *_):

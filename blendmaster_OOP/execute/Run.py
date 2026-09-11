@@ -19,6 +19,7 @@ from classes.ProductBuildLanes import (
 )
 from classes.ExpitDataHandler import ExpitDataHandler
 from classes.Optimizer import Optimizer
+from classes.MultiFeedSettings import multi_feed_settings
 from classes.GradeStreams import configured_brands, resolve_grade_vector
 from classes.ClosingROMStocksCompliance import ClosingROMStocksCompliance
 from database.SQLiteDatabase import DatabaseManager
@@ -89,6 +90,25 @@ class Run:
             return DataFrame()
 
         site_context = site_context or {}
+        feed = multi_feed_settings(site_context.get("multi_feed_settings"))
+        if feed["mode"] != "single":
+            selected_aps_crusher = [p["name"] for p in feed["tipping_points"] if p["direct_tip_enabled"]]
+        from classes.OPFSourceProfiles import register_profiles, prefix
+        profile_config = dict(source_property_kinds={str(r['name']): r.get('kind') for r in site_context.get('field_definitions', []) if r.get('name')},
+                              source_property_weights={str(r['name']): r.get('weight_field') for r in site_context.get('field_definitions', []) if r.get('weight_field')})
+        register_profiles(profile_config, site_context.get('opf_profiles') or {})
+        property_mappings = dict(site_context.get('aps_source_property_field_mappings') or {})
+        for opf, profile in (site_context.get('opf_profiles') or {}).items():
+            for name, header in profile.get('aps_source_property_field_mappings', {}).items():
+                property_mappings[prefix(opf) + name] = header
+            for field, (stream, brand, analyte) in profile_config['opf_property_descriptors'][opf]['grades'].items():
+                if stream == 'insitu':
+                    header = 'Mining.grades_' + analyte
+                else:
+                    category = 'product' if 'product' in stream else 'rom'
+                    header = (profile.get('aps_grade_field_mappings', {}).get(category, {}).get(brand) or {}).get(analyte, '')
+                if header:
+                    property_mappings[field] = header
         reference_path = two_wp_file_path or file_path
         destination_guidance = site_context.get("aps_destination_guidance")
         if (
@@ -110,7 +130,7 @@ class Run:
             include_crusher_destinations=reevaluate_aps_direct_tip,
             selected_crusher_name=selected_aps_crusher,
             operational_mine=site_context.get("mine"),
-            operational_crusher=site_context.get("crusher"),
+            operational_crusher=site_context.get("crusher") if feed["mode"] == "single" else None,
             operational_opf=site_context.get("opf"),
             direct_tip_movement_rules=site_context.get(
                 "direct_tip_movement_rules", []
@@ -121,24 +141,12 @@ class Run:
             grade_field_mappings=site_context.get(
                 "aps_grade_field_mappings", {}
             ),
-            source_property_field_mappings=site_context.get(
-                "aps_source_property_field_mappings", {}
-            ),
+            source_property_field_mappings=property_mappings,
             configured_product_brands=site_context.get(
                 "product_brands", []
             ),
-            source_property_kinds={
-                str(row.get("name")): str(row.get("kind"))
-                for row in (site_context.get("field_definitions") or [])
-                if isinstance(row, dict) and row.get("name")
-            },
-            source_property_weights={
-                str(row.get("name")): str(row.get("weight_field"))
-                for row in (site_context.get("field_definitions") or [])
-                if isinstance(row, dict)
-                and row.get("name")
-                and row.get("weight_field")
-            },
+            source_property_kinds=profile_config['source_property_kinds'],
+            source_property_weights=profile_config['source_property_weights'],
             preserve_source_payloads_for_reconciliation=(
                 interaction_mode == 2
             ),
@@ -403,6 +411,21 @@ class Run:
         solver_config["selected_data_stream"] = (
             (site_context or {}).get("selected_data_stream") or "adjusted_product"
         )
+        solver_config["multi_feed_settings"] = multi_feed_settings((site_context or {}).get("multi_feed_settings"))
+        if solver_config["multi_feed_settings"]["mode"] != "single":
+            points = solver_config["multi_feed_settings"]["tipping_points"]
+            solver_config['direct_tip_enabled'] = any(p['direct_tip_enabled'] for p in points)
+            routing = {}
+            for row in expit_payload_transactions.to_dict("records"):
+                destination = row.get("destination", "")
+                routing[str(row.get("direct_tip_id", ""))] = [point["name"] for point in points
+                    if ExpitDataHandler.crusher_destination_names_match(destination, point["name"])
+                    or ExpitDataHandler.crusher_destination_matches(destination, (site_context or {}).get("mine"), point["name"], point["opf"])
+                    or any(str(rule.get("grade_block_source") or "").strip().upper() in str(row.get("source") or "").upper()
+                           and str(rule.get("grade_block_source") or "").strip()
+                           and ExpitDataHandler.crusher_destination_names_match(rule.get("crusher_destination"), point["name"])
+                           for rule in (site_context or {}).get("direct_tip_movement_rules", []))]
+            solver_config["direct_tip_point_by_payload"] = routing
         for key, default in {
             "crusher_tonnes_stream": "modelled_rom_wmt",
             "reclaimer_tonnes_stream": "modelled_rom_wmt",
@@ -482,6 +505,15 @@ class Run:
             calendar_inputs,
             expit_payload_transactions,
         )
+        if solver_config['multi_feed_settings']['mode'] == 'combined_opf':
+            from classes.OPFSourceProfiles import register_profiles, prepare_inventory_profiles
+            profiles = (site_context or {}).get('opf_profiles') or {}
+            for opf, profile in profiles.items():
+                if profile.get('mine') != (site_context or {}).get('mine') or pd.Timestamp(profile.get('start')) != pd.Timestamp(start_time):
+                    raise ValueError(f'{opf}: reconciliation scenario must use the same mine and scenario start as the combined run.')
+            stockpile_data, hex_sequence_table = copy.deepcopy(stockpile_data), copy.deepcopy(hex_sequence_table)
+            register_profiles(solver_config, profiles)
+            prepare_inventory_profiles(stockpile_data, hex_sequence_table, solver_config)
 
         # Load input data (this is combined user input and opening inventories)
         loader_calendar_inputs = dict(calendar_inputs or {})
@@ -1186,9 +1218,17 @@ class Run:
             grade_block.name
             for grade_block in getattr(self.case_modeller, "grade_blocks", [])
         }
-        for (steady_state, blend_id), blend_rows in valid_feed.groupby(
-            ["steady_state_number", "blend_ID"], dropna=False
+        group_keys = ["steady_state_number", "blend_ID"] + (["tipping_point"] if "tipping_point" in valid_feed else [])
+        defaults = min_stockpiles, max_stockpiles
+        for identity, blend_rows in valid_feed.groupby(
+            group_keys, dropna=False
         ):
+            steady_state, blend_id = identity[:2]
+            min_stockpiles, max_stockpiles = defaults
+            if len(identity) > 2:
+                point = next((p for p in getattr(self.case_modeller, "multi_feed_configuration", {}).get("tipping_points", []) if p["name"] == identity[2]), {})
+                min_stockpiles = point.get("min_stockpiles") if point.get("min_stockpiles") is not None else min_stockpiles
+                max_stockpiles = point.get("max_stockpiles") if point.get("max_stockpiles") is not None else max_stockpiles
             source_ratios = (
                 blend_rows["source_actual_tonnes"]
                 / blend_rows["crusher_actual_tonnes"].replace(0, pd.NA)

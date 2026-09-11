@@ -9,6 +9,7 @@ from classes.SoftProductGrades import analyte_audit, objective_config, source_pr
 from classes.ProductQualityReport import QUALITY_REPORT_SUFFIXES, quality_state_audit, serialize_audit
 
 from classes.ProductBuildLanes import (
+    normalized_build_lane, lane_kind,
     BYPRODUCT_LANES,
     PRODUCT_LANE,
     lane_grade_column,
@@ -156,6 +157,19 @@ class ProductBuildProgress:
             byproducts_enabled = any(
                 build.get("byproduct") in BYPRODUCT_LANES for build in builds
             )
+        if any(build.get("opf_scope") for build in builds):
+            for lane in dict.fromkeys(normalized_build_lane(b, byproducts_enabled) for b in builds):
+                lane_builds = [b for b in builds if normalized_build_lane(b, byproducts_enabled) == lane]
+                result = cls._annotate_lane(result, lane_builds, lane=lane, prefix=f"product_build_{lane}", solver_config=solver_config)
+                # Existing report controls show the build associated with each
+                # physical row; scoped audit columns retain every build lane.
+                eligible = result.get("opf", pd.Series("", index=result.index)).isin(lane_builds[0].get("contributing_opfs", []))
+                prefix = "product_build" if lane_kind(lane) == PRODUCT_LANE else f"product_build_{lane_kind(lane)}"
+                for suffix in cls.BASE_SUFFIXES:
+                    column = f"product_build_{lane}_{suffix}"
+                    if column in result:
+                        result.loc[eligible, f"{prefix}_{suffix}"] = result.loc[eligible, column]
+            return result
         if byproducts_enabled:
             for lane in BYPRODUCT_LANES:
                 lane_builds = [

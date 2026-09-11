@@ -491,9 +491,9 @@ class MaterialDestinationPlan:
             base_row = cls._base_row(payload, plan_type, plan_id)
 
             for assigned_tonnes, report_row in direct_tip_rows[identifier]:
-                assigned_destination = cls._crusher_destination(
+                assigned_destination = cls._text(report_row.get('tipping_point')) or cls._crusher_destination(
                     payload,
-                    crusher_destination,
+                    cls._text(report_row.get("tipping_point")) or crusher_destination,
                     movement_rules,
                 )
                 alternate_1, alternate_2 = cls._row_alternates(

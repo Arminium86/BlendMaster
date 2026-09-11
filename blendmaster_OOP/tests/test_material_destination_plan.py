@@ -12,6 +12,16 @@ from classes.PeriodManager import PeriodManager
 
 
 class MaterialDestinationPlanTests(unittest.TestCase):
+    def test_simultaneous_direct_tip_keeps_each_physical_destination(self):
+        payloads = pd.DataFrame([dict(direct_tip_id='P1', source='GB1', payload=100,
+            destination='Stockpiles/SP1', planned_destination='Stockpiles/SP1')])
+        feed = pd.DataFrame([dict(source_type='grade_block', source='GB1', source_id='P1',
+            source_actual_tonnes=tonnes, tipping_point=point) for point, tonnes in [('A', 40), ('B', 30)]])
+        report = MaterialDestinationPlan.build(payloads, feed, 'optimised', crusher_destination='Total_Feed_PC')
+        direct = report[report.assigned_destination_type.eq('Crusher')]
+        self.assertEqual(dict(zip(direct.assigned_destination, direct.assigned_tonnes)), {'A': 40, 'B': 30})
+        self.assertAlmostEqual(report.assigned_tonnes.sum(), 100)
+
     def test_alternate_destinations_follow_fallback_chain(self):
         payloads = pd.DataFrame([{
             "direct_tip_id": "P1",

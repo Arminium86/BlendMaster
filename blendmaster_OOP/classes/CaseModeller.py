@@ -10,6 +10,7 @@ from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, with_qu
 from classes.ProductQualityReport import QUALITY_REPORT_SUFFIXES
 from classes.ProductTargetModes import TARGET_MODE_FIELDS, target_mode_fields, require_supported_target_modes
 from classes.ProductBuildLanes import (
+    lane_kind,
     BYPRODUCT_LANES,
     PRODUCT_LANE,
     active_build_indices,
@@ -23,7 +24,9 @@ from classes.ProductBuildLanes import (
 from classes.CrusherTarget import CrusherTarget
 from classes.GradeStreams import ANALYTES, STREAMS, grade_stream_audit_fields
 from classes.GradeBlockIdentity import parent_grade_block_name
-from classes.MaterialFlowTopology import model_sources, one_lane_topology
+from classes.MaterialFlowTopology import model_sources, one_lane_topology, planning_topology
+from classes.MultiFeedSettings import multi_feed_settings, period_lanes
+from classes.MultiLaneOptimizer import MultiLaneOptimizer
 from classes.CustomConstraints import (
     custom_constraint_property_keys,
     expand_required_property_keys,
@@ -228,6 +231,18 @@ class CaseModeller:
             )
         self.event_pool = EventPoolGenerator(stockpiles, grade_blocks, equipment)
         self.optimizer = Optimizer()
+        self.multi_feed_configuration = multi_feed_settings(self.solver_config.get("multi_feed_settings"))
+        if self.multi_feed_configuration["mode"] != "single":
+            self.crusher_targets = copy.deepcopy(self.crusher_targets)
+            for period, target in self.crusher_targets.items():
+                points = period_lanes(self.multi_feed_configuration, period, target)
+                for point, configured in zip(points, self.multi_feed_configuration["tipping_points"]):
+                    configured["targets_by_period"][period] = copy.deepcopy(point["target"])
+                target["crusher_rate"] = sum(p["target"]["crusher_rate"] for p in points)
+                target["direct_feed_ratio_min"], target["direct_feed_ratio_max"] = 0.0, 1.0
+                for analyte in ("fe", "si", "al", "p", "mn"):
+                    target[f"target_{analyte}_min"], target[f"target_{analyte}_max"] = 0.0, 100.0
+            self.optimizer = MultiLaneOptimizer(self.multi_feed_configuration)
         self.results = pd.DataFrame()
         self.build_report = pd.DataFrame()
         self.steady_state_tracker = 0
@@ -254,7 +269,8 @@ class CaseModeller:
         # solver steady state.  It changes only when the selected material
         # composition changes.
         self.previous_chemical_blend_signature = None
-        self.product_build_settings = self.normalized_product_build_settings(product_build_settings)
+        from classes.MultiFeedSettings import scoped_builds
+        self.product_build_settings = self.normalized_product_build_settings(scoped_builds(product_build_settings, self.multi_feed_configuration))
         if self.byproducts_enabled and self.product_build_settings:
             configured_lanes = {
                 setting.get("byproduct") for setting in self.product_build_settings
@@ -293,7 +309,8 @@ class CaseModeller:
     @property
     def material_flow_topology(self):
         """Return a detached topology snapshot without altering planning state."""
-        return one_lane_topology(
+        return planning_topology(
+            multi_feed=getattr(self, "multi_feed_configuration", None),
             site_context=getattr(self, "site_context", None),
             sources=model_sources(self.stockpiles, self.grade_blocks),
             crusher_targets=self.crusher_targets,
@@ -330,7 +347,7 @@ class CaseModeller:
                 )
             normalized.append(with_quality_configuration({
                 **{key: copy.deepcopy(value) for key, value in setting.items()
-                   if key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"} or key.startswith("planning_")},
+                   if key in {"opf", "opf_scope", "contributing_opfs", "crusher", "cbfl_campaign", "crusher_contribution_ratio"} or key.startswith("planning_")},
                 **quality_fields(setting),
                 **target_mode_fields(setting),
                 "build_id": int(setting.get("build_id") or index + 1),
@@ -540,7 +557,7 @@ class CaseModeller:
                 - self.PRODUCT_BUILD_TONNES_TOLERANCE
             ):
                 completed.append(build_index)
-        if bool(getattr(self, "byproducts_enabled", False)):
+        if bool(getattr(self, "byproducts_enabled", False)) or getattr(self, "multi_feed_configuration", {}).get("mode") == "combined_opf":
             return completed
         return completed[0] if completed else None
 
@@ -680,18 +697,14 @@ class CaseModeller:
             if build_index >= len(runtime_states):
                 continue
 
-            requested_lane = str(
-                self.product_build_settings[build_index].get("byproduct") or ""
-            )
+            requested_lane = normalized_build_lane(self.product_build_settings[build_index], bool(getattr(self, 'byproducts_enabled', False)))
             prior_builds_complete = all(
                 runtime_states[index]["tonnes"]
                 >= self.product_build_settings[index]["target_tonnes"]
                 - self.PRODUCT_BUILD_TONNES_TOLERANCE
                 for index in range(build_index)
                 if (
-                    not self.byproducts_enabled
-                    or str(self.product_build_settings[index].get("byproduct") or "")
-                    == requested_lane
+                    normalized_build_lane(self.product_build_settings[index], bool(getattr(self, 'byproducts_enabled', False))) == requested_lane
                 )
             )
             requested_build_incomplete = (
@@ -1736,6 +1749,7 @@ class CaseModeller:
 
     def publish_decision_options(self):
         display_columns = [
+            "tipping_point", "opf",
             "steady_state_number",
             "start_datetime",
             "end_datetime",
@@ -1933,6 +1947,9 @@ class CaseModeller:
                 )
             except (TypeError, ValueError):
                 crusher_rate = 0.0
+            if build.get('contributing_opfs'):
+                crusher_rate = sum(float(p['targets_by_period'].get(period_name, {}).get('crusher_rate') or 0)
+                                   for p in self.multi_feed_configuration['tipping_points'] if p['opf'] in build['contributing_opfs'])
             remaining_capacity += (
                 self.product_build_capacity_rate(crusher_rate, lane=lane) * hours
             )
@@ -1947,10 +1964,10 @@ class CaseModeller:
             self.solver_config.get("crusher_tonnes_stream")
             or "modelled_rom_wmt"
         )
-        if bool(getattr(self, "byproducts_enabled", False)) and lane in BYPRODUCT_LANES:
+        if bool(getattr(self, "byproducts_enabled", False)) and lane_kind(lane) in BYPRODUCT_LANES:
             product_stream = normalize_byproduct_quantity_fields(
                 self.solver_config.get("byproduct_quantity_fields")
-            )[lane]
+            )[lane_kind(lane)]
         else:
             product_stream = str(
                 self.solver_config.get("product_build_tonnes_stream")
@@ -2417,6 +2434,7 @@ class CaseModeller:
                 "source",
                 "source_type",
                 "equipment",
+                "tipping_point", "opf",
             ]
             if column in grade_block_rows.columns
         ]
@@ -2631,7 +2649,7 @@ class CaseModeller:
             # Product-build quantities are additive across grouped APS
             # payloads. Lane grades remain intensive and use the exact grade
             # weight emitted by the optimiser for that lane/analyte.
-            for lane in (PRODUCT_LANE, *BYPRODUCT_LANES):
+            for lane in dict.fromkeys([PRODUCT_LANE, *BYPRODUCT_LANES, *[normalized_build_lane(s, bool(getattr(self, 'byproducts_enabled', False))) for s in getattr(self, "product_build_settings", [])]]):
                 tonnes_column = lane_source_tonnes_column(lane)
                 if tonnes_column not in group.columns:
                     continue
@@ -3029,6 +3047,17 @@ class CaseModeller:
                 for transaction in result["transactions"]
             ]
 
+        if result.get("tipping_point_results") and result["Linprog_result_object"].success:
+            for row, transaction in zip(report_data, result["transactions"]):
+                point = transaction["tipping_point"]
+                local = result["tipping_point_results"][point]
+                row.update(tipping_point=point, opf=transaction["opf"])
+                row.update({key: transaction.get(key, "") for key in ("reconciliation_opf", "reconciliation_scenario")})
+                row.update({key: value for key, value in local.items() if key.startswith("crusher_")})
+                total = sum(float(t.get("actual_tonnes") or 0) for t in local.get("transactions", []))
+                direct = sum(float(t.get("actual_tonnes") or 0) for t in local.get("transactions", []) if t.get("source_type") == "grade_block")
+                row["source_blend_ratio"] = float(transaction["actual_tonnes"]) / total if total else 0.0
+                row["actual_direct_tip_ratio"] = direct / total if total else 0.0
         self.decision_point_results = pd.concat([self.decision_point_results, pd.DataFrame(report_data)], ignore_index=True)
 
     def append_results(self, filtered_decision_point_results_to_user_choice):
@@ -3096,6 +3125,7 @@ class CaseModeller:
 
     def build_product_build_report(self):
         columns = [
+            "tipping_point", "contributing_opf",
             "product_build_id",
             "product_build_name",
             "product_build_lane",
@@ -3172,11 +3202,7 @@ class CaseModeller:
         records = []
         group_keys = ["steady_state_number", "blend_ID", "blend_option"]
 
-        lanes = (
-            BYPRODUCT_LANES
-            if bool(getattr(self, "byproducts_enabled", False))
-            else (PRODUCT_LANE,)
-        )
+        lanes = list(dict.fromkeys(normalized_build_lane(s, bool(getattr(self, 'byproducts_enabled', False))) for s in self.product_build_settings))
         for lane in lanes:
             lane_settings = [
                 setting for setting in self.product_build_settings
@@ -3242,6 +3268,8 @@ class CaseModeller:
                     source_to_build = float(
                         row.get(tonnes_column) or 0
                     ) * allocation_fraction
+                    if source_to_build <= Optimizer.SOLUTION_TOLERANCE:
+                        continue
                     source_grades = {}
                     for grade in ("fe", "si", "al", "p", "mn"):
                         grade_column = lane_grade_column(lane, grade)
@@ -3260,6 +3288,8 @@ class CaseModeller:
                         source_grades[f"source_grade_{grade}"] = grade_value
 
                     records.append({
+                        "tipping_point": row.get("tipping_point", ""),
+                        "contributing_opf": row.get("opf", ""),
                         "product_build_id": build_setting["build_id"],
                         **{key: row.get(f"product_build_{lane + '_' if lane != PRODUCT_LANE else ''}{key}")
                            for key in QUALITY_REPORT_SUFFIXES},

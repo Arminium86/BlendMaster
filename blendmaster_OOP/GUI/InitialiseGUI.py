@@ -54,6 +54,8 @@ from GUI.ProductTargetDelegate import (
 )
 from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
+from GUI.MultiFeedSetup import MultiFeedSetup
+from classes.MultiFeedSettings import multi_feed_settings
 from GUI.MaterialDestinationPlanView import MaterialDestinationPlanView
 from classes.DestinationBuildOrder import write_order_audit, inventory_areas
 from classes.DestinationRules import VERSION as DESTINATION_RULE_VERSION
@@ -1367,6 +1369,8 @@ class UserInputs(QMainWindow):
 
     def active_site_context(self):
         return {
+            "multi_feed_settings": self.current_multi_feed_configuration(),
+            "opf_profiles": self.current_opf_profiles(),
             "scenario_id": self.active_scenario_id,
             "destination_reconciliation": self.destination_allocation_context(),
             "destination_rules": self.destination_rule_context(),
@@ -1561,7 +1565,7 @@ class UserInputs(QMainWindow):
             "available_two_wp_product_crushers",
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
-            "product_brand_labels_choice", "product_targets", "product_assay_report_settings", "destination_progress_settings",
+            "product_brand_labels_choice", "product_targets", "product_assay_report_settings", "destination_progress_settings", "multi_feed_configuration",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
             "product_build_tonnes_stream", "byproducts_enabled",
             "byproduct_quantity_fields", "byproduct_grade_fields",
@@ -1715,6 +1719,9 @@ class UserInputs(QMainWindow):
         if tab_index == getattr(self, "destination_progress_tab_index", None):
             self.sync_destination_progress_context()
             QTimer.singleShot(0, self.destination_progress.request_refresh)
+
+        if tab_index == getattr(self, "decision_levers_tab_index", None) and hasattr(self, "multi_feed_setup"):
+            self.sync_multi_feed_setup()
 
         if (
             tab_index == self.database_view_tab_index
@@ -1920,6 +1927,9 @@ class UserInputs(QMainWindow):
             self.product_targets = copy.deepcopy(state.get("product_targets") or [])
             self.product_assay_report_settings = copy.deepcopy(state.get("product_assay_report_settings") or {})
             self.destination_progress_settings = progress_settings(state.get("destination_progress_settings"))
+            self.multi_feed_configuration = multi_feed_settings(state.get("multi_feed_configuration"))
+            if hasattr(self, "multi_feed_setup"):
+                self.multi_feed_setup.set_settings(self.multi_feed_configuration, opf=getattr(self, "opf_input_choice", ""))
             self.auto_load_2wp_targets_choice = bool(
                 state.get("auto_load_2wp_targets_choice", True)
             )
@@ -2911,6 +2921,10 @@ class UserInputs(QMainWindow):
         description.setStyleSheet("font-size: 12px; color: #64748b;")
         layout.addWidget(description)
 
+        self.multi_feed_setup = MultiFeedSetup()
+        self.multi_feed_setup.set_settings(getattr(self, "multi_feed_configuration", None), opf=getattr(self, "opf_input_choice", ""))
+        layout.addWidget(self.multi_feed_setup)
+
         blend_section = QLabel("Blend Composition")
         blend_section.setStyleSheet(
             "font-weight: bold; margin-top: 10px; color: #334155;"
@@ -3108,6 +3122,53 @@ class UserInputs(QMainWindow):
         decision_submit_layout.addStretch()
         layout.addLayout(decision_submit_layout)
         layout.addStretch()
+
+    def current_multi_feed_configuration(self):
+        value = multi_feed_settings(getattr(self, "multi_feed_configuration", None))
+        if not value['tipping_points'] and 'TOTAL_FEED' in str(getattr(self, 'crusher_input_choice', '')).upper():
+            mine, opf = getattr(self, 'mine_input_choice', ''), getattr(self, 'opf_input_choice', '')
+            physical = [name for name in SITE_CRUSHER_OPTIONS.get((mine, opf), []) if 'TOTAL_FEED' not in name.upper()]
+            if len(physical) > 1:
+                calendar = getattr(self, 'calendar_inputs', {}) or {}
+                aliases = {'OPF01_PC': 'OPF1 CRUSHER', 'HAL_PC': 'HAL CRUSHER', 'OPF02_PC': 'RCH'} if mine == 'CC' else {}
+                value.update(mode='multi_tipping_point', tipping_points=[dict(name=name, opf=opf, rom_area=aliases.get(name, name), targets_by_period={
+                    ('preplan' if i == 0 else f'period_{i}'): dict(crusher_rate=float((calendar.get('crusher_rate') or {}).get(label) or 0) / len(physical))
+                    for i, label in enumerate(self.planning_period_labels())}) for name in physical])
+                value = multi_feed_settings(value)
+        for name, row in (getattr(self, "stockpile_data", None) or {}).items():
+            value["source_subsets"][name] = str(row.get("subset", value["source_subsets"].get(name, row.get("nearest_crusher", row.get("NEAREST_CRUSHER", "")))) or "")
+        return value
+
+    def sync_multi_feed_setup(self):
+        calendar = self.capture_calendar_table_inputs()
+        base = {}
+        for index, label in enumerate(self.planning_period_labels()):
+            period = "preplan" if index == 0 else f"period_{index}"
+            target = dict(crusher_rate=0, brand=(calendar.get("crusher_brand", {}) or {}).get(label, ""), direct_feed_ratio_min=0, direct_feed_ratio_max=1)
+            for analyte in ("fe", "si", "al", "p", "mn"):
+                for bound in ("min", "max"):
+                    key = f"target_{analyte}_{bound}"
+                    target[key] = (calendar.get("crusher_" + key, {}) or {}).get(label, 0 if bound == "min" else 100)
+            base[period] = target
+        self.multi_feed_setup.set_settings(self.current_multi_feed_configuration(), base_targets=base, opf=getattr(self, "opf_input_choice", ""))
+        states = {**(getattr(self, 'site_scenarios', {}) or {}), getattr(self, 'active_scenario_id', ''): vars(self)}
+        self.multi_feed_setup.set_scenarios({identity: (f"{s.get('opf_input_choice', '')} / {s.get('crusher_input_choice', '')} / {s.get('start_time_choice', '')}", s.get('opf_input_choice')) for identity, s in states.items()})
+
+    def current_opf_profiles(self):
+        from classes.OPFSourceProfiles import profile_from_state
+        config = self.current_multi_feed_configuration()
+        if config['mode'] != 'combined_opf':
+            return {}
+        states = {**(getattr(self, 'site_scenarios', {}) or {}), getattr(self, 'active_scenario_id', ''): vars(self)}
+        result = {}
+        for opf in {p['opf'] for p in config['tipping_points']}:
+            identity = config['opf_scenarios'].get(opf)
+            if not identity:
+                matches = [key for key, state in states.items() if state.get('opf_input_choice') == opf and state.get('mine_input_choice') == getattr(self, 'mine_input_choice', None)]
+                identity = matches[0] if len(matches) == 1 else None
+            if identity in states and states[identity].get('opf_input_choice') == opf:
+                result[opf] = profile_from_state(states[identity], identity)
+        return result
 
     def setup_product_targets_tab(self):
         self.product_build_tab = QWidget()
@@ -3529,8 +3590,8 @@ class UserInputs(QMainWindow):
         build_item.setTextAlignment(Qt.AlignCenter)
         self.product_build_table.setItem(row_idx, 0, build_item)
         opf_item = QTableWidgetItem(str(setting.get("opf") or getattr(self, "opf_input_choice", "") or ""))
-        opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        opf_item.setToolTip("The OPF carried with this build. New manual rows use the active OPF.")
+        opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+        opf_item.setToolTip("Combined OPF: enter one configured OPF for a separate build, or comma-separated OPFs for a shared build. Shared builds require Allow OPFs to compensate in Decision Levers.")
         self.product_build_table.setItem(row_idx, self.product_build_headers.index("OPF"), opf_item)
         mode_combo = QComboBox()
         for value, label in TARGET_MODE_LABELS.items():
@@ -3870,6 +3931,12 @@ class UserInputs(QMainWindow):
         self.show_page(self.decision_levers_tab_index)
 
     def handle_decision_levers_submit(self):
+        try:
+            self.multi_feed_configuration = self.multi_feed_setup.settings()
+            self.multi_feed_setup.validation.clear()
+        except (ValueError, TypeError) as exc:
+            self.multi_feed_setup.validation.setText(str(exc))
+            return
         if not self.store_solver_config_inputs():
             return
         self.save_active_scenario_state()
@@ -5656,6 +5723,8 @@ class UserInputs(QMainWindow):
             context.get("field_definitions")
         )
         signature = {
+            "multi_feed": context.get("multi_feed_settings"),
+            "opf_mappings": {opf: {k: profile.get(k) for k in ('scenario_id', 'fields', 'aps_grade_field_mappings', 'aps_source_property_field_mappings', 'brands')} for opf, profile in (context.get('opf_profiles') or {}).items()},
             "cache_version": EXPIT_INPUT_CACHE_VERSION,
             "destination_rule_version": DESTINATION_RULE_VERSION,
             "destination_guidance_version": (
@@ -16870,6 +16939,7 @@ class UserInputs(QMainWindow):
         if self.is_total_feed_operating_crusher():
             headers.append("Max Reclaim Rate (t/h)")
         headers.append("Reclaim Threshold (WMT)")
+        headers.append("Subset")
         return headers
 
     def stockpile_table_column_index(self, caption):
@@ -17139,6 +17209,8 @@ class UserInputs(QMainWindow):
 
             # Reclaim Threshold (Editable, Center-aligned)
             reclaim_value = attributes.get("reclaim_threshold", 0)
+            subset = attributes.get("subset", attributes.get("nearest_crusher", attributes.get("NEAREST_CRUSHER", "")))
+            self.stockpile_table.setItem(row_idx, headers.index("Subset"), QTableWidgetItem(str(subset or "")))
             reclaim_value = float(reclaim_value)
             reclaim_item = NumericSortTableWidgetItem(f"{reclaim_value:,.0f}")
             reclaim_item.setData(Qt.UserRole, reclaim_value)
@@ -17299,6 +17371,12 @@ class UserInputs(QMainWindow):
 
         for row in range(self.stockpile_table.rowCount()):
             # Check if "Use" column checkbox is checked
+            subset_column = self.stockpile_table_column_index("Subset")
+            name_item = self.stockpile_table.item(row, 2)
+            if subset_column is not None and name_item is not None:
+                subset_item = self.stockpile_table.item(row, subset_column)
+                if name_item.text() in self.stockpile_data:
+                    self.stockpile_data[name_item.text()]["subset"] = subset_item.text().strip() if subset_item else ""
             checkbox_widget = self.stockpile_table.cellWidget(row, 0)  # Get the widget in the "Use" column
             AMT_checkbox_widget = self.stockpile_table.cellWidget(row, 1)  # Get the widget in the "AMT" column
 
@@ -21379,6 +21457,7 @@ class UserInputs(QMainWindow):
     def default_optimisation_snapshot_columns(columns):
         """Return a compact, useful opening view of the report snapshot."""
         preferred = [
+            "tipping_point", "opf",
             "start_datetime", "end_datetime", "steady_state_number",
             "blend_ID", "source", "source_id", "source_type",
             "source_opening_balance", "source_actual_tonnes",
@@ -22227,11 +22306,18 @@ class UserInputs(QMainWindow):
 
     def current_blend_plan_backup_choices(self, with_reason=False):
         points = getattr(self, "selected_site_crushers", None) or [getattr(self, "crusher_input_choice", "")]
+        feed = multi_feed_settings(getattr(self, "multi_feed_configuration", None))
+        if feed["mode"] != "single":
+            points = [r["name"] for r in feed["tipping_points"]]
         if any(str(point).upper().replace("-", "_") == "TOTAL_FEED_PC" for point in points):
             points = getattr(self, "aps_ratio_crusher_choices", None) or getattr(self, "aps_direct_tip_crusher_choice", None) or []
         areas = inventory_areas(getattr(self, "stockpile_data", None) or {})
-        evidence = self.manual_material_destination_plan_report()
+        evidence = (self.fetch_multi_feed_report("material_destination_plan")
+                    if feed["mode"] != "single" else self.manual_material_destination_plan_report())
         def matches(area, point):
+            configured = next((r for r in feed["tipping_points"] if r["name"] == point), None)
+            if configured:
+                return area.casefold() == configured["rom_area"].casefold()
             return area.upper() == str(point).upper() or ExpitDataHandler.crusher_destination_matches(
                 area, getattr(self, "mine_input_choice", ""), point, getattr(self, "opf_input_choice", ""))
         rows = evidence.to_dict("records")
@@ -22246,6 +22332,28 @@ class UserInputs(QMainWindow):
 
     def validated_blend_plan_backups(self):
         return backup_publication(self.current_blend_plan_backup_choices(), getattr(self, "blend_plan_backup_destinations", None) or {})
+
+    def fetch_multi_feed_report(self, table="optimised_blend_report"):
+        """Read the active scenario's simultaneous result without requiring conversion."""
+        if multi_feed_settings(getattr(self, "multi_feed_configuration", None))["mode"] == "single":
+            return pd.DataFrame()
+        if table not in {"optimised_blend_report", "material_destination_plan"}:
+            raise ValueError("Unsupported simultaneous report")
+        connection = sqlite3.connect(get_database_path())
+        try:
+            query = f'SELECT * FROM "{table}"'
+            if table == "material_destination_plan":
+                query += " WHERE lower(plan_type) = 'optimised'"
+            return pd.read_sql_query(query, connection)
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            return pd.DataFrame()
+        finally:
+            connection.close()
+
+    def multi_feed_backup_export_sheets(self):
+        if self.fetch_multi_feed_report().empty:
+            return []
+        return [("Backup Destinations", pd.DataFrame(self.validated_blend_plan_backups()))]
 
     def fetch_manual_blend_plan_report(self):
         connection = sqlite3.connect(get_database_path())
@@ -22334,7 +22442,9 @@ class UserInputs(QMainWindow):
         if hasattr(self, "blend_plan_backup_controls"):
             backup_choices, unavailable_reason = self.current_blend_plan_backup_choices(with_reason=True)
             self.blend_plan_backup_controls.set_context(backup_choices,
-                getattr(self, "blend_plan_backup_destinations", None) or {}, not raw_report.empty,
+                getattr(self, "blend_plan_backup_destinations", None) or {},
+                not self.fetch_multi_feed_report().empty if multi_feed_settings(
+                    getattr(self, "multi_feed_configuration", None))["mode"] != "single" else not raw_report.empty,
                 unavailable_reason=unavailable_reason)
         rounding_audit = rounding_audit_rows(
             getattr(self, "stored_blend_sequence_table_for_gantt", None) or [])
@@ -22773,7 +22883,7 @@ class UserInputs(QMainWindow):
             if suffix == "xlsx":
                 SpreadsheetReportExporter.export_xlsx(
                     file_path,
-                    [(table_name, report)],
+                    [(table_name, report)] + self.multi_feed_backup_export_sheets(),
                     report_title=f"BlendMaster - {table_name}",
                     report_datetime=timestamp,
                 )
@@ -22830,7 +22940,7 @@ class UserInputs(QMainWindow):
         try:
             SpreadsheetReportExporter.export_xlsx(
                 file_path,
-                sheets,
+                sheets + self.multi_feed_backup_export_sheets(),
                 report_title="BlendMaster - Database Reports",
                 report_datetime=timestamp,
             )
@@ -22936,7 +23046,12 @@ class UserInputs(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 table_widget.setItem(row_idx, col_idx, item)
 
+        table_widget.ensurePolished()
+        table_widget.horizontalHeader().ensurePolished()
         table_widget.resizeColumnsToContents()
+        metrics = table_widget.horizontalHeader().fontMetrics()
+        for column, label in enumerate(df.columns):
+            table_widget.setColumnWidth(column, max(table_widget.columnWidth(column), metrics.horizontalAdvance(str(label)) + 44))
 
     def setup_optimised_grade_profile_tab(self):
         self.optimised_grade_profile_tab = QWidget()
@@ -26128,6 +26243,7 @@ class UserInputs(QMainWindow):
                 "product_targets": self.product_targets,
                 "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
                 "destination_progress_settings": progress_settings(getattr(self, "destination_progress_settings", None)),
+                "multi_feed_configuration": self.current_multi_feed_configuration(),
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
                     self.group_2wp_build_targets_by_brand_choice
@@ -26588,6 +26704,9 @@ class UserInputs(QMainWindow):
         )
         self.product_assay_report_settings = copy.deepcopy(loaded_state.get("product_assay_report_settings") or {})
         self.destination_progress_settings = progress_settings(loaded_state.get("destination_progress_settings"))
+        self.multi_feed_configuration = multi_feed_settings(loaded_state.get("multi_feed_configuration"))
+        if hasattr(self, "multi_feed_setup"):
+            self.multi_feed_setup.set_settings(self.multi_feed_configuration, opf=getattr(self, "opf_input_choice", ""))
         if hasattr(self, "destination_progress"):
             self.destination_progress.reset_context()
         if hasattr(self, "opf_production_report"):
@@ -26982,6 +27101,7 @@ class UserInputs(QMainWindow):
         self.product_targets = []
         self.product_assay_report_settings = {}
         self.destination_progress_settings = progress_settings()
+        self.multi_feed_configuration = multi_feed_settings()
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}
