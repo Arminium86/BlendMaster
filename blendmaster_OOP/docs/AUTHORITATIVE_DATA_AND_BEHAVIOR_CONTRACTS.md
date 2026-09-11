@@ -739,6 +739,29 @@ assumption. Explicit user selections retain priority. Assumed selections are
 derived again on refresh, never persisted as manual overrides. Allocation and
 saved report provenance use the same resolution and remaining-tonnage estimate.
 
+When 24-hour transaction reconciliation is enabled, the selected 24HR Mining.csv
+also contributes missing ROM area/material combinations. These use valid positive
+reserve-to-stockpile rows whose delivery interval has not ended at scenario start,
+respect the selected ExPit agents and require a Nearest Crusher mapping. Existing
+2WP combinations remain authoritative; waste and past-only inputs add no rows.
+Additional rows are labelled **24-hour plan only — no 2WP build order** and list
+their 24-hour source blocks. Their destination dropdown contains current mapped
+stockpiles in the same ROM area. They require an explicit selection and an entered
+ROM WMT allowance; actual activity, the first-build assumption and estimated 2WP
+capacity cannot configure them automatically.
+
+The allowance belongs to that ROM area/material/destination and is separate from
+any existing 2WP physical build, whose position is not established for this extra
+material. Whole payloads can overrun the allowance under the existing rule, but
+the next payload stays unresolved after exhaustion. The destination choices are
+not an ordered sequence and are never advanced automatically. Published rows
+carry **User selected — 24-hour plan only** and **User entered — 24-hour plan
+allowance**, with no invented 2WP order number or build instance. Existing settings
+maps persist the selection and allowance through scenario/project save/load.
+The 24-hour file fingerprint, content, agent choices and additional-lane choices
+participate in context validation; changed inputs require reconciliation refresh.
+The 2WP Build order tab and its audit remain strictly derived from 2WP.
+
 Settings use `destination_progress_settings` schema v1, persist per site scenario
 and through `.prj` save/load, and default to 12 hours with no entered capacity in
 legacy projects. Scenario-time or source-signature changes clear previous

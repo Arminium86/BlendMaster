@@ -6,6 +6,7 @@ from copy import deepcopy
 from classes.DestinationBuildOrder import digest
 from setup.InventoryBuildLineage import finite_number
 from setup.ProductAssayHistory import awst
+from classes.DestinationSupplementalLanes import SUPPLEMENTAL_ORIGIN, SUPPLEMENTAL_SELECTION
 
 
 ESTIMATED_CAPACITY_BASIS = "Estimated from remaining 2WP deliveries"
@@ -109,4 +110,18 @@ def resolve_progress(order, activity, selections=None):
                            next=deepcopy(sequence[index+1]) if index is not None and index+1 < len(sequence) else None,
                            latest_inbound=latest, activity_wmt=sum(r["wmt"] for r in evidence), evidence=deepcopy(evidence),
                            warnings=warnings, ambiguous=current is None and bool(evidence)))
-    return result
+    existing = set(lanes)
+    for lane in order.get("supplemental_lanes", []):
+        area, material = lane["rom_area"], lane["material_type"]
+        if (area, material) in existing:
+            continue
+        key = lane_key(area, material)
+        candidates = lane["candidates"]
+        current = next((r for r in candidates if r["instance_id"] == (selections or {}).get(key)), None)
+        result.append(dict(lane_key=key, rom_area=area, material_type=material, sequence=deepcopy(candidates),
+                           detected_destination=None, current=deepcopy(current),
+                           selection_basis=SUPPLEMENTAL_SELECTION if current else SUPPLEMENTAL_ORIGIN,
+                           previous=None, next=None, latest_inbound=None, activity_wmt=0.0, evidence=[],
+                           warnings=[SUPPLEMENTAL_ORIGIN + ". Select a destination in this ROM area and enter an explicit remaining ROM WMT allowance. No automatic destination or allowance is inferred."],
+                           ambiguous=False, supplemental=True, source_blocks=lane["source_blocks"]))
+    return sorted(result, key=lambda r: (r["rom_area"], r["material_type"]))

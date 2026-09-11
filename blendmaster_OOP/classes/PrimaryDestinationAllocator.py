@@ -14,6 +14,7 @@ import sqlite3
 
 from classes.DestinationBuildOrder import digest, stockpile_key
 from classes.DestinationProgress import progress_settings, resolve_progress, remaining_2wp_estimates, ESTIMATED_CAPACITY_BASIS
+from classes.DestinationSupplementalLanes import SUPPLEMENTAL_ORIGIN, SUPPLEMENTAL_SELECTION, SUPPLEMENTAL_CAPACITY
 from classes.GradeBlockIdentity import grade_block_material_type
 from classes.MaterialDestinationPlan import MaterialDestinationPlan
 from classes.DestinationRules import DestinationRuleEngine, METADATA_COLUMNS
@@ -21,7 +22,7 @@ from setup.InventoryBuildLineage import clean_text, finite_number
 from setup.ProductAssayHistory import awst
 
 
-VERSION = 3
+VERSION = 4
 AUDIT_COLUMNS = {
     "destination_allocation_runs": "plan_type plan_id schema_version context_signature status payload_count payload_wmt direct_tipped_wmt non_direct_wmt assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt overrun_wmt reason input_signature scenario_context_signature allocation_window_start allocation_window_end".split(),
     "destination_primary_assignments": "plan_type plan_id payload_id source delivered_datetime payload_wmt direct_tipped_wmt non_direct_wmt rom_area material_type planned_destination assigned_destination instance_id build_instance order_position assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt capacity_before_wmt capacity_after_wmt overrun_wmt capacity_basis selection_basis status reason context_signature".split(),
@@ -55,6 +56,9 @@ class PrimaryDestinationAllocator:
         for row in rows:
             lane = (row["rom_area"], row["material_type"])
             sequence = row["sequence"]
+            if row.get("supplemental"):
+                sequence = [row["current"]] if row["current"] else []
+                row = {**row, "sequence": sequence}
             positions = [r["order_position"] for r in sequence]
             if positions != sorted(set(positions)) or len({r["instance_id"] for r in sequence}) != len(sequence):
                 raise ValueError("2WP build order must have unique, increasing positions and instances within each ROM area/material type.")
@@ -79,6 +83,8 @@ class PrimaryDestinationAllocator:
             initial = entered if entered is not None else estimates.get(key) if key in current_ids else item["planned_wmt"]
             item.update(starting_wmt=initial, remaining_wmt=initial,
                         capacity_basis="User entered" if entered is not None else "Not set" if initial is None else ESTIMATED_CAPACITY_BASIS if key in current_ids else "2WP planned ROM WMT")
+            if key.startswith("24hr-") and entered is not None:
+                item["capacity_basis"] = SUPPLEMENTAL_CAPACITY
 
     @staticmethod
     def _payload(raw):
@@ -106,7 +112,7 @@ class PrimaryDestinationAllocator:
                                 source=base["source"], delivered_datetime=base["delivered_datetime"],
                                 rom_area=base["rom_area"], material_type=base["material_type"], event=event,
                                 instance_id=entry["instance_id"], destination=entry["destination"],
-                                build_instance=entry["build_instance"], order_position=entry["order_position"],
+                                build_instance=entry["build_instance"], order_position=None if entry.get("origin") == SUPPLEMENTAL_ORIGIN else entry["order_position"],
                                 capacity_before_wmt=before, capacity_after_wmt=after, consumed_wmt=consumed,
                                 overrun_wmt=overrun, next_instance_id=next_entry["instance_id"] if next_entry else "",
                                 next_destination=next_entry["destination"] if next_entry else "", reason=reason,
@@ -149,7 +155,7 @@ class PrimaryDestinationAllocator:
                         rom_area=area, material_type=material, planned_destination=clean_text(row.get("destination")),
                         assigned_destination="", instance_id="", build_instance=None, order_position=None,
                         assigned_wmt=0.0, unresolved_wmt=0.0, out_of_scope_wmt=0.0, outside_window_wmt=0.0, capacity_before_wmt=None,
-                        capacity_after_wmt=None, overrun_wmt=0.0, capacity_basis="", selection_basis="",
+                        capacity_after_wmt=None, overrun_wmt=0.0, capacity_basis="", selection_basis=self.lanes.get(lane, {}).get("selection_basis", ""),
                         status="Unresolved", reason="", context_signature=self.context_signature)
             tonnes = row["non_direct_wmt"]
             if tonnes == 0:
@@ -164,7 +170,8 @@ class PrimaryDestinationAllocator:
             elif lane not in self.lanes:
                 base["reason"] = "No 2WP build order for the payload's ROM area/material type."
             elif self.positions[lane] is None:
-                base["reason"] = "Current build instance is unconfirmed; review Destination Reconciliation."
+                base["reason"] = (SUPPLEMENTAL_ORIGIN + "; select a destination and enter a remaining ROM WMT allowance in Destination Reconciliation."
+                                  if self.lanes[lane].get("supplemental") else "Current build instance is unconfirmed; review Destination Reconciliation.")
             else:
                 sequence = self.lanes[lane]["sequence"]
                 base["selection_basis"] = self.lanes[lane]["selection_basis"]
@@ -174,8 +181,8 @@ class PrimaryDestinationAllocator:
                     before = capacity["remaining_wmt"]
                     if before is None:
                         base.update(instance_id=entry["instance_id"], build_instance=entry["build_instance"],
-                                    order_position=entry["order_position"], capacity_basis=capacity["capacity_basis"],
-                                    reason="Remaining ROM WMT is not set for the current build instance.")
+                                    order_position=None if self.lanes[lane].get("supplemental") else entry["order_position"], capacity_basis=capacity["capacity_basis"],
+                                    reason="Remaining ROM WMT allowance is not set for the selected 24-hour plan destination." if self.lanes[lane].get("supplemental") else "Remaining ROM WMT is not set for the current build instance.")
                         break
                     if before == 0:
                         self._advance(lane, base, "Build instance has no remaining capacity.")
@@ -185,16 +192,16 @@ class PrimaryDestinationAllocator:
                     capacity["consumed_wmt"] += tonnes
                     capacity["overrun_wmt"] += overrun
                     base.update(assigned_destination=entry["destination"], instance_id=entry["instance_id"],
-                                build_instance=entry["build_instance"], order_position=entry["order_position"],
+                                build_instance=entry["build_instance"], order_position=None if self.lanes[lane].get("supplemental") else entry["order_position"],
                                 assigned_wmt=tonnes, capacity_before_wmt=before, capacity_after_wmt=after,
                                 overrun_wmt=overrun, capacity_basis=capacity["capacity_basis"], status="Assigned",
-                                reason="Whole payload retained; capacity overrun recorded." if overrun else "2WP build order.")
+                                reason="Whole payload retained; capacity overrun recorded." if overrun else "Explicit 24-hour plan destination allowance." if self.lanes[lane].get("supplemental") else "2WP build order.")
                     self._event(base, "Allocate", entry, before=before, after=after, consumed=tonnes, overrun=overrun, reason=base["reason"])
                     if after == 0:
                         self._advance(lane, base, "Capacity consumed; the next payload advances.")
                     break
                 else:
-                    base["reason"] = "2WP build order exhausted; no later primary destination is available."
+                    base["reason"] = "The explicit 24-hour plan destination allowance is exhausted; review the allowance. No automatic next destination." if self.lanes[lane].get("supplemental") else "2WP build order exhausted; no later primary destination is available."
             if base["status"] == "Unresolved":
                 base["unresolved_wmt"] = tonnes
             self.assignments.append(base)
@@ -275,6 +282,8 @@ def allocate_final_plan(payload_transactions, blend_report, context, *, plan_typ
                                  primary_destination=row["assigned_destination"], rom_area=row["rom_area"],
                                  anchor_destination=row["planned_destination"],
                                  route_only_waste=payload["route_only_waste"])
+        if row["selection_basis"] == SUPPLEMENTAL_SELECTION and row["assigned_destination"]:
+            decision.update(primary_rule=SUPPLEMENTAL_SELECTION, resolution="manual_24hr_allowance")
         row.update(rules.metadata(decision), primary_rule=decision["primary_rule"],
                    alternate_destinations=decision["alternate_destinations"], destination_rule_signature=rules.signature)
     result["run"]["destination_rule_signature"] = rules.signature

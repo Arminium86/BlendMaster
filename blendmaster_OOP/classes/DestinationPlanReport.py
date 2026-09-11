@@ -83,7 +83,7 @@ def build_publication(payloads, blend_report, allocation, context, *, plan_type,
             row["assigned_destination"] = final.get("assigned_destination", "")
             row["assigned_tonnes"] = final.get("assigned_wmt", 0.0)
             row["consumed_capacity_wmt"] = row["assigned_tonnes"]
-            row["assignment_source"] = "2WP build order" if row["assigned_tonnes"] else row["status"]
+            row["assignment_source"] = final.get("primary_rule") or "2WP build order" if row["assigned_tonnes"] else row["status"]
             for key in ("unresolved_wmt", "out_of_scope_wmt", "outside_window_wmt", "overrun_wmt"):
                 row[key] = final.get(key, quantity if key == "unresolved_wmt" else 0.0)
             if row["out_of_scope_wmt"]:

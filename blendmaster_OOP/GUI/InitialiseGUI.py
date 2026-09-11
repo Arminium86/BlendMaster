@@ -3297,7 +3297,9 @@ class UserInputs(QMainWindow):
             site=getattr(self, "mine_input_choice", None),
             scenario_start=getattr(self, "start_time_choice", None),
             path=getattr(self, "file_path_choice", ""),
-            inventories=getattr(self, "stockpile_data", None) or {})
+            inventories=getattr(self, "stockpile_data", None) or {},
+            supplemental_path=getattr(self, "file_path_24hr_choice", "") if int(getattr(self, "expit_mode_choice", 1) or 1) == 2 else "",
+            selected_agents=getattr(self, "selected_24hr_expit_agents", []) or [])
         if context is not None:
             context["destination_rules"] = self.destination_rule_context()
             context["destination_rules"]["guidance"] = copy.deepcopy(getattr(self, "aps_destination_guidance", {}) or {})
@@ -3310,7 +3312,9 @@ class UserInputs(QMainWindow):
             scenario_start=getattr(self, "start_time_choice", None),
             path=getattr(self, "file_path_choice", ""),
             inventories=getattr(self, "stockpile_data", None) or {},
-            state=getattr(self, "destination_progress_settings", None))
+            state=getattr(self, "destination_progress_settings", None),
+            supplemental_path=getattr(self, "file_path_24hr_choice", "") if int(getattr(self, "expit_mode_choice", 1) or 1) == 2 else "",
+            selected_agents=getattr(self, "selected_24hr_expit_agents", []) or [])
 
     def store_destination_order_audit(self, snapshot):
         try:

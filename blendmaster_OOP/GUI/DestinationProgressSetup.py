@@ -13,21 +13,31 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                             QLineEdit, QPlainTextEdit, QTableView)
 
 from classes.DestinationBuildOrder import extract_build_order, inventory_areas, digest
+from classes.DestinationSupplementalLanes import add_24hr_lanes, SUPPLEMENTAL_ORIGIN
 from classes.DestinationProgress import progress_settings, resolve_progress, remaining_2wp_estimates, ESTIMATED_CAPACITY_BASIS
 from setup.RecentDestinationActivity import RecentDestinationActivity
 from setup.ProductAssayHistory import awst
 
 
 def instance_label(row):
+    if row and row.get("origin") == SUPPLEMENTAL_ORIGIN:
+        return row["destination"] + " · 24-hour plan allowance"
     return f"{row['order_position']}. {row['destination']} · build {row['build_instance']}" if row else "—"
 
 
-def context_key(scenario_id, site, start, path, areas):
+def context_key(scenario_id, site, start, path, areas, supplemental_path="", selected_agents=None):
     try:
         stat = Path(path).stat() if path else None
     except OSError:
         stat = None
-    return digest([scenario_id, site, start, str(path), (stat.st_size, stat.st_mtime_ns) if stat else None, areas])
+    key = [scenario_id, site, start, str(path), (stat.st_size, stat.st_mtime_ns) if stat else None, areas]
+    if supplemental_path:
+        try:
+            extra = Path(supplemental_path).stat()
+        except OSError:
+            extra = None
+        key.append([str(supplemental_path), (extra.st_size, extra.st_mtime_ns) if extra else None, sorted(selected_agents or [])])
+    return digest(key)
 
 
 class EvidenceModel(QAbstractTableModel):
@@ -84,7 +94,7 @@ class DestinationProgressSetup(QWidget):
         title = QLabel("Destination Reconciliation")
         title.setStyleSheet("font-size: 20px; font-weight: 750; color: #172033;")
         layout.addWidget(title)
-        note = QLabel("Detection uses actual inbound movements to destinations in each ROM area/material type's 2WP order. A successful lookup with no matching activity assumes the first build. Review the current build and remaining ROM WMT. ROM area uses Nearest Crusher from Stockpile Inventories.")
+        note = QLabel("For 2WP rows, detection uses matching actual inbound movements; a successful lookup with no matches assumes the first build. Materials found only in the 24-hour plan require an explicit destination and allowance. ROM area uses Nearest Crusher from Stockpile Inventories.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.context_label = QLabel("Set the scenario start, import 2WP Mining.csv and load Stockpile Inventories.")
@@ -151,7 +161,7 @@ class DestinationProgressSetup(QWidget):
         self.validation.setWordWrap(True)
         self.validation.setStyleSheet("color: #a33b16;")
         layout.addWidget(self.validation)
-        footer = QLabel("Remaining assignable tonnes are entered in ROM WMT. Blank uses an estimate from remaining 2WP deliveries for the current build; 0 means no remaining capacity. Estimates share one physical build balance across material types. Valid edits apply immediately; save the project to retain them. Recalculate the plan to update Material Destination Plan assignments.")
+        footer = QLabel("For 2WP builds, blank Remaining (ROM WMT) uses the remaining-delivery estimate, shared across the physical build's material types. For 24-hour-only rows, blank remains unresolved. Zero means no remaining capacity or allowance. Edits apply immediately; save the project to retain them and recalculate the plan to update assignments.")
         footer.setWordWrap(True)
         footer.setStyleSheet("color: #526474;")
         layout.addWidget(footer)
@@ -218,33 +228,35 @@ class DestinationProgressSetup(QWidget):
         self.status.setText(message)
         self.validation.clear()
 
-    def set_context(self, *, scenario_id, site, scenario_start, path, inventories, state=None):
+    def set_context(self, *, scenario_id, site, scenario_start, path, inventories, state=None, supplemental_path="", selected_agents=None):
         areas = inventory_areas(inventories)
         start = awst(scenario_start).isoformat() if scenario_start is not None else None
-        key = context_key(scenario_id, site, start, path, areas)
+        key = context_key(scenario_id, site, start, path, areas, supplemental_path, selected_agents)
         if key == self._context_key:
             return
         self.invalidate("Ready — Refresh to load destination reconciliation.")
         self._context_key = key
-        self._context = dict(scenario_id=scenario_id, site=site, start=start, path=str(path or ""), inventories=deepcopy(inventories or {}))
+        self._context = dict(scenario_id=scenario_id, site=site, start=start, path=str(path or ""), inventories=deepcopy(inventories or {}), supplemental_path=str(supplemental_path or ""), selected_agents=list(selected_agents or []))
         self._settings = progress_settings(state)
         self.lookback.blockSignals(True)
         self.lookback.setValue(self._settings["lookback_hours"])
         self.lookback.blockSignals(False)
         self.context_label.setText(f"Site: {site or 'not set'} · Scenario start: {start or 'not set'} AWST · 2WP: {Path(path).name if path else 'not selected'}")
+        if supplemental_path:
+            self.context_label.setText(self.context_label.text() + f" · 24-hour plan: {Path(supplemental_path).name}")
         self.update_activity_window()
 
-    def allocation_context(self, *, scenario_id, site, scenario_start, path, inventories):
+    def allocation_context(self, *, scenario_id, site, scenario_start, path, inventories, supplemental_path="", selected_agents=None):
         """Freeze reviewed inputs for a plan; never return an old scenario's data."""
         if not self.snapshot or self._pending:
             return None
         start = awst(scenario_start).isoformat() if scenario_start is not None else None
-        if context_key(scenario_id, site, start, path, inventory_areas(inventories)) != self._context_key:
+        if context_key(scenario_id, site, start, path, inventory_areas(inventories), supplemental_path, selected_agents) != self._context_key:
             return None
         if self._settings["context_signature"] != self.snapshot["context_signature"]:
             return None
         order = self.snapshot["order"]
-        return deepcopy(dict(order={k: order[k] for k in ("schema_version", "signature", "source_file", "orders", "areas")},
+        return deepcopy(dict(order={k: order[k] for k in ("schema_version", "signature", "source_file", "orders", "areas", "supplemental_lanes") if k in order},
                              activity=self.snapshot["activity"], settings=self._settings,
                              context_signature=self.snapshot["context_signature"], scenario_id=scenario_id, site=site, start=start))
 
@@ -282,6 +294,7 @@ class DestinationProgressSetup(QWidget):
 
         def work():
             order = extract_build_order(context["path"], context["inventories"])
+            order = add_24hr_lanes(order, context["supplemental_path"], context["start"], context["selected_agents"])
             try:
                 activity = self.service.fetch(context["site"], context["start"], hours, order["areas"], order["signature"], force_refresh=force) if order["orders"] else None
                 error = None
@@ -316,8 +329,10 @@ class DestinationProgressSetup(QWidget):
     def render(self, refresh_evidence=True):
         order, activity = self.snapshot["order"], self.snapshot["activity"] or {}
         self.rows = resolve_progress(order, activity, self._settings["selected_instances"])
-        if not order["orders"]:
+        if not order["orders"] and not order.get("supplemental_lanes"):
             status = "No planned ROM destinations. Review the 2WP row audit and Nearest Crusher values."
+        elif not order["orders"]:
+            status = "No 2WP build order. Review the 24-hour plan only rows and enter explicit destinations and allowances."
         elif self.snapshot["error"]:
             status = "Activity unavailable — " + self.snapshot["error"]
         else:
@@ -330,14 +345,16 @@ class DestinationProgressSetup(QWidget):
         self.status.setText(status)
         summaries = [dict(rom_area=r["rom_area"], material_type=r["material_type"], detected=r["detected_destination"] or ("Ambiguous" if r["ambiguous"] else "Not detected"),
                           current="", previous=instance_label(r["previous"]), next=instance_label(r["next"]), remaining="", basis=r["selection_basis"]) for r in self.rows]
-        self.fill(self.table, summaries, [("rom_area", "ROM area"), ("material_type", "Material type"), ("detected", "Detected destination"), ("current", "Current build instance"), ("previous", "Previous"), ("next", "Next"), ("remaining", "Remaining (ROM WMT)"), ("basis", "Selection basis")])
+        self.fill(self.table, summaries, [("rom_area", "ROM area"), ("material_type", "Material type"), ("detected", "Detected destination"), ("current", "Current build instance / destination"), ("previous", "Previous"), ("next", "Next"), ("remaining", "Remaining (ROM WMT)"), ("basis", "Selection basis")])
         self.capacity_fields = {}
         self.capacity_estimates = remaining_2wp_estimates(order, self._context.get("start"))
         for i, row in enumerate(self.rows):
             combo = QComboBox()
             combo.setToolTip("Select the current build instance from the 2WP Build order. A manual selection overrides automatic detection or the assumed first build for this ROM area/material type. The planned destinations and their sequence remain as defined in 2WP.")
             combo.setMinimumWidth(combo.fontMetrics().horizontalAdvance("Automatic / review required") + 45)
-            combo.addItem("Automatic / review required", "")
+            combo.addItem("Select destination" if row.get("supplemental") else "Automatic / review required", "")
+            if row.get("supplemental"):
+                combo.setToolTip(SUPPLEMENTAL_ORIGIN + ". Choose a stockpile in the same ROM area. These are destination choices, not a build order; the allowance never advances to another choice.")
             for entry in row["sequence"]:
                 combo.addItem(instance_label(entry), entry["instance_id"])
             current = row["current"]
@@ -356,6 +373,8 @@ class DestinationProgressSetup(QWidget):
                 if estimate is not None:
                     field.setPlaceholderText(f"Estimated: {estimate:,.1f}")
                 field.setToolTip(f"{ESTIMATED_CAPACITY_BASIS}: {estimate:,.1f} ROM WMT. Used when blank; an entered value, including zero, overrides it. Shared across material types in this physical build. Intervals crossing scenario start are prorated by time." if estimate is not None else "No remaining 2WP delivery estimate is available. Enter remaining ROM WMT or refresh the 2WP inputs.")
+                if row.get("supplemental"):
+                    field.setToolTip("Enter an explicit ROM WMT allowance for this material type and destination. Blank remains unresolved; zero leaves no allowance. This does not change an existing 2WP build's capacity.")
                 field.setText(str(value) if value is not None else "")
                 field.textEdited.connect(lambda text, key=key, field=field: self.edit_capacity(key, field, text))
                 field.editingFinished.connect(lambda key=key, field=field: self.finish_capacity(key, field))
@@ -443,6 +462,10 @@ class DestinationProgressSetup(QWidget):
                      "  →  ".join(instance_label(r) for r in row["sequence"]),
                      f"Latest inbound: {row['latest_inbound'] or 'none'} AWST · Activity: {row['activity_wmt']:,.1f} ROM WMT · {row['selection_basis']}"]
             notes = row["warnings"] + notes
+            if row.get("supplemental"):
+                lines = [f"{row['rom_area']} / {row['material_type']} — {SUPPLEMENTAL_ORIGIN}",
+                         "24-hour plan sources: " + ", ".join(row["source_blocks"]),
+                         "Destination: " + (row["current"]["destination"] if row["current"] else "Not selected")]
             if row["current"]:
                 key = row["current"]["instance_id"]
                 value = self._settings["remaining_wmt"].get(key)

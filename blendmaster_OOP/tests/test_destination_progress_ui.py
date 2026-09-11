@@ -239,6 +239,58 @@ class DestinationProgressUITests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(model.records[-1], rows[-1])
 
+    def test_24hr_only_destination_allowance_save_load_and_stale_file(self):
+        from tests.test_destination_supplemental_lanes import schedule_row
+        from classes.DestinationSupplementalLanes import SUPPLEMENTAL_ORIGIN
+        import pandas as pd
+        supplemental = Path(self.directory.name) / "24hr.csv"
+        pd.DataFrame([schedule_row()]).to_csv(supplemental, index=False)
+        extra = dict(supplemental_path=str(supplemental), selected_agents=["EX1"])
+        self.context(**extra)
+        self.load()
+        index = next(i for i, r in enumerate(self.view.rows) if r["material_type"] == "SG")
+        self.view.table.selectRow(index)
+        self.assertEqual(self.view.table.item(index, 7).text(), SUPPLEMENTAL_ORIGIN)
+        combo = self.view.table.cellWidget(index, 3)
+        self.assertEqual(combo.currentText(), "Select destination")
+        self.assertFalse(self.view.table.cellWidget(index, 6).isEnabled())
+        self.assertEqual(combo.count(), 3)
+        combo.setCurrentIndex(1)
+        field = self.view.table.cellWidget(index, 6)
+        self.assertTrue(field.isEnabled())
+        self.assertEqual(field.placeholderText(), "Not set")
+        QTest.keyClicks(field, "250.5")
+        saved = pickle.loads(pickle.dumps(self.view.settings()))
+        self.view.reset_context()
+        self.context(state=saved, **extra)
+        self.load()
+        self.assertIn("SP1", self.view.table.cellWidget(index, 3).currentText())
+        self.assertEqual(self.view.table.cellWidget(index, 6).text(), "250.5")
+        self.assertEqual(self.view.settings(), saved)
+        inputs = dict(scenario_id="a", site="CC", scenario_start=START, path=str(self.path),
+                      inventories={k: {"nearest_crusher": v} for k, v in AREAS.items()}, **extra)
+        frozen = self.view.allocation_context(**inputs)
+        self.assertEqual(len(frozen["order"]["supplemental_lanes"]), 1)
+        self.assertEqual(len(frozen["order"]["orders"]), 4)
+        self.assertIsNone(self.view.allocation_context(**{**inputs, "selected_agents": ["EX2"]}))
+        with supplemental.open("a") as stream:
+            stream.write("\n")
+        self.assertIsNone(self.view.allocation_context(**inputs))
+
+    def test_24hr_destination_inputs_are_forwarded_from_active_application(self):
+        from types import SimpleNamespace
+        panel = Mock()
+        panel.allocation_context.return_value = None
+        owner = SimpleNamespace(destination_progress=panel, expit_mode_choice=2,
+                                file_path_24hr_choice="24hr.csv", selected_24hr_expit_agents=["EX1"])
+        UserInputs.sync_destination_progress_context(owner)
+        self.assertEqual(panel.set_context.call_args.kwargs["supplemental_path"], "24hr.csv")
+        UserInputs.destination_allocation_context(owner)
+        self.assertEqual(panel.allocation_context.call_args.kwargs["selected_agents"], ["EX1"])
+        owner.expit_mode_choice = 1
+        UserInputs.sync_destination_progress_context(owner)
+        self.assertEqual(panel.set_context.call_args.kwargs["supplemental_path"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
