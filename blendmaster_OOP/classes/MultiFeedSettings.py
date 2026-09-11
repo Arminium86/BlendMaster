@@ -46,6 +46,8 @@ def multi_feed_settings(value=None):
             raise ValueError(f"{name}: minimum stockpiles exceeds maximum.")
         for period, target in row["targets_by_period"].items():
             target["crusher_rate"] = number(target.get("crusher_rate"), f"{name} / {period} crusher rate")
+            if 'max_reclaim_rate' in target:
+                target['max_reclaim_rate'] = number(target['max_reclaim_rate'], f'{name} / {period} Max Reclaim Rate')
             lo, hi = (number(target.get(k, default), f"{name} {k}") for k, default in (("direct_feed_ratio_min", 0), ("direct_feed_ratio_max", 1)))
             if not 0 <= lo <= hi <= 1:
                 raise ValueError(f"{name}: direct-tip ratios must satisfy 0 ≤ min ≤ max ≤ 1.")

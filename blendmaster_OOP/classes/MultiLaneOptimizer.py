@@ -56,7 +56,7 @@ class MultiLaneOptimizer(Optimizer):
                     from classes.OPFSourceProfiles import apply_opf_profile
                     apply_opf_profile(event, point["opf"], config)
                 if event.is_stockpile:
-                    rate = self.settings["route_reclaim_rates"].get(source, {}).get(point["name"])
+                    rate = point['target'].get('max_reclaim_rate', self.settings["route_reclaim_rates"].get(source, {}).get(point["name"]))
                     if rate is not None:
                         event._rate = rate
                 events.append(event)
@@ -104,6 +104,9 @@ class MultiLaneOptimizer(Optimizer):
         for point, steps, packet in models:
             joint.extend(packet["problem"], use_objective=False)
             objective += packet["problem"].objective
+            if point['target'].get('max_reclaim_rate') is not None:
+                joint += lpSum(v * c for e, v, c in zip(packet['events'], packet['variables'], packet['reclaimer_coefficients'])
+                               if e.is_stockpile) <= point['target']['max_reclaim_rate'] * steady_state_duration
             for event, variable in zip(packet["events"], packet["variables"]):
                 joint += variable == aggregate_vars[event._multi_key]
 

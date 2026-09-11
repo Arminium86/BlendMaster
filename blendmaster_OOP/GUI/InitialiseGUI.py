@@ -56,6 +56,8 @@ from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
 from GUI.MultiFeedSetup import MultiFeedSetup
 from classes.MultiFeedSettings import multi_feed_settings
+from classes.MultiFeedCalendar import apply_calendar, calendar_rows as multi_calendar_rows, legacy_aggregate_calendar
+from GUI.SelectionComboBox import SelectionComboBox
 from GUI.MaterialDestinationPlanView import MaterialDestinationPlanView
 from classes.DestinationBuildOrder import write_order_audit, inventory_areas
 from classes.DestinationRules import VERSION as DESTINATION_RULE_VERSION
@@ -1078,6 +1080,10 @@ class UserInputs(QMainWindow):
         mine = str(state.get("mine_input_choice") or "").strip()
         opf = str(state.get("opf_input_choice") or "").strip()
         crusher = str(state.get("crusher_input_choice") or "").strip()
+        feed = state.get('multi_feed_configuration') or {}
+        if feed.get('mode', 'single') != 'single':
+            opf = ', '.join(dict.fromkeys(p['opf'] for p in feed.get('tipping_points', [])))
+            crusher = ', '.join(p['name'] for p in feed.get('tipping_points', []))
         parts = [value for value in (hub, mine, opf, crusher) if value]
         return " / ".join(parts) if parts else fallback
 
@@ -1720,7 +1726,7 @@ class UserInputs(QMainWindow):
             self.sync_destination_progress_context()
             QTimer.singleShot(0, self.destination_progress.request_refresh)
 
-        if tab_index == getattr(self, "decision_levers_tab_index", None) and hasattr(self, "multi_feed_setup"):
+        if tab_index == getattr(self, "multi_feed_tab_index", None) and hasattr(self, "multi_feed_setup"):
             self.sync_multi_feed_setup()
 
         if (
@@ -1928,6 +1934,7 @@ class UserInputs(QMainWindow):
             self.product_assay_report_settings = copy.deepcopy(state.get("product_assay_report_settings") or {})
             self.destination_progress_settings = progress_settings(state.get("destination_progress_settings"))
             self.multi_feed_configuration = multi_feed_settings(state.get("multi_feed_configuration"))
+            self.plan_mode_input.setCurrentIndex(self.plan_mode_input.findData(self.multi_feed_configuration['mode']))
             if hasattr(self, "multi_feed_setup"):
                 self.multi_feed_setup.set_settings(self.multi_feed_configuration, opf=getattr(self, "opf_input_choice", ""))
             self.auto_load_2wp_targets_choice = bool(
@@ -2923,7 +2930,15 @@ class UserInputs(QMainWindow):
 
         self.multi_feed_setup = MultiFeedSetup()
         self.multi_feed_setup.set_settings(getattr(self, "multi_feed_configuration", None), opf=getattr(self, "opf_input_choice", ""))
-        layout.addWidget(self.multi_feed_setup)
+        self.multi_feed_tab = QWidget()
+        self.multi_feed_tab_index = self.register_page('multi_feed_setup', self.setup_tabs,
+            self.multi_feed_tab, 'Multi-feed Setup')
+        feed_layout = QVBoxLayout(self.multi_feed_tab)
+        feed_layout.addWidget(self.multi_feed_setup)
+        feed_submit = QPushButton('Submit')
+        feed_submit.clicked.connect(self.submit_multi_feed_setup)
+        feed_layout.addWidget(feed_submit)
+        self.set_page_enabled(self.multi_feed_tab_index, False)
 
         blend_section = QLabel("Blend Composition")
         blend_section.setStyleSheet(
@@ -3137,22 +3152,36 @@ class UserInputs(QMainWindow):
                 value = multi_feed_settings(value)
         for name, row in (getattr(self, "stockpile_data", None) or {}).items():
             value["source_subsets"][name] = str(row.get("subset", value["source_subsets"].get(name, row.get("nearest_crusher", row.get("NEAREST_CRUSHER", "")))) or "")
+        if value['mode'] != 'single':
+            value = apply_calendar(value, getattr(self, 'calendar_inputs', {}) or {}, self.planning_period_labels())
         return value
 
     def sync_multi_feed_setup(self):
-        calendar = self.capture_calendar_table_inputs()
-        base = {}
-        for index, label in enumerate(self.planning_period_labels()):
-            period = "preplan" if index == 0 else f"period_{index}"
-            target = dict(crusher_rate=0, brand=(calendar.get("crusher_brand", {}) or {}).get(label, ""), direct_feed_ratio_min=0, direct_feed_ratio_max=1)
-            for analyte in ("fe", "si", "al", "p", "mn"):
-                for bound in ("min", "max"):
-                    key = f"target_{analyte}_{bound}"
-                    target[key] = (calendar.get("crusher_" + key, {}) or {}).get(label, 0 if bound == "min" else 100)
-            base[period] = target
-        self.multi_feed_setup.set_settings(self.current_multi_feed_configuration(), base_targets=base, opf=getattr(self, "opf_input_choice", ""))
+        config = self.current_multi_feed_configuration()
+        rows = (getattr(self, 'stockpile_data', {}) or {}).values()
+        areas = {str(r.get('nearest_crusher', r.get('NEAREST_CRUSHER', '')) or '') for r in rows}
+        areas.update(p['rom_area'] for p in config['tipping_points'])
+        self.multi_feed_setup.set_settings(config, context=dict(
+            crushers=[p['name'] for p in config['tipping_points']],
+            point_opfs={p['name']: p['opf'] for p in config['tipping_points']},
+            areas=sorted(areas - {''}), subsets=sorted(set(config['source_subsets'].values()) - {''})))
         states = {**(getattr(self, 'site_scenarios', {}) or {}), getattr(self, 'active_scenario_id', ''): vars(self)}
-        self.multi_feed_setup.set_scenarios({identity: (f"{s.get('opf_input_choice', '')} / {s.get('crusher_input_choice', '')} / {s.get('start_time_choice', '')}", s.get('opf_input_choice')) for identity, s in states.items()})
+        self.multi_feed_setup.set_scenarios({identity: (f"{s.get('opf_input_choice', '')} / {s.get('crusher_input_choice', '')} / {s.get('start_time_choice', '')}", s.get('opf_input_choice')) for identity, s in states.items()
+            if s.get('mine_input_choice') == getattr(self, 'mine_input_choice', None)
+            and s.get('start_time_choice') == getattr(self, 'start_time_choice', None)
+            and (s.get('multi_feed_configuration') or {}).get('mode', 'single') != 'combined_opf'})
+
+    def submit_multi_feed_setup(self):
+        try:
+            self.multi_feed_configuration = self.multi_feed_setup.settings()
+            self.multi_feed_setup.validation.clear()
+        except (ValueError, TypeError) as exc:
+            self.multi_feed_setup.validation.setText(str(exc))
+            return
+        self.calendar_table_refresh_pending = True
+        self.save_active_scenario_state()
+        if hasattr(self, 'calendar_headers'):
+            self.setup_calendar()
 
     def current_opf_profiles(self):
         from classes.OPFSourceProfiles import profile_from_state
@@ -3590,9 +3619,23 @@ class UserInputs(QMainWindow):
         build_item.setTextAlignment(Qt.AlignCenter)
         self.product_build_table.setItem(row_idx, 0, build_item)
         opf_item = QTableWidgetItem(str(setting.get("opf") or getattr(self, "opf_input_choice", "") or ""))
-        opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
-        opf_item.setToolTip("Combined OPF: enter one configured OPF for a separate build, or comma-separated OPFs for a shared build. Shared builds require Allow OPFs to compensate in Decision Levers.")
+        opf_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        opf_item.setToolTip('Choose OPFs selected in Site Configuration. Shared builds require Allow OPFs to compensate in Multi-feed Setup.')
         self.product_build_table.setItem(row_idx, self.product_build_headers.index("OPF"), opf_item)
+        feed = getattr(self, 'multi_feed_configuration', None) or {}
+        opfs = list(dict.fromkeys(p['opf'] for p in feed.get('tipping_points', []))) or [getattr(self, 'opf_input_choice', '') or '']
+        opf_combo = SelectionComboBox()
+        opf_combo.addItems(opfs)
+        opf_combo.setMultiple(feed.get('mode') == 'combined_opf')
+        saved_opfs = [v.strip() for v in opf_item.text().split(',') if v.strip()]
+        for opf in saved_opfs:
+            if opf not in opfs:
+                opf_combo.addItem(opf)
+                opf_combo.setItemData(opf_combo.count() - 1, 'No longer selected in Site Configuration', Qt.ToolTipRole)
+        opf_combo.setSelectedTexts(saved_opfs or opfs[:1])
+        opf_combo.selectionChanged.connect(lambda: opf_item.setText(', '.join(opf_combo.selectedTexts())))
+        opf_item.setText(', '.join(opf_combo.selectedTexts()))
+        self.product_build_table.setCellWidget(row_idx, self.product_build_headers.index('OPF'), opf_combo)
         mode_combo = QComboBox()
         for value, label in TARGET_MODE_LABELS.items():
             mode_combo.addItem(value.title(), value)
@@ -3931,12 +3974,6 @@ class UserInputs(QMainWindow):
         self.show_page(self.decision_levers_tab_index)
 
     def handle_decision_levers_submit(self):
-        try:
-            self.multi_feed_configuration = self.multi_feed_setup.settings()
-            self.multi_feed_setup.validation.clear()
-        except (ValueError, TypeError) as exc:
-            self.multi_feed_setup.validation.setText(str(exc))
-            return
         if not self.store_solver_config_inputs():
             return
         self.save_active_scenario_state()
@@ -10163,6 +10200,9 @@ class UserInputs(QMainWindow):
         warnings.extend(reconciliation_inputs.get("warnings", []))
         build_targets = {crusher: [] for crusher in self.selected_site_crushers}
         target_errors = {}
+        feed = getattr(self, 'multi_feed_configuration', None) or {}
+        point_opfs = {p['name']: p['opf'] for p in feed.get('tipping_points', [])}
+        fetched_opfs = set()
         if self.auto_load_2wp_targets_choice:
             planning_category = self.selected_planning_category()
             if not planning_category:
@@ -10173,13 +10213,16 @@ class UserInputs(QMainWindow):
             for crusher in self.selected_site_crushers:
                 if not planning_category:
                     continue
+                owning_opf = point_opfs.get(crusher, self.opf_input_choice)
+                if feed.get('mode', 'single') != 'single' and owning_opf in fetched_opfs:
+                    continue
                 try:
                     targets = self.planning_plan_targets.fetch(
                         self.mine_input_choice,
                         crusher,
                         self.start_time_choice,
                         self.product_brand_labels_choice,
-                        opf=self.opf_input_choice,
+                        opf=owning_opf,
                         crusher_contribution_ratio=self.crusher_contribution_ratio_choice,
                         planning_period_count=self.planning_period_count(),
                         planning_category=planning_category,
@@ -10187,7 +10230,10 @@ class UserInputs(QMainWindow):
                     )
                     if self.group_2wp_build_targets_by_brand_choice:
                         targets = self.planning_plan_targets.group_builds_by_brand(targets)
+                    for target in targets:
+                        target['opf'] = owning_opf
                     build_targets[crusher] = targets
+                    fetched_opfs.add(owning_opf)
                 except Exception as exc:
                     target_errors[crusher] = str(exc)
         return {
@@ -11193,14 +11239,17 @@ class UserInputs(QMainWindow):
         self.hub_input = QComboBox()
         self.hub_input.addItems(["Chichester Hub", "Western Hub", "Solomon Hub", "Iron Bridge Hub"])
         self.mine_input = QComboBox()
-        self.opf_input = QComboBox()
-        self.site_crusher_input = QComboBox()
+        self.plan_mode_input = QComboBox()
+        for label, mode in [('Single tipping point', 'single'), ('Multiple tipping points → one OPF', 'multi_tipping_point'), ('Combined OPF', 'combined_opf')]:
+            self.plan_mode_input.addItem(label, mode)
+        self.opf_input = SelectionComboBox()
+        self.site_crusher_input = SelectionComboBox()
 
         # Adjust size of dropdowns
         self.hub_input.setFixedWidth(180)
         self.mine_input.setFixedWidth(180)
-        self.opf_input.setFixedWidth(240)
-        self.site_crusher_input.setFixedWidth(240)
+        self.opf_input.setFixedWidth(420)
+        self.site_crusher_input.setFixedWidth(420)
 
         # Create bold labels for Hub and Mine
         hub_label = QLabel("Hub:")
@@ -11214,13 +11263,15 @@ class UserInputs(QMainWindow):
 
         layout.addRow(hub_label, self.hub_input)
         layout.addRow(mine_label, self.mine_input)
+        layout.addRow('Plan Mode:', self.plan_mode_input)
         layout.addRow(opf_label, self.opf_input)
         layout.addRow(crusher_label, self.site_crusher_input)
 
         # Connect hub dropdown change to update mine dropdown
         self.hub_input.currentIndexChanged.connect(self.update_mine_dropdown)
         self.mine_input.currentIndexChanged.connect(self.update_opf_dropdown)
-        self.opf_input.currentIndexChanged.connect(self.update_site_crusher_options)
+        self.opf_input.selectionChanged.connect(self.update_site_crusher_options)
+        self.plan_mode_input.currentIndexChanged.connect(self.handle_plan_mode_changed)
 
         self.crusher_ratio_mode_input = QComboBox()
         self.crusher_ratio_mode_input.addItem("Enter manually", "manual")
@@ -11675,7 +11726,7 @@ class UserInputs(QMainWindow):
         self.hub_input.currentIndexChanged.connect(self.validate_form)
         self.mine_input.currentIndexChanged.connect(self.validate_form)
         self.opf_input.currentIndexChanged.connect(self.validate_form)
-        self.site_crusher_input.currentIndexChanged.connect(self.handle_operating_crusher_changed)
+        self.site_crusher_input.selectionChanged.connect(self.handle_operating_crusher_changed)
         self.crusher_ratio_mode_input.currentIndexChanged.connect(self.toggle_crusher_ratio_controls)
         self.crusher_ratio_mode_input.currentIndexChanged.connect(self.validate_form)
         self.crusher_ratio_input.textChanged.connect(self.validate_form)
@@ -11757,7 +11808,7 @@ class UserInputs(QMainWindow):
             self.hub_input.currentIndex() != -1
             and self.mine_input.currentIndex() != -1
             and self.opf_input.currentIndex() != -1
-            and len(self.selected_site_crusher_names()) == 1
+            and self.site_plan_selection_valid()
             and (self.time_mode.currentIndex() == 0 or self.start_time.dateTime().isValid())
             and self.blend_mode.currentIndex() != -1
         )
@@ -12334,15 +12385,16 @@ class UserInputs(QMainWindow):
     def selected_aps_crusher_matches_operating_crusher(self):
         selected = self.selected_aps_crusher_names()
         operating = self.selected_site_crusher_names()
-        if not selected or len(operating) != 1:
+        if not selected or not operating:
             return False
+        point_opfs = {p['name']: p['opf'] for p in (getattr(self, 'multi_feed_configuration', None) or {}).get('tipping_points', [])}
         return all(
-            ExpitDataHandler.crusher_destination_matches(
+            any(ExpitDataHandler.crusher_destination_matches(
                 destination,
                 self.mine_input.currentText(),
-                operating[0],
-                self.opf_input.currentText() if hasattr(self, "opf_input") else None,
-            )
+                point,
+                point_opfs.get(point, self.opf_input.currentText() if hasattr(self, "opf_input") else None),
+            ) for point in operating)
             for destination in selected
         )
 
@@ -12448,21 +12500,21 @@ class UserInputs(QMainWindow):
             return
 
         previous_selection = self.selected_aps_crusher_names()
-        operating_crusher = self.site_crusher_input.currentText().strip()
+        operating_crushers = self.selected_site_crusher_names()
         mine = self.mine_input.currentText().strip()
         matching_names = [
             name for name in crusher_names
-            if ExpitDataHandler.crusher_destination_matches(
-                name, mine, operating_crusher,
+            if any(ExpitDataHandler.crusher_destination_matches(
+                name, mine, point,
                 self.opf_input.currentText() if hasattr(self, "opf_input") else None,
-            )
+            ) for point in operating_crushers)
         ]
         retained_selection = [
             name for name in previous_selection if name in crusher_names
         ]
         if retained_selection:
             selected_names = retained_selection
-        elif self.is_total_feed_operating_crusher():
+        elif self.is_total_feed_operating_crusher() or self.site_plan_mode() != 'single':
             selected_names = matching_names
         else:
             selected_names = matching_names[:1]
@@ -12470,7 +12522,7 @@ class UserInputs(QMainWindow):
         if crusher_names:
             selection_guidance = (
                 "All matching child crusher destinations were selected for this Total Feed scenario."
-                if self.is_total_feed_operating_crusher() and selected_names
+                if (self.is_total_feed_operating_crusher() or self.site_plan_mode() != 'single') and selected_names
                 else "Select the corresponding 2WP crusher."
             )
             QMessageBox.information(
@@ -12522,10 +12574,60 @@ class UserInputs(QMainWindow):
         )
 
     def current_site_crusher_options(self):
-        return crusher_options_for_site(
-            self.mine_input.currentText() if hasattr(self, "mine_input") else "",
-            self.opf_input.currentText() if hasattr(self, "opf_input") else "",
-        )
+        mine = self.mine_input.currentText() if hasattr(self, 'mine_input') else ''
+        opfs = self.opf_input.selectedTexts() if hasattr(self.opf_input, 'selectedTexts') else [self.opf_input.currentText()]
+        return list(dict.fromkeys(name for opf in opfs for name in crusher_options_for_site(mine, opf) if 'TOTAL_FEED' not in name.upper()))
+
+    def site_plan_mode(self):
+        return self.plan_mode_input.currentData() if hasattr(self, 'plan_mode_input') else (getattr(self, 'multi_feed_configuration', None) or {}).get('mode', 'single')
+
+    def site_plan_selection_valid(self):
+        points = self.selected_site_crusher_names()
+        mode = self.site_plan_mode()
+        opfs = self.opf_input.selectedTexts() if hasattr(self.opf_input, 'selectedTexts') else [self.opf_input.currentText()]
+        if mode == 'single':
+            return len(points) == 1 and len(opfs) == 1
+        if len(points) < 2 or (mode == 'multi_tipping_point' and len(opfs) != 1) or (mode == 'combined_opf' and len(opfs) < 2):
+            return False
+        mine = self.mine_input.currentText()
+        return all(any(p in crusher_options_for_site(mine, opf) for p in points) for opf in opfs)
+
+    def handle_plan_mode_changed(self, *_):
+        mode = self.site_plan_mode()
+        self.opf_input.blockSignals(True)
+        self.opf_input.setMultiple(mode == 'combined_opf')
+        self.opf_input.blockSignals(False)
+        self.site_crusher_input.blockSignals(True)
+        self.site_crusher_input.setMultiple(mode != 'single')
+        self.site_crusher_input.blockSignals(False)
+        if hasattr(self, 'crusher_ratio_mode_input'):
+            self.update_site_crusher_options()
+        if hasattr(self, 'multi_feed_tab_index'):
+            self.set_page_enabled(self.multi_feed_tab_index, mode != 'single')
+
+    def capture_plan_mode_configuration(self):
+        if not self.site_plan_selection_valid():
+            return
+        old = copy.deepcopy(getattr(self, 'multi_feed_configuration', None) or {})
+        prior = {p['name']: p for p in old.get('tipping_points', [])}
+        mode = self.site_plan_mode()
+        aliases = {'OPF01_PC': 'OPF1 CRUSHER', 'HAL_PC': 'HAL CRUSHER', 'OPF02_PC': 'RCH'} if self.mine_input_choice == 'CC' else {}
+        opfs = self.opf_input.selectedTexts()
+        points = []
+        if mode != 'single':
+            for name in self.selected_site_crushers:
+                point = prior.get(name, dict(name=name, rom_area=aliases.get(name, name), targets_by_period={}))
+                point['opf'] = next(opf for opf in opfs if name in crusher_options_for_site(self.mine_input_choice, opf))
+                points.append(point)
+        selected = set(self.selected_site_crushers)
+        old.update(mode=mode, tipping_points=points,
+            rehandle_rules=[r for r in old.get('rehandle_rules', []) if r['tipping_point'] in selected] if points else [],
+            route_reclaim_rates={})
+        self.multi_feed_configuration = multi_feed_settings(old)
+        self.calendar_table_refresh_pending = True
+        if hasattr(self, 'multi_feed_setup'):
+            self.sync_multi_feed_setup()
+            self.set_page_enabled(self.multi_feed_tab_index, mode != 'single')
 
     def selected_aps_ratio_crusher_names(self):
         if not hasattr(self, "aps_ratio_crusher_input"):
@@ -12551,7 +12653,7 @@ class UserInputs(QMainWindow):
     def toggle_crusher_ratio_controls(self, *_args):
         if not hasattr(self, "crusher_ratio_mode_input"):
             return
-        multiple_crushers = len(self.current_site_crusher_options()) > 1
+        multiple_crushers = len(self.current_site_crusher_options()) > 1 and self.site_plan_mode() == 'single'
         derive_from_aps = self.crusher_ratio_mode() == "aps"
         self.crusher_ratio_mode_input.setEnabled(multiple_crushers)
         self.crusher_ratio_input.setEnabled(multiple_crushers and not derive_from_aps)
@@ -12925,7 +13027,12 @@ class UserInputs(QMainWindow):
         self.opf_input.blockSignals(True)
         self.opf_input.clear()
         self.opf_input.addItems(options)
-        if previous and self.opf_input.findText(previous) >= 0:
+        selected = [previous] if previous else options[:1]
+        if hasattr(self.opf_input, 'setSelectedTexts'):
+            if self.site_plan_mode() == 'combined_opf':
+                selected = list(dict.fromkeys(p['opf'] for p in (getattr(self, 'multi_feed_configuration', None) or {}).get('tipping_points', []))) or selected
+            self.opf_input.setSelectedTexts(selected)
+        elif previous and self.opf_input.findText(previous) >= 0:
             self.opf_input.setCurrentText(previous)
         self.opf_input.blockSignals(False)
         self.update_site_crusher_options()
@@ -12933,6 +13040,8 @@ class UserInputs(QMainWindow):
     def selected_site_crusher_names(self):
         if not hasattr(self, "site_crusher_input"):
             return []
+        if hasattr(self.site_crusher_input, 'selectedTexts'):
+            return self.site_crusher_input.selectedTexts()
         if isinstance(self.site_crusher_input, QComboBox):
             value = self.site_crusher_input.currentText().strip()
             return [value] if value else []
@@ -12952,11 +13061,14 @@ class UserInputs(QMainWindow):
         selected = [str(value).strip() for value in selected_crushers or [] if str(value).strip()]
         mine = self.mine_input.currentText().strip().upper() if hasattr(self, "mine_input") else ""
         opf = self.opf_input.currentText().strip() if hasattr(self, "opf_input") else ""
-        crushers = crusher_options_for_site(mine, opf)
+        crushers = self.current_site_crusher_options()
         self.site_crusher_input.blockSignals(True)
         self.site_crusher_input.clear()
         self.site_crusher_input.addItems(crushers)
-        if selected:
+        if hasattr(self.site_crusher_input, 'setSelectedTexts'):
+            retained = [name for name in selected if name in crushers]
+            self.site_crusher_input.setSelectedTexts(retained or crushers[:1])
+        elif selected:
             index = self.site_crusher_input.findText(selected[0])
             self.site_crusher_input.setCurrentIndex(index if index >= 0 else 0)
         elif crushers:
@@ -12977,6 +13089,7 @@ class UserInputs(QMainWindow):
         self.crusher_input_choice = (
             self.selected_site_crushers[0] if self.selected_site_crushers else None
         )
+        self.capture_plan_mode_configuration()
         self.crusher_ratio_mode_choice = self.crusher_ratio_mode()
         self.crusher_contribution_ratio_choice = self.current_crusher_ratio()
         self.crusher_ratio_configured = True
@@ -13019,6 +13132,11 @@ class UserInputs(QMainWindow):
         return states
 
     def validate_site_configuration_constraints(self):
+        if self.site_plan_mode() != 'single':
+            if not self.site_plan_selection_valid():
+                return False, 'Select at least two operating crushers. Combined OPF needs at least two OPFs and a selected crusher for every OPF; multiple tipping points → one OPF needs exactly one OPF.'
+            self.crusher_contribution_ratio_choice = 1.0
+            return True, ''
         if len(self.selected_site_crushers) != 1:
             return False, "Select exactly one operating crusher for this site scenario."
         ratio = self.crusher_contribution_ratio_choice
@@ -13111,6 +13229,7 @@ class UserInputs(QMainWindow):
                 )
             if (
                 not self.is_total_feed_operating_crusher()
+                and self.site_plan_mode() == 'single'
                 and len(selected_destinations) != 1
             ):
                 return False, (
@@ -13120,6 +13239,8 @@ class UserInputs(QMainWindow):
         return True, ""
 
     def validate_active_ratio_group_for_run(self):
+        if (getattr(self, 'multi_feed_configuration', None) or {}).get('mode', 'single') != 'single':
+            return True, ''
         # Each operating-crusher scenario is independently optimisable.  The
         # contribution ratio scales this scenario's product-build target; it is
         # not a prerequisite that sibling crusher scenarios have been created.
@@ -13267,6 +13388,12 @@ class UserInputs(QMainWindow):
 
     def restore_site_configuration_controls(self):
         """Restore Site Configuration widgets without discarding legacy project defaults."""
+        if hasattr(self, 'plan_mode_input'):
+            config = self.current_multi_feed_configuration()
+            if config['mode'] != 'single':
+                self.selected_site_crushers = [p['name'] for p in config['tipping_points']]
+            self.plan_mode_input.setCurrentIndex(self.plan_mode_input.findData(config['mode']))
+            self.handle_plan_mode_changed()
         self.hub_input.setCurrentText(str(self.hub_input_choice or ""))
         self.update_mine_dropdown()
         self.mine_input.setCurrentText(str(self.mine_input_choice or ""))
@@ -13568,7 +13695,9 @@ class UserInputs(QMainWindow):
 
         current_crusher = selected_crushers[0]
         self.crusher_input_choice = current_crusher
-        self.product_targets = copy.deepcopy(build_targets.get(current_crusher) or [])
+        multiple = (getattr(self, 'multi_feed_configuration', None) or {}).get('mode', 'single') != 'single'
+        self.product_targets = copy.deepcopy([b for point in selected_crushers for b in (build_targets.get(point) or [])]
+                                            if multiple else build_targets.get(current_crusher) or [])
         self.populate_product_build_table()
         self.saved_blends_for_schedule = []
         self.stored_blend_sequence_table_for_gantt = []
@@ -13579,7 +13708,7 @@ class UserInputs(QMainWindow):
             self.seed_active_scenario_database(force=True)
         current_state = self.capture_scenario_state()
         current_state["crusher_input_choice"] = current_crusher
-        current_state["selected_site_crushers"] = [current_crusher]
+        current_state["selected_site_crushers"] = selected_crushers if multiple else [current_crusher]
         current_state["opf_input_choice"] = self.opf_input_choice
         current_state["crusher_contribution_ratio_choice"] = (
             self.crusher_contribution_ratio_choice
@@ -13588,8 +13717,10 @@ class UserInputs(QMainWindow):
             self.direct_tip_movement_rules
         )
         self.site_scenarios[self.active_scenario_id] = current_state
-        self.selected_site_crushers = [current_crusher]
+        self.selected_site_crushers = selected_crushers if multiple else [current_crusher]
         self.update_site_crusher_options(self.selected_site_crushers)
+        if hasattr(self, 'multi_feed_tab_index'):
+            self.set_page_enabled(self.multi_feed_tab_index, multiple)
         self.refresh_scenario_selector()
 
     def finish_site_config_submit(self, stockpile_data):
@@ -19973,6 +20104,10 @@ class UserInputs(QMainWindow):
                     })
 
         # Dynamically Add Stockpile Rows with default values
+        feed = self.current_multi_feed_configuration()
+        if feed['mode'] != 'single':
+            # Replace the single-crusher block, preserving shared custom constraints.
+            self.calendar_rows = multi_calendar_rows(feed, period_labels, getattr(self, 'product_targets', []) or []) + self.calendar_rows[24:]
         self.calendar_rows.append(("Stockpiles", [False] * period_count, "red", [""] * period_count))
         self.calendar_stockpile_start_index = len(self.calendar_rows)
 
@@ -20199,6 +20334,17 @@ class UserInputs(QMainWindow):
         return key.startswith("stockpiles_") and key.endswith("_state")
 
     def load_calendar_inputs(self):
+        if self.current_multi_feed_configuration()['mode'] != 'single':
+            for row in self.calendar_rows:
+                if not isinstance(row, dict):
+                    continue
+                for key, (caption, editables, color, defaults) in list(row.items()):
+                    saved = (self.calendar_inputs or {}).get(key) or {}
+                    if not any(editables):
+                        continue
+                    row[key] = (caption, editables, color, [saved.get(label, defaults[i]) for i, label in enumerate(self.calendar_headers[1:])])
+            self.populate_calendar()
+            return
         if self.calendar_inputs:
             if self.calendar_inputs.get("min_stockpiles") is not None:
                 self.min_stockpiles = self.calendar_inputs["min_stockpiles"]
@@ -20390,6 +20536,12 @@ class UserInputs(QMainWindow):
             for outer_key, outer_value in self.calendar_inputs.items()
         }
 
+        feed = self.current_multi_feed_configuration()
+        if feed['mode'] != 'single':
+            feed = multi_feed_settings(apply_calendar(feed, self.calendar_inputs, headers))
+            self.multi_feed_configuration = feed
+            self.calendar_inputs = legacy_aggregate_calendar(feed, self.calendar_inputs, headers)
+
         # Calendar Cash is retained in the project schema for compatibility,
         # but it is no longer a user input or an optimisation objective term.
         zero_cash = {header: 0.0 for header in headers}
@@ -20406,6 +20558,8 @@ class UserInputs(QMainWindow):
         self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
             getattr(self, "calendar_expit_material_brand_rows", {})
         )
+        if feed['mode'] != 'single':
+            self.calendar_inputs.setdefault('solver_config', {})['multi_feed_settings'] = copy.deepcopy(feed)
 
     def load_solver_config_inputs(self):
         if not hasattr(self, "min_stockpiles_input"):
@@ -20982,6 +21136,7 @@ class UserInputs(QMainWindow):
             )
             return
 
+        previous_calendar = copy.deepcopy(self.calendar_inputs or {})
         self.submit_calendar_first_call = False
         self.clear_decision_point_output()
         
@@ -21038,6 +21193,16 @@ class UserInputs(QMainWindow):
     for outer_key, outer_value in self.calendar_inputs.items()
 }
 
+        try:
+            feed = self.current_multi_feed_configuration()
+            if feed['mode'] != 'single':
+                feed = multi_feed_settings(apply_calendar(feed, self.calendar_inputs, headers))
+                self.multi_feed_configuration = feed
+                self.calendar_inputs = legacy_aggregate_calendar(feed, self.calendar_inputs, headers)
+        except (ValueError, TypeError) as exc:
+            self.calendar_inputs = previous_calendar
+            QMessageBox.warning(self, 'Calendar', str(exc))
+            return
         if not self.store_stockpile_constraint_inputs():
             return
         self.solver_config = self.normalized_solver_config(
@@ -26705,6 +26870,7 @@ class UserInputs(QMainWindow):
         self.product_assay_report_settings = copy.deepcopy(loaded_state.get("product_assay_report_settings") or {})
         self.destination_progress_settings = progress_settings(loaded_state.get("destination_progress_settings"))
         self.multi_feed_configuration = multi_feed_settings(loaded_state.get("multi_feed_configuration"))
+        self.plan_mode_input.setCurrentIndex(self.plan_mode_input.findData(self.multi_feed_configuration['mode']))
         if hasattr(self, "multi_feed_setup"):
             self.multi_feed_setup.set_settings(self.multi_feed_configuration, opf=getattr(self, "opf_input_choice", ""))
         if hasattr(self, "destination_progress"):
@@ -26751,7 +26917,10 @@ class UserInputs(QMainWindow):
         self.selected_site_crushers = loaded_state.get("selected_site_crushers") or (
             [self.crusher_input_choice] if self.crusher_input_choice else []
         )
-        self.selected_site_crushers = self.selected_site_crushers[:1]
+        if self.multi_feed_configuration['mode'] == 'single':
+            self.selected_site_crushers = self.selected_site_crushers[:1]
+        else:
+            self.selected_site_crushers = [p['name'] for p in self.multi_feed_configuration['tipping_points']]
         self.crusher_ratio_mode_choice = self.normalized_crusher_ratio_mode(
             loaded_state.get("crusher_ratio_mode_choice")
         )
@@ -27102,6 +27271,8 @@ class UserInputs(QMainWindow):
         self.product_assay_report_settings = {}
         self.destination_progress_settings = progress_settings()
         self.multi_feed_configuration = multi_feed_settings()
+        if hasattr(self, 'plan_mode_input'):
+            self.plan_mode_input.setCurrentIndex(0)
         self.auto_load_2wp_targets_choice = True
         self.group_2wp_build_targets_by_brand_choice = False
         self.aps_stockpile_brand_map = {}

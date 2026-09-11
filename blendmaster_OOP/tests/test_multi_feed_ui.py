@@ -27,15 +27,17 @@ class MultiFeedUITests(unittest.TestCase):
         self.view = MultiFeedSetup()
         self.addCleanup(self.view.deleteLater)
 
-    def test_rename_updates_targets_routes_and_capacities(self):
+    def test_site_owned_dropdowns_and_stockpile_subset_rules(self):
         cfg = settings(rehandle_rules=[dict(subset='A', tipping_point='B', allowed=True)], route_reclaim_rates={'SP1': {'B': 40}})
-        self.view.set_settings(cfg)
-        self.view.points.item(1, 0).setText('HAL_PC')
+        self.view.set_settings(cfg, context={'crushers': ['A', 'B'], 'subsets': ['A', 'B'], 'areas': ['A', 'B']})
         restored = self.view.settings()
-        self.assertEqual(restored['tipping_points'][1]['name'], 'HAL_PC')
-        self.assertEqual(restored['route_reclaim_rates']['SP1'], {'HAL_PC': 40})
-        self.assertEqual(restored['rehandle_rules'][0]['tipping_point'], 'HAL_PC')
-        self.assertTrue(route_allowed(restored, 'SP1', 'HAL_PC'))
+        self.assertEqual(restored['tipping_points'][1]['name'], 'B')
+        self.assertEqual(restored['route_reclaim_rates'], {})
+        self.assertEqual(self.view.rules.horizontalHeaderItem(0).text(), 'Stockpile subset')
+        self.assertEqual(self.view.rules.cellWidget(0, 0).count(), 2)
+        self.assertTrue(route_allowed(restored, 'SP1', 'B'))
+        self.assertFalse(hasattr(self.view, 'targets'))
+        self.assertFalse(hasattr(self.view, 'rates'))
 
     def test_combined_settings_and_profile_selections_round_trip(self):
         cfg = settings(allow_opf_compensation=True, opf_scenarios={'OPF1': 'one', 'OPF2': 'two'})
@@ -49,11 +51,14 @@ class MultiFeedUITests(unittest.TestCase):
         self.assertEqual(self.view.profiles.cellWidget(1, 1).currentData(), 'two')
         self.assertTrue(self.view.compensation.isChecked())
 
-    def test_missing_target_values_receive_editable_defaults(self):
+    def test_calendar_owns_defaults_and_existing_target_values(self):
+        from classes.MultiFeedCalendar import apply_calendar, calendar_key
         cfg = settings()
         cfg['tipping_points'][0]['targets_by_period']['preplan'] = {'crusher_rate': 10}
         self.view.set_settings(cfg)
-        self.assertEqual(self.view.settings()['tipping_points'][0]['targets_by_period']['preplan']['target_fe_max'], 100)
+        config = apply_calendar(self.view.settings(), {calendar_key('A', 'crusher_rate'): {'Preplan': 20}}, ['Preplan'])
+        self.assertEqual(config['tipping_points'][0]['targets_by_period']['preplan']['target_fe_max'], 100)
+        self.assertEqual(config['tipping_points'][0]['targets_by_period']['preplan']['crusher_rate'], 20)
 
     def test_unknown_route_and_bad_ratios_rejected(self):
         with self.assertRaisesRegex(ValueError, 'configured tipping point'):
