@@ -510,7 +510,7 @@ class Run:
             profiles = (site_context or {}).get('opf_profiles') or {}
             for opf, profile in profiles.items():
                 if profile.get('mine') != (site_context or {}).get('mine') or pd.Timestamp(profile.get('start')) != pd.Timestamp(start_time):
-                    raise ValueError(f'{opf}: reconciliation scenario must use the same mine and scenario start as the combined run.')
+                    raise ValueError(f'{opf}: reconciliation inputs are stale for this mine or scenario start. Refresh Data Streams in this scenario.')
             stockpile_data, hex_sequence_table = copy.deepcopy(stockpile_data), copy.deepcopy(hex_sequence_table)
             register_profiles(solver_config, profiles)
             prepare_inventory_profiles(stockpile_data, hex_sequence_table, solver_config)

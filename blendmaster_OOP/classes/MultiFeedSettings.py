@@ -78,7 +78,7 @@ def multi_feed_settings(value=None):
     return dict(schema_version=1, mode=mode, tipping_points=lanes, rehandle_rules=rules,
                 route_reclaim_rates=rates,
                 source_subsets={str(k): str(v).strip() for k, v in (value.get("source_subsets") or {}).items()},
-                opf_scenarios=deepcopy(value.get("opf_scenarios") or {}),
+                opf_scenarios={},  # Legacy scenario selectors are obsolete; Data Streams owns every selected OPF.
                 allow_opf_compensation=bool(value.get("allow_opf_compensation", False)))
 
 

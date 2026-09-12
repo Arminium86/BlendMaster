@@ -39,16 +39,17 @@ class MultiFeedUITests(unittest.TestCase):
         self.assertFalse(hasattr(self.view, 'targets'))
         self.assertFalse(hasattr(self.view, 'rates'))
 
-    def test_combined_settings_and_profile_selections_round_trip(self):
+    def test_combined_settings_clear_legacy_scenario_selections(self):
         cfg = settings(allow_opf_compensation=True, opf_scenarios={'OPF1': 'one', 'OPF2': 'two'})
         cfg['mode'] = 'combined_opf'
         cfg['tipping_points'][1]['opf'] = 'OPF2'
-        self.view.set_scenarios({'one': ('OPF1 primary', 'OPF1'), 'two': ('OPF2 primary', 'OPF2')})
         self.view.set_settings(cfg)
         saved = self.view.settings()
         self.view.set_settings(json.loads(json.dumps(saved)))
         self.assertEqual(saved, self.view.settings())
-        self.assertEqual(self.view.profiles.cellWidget(1, 1).currentData(), 'two')
+        self.assertEqual(saved['opf_scenarios'], {})
+        self.assertFalse(hasattr(self.view, 'profiles'))
+        self.assertNotIn('OPF reconciliation', [self.view.tabs.tabText(i) for i in range(self.view.tabs.count())])
         self.assertTrue(self.view.compensation.isChecked())
 
     def test_calendar_owns_defaults_and_existing_target_values(self):

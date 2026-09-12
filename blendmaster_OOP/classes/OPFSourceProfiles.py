@@ -76,7 +76,7 @@ def prepare_inventory_profiles(stockpiles, chunks, config):
     profiles = config.get('opf_profiles') or {}
     required = {p['opf'] for p in settings['tipping_points']}
     if required - profiles.keys():
-        raise ValueError('Choose a prepared reconciliation scenario for each OPF in Decision Levers: ' + ', '.join(sorted(required - profiles.keys())))
+        raise ValueError('Prepare Data Streams for all selected OPFs in this scenario: ' + ', '.join(sorted(required - profiles.keys())))
     for row, identity, footprint, amt in [*( (r, n, n, False) for n, r in stockpiles.items() if not r.get('amt')),
                                        *((r, str(r.get('hex') or r.get('chunk_id')), r.get('footprint'), True) for r in chunks)]:
         for opf, profile in profiles.items():
@@ -84,11 +84,11 @@ def prepare_inventory_profiles(stockpiles, chunks, config):
                 continue
             source = profile['chunks' if amt else 'inventory'].get(identity)
             if not source or not (source.get('grade_streams') or source.get('GRADE_STREAMS')):
-                raise ValueError(f'{opf}: {identity} has no prepared grade streams. Submit Data Streams and AMT chunks in its reconciliation scenario.')
+                raise ValueError(f'{opf}: {identity} has no prepared grade streams. Submit Data Streams and AMT chunks in this scenario.')
             if str(source.get('build') or source.get('BUILD') or '') != str(row.get('build') or row.get('BUILD') or ''):
-                raise ValueError(f'{opf}: {identity} reconciliation refers to a different inventory build. Refresh its scenario.')
+                raise ValueError(f'{opf}: {identity} reconciliation refers to a different inventory build. Refresh Data Streams in this scenario.')
             if abs(float(source.get('balance') or 0) - float(row.get('balance') or 0)) > 0.1:
-                raise ValueError(f'{opf}: {identity} opening tonnes differ between reconciliation scenarios. Refresh both at the same scenario start.')
+                raise ValueError(f'{opf}: {identity} reconciliation opening tonnes differ from the physical inventory. Refresh Data Streams and rebuild AMT chunks in this scenario.')
             row.setdefault('source_properties', {}).update(namespace_record(source, opf, config))
 
 

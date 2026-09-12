@@ -1158,6 +1158,11 @@ class UserInputs(QMainWindow):
                 self.historical_recon_factors,
                 getattr(self, "historical_recon_warnings", []),
             )
+        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf':
+            for opf, bundle in (vars(self).get('opf_reconciliation_inputs') or {}).items():
+                if opf != self.opf_input_choice:
+                    self.data_stream_reconciliation.save_to_database(
+                        opf, bundle['start'], bundle['factors'], bundle.get('warnings') or [])
         DatabaseManager().add_product_build_progress_to_existing_reports(
             getattr(self, "product_targets", []) or [],
             database_path,
@@ -1460,6 +1465,7 @@ class UserInputs(QMainWindow):
             )),
             "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
             "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
+            "opf_reconciliation_inputs": copy.deepcopy(vars(self).get("opf_reconciliation_inputs") or {}),
             "data_stream_planning_categories": copy.deepcopy(getattr(
                 self, "data_stream_planning_categories", {}
             )),
@@ -1581,7 +1587,7 @@ class UserInputs(QMainWindow):
             "aps_source_property_field_mappings",
             "cb_lump_fines_mode", "cb_lump_percentage",
             "historical_recon_factors", "historical_recon_warnings",
-            "reconciliation_settings", "reconciliation_inputs",
+            "reconciliation_settings", "reconciliation_inputs", "opf_reconciliation_inputs",
             "data_stream_planning_categories",
             "auto_load_2wp_targets_choice",
             "group_2wp_build_targets_by_brand_choice",
@@ -1927,6 +1933,7 @@ class UserInputs(QMainWindow):
             )
             self.reconciliation_settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
             self.reconciliation_inputs = copy.deepcopy(state.get("reconciliation_inputs") or {})
+            self.opf_reconciliation_inputs = copy.deepcopy(state.get("opf_reconciliation_inputs") or {})
             self.data_stream_planning_categories = normalise_planning_categories(
                 state.get("data_stream_planning_categories")
             )
@@ -3165,11 +3172,6 @@ class UserInputs(QMainWindow):
             crushers=[p['name'] for p in config['tipping_points']],
             point_opfs={p['name']: p['opf'] for p in config['tipping_points']},
             areas=sorted(areas - {''}), subsets=sorted(set(config['source_subsets'].values()) - {''})))
-        states = {**(getattr(self, 'site_scenarios', {}) or {}), getattr(self, 'active_scenario_id', ''): vars(self)}
-        self.multi_feed_setup.set_scenarios({identity: (f"{s.get('opf_input_choice', '')} / {s.get('crusher_input_choice', '')} / {s.get('start_time_choice', '')}", s.get('opf_input_choice')) for identity, s in states.items()
-            if s.get('mine_input_choice') == getattr(self, 'mine_input_choice', None)
-            and s.get('start_time_choice') == getattr(self, 'start_time_choice', None)
-            and (s.get('multi_feed_configuration') or {}).get('mode', 'single') != 'combined_opf'})
 
     def submit_multi_feed_setup(self):
         try:
@@ -3184,20 +3186,20 @@ class UserInputs(QMainWindow):
             self.setup_calendar()
 
     def current_opf_profiles(self):
-        from classes.OPFSourceProfiles import profile_from_state
+        from classes.CombinedOPFReconciliation import build_profiles, profile_signature, evidence_signature
         config = self.current_multi_feed_configuration()
         if config['mode'] != 'combined_opf':
             return {}
-        states = {**(getattr(self, 'site_scenarios', {}) or {}), getattr(self, 'active_scenario_id', ''): vars(self)}
-        result = {}
-        for opf in {p['opf'] for p in config['tipping_points']}:
-            identity = config['opf_scenarios'].get(opf)
-            if not identity:
-                matches = [key for key, state in states.items() if state.get('opf_input_choice') == opf and state.get('mine_input_choice') == getattr(self, 'mine_input_choice', None)]
-                identity = matches[0] if len(matches) == 1 else None
-            if identity in states and states[identity].get('opf_input_choice') == opf:
-                result[opf] = profile_from_state(states[identity], identity)
-        return result
+        bundles = vars(self).get('opf_reconciliation_inputs') or {}
+        opfs = sorted({p['opf'] for p in config['tipping_points']})
+        if any(opf not in bundles or bundles[opf].get('signature') != evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()) for opf in opfs):
+            return {}
+        signature = profile_signature(vars(self), opfs)
+        cached = vars(self).get('_combined_opf_profile_cache')
+        if not cached or cached[0] != signature:
+            cached = (signature, build_profiles(vars(self), opfs, UserInputs))
+            self._combined_opf_profile_cache = cached
+        return cached[1]
 
     def setup_product_targets_tab(self):
         self.product_build_tab = QWidget()
@@ -8953,6 +8955,11 @@ class UserInputs(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        self.data_stream_opf_context = QLabel()
+        self.data_stream_opf_context.setWordWrap(True)
+        self.data_stream_opf_context.hide()
+        layout.addWidget(self.data_stream_opf_context)
+
         selection_card = QFrame()
         selection_card.setFrameShape(QFrame.StyledPanel)
         selection_layout = QFormLayout(selection_card)
@@ -9680,6 +9687,14 @@ class UserInputs(QMainWindow):
             self.cb_lump_percentage = float(value)
 
     def populate_recon_factor_table(self):
+        label = vars(self).get('data_stream_opf_context')
+        if label is not None:
+            combined = (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf'
+            label.setVisible(combined)
+            if combined:
+                names = ', '.join(vars(self).get('opf_reconciliation_inputs') or {})
+                label.setText((f'Reconciliation inputs loaded for {names} in this scenario. ' if names else 'Prepare Data Streams to load all selected OPFs. ')
+                    + f'The factor table and source review show {self.opf_input_choice}. Each tipping point uses its own OPF inputs.')
         table = self.recon_factor_table
         table.blockSignals(True)
         factors = self.historical_recon_factors or {}
@@ -10082,6 +10097,10 @@ class UserInputs(QMainWindow):
             "start_time": self.start_time_choice,
             "mine": self.mine_input_choice,
             "opf": self.opf_input_choice,
+            "selected_opfs": sorted({p['opf'] for p in (vars(self).get('multi_feed_configuration') or {}).get('tipping_points', [])}),
+            "per_opf_history_days": {p['opf']: required_history_days(vars(self).get('reconciliation_settings'), p['opf'], configured_brands(self.product_brand_labels_choice))
+                                     for p in (vars(self).get('multi_feed_configuration') or {}).get('tipping_points', [])},
+            "combined_reconciliation_version": 1,
             "brands": configured_brands(self.product_brand_labels_choice),
             "crushers": sorted(
                 str(value) for value in (self.selected_site_crushers or [])
@@ -10171,7 +10190,7 @@ class UserInputs(QMainWindow):
         names = ("start_time_choice", "opf_input_choice", "product_brand_labels_choice",
                  "mine_input_choice", "selected_site_crushers", "crusher_contribution_ratio_choice",
                  "auto_load_2wp_targets_choice", "group_2wp_build_targets_by_brand_choice",
-                 "byproducts_enabled", "reconciliation_settings")
+                 "byproducts_enabled", "reconciliation_settings", "multi_feed_configuration")
         context = SimpleNamespace(**{name: copy.deepcopy(vars(self).get(name)) for name in names})
         context.data_stream_reconciliation = self.data_stream_reconciliation
         context.planning_plan_targets = self.planning_plan_targets
@@ -10184,6 +10203,26 @@ class UserInputs(QMainWindow):
         return lambda: UserInputs.fetch_data_stream_inputs(context)
 
     def fetch_data_stream_inputs(self):
+        feed = getattr(self, 'multi_feed_configuration', None) or {}
+        if feed.get('mode') == 'combined_opf':
+            from classes.CombinedOPFReconciliation import evidence_signature
+            result = dict(factors={}, reconciliation_inputs={}, warnings=[], build_targets={}, target_errors={}, opf_reconciliation_inputs={})
+            for opf in dict.fromkeys(p['opf'] for p in feed['tipping_points']):
+                context = SimpleNamespace(**vars(self))
+                context.opf_input_choice = opf
+                context.selected_site_crushers = [p['name'] for p in feed['tipping_points'] if p['opf'] == opf]
+                context.multi_feed_configuration = {**feed, 'mode': 'multi_tipping_point', 'tipping_points': [p for p in feed['tipping_points'] if p['opf'] == opf]}
+                context.fetch_advanced_reconciliation_inputs = lambda c=context: UserInputs.fetch_advanced_reconciliation_inputs(c)
+                part = UserInputs.fetch_data_stream_inputs(context)
+                result['opf_reconciliation_inputs'][opf] = dict(factors=part['factors'], reconciliation_inputs=part['reconciliation_inputs'], warnings=part['warnings'],
+                    mine=self.mine_input_choice, start=str(self.start_time_choice),
+                    signature=evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()))
+                result['warnings'].extend(f'{opf}: {warning}' for warning in part['warnings'])
+                result['build_targets'].update(part['build_targets'])
+                result['target_errors'].update(part['target_errors'])
+                if opf == self.opf_input_choice:
+                    result['factors'], result['reconciliation_inputs'] = part['factors'], part['reconciliation_inputs']
+            return result
         try:
             factors, warnings = self.data_stream_reconciliation.fetch(
                 self.start_time_choice,
@@ -10257,6 +10296,7 @@ class UserInputs(QMainWindow):
         self.finish_data_stream_inputs(copy.deepcopy(result or {}))
 
     def finish_data_stream_inputs(self, result):
+        self.opf_reconciliation_inputs = copy.deepcopy(result.get('opf_reconciliation_inputs') or {})
         self.reconciliation_inputs = copy.deepcopy(result.get("reconciliation_inputs") or {})
         self.historical_recon_factors = copy.deepcopy(result.get("factors", {}))
         for (brand, factor_type, analyte), effective in getattr(
@@ -10314,6 +10354,19 @@ class UserInputs(QMainWindow):
             "build_targets": {},
             "target_errors": {},
         }
+        feed = vars(self).get('multi_feed_configuration') or {}
+        if feed.get('mode') == 'combined_opf':
+            from classes.CombinedOPFReconciliation import evidence_signature
+            result['opf_reconciliation_inputs'] = {}
+            for opf in dict.fromkeys(p['opf'] for p in feed['tipping_points']):
+                defaults, messages = self.data_stream_reconciliation.default_factors(
+                    opf, self.product_brand_labels_choice,
+                    f'Data Streams setup failed; factors defaulted to 1.0. {error_message}')
+                result['opf_reconciliation_inputs'][opf] = dict(factors=defaults, warnings=messages, reconciliation_inputs={},
+                    mine=self.mine_input_choice, start=str(self.start_time_choice),
+                    signature=evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()))
+                if opf != self.opf_input_choice:
+                    result['warnings'].extend(f'{opf}: {message}' for message in messages)
         if request_signature:
             self.data_stream_input_cache_signature = str(request_signature)
             self.data_stream_input_cache_result = copy.deepcopy(result)
@@ -10964,6 +11017,9 @@ class UserInputs(QMainWindow):
                 persist=True,
                 refresh_map=True,
             )
+            if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles():
+                self.prepare_data_streams()
+                return
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
@@ -10981,6 +11037,11 @@ class UserInputs(QMainWindow):
             self.historical_recon_factors,
             self.historical_recon_warnings,
         )
+        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf':
+            for opf, bundle in self.opf_reconciliation_inputs.items():
+                if opf != self.opf_input_choice:
+                    self.data_stream_reconciliation.save_to_database(
+                        opf, self.start_time_choice, bundle['factors'], bundle.get('warnings') or [])
         self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
         # The field schema remains editable after Data Streams. It is common
@@ -13627,6 +13688,7 @@ class UserInputs(QMainWindow):
         self.historical_recon_factors = {}
         self.historical_recon_warnings = []
         self.reconciliation_inputs = {}
+        self.opf_reconciliation_inputs = {}
         self._reconciliation_application_cache = None
         self.data_stream_source_warnings = {}
         self.data_stream_pending_build_targets = {}
@@ -26404,6 +26466,7 @@ class UserInputs(QMainWindow):
                 "historical_recon_warnings": self.historical_recon_warnings,
                 "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
                 "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
+                "opf_reconciliation_inputs": copy.deepcopy(vars(self).get("opf_reconciliation_inputs") or {}),
                 "data_stream_planning_categories": self.data_stream_planning_categories,
                 "product_targets": self.product_targets,
                 "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
@@ -26861,6 +26924,7 @@ class UserInputs(QMainWindow):
         )
         self.reconciliation_settings = normalise_reconciliation_settings(loaded_state.get("reconciliation_settings"))
         self.reconciliation_inputs = copy.deepcopy(loaded_state.get("reconciliation_inputs") or {})
+        self.opf_reconciliation_inputs = copy.deepcopy(loaded_state.get("opf_reconciliation_inputs") or {})
         self.data_stream_planning_categories = normalise_planning_categories(
             loaded_state.get("data_stream_planning_categories")
         )
@@ -27260,6 +27324,7 @@ class UserInputs(QMainWindow):
         self.historical_recon_warnings = []
         self.reconciliation_settings = normalise_reconciliation_settings()
         self.reconciliation_inputs = {}
+        self.opf_reconciliation_inputs = {}
         self._reconciliation_application_cache = None
         self.data_stream_planning_categories = normalise_planning_categories()
         self.data_stream_pending_build_targets = {}

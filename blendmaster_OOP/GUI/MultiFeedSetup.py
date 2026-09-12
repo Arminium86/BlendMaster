@@ -9,9 +9,9 @@ class MultiFeedSetup(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._saved = multi_feed_settings()
-        self.context, self.scenarios = {}, {}
+        self.context = {}
         layout = QVBoxLayout(self)
-        note = QLabel('Plan Mode, OPFs and operating crushers come from Site Configuration. Rates, grade targets and Max Reclaim Rate are in Calendar. Brand follows Product Targets. Each stockpile feeds at most one tipping point at a time.')
+        note = QLabel('Plan Mode, OPFs and operating crushers come from Site Configuration. Rates, grade targets and Max Reclaim Rate are in Calendar. Brand follows Product Targets. Data Streams prepares reconciliation for each selected OPF within this scenario. Each stockpile feeds at most one tipping point at a time.')
         note.setWordWrap(True)
         layout.addWidget(note)
         self.compensation = QCheckBox('Allow OPFs to compensate in shared builds')
@@ -21,16 +21,6 @@ class MultiFeedSetup(QWidget):
         layout.addWidget(self.tabs)
         self.points = self.table('Tipping points', ['Tipping point', 'OPF', 'ROM area', 'Direct tip enabled', 'Grade stream', 'Min stockpiles', 'Max stockpiles'])
         self.rules = self.table('Rehandle Movement Rules', ['Stockpile subset', 'Tipping point', 'Allowed'])
-        self.profiles_page = QWidget()
-        profile_layout = QVBoxLayout(self.profiles_page)
-        note = QLabel('Each OPF needs its own reconciled source grades before outputs can be combined. Select the prepared Data Streams scenario for that OPF, at the same mine and scenario start. This selects existing reconciliation data; it does not change factors or inventory. A unique matching scenario is selected automatically.')
-        note.setWordWrap(True)
-        profile_layout.addWidget(note)
-        self.profiles = QTableWidget(0, 2)
-        self.profiles.setHorizontalHeaderLabels(['OPF', 'Prepared reconciliation data'])
-        self.profiles.horizontalHeader().setStretchLastSection(True)
-        profile_layout.addWidget(self.profiles)
-        self.tabs.addTab(self.profiles_page, 'OPF reconciliation')
         buttons = QHBoxLayout()
         add, remove = QPushButton('Add movement rule'), QPushButton('Remove selected movement rule')
         add.clicked.connect(self.add_rule)
@@ -81,7 +71,6 @@ class MultiFeedSetup(QWidget):
         self.compensation.setChecked(self._saved['allow_opf_compensation'])
         combined = self._saved['mode'] == 'combined_opf'
         self.compensation.setVisible(combined)
-        self.tabs.setTabVisible(self.tabs.indexOf(self.profiles_page), combined)
         names = self.context.get('crushers', [p['name'] for p in self._saved['tipping_points']])
         self.points.setRowCount(len(self._saved['tipping_points']))
         for row, point in enumerate(self._saved['tipping_points']):
@@ -96,7 +85,6 @@ class MultiFeedSetup(QWidget):
         self.rules.setRowCount(0)
         for rule in self._saved['rehandle_rules']:
             self.add_rule(rule)
-        self.set_scenarios(self.scenarios)
         self.points.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         for col, width in enumerate([185, 150, 210, 160, 210, 160, 160]):
             self.points.setColumnWidth(col, width)
@@ -115,31 +103,11 @@ class MultiFeedSetup(QWidget):
         self.choice(self.rules, row, 1, self.context.get('crushers', [p['name'] for p in self._saved['tipping_points']]), rule.get('tipping_point'))
         self.choice(self.rules, row, 2, ['Yes', 'No'], 'Yes' if rule.get('allowed', True) else 'No')
 
-    def set_scenarios(self, scenarios):
-        self.scenarios = scenarios
-        selected = {row[0]: row[1] for row in self.rows(self.profiles)}
-        opfs = list(dict.fromkeys(p['opf'] for p in self._saved['tipping_points']))
-        self.profiles.setRowCount(len(opfs))
-        for row, opf in enumerate(opfs):
-            self.text(self.profiles, row, 0, opf, False)
-            combo = QComboBox()
-            combo.addItem('Choose prepared scenario…', '')
-            for identity, (label, scenario_opf) in scenarios.items():
-                if scenario_opf == opf:
-                    combo.addItem(label, identity)
-            saved = self._saved['opf_scenarios'].get(opf) or selected.get(opf)
-            index = combo.findData(saved)
-            if saved and index < 0:
-                combo.addItem(f'Unavailable scenario: {saved}', saved)
-                index = combo.count() - 1
-            combo.setCurrentIndex(index if index >= 0 else 1 if combo.count() == 2 else 0)
-            self.profiles.setCellWidget(row, 1, combo)
-
     def settings(self):
         value = deepcopy(self._saved)
         value.update(tipping_points=[], rehandle_rules=[], route_reclaim_rates={})
         value['allow_opf_compensation'] = self.compensation.isChecked()
-        value['opf_scenarios'] = {row[0]: row[1] for row in self.rows(self.profiles)}
+        value['opf_scenarios'] = {}  # Legacy cross-scenario selectors are no longer used.
         prior = {p['name']: p for p in self._saved['tipping_points']}
         for name, opf, area, direct, stream, minimum, maximum in self.rows(self.points):
             if name not in prior:
