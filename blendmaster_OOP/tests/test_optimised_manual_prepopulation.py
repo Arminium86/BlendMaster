@@ -77,6 +77,63 @@ class OptimisedManualPrepopulationTests(unittest.TestCase):
             transfer["blend_definitions"][0]["Source Ratios"],
         )
 
+    def test_truncated_saved_timestamps_preserve_exact_duration_and_calendar_caps(self):
+        start = datetime(2025, 1, 1, 6)
+        durations = [1 + .75 / 3600, 1 - .75 / 3600]
+        rows = []
+        for index, duration in enumerate(durations):
+            row = self.report_row(index + 1, 'SP1', 2000 * duration,
+                start=start + timedelta(hours=index), duration=1, crusher_tonnes=2000 * duration)
+            row.update(steady_state_duration=duration, crusher_rate_output=2000)
+            rows.append(row)
+        original = pd.DataFrame(rows)
+        transfer = OptimisedToManualPlan(original).build()
+        sequence = transfer['sequence_rows']
+        self.assertEqual(sequence[0]['_exact_end'], '2025-01-01 07:00:00.750000')
+        self.assertEqual(sequence[1]['_exact_start'], sequence[0]['_exact_end'])
+        self.assertEqual(sequence[1]['_exact_end'], '2025-01-01 08:00:00')
+        planner = ManualBlendPlanner(sequence, transfer['blend_definitions'],
+            {'SP1': {'balance': 10000, 'grade_fe': 60}}, [], pd.DataFrame(),
+            {'preplan_start': start, 'preplan_end': start + timedelta(hours=2)}, [], 2000,
+            {'crusher_rate': {'Preplan': 6000}, 'reclaim_equipment_max_reclaim_rate': {'Preplan': 2000}})
+        report = planner.build_report(planner.build_steady_states(), {})
+        self.assertAlmostEqual(report.source_actual_tonnes.sum(), 4000)
+        self.assertLessEqual(report.equipment_rate_output.max(), 2000.000001)
+        self.assertEqual(original.iloc[0].end_datetime, start + timedelta(hours=1))
+
+    def test_fractional_duration_keeps_a_boundary_truck_in_its_optimised_state(self):
+        start = datetime(2025, 1, 1, 6)
+        durations = [1 + .75 / 3600, 1 - .75 / 3600]
+        rows = []
+        for index, duration in enumerate(durations):
+            total = 2000 * duration + (100 if index else 0)
+            row = self.report_row(index + 1, 'SP1', 2000 * duration,
+                start=start + timedelta(hours=index), duration=1, crusher_tonnes=total)
+            row.update(steady_state_duration=duration, crusher_rate_output=total / duration)
+            rows.append(row)
+        truck = self.report_row(2, 'GB1', 100, source_type='grade_block', source_id='TRUCK1',
+            start=start + timedelta(hours=1), crusher_tonnes=total)
+        truck.update(steady_state_duration=durations[1], crusher_rate_output=total / durations[1])
+        rows.append(truck)
+        transfer = OptimisedToManualPlan(pd.DataFrame(rows)).build()
+        payloads = pd.DataFrame([dict(source='GB1', payload=100, direct_tip_id='TRUCK1',
+            direct_tip_eligible=True, delivered_datetime=start + timedelta(hours=1))])
+        planner = ManualBlendPlanner(transfer['sequence_rows'], transfer['blend_definitions'],
+            {'SP1': {'balance': 10000, 'grade_fe': 60}}, [], payloads,
+            {'preplan_start': start, 'preplan_end': start + timedelta(hours=2)}, [], 6000,
+            {'crusher_rate': {'Preplan': 6000}, 'reclaim_equipment_max_reclaim_rate': {'Preplan': 2000}})
+        states = planner.build_steady_states()
+        self.assertEqual(states[0]['direct_tip_candidates'], [])
+        self.assertEqual(states[1]['direct_tip_candidates'][0]['direct_tip_ids'], ['TRUCK1'])
+        allocations = OptimisedToManualPlan.direct_tip_allocations(states, transfer['direct_tip_rows'])
+        report = planner.build_report(states, allocations)
+        self.assertAlmostEqual(report.source_actual_tonnes.sum(), 4100)
+        self.assertAlmostEqual(sum(sum(values.values()) for values in allocations.values()), 100)
+        # A manually changed window cannot admit earlier trucks.
+        states[1]['payload_start_datetime'] = start
+        planner.attach_direct_tip_candidates(states)
+        self.assertEqual(states[1]['direct_tip_candidates'], [])
+
     def test_amt_chunk_report_rows_restore_parent_for_manual_inventory(self):
         row = self.report_row(
             1,

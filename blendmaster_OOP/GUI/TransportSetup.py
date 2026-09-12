@@ -11,7 +11,7 @@ class TransportSetup(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        title = QLabel('Material Flow')
+        title = QLabel('Conveyors & COS')
         title.setStyleSheet('font-size:20px;font-weight:700;color:#17324d')
         layout.addWidget(title)
         note = QLabel('Optional FIFO conveyor and coarse ore stockpile (COS) modelling. Capacities are physical ROM WMT. '

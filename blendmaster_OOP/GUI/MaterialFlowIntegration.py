@@ -38,6 +38,8 @@ def sync_setup(gui):
 
 
 def submit_setup(gui):
+    from classes.SiteWorkflow import require_action
+    require_action(vars(gui).get('access_role', 'support'), 'configure_transport')
     try:
         settings = gui.transport_setup.settings()
         gui.transport_settings = settings
@@ -84,6 +86,7 @@ def refresh_history(gui):
 
 
 def save_positions(gui,positions):
+    # A diagram layout is a view preference, not an equipment configuration.
     gui.flow_node_positions = {**getattr(gui,'flow_node_positions',{}),**deepcopy(positions)}
 
 

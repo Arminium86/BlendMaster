@@ -19,6 +19,8 @@ class FrameModel(QAbstractTableModel):
     def data(self,index,role=Qt.DisplayRole):
         if not index.isValid() or role not in (Qt.DisplayRole,Qt.ToolTipRole):
             return None
+        if not (0 <= index.row() < self.rowCount() and 0 <= index.column() < self.columnCount()):
+            return None
         value = self.frame.iat[index.row(),index.column()]
         if isinstance(value,(dict,list,tuple)):
             return json.dumps(value,default=str)
@@ -29,8 +31,12 @@ class FrameModel(QAbstractTableModel):
         return str(value)
     def headerData(self,section,orientation,role=Qt.DisplayRole):
         if role in (Qt.DisplayRole,Qt.ToolTipRole):
-            if orientation != Qt.Horizontal:
-                return str(section+1)
+            if orientation == Qt.Vertical:
+                return str(section+1) if 0 <= section < self.rowCount() else None
+            # Qt can request headers while an empty/loading model replaces
+            # the previous table. Never index outside the current schema.
+            if orientation != Qt.Horizontal or not 0 <= section < self.columnCount():
+                return None
             column=str(self.frame.columns[section])
             labels={'steady_state_number':'State','steady_state_duration':'Duration (h)',
                     'Steady State Duration (hrs)':'Duration (h)','Optimiser Grade Stream':'Grade stream',

@@ -81,13 +81,16 @@ class BackupTests(unittest.TestCase):
     def test_backup_choices_are_owned_by_manual_plan(self):
         view = SimpleNamespace(MANUAL_PLAN_STATE_FIELDS=UserInputs.MANUAL_PLAN_STATE_FIELDS,
                                active_manual_plan_id="Primary", manual_plan_states={},
-                               blend_plan_backup_destinations={"CR1": "SP1"})
+                               blend_plan_backup_destinations={"CR1": "SP1"}, manual_input_revision='primary')
         UserInputs.capture_active_manual_plan_state(view)
         view.active_manual_plan_id = "Contingency 1"
         view.blend_plan_backup_destinations = {"CR1": "SP2"}
+        view.manual_input_revision = 'contingency'
         UserInputs.capture_active_manual_plan_state(view)
         self.assertEqual(view.manual_plan_states["Primary"]["blend_plan_backup_destinations"], {"CR1": "SP1"})
         self.assertEqual(view.manual_plan_states["Contingency 1"]["blend_plan_backup_destinations"], {"CR1": "SP2"})
+        self.assertEqual(view.manual_plan_states['Primary']['manual_input_revision'], 'primary')
+        self.assertEqual(view.manual_plan_states['Contingency 1']['manual_input_revision'], 'contingency')
 
 
 if __name__ == "__main__":

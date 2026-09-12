@@ -80,7 +80,9 @@ class BlendPlanPDF:
         key = str(column or "").lower()
         if any(token in key for token in ("tonnes", "_wmt", "_dmt")):
             return f"{number:,.0f}"
-        if any(token in key for token in ("grade", "ratio", "rate")):
+        if "grade" in key or "ratio" in key:
+            return f"{number:,.4f}"
+        if "rate" in key:
             return f"{number:,.2f}"
         if number.is_integer():
             return f"{int(number):,}"

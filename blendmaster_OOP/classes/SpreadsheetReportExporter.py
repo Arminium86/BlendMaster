@@ -85,8 +85,10 @@ class SpreadsheetReportExporter:
             or normalized in {"wmt", "dmt", "balance", "payload"}
         ):
             return "#,##0"
+        if "grade" in normalized or "ratio" in normalized:
+            return "0.0000"
         if any(marker in normalized for marker in (
-            "grade", "ratio", "rate", "coverage", "priority"
+            "ratio", "rate", "coverage", "priority"
         )):
             return "0.00"
         return None
@@ -119,6 +121,10 @@ class SpreadsheetReportExporter:
         workbook.properties.created = report_datetime
         existing_names = set()
         thin_border = Side(style="thin", color=cls.BORDER)
+        body_font = Font(name="Aptos", size=9)
+        body_alignment = {align: Alignment(horizontal=align, vertical="top", wrap_text=True)
+                          for align in ('left', 'right')}
+        band_fill = PatternFill("solid", fgColor=cls.BAND_FILL)
 
         for requested_name, raw_frame in sheets:
             frame = cls._frame(raw_frame)
@@ -175,6 +181,7 @@ class SpreadsheetReportExporter:
                 cell.border = Border(bottom=thin_border)
             worksheet.row_dimensions[header_row].height = 30
 
+            number_formats = [cls._column_number_format(column) for column in frame.columns]
             for row_index, row in enumerate(
                 frame.itertuples(index=False, name=None), start=header_row + 1
             ):
@@ -183,20 +190,14 @@ class SpreadsheetReportExporter:
                     cell = worksheet.cell(
                         row_index, column_index, cls._value(value)
                     )
-                    cell.font = Font(name="Aptos", size=9)
-                    cell.alignment = Alignment(
-                        horizontal=(
+                    cell.font = body_font
+                    cell.alignment = body_alignment[
                             "right" if isinstance(cell.value, (int, float))
                             and not isinstance(cell.value, bool) else "left"
-                        ),
-                        vertical="top",
-                        wrap_text=True,
-                    )
+                        ]
                     if row_index % 2 == 0:
-                        cell.fill = PatternFill(
-                            "solid", fgColor=cls.BAND_FILL
-                        )
-                    number_format = cls._column_number_format(column)
+                        cell.fill = band_fill
+                    number_format = number_formats[column_index - 1]
                     if number_format:
                         cell.number_format = number_format
 

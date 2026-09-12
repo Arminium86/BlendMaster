@@ -228,6 +228,30 @@ class DestinationProgressUITests(unittest.TestCase):
         self.assertIn("Unable to load", self.view.status.text())
         self.assertTrue(self.view.refresh.isEnabled())
 
+    def test_prepared_handoff_restores_without_query_and_rejects_changed_dependencies(self):
+        self.load()
+        saved = pickle.loads(pickle.dumps(self.view.prepared_state()))
+        settings = self.view.settings()
+        self.service._query.reset_mock()
+        self.view.reset_context()
+        self.context(state=settings)
+        self.assertTrue(self.view.restore_prepared_state(saved))
+        self.assertEqual(self.view.table.rowCount(), 2)
+        self.service._query.assert_not_called()
+        self.view.snapshot['error'] = 'local edit'
+        self.assertIsNone(saved['snapshot']['error'])
+        for changes in ({'scenario_id': 'b'}, {'scenario_start': START + timedelta(hours=1)},
+                        {'inventories': {'SP1': {'nearest_crusher': 'OTHER'}}},
+                        {'state': {**settings, 'lookback_hours': 24}}):
+            self.view.reset_context()
+            self.context(**{'state': settings, **changes})
+            self.assertFalse(self.view.restore_prepared_state(saved))
+        with self.path.open('a') as stream:
+            stream.write('\n')
+        self.view.reset_context()
+        self.context(state=settings)
+        self.assertFalse(self.view.restore_prepared_state(saved))
+
     def test_large_audit_remains_complete_and_last_record_is_accessible(self):
         rows = [{"record": i, "reason": "ROM inbound"} for i in range(50000)]
         self.view.fill(self.view.audit_table, rows, [("record", "CSV record"), ("reason", "Reason")])

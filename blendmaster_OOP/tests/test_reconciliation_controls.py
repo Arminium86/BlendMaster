@@ -354,7 +354,8 @@ class NativeReviewTests(unittest.TestCase):
         self.assertEqual(self.widget.settings()["method"], "standard")
         self.assertEqual(len(spy), 0)
 
-    def test_review_then_submit_advances_once_and_stale_settings_require_recalculation(self):
+    @patch('GUI.InventoryStreamApplication.apply', side_effect=lambda host, done: done())
+    def test_review_then_submit_advances_once_and_stale_settings_require_recalculation(self, _apply):
         view = window()
         view.reconciliation_review = self.widget
         view.recon_factor_table = QTableWidget(0, 14)
@@ -377,14 +378,14 @@ class NativeReviewTests(unittest.TestCase):
         view.update_reconciliation_review()
         self.assertTrue(view.data_streams_submit_button.isEnabled())
         view.handle_data_streams_submit()
-        view.apply_grade_streams_to_inventory.assert_called_once()
-        view.refresh_AMT_enrichment_if_needed.assert_called_once_with(persist=True, refresh_map=True)
+        _apply.assert_called_once()
+        view.refresh_AMT_enrichment_if_needed.assert_not_called()
         view.open_database_view.assert_called_once_with(navigate=True)
         view.prepare_data_streams.assert_not_called()
         view.reconciliation_settings["cells"] = [local(blend=2)]
         view.handle_data_streams_submit()
         view.prepare_data_streams.assert_called_once()
-        view.apply_grade_streams_to_inventory.assert_called_once()
+        _apply.assert_called_once()
 
     def test_default_and_local_changes_invalidate_submit_and_keep_model_in_sync(self):
         view = window()

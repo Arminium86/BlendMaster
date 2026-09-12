@@ -1271,7 +1271,16 @@ class DrawStockProfiles:
                             ],
                             style={"padding": "14px 4px 12px 4px"},
                         ),
-                        html.Div(id="chart-container", children=[]),
+                        html.Div([
+                            html.Label('Source'),
+                            dcc.Dropdown(id='profile-source', options=[], value=None, clearable=True,
+                                         placeholder='Browse all sources', style={'minWidth': '400px', 'flex': '1'}),
+                            html.Label('Page'),
+                            dcc.Input(id='profile-page', type='number', min=1, step=1, value=1,
+                                      style={'width': '70px'}),
+                        ], style={'display': 'flex', 'alignItems': 'center', 'gap': '12px', 'marginBottom': '10px'}),
+                        html.Div(id='profile-summary', style={'marginBottom': '12px', 'color': '#475569'}),
+                        dcc.Loading(html.Div(id="chart-container", children=[]), type='default'),
                     ],
                     style={
                         "backgroundColor": "#f8fafc",
@@ -1290,9 +1299,14 @@ class DrawStockProfiles:
         """
         @self.app.callback(
             Output("chart-container", "children"),
-            Input("manual-refresh", "value")
+            Output('profile-summary', 'children'),
+            Output('profile-source', 'options'),
+            Output('profile-page', 'max'),
+            Input("manual-refresh", "value"),
+            Input('profile-source', 'value'),
+            Input('profile-page', 'value'),
         )
-        def update_charts(_):
+        def update_charts(_, source, page):
             """
             Callback to update charts dynamically when triggered.
             """
@@ -1303,7 +1317,8 @@ class DrawStockProfiles:
                     data['time'] = pd.to_datetime(data['time'], errors='coerce')
                 crusher_data = self.fetch_crusher_data()
                 product_build_data = self.fetch_product_build_data()
-                return self.create_charts(data, crusher_data, product_build_data)
+                data, summary, options, pages = self.profile_page(data, source, page)
+                return self.create_charts(data, crusher_data, product_build_data), summary, options, pages
             except Exception:
                 print(traceback.format_exc())
                 return html.Div(
@@ -1316,7 +1331,25 @@ class DrawStockProfiles:
                         "color": "#9a3412",
                         "fontWeight": "600",
                     },
-                )
+                ), 'Profiles could not be loaded.', [], 1
+
+    @staticmethod
+    def profile_page(data, source=None, page=1, page_size=12):
+        """Bound browser work while retaining access to every saved source."""
+        if data is None or data.empty or 'stockpile' not in data:
+            return data, 'No source profiles available.', [], 1
+        names = sorted(data.stockpile.dropna().astype(str).unique())
+        options = [{'label': name, 'value': name} for name in names]
+        pages = max(1, (len(names) + page_size - 1) // page_size)
+        if source:
+            selected = [str(source)]
+            summary = f'Source: {source}. Clear the selection to browse all {len(names)} sources.'
+        else:
+            page = min(pages, max(1, int(page or 1)))
+            first = (page - 1) * page_size
+            selected = names[first:first + page_size]
+            summary = f'Sources {first + 1}–{first + len(selected)} of {len(names)} · page {page} of {pages}.'
+        return data[data.stockpile.astype(str).isin(selected)].copy(), summary, options, pages
 
     def setup_routes(self):
         """
@@ -1327,9 +1360,9 @@ class DrawStockProfiles:
             """
             HTTP route to trigger the Dash callback manually.
             """
-            # Trigger the callback by setting a value for the "manual-refresh" input
-            self.app.callback_map["chart-container.children"]["inputs"][0]["value"] = "refresh"
-            return jsonify({"status": "success", "message": "Refresh triggered"})
+            # The Qt caller reloads the page; its initial callback reads the
+            # saved reports. Callback metadata must never be mutated here.
+            return jsonify({"status": "success", "message": "Ready to refresh"})
 
     def run_app(self):
         """
@@ -1465,6 +1498,14 @@ class DrawGanttChart:
         }
         if data.empty or not required_columns.issubset(data.columns):
             return pd.DataFrame()
+
+        data = data.copy()
+        if 'source_actual_tonnes' in data:
+            physical = pd.to_numeric(data['source_actual_tonnes'], errors='coerce').fillna(0)
+            totals = physical.groupby([data['blend_ID'], data['steady_state_number']]).transform('sum')
+            # Legacy reports round the saved ratio. The operational mix uses
+            # physical source tonnes, matching the Blend Plan and its exports.
+            data['source_blend_ratio'] = physical.div(totals.where(totals > 0)).fillna(0)
 
         if "actual_direct_tip_ratio" not in data.columns:
             data["actual_direct_tip_ratio"] = 0
@@ -1633,7 +1674,7 @@ class DrawGanttChart:
                         f"Crusher Actual Grade Fe: {float(row['crusher_actual_grade_fe']):.2f}%<br>"  # Format as percent
                         f"Crusher Actual Grade Si: {float(row['crusher_actual_grade_si']):.2f}%<br>"
                         f"Crusher Actual Grade Al: {float(row['crusher_actual_grade_al']):.2f}%<br>"
-                        f"Crusher Actual Grade P: {float(row['crusher_actual_grade_p']):.2f}%<br>"
+                        f"Crusher Actual Grade P: {float(row['crusher_actual_grade_p']):.4f}%<br>"
                         f"Crusher Actual Grade Mn: {float(row['crusher_actual_grade_mn']):.2f}%<br>",
             axis=1
         )
@@ -1790,10 +1831,10 @@ class DrawGanttChart:
                             style_cell={
                                 'textAlign': 'center',
                                 'padding': '7px 8px',
-                                'whiteSpace': 'normal',
-                                'overflow': 'hidden',
-                                'textOverflow': 'ellipsis',
-                                'maxWidth': '150px',
+                                'whiteSpace': 'nowrap',
+                                'overflow': 'visible',
+                                'textOverflow': 'clip',
+                                'minWidth': '140px',
                                 'height': 'auto',
                                 'lineHeight': '1.2',
                                 'fontFamily': 'Segoe UI, Arial, sans-serif',
@@ -1810,7 +1851,7 @@ class DrawGanttChart:
                                     'minWidth': '420px',
                                     'width': '520px',
                                     'maxWidth': '760px',
-                                    'whiteSpace': 'normal',
+                                    'whiteSpace': 'nowrap',
                                     'overflow': 'visible',
                                     'textOverflow': 'clip',
                                 },
@@ -1820,7 +1861,7 @@ class DrawGanttChart:
                                     'minWidth': '160px',
                                     'width': '180px',
                                     'maxWidth': '220px',
-                                    'whiteSpace': 'normal',
+                                    'whiteSpace': 'nowrap',
                                     'overflow': 'visible',
                                     'textOverflow': 'clip',
                                 }
@@ -1830,11 +1871,11 @@ class DrawGanttChart:
                                 'textAlign': 'center',
                                 'fontFamily': 'Segoe UI, Arial, sans-serif',
                                 'fontSize': '12px',
-                                'whiteSpace': 'normal',
+                                'whiteSpace': 'nowrap',
                                 'height': 'auto',
                                 'lineHeight': '1.2',
                                 'padding': '8px',
-                                'overflow': 'hidden',
+                                'overflow': 'visible',
                                 'backgroundColor': '#f1f5f9',
                                 'color': '#0f172a',
                                 'border': '1px solid #dbe4ee',
@@ -1908,9 +1949,14 @@ class DrawGanttChart:
             chart_style = dict(base_chart_style)
             chart_style['height'] = f'{chart_height + 18}px'
 
+            # Plotly timeline rewrites x_end to duration in milliseconds.
+            # Keep independent timestamp fields for exact click identity.
+            chart_data['_snapshot_start'] = chart_data['start_datetime'].map(lambda value: pd.Timestamp(value).isoformat())
+            chart_data['_snapshot_end'] = chart_data['end_datetime'].map(lambda value: pd.Timestamp(value).isoformat())
             # Create Gantt chart
             fig = px.timeline(
                 chart_data,
+                custom_data=["steady_state_number", "_snapshot_start", "_snapshot_end", "lane"],
                 x_start="start_datetime",
                 x_end="end_datetime",
                 y="lane",  # Cascading lanes (top to bottom)
@@ -2004,9 +2050,8 @@ class DrawGanttChart:
             if data.empty:
                 return [], [], [], {}
             
-            if click_data and "points" in click_data and "lane" in data.columns:
-                clicked_lane = click_data["points"][0]["y"]
-                data = data[data["lane"] == clicked_lane].copy()
+            from classes.BlendSnapshot import selected_state
+            data = selected_state(data, click_data)
 
             # Select only the user-configured report columns after applying the
             # click filter; lane and blend_ID do not need to remain visible.
@@ -2025,7 +2070,7 @@ class DrawGanttChart:
                 {"name": aliases.get(column, column), "id": column}
                 for column in visible_columns
             ]
-            wrapping = bool(self.report_wrap_text)
+            wrapping = False
             header_style = {
                 "fontWeight": "bold",
                 "textAlign": "center",
@@ -2037,7 +2082,7 @@ class DrawGanttChart:
                 "lineHeight": "1.2",
                 "padding": "8px",
                 "overflow": "hidden",
-                "textOverflow": "clip" if wrapping else "ellipsis",
+                "textOverflow": "clip",
                 "backgroundColor": "#f1f5f9",
                 "color": "#0f172a",
                 "border": "1px solid #dbe4ee",
@@ -2052,8 +2097,8 @@ class DrawGanttChart:
                     "maxWidth": f"{width}px",
                     "whiteSpace": "normal" if wrapping else "nowrap",
                     "height": "auto" if wrapping else "28px",
-                    "overflow": "visible" if wrapping else "hidden",
-                    "textOverflow": "clip" if wrapping else "ellipsis",
+                    "overflow": "visible",
+                    "textOverflow": "clip",
                 })
             
             def additive_column(column):
@@ -2067,8 +2112,7 @@ class DrawGanttChart:
 
             # Preserve report precision semantics in the detailed snapshot:
             # additive quantities are whole tonnes with separators, while
-            # grades, ratios and other weighted-average values show two
-            # decimal places.
+            # grades and physical ratio fractions keep four decimal places.
             for column in data.columns:
                 if pd.api.types.is_datetime64_any_dtype(data[column]):
                     data[column] = data[column].dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -2085,6 +2129,8 @@ class DrawGanttChart:
                         data[column] = values.map(
                             lambda value: "" if pd.isna(value) else f"{float(value):,.0f}"
                         )
+                    elif 'grade' in str(column).lower() or 'ratio' in str(column).lower():
+                        data[column] = values.map(lambda value: '' if pd.isna(value) else f'{float(value):.4f}')
                     else:
                         data[column] = values.round(2)
             
@@ -2252,6 +2298,7 @@ class DrawAMTStockpile:
         source_property_kinds=None,
         source_property_weights=None,
         excluded_footprints=None,
+        defer_load=False,
     ):
         self.db_path = db_path
         self.port = port
@@ -2270,7 +2317,7 @@ class DrawAMTStockpile:
         self.exclusion_mode_footprints = set()
         self.status_message = "Select a footprint, digitize reclaim and cut directions, then generate chunks."
         self.server = self.app.server  # Get Flask server instance
-        self.data = self.fetch_data()
+        self.data = self.empty_amt_dataframe() if defer_load else self.fetch_data()
         self.unique_footprints = self.get_unique_footprints()
         self.refresh_call = False
         self.clean_up_hex_sequence_table()
@@ -2378,6 +2425,8 @@ class DrawAMTStockpile:
                 }
             ):
                 return f"{float(value):,.0f}"
+            if normalized_column in ('grade_p', 'p') or normalized_column.endswith('_grade_p'):
+                return f"{float(value):.4f}"
             if (
                 normalized_column == "lineage_coverage_pct"
                 or normalized_column.startswith("grade_")

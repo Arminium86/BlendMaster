@@ -5,6 +5,7 @@ grade and mass definitions still govern aggregation of those sources into chunks
 """
 
 from copy import deepcopy
+from collections import OrderedDict
 import hashlib
 import json
 import math
@@ -62,12 +63,26 @@ class ReconciliationApplication:
         self.opf = normalise_opf(opf)
         self.brands = configured_brands(brands)
         self.resolvers = {}
+        self._resolved_sources = OrderedDict()
         if self.settings["method"] != "standard":
             for brand in self.brands:
                 self.resolvers[brand] = ReconciliationFactorResolver(
                     samples, opf=self.opf, brand=brand, scenario_start=scenario_start,
                     standard_factors=(standard_factors or {}).get(brand), **self.settings,
                 )
+
+    def resolved_source(self, brand, source_id, source_kind, blocks, total, hex_id):
+        # One application owns one immutable history/settings context. Reuse
+        # the review's factor search only for exactly the same physical source.
+        key = reconciliation_fingerprint([brand, source_id, source_kind, blocks, total, hex_id])
+        if key in self._resolved_sources:
+            self._resolved_sources.move_to_end(key)
+            return deepcopy(self._resolved_sources[key])
+        result = self.resolvers[brand].resolve_source(source_id, source_kind, blocks, total, hex_id=hex_id)
+        self._resolved_sources[key] = deepcopy(result)
+        if len(self._resolved_sources) > 4096:
+            self._resolved_sources.popitem(last=False)
+        return result
 
     def apply(self, streams, *, source_id, source_kind, source_wmt, contributing_blocks,
               hex_id=None, warnings=(), grade_coverage=None):
@@ -85,12 +100,12 @@ class ReconciliationApplication:
                  "warnings": list(warnings), "confidence_method": CONFIDENCE_METHOD}
         for brand, resolver in self.resolvers.items():
             try:
-                resolved = resolver.resolve_source(source_id, source_kind, contributing_blocks, total, hex_id=hex_id)
+                resolved = self.resolved_source(brand, source_id, source_kind, contributing_blocks, total, hex_id)
             except (ValueError, TypeError, AttributeError) as exc:
                 # Malformed source lineage is unavailable evidence, never a reason
                 # to discard source mass or invent factors. Configuration/history
                 # validation happens in the constructor and is not caught here.
-                resolved = resolver.resolve_source(source_id, source_kind, [], total, hex_id=hex_id)
+                resolved = self.resolved_source(brand, source_id, source_kind, [], total, hex_id)
                 audit["warnings"].append(f"Invalid source lineage; using global factors. {exc}")
             records = resolved["records"]
             applied = {kind: {a: math.fsum(r["lineage_fraction"] * r[f"{kind}_factors"][a]

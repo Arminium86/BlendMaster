@@ -3,15 +3,47 @@ from copy import deepcopy
 import html
 import json
 import math
+import hashlib
 from collections import defaultdict
 from PyQt5.QtCore import Qt, QRectF, QPointF, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor, QPen, QBrush, QPainter, QPainterPath, QFont, QPolygonF
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSplitter,
-    QPlainTextEdit, QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsPathItem)
+    QPlainTextEdit, QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsPathItem, QCheckBox)
 
 COLORS = dict(source='#64748b', tipping_point='#137e9d', conveyor='#c67b15',
               cos='#9466bb', opf='#16856a', product_build_lane='#285b9a')
 ORDER = ('source','tipping_point','conveyor','cos','opf','product_build_lane')
+
+
+def compact_sources(graph):
+    """Collapse source detail in the view only; retain every permitted route."""
+    nodes = graph.get('nodes', [])
+    sources = {n['node_id']: n for n in nodes if n['node_type'] == 'source'}
+    if len(sources) <= 20:
+        return graph
+    destinations = defaultdict(set)
+    for edge in graph['edges']:
+        destinations[edge['source_node_id']].add(edge['target_node_id'])
+    groups = defaultdict(list)
+    for key, node in sources.items():
+        kind = str(node['properties'].get('source_type') or 'source')
+        groups[(kind, tuple(sorted(destinations[key])))].append(node)
+    rendered, mapping = [n for n in nodes if n['node_id'] not in sources], {}
+    for (kind, targets), members in groups.items():
+        key = 'view:sources:' + hashlib.sha1(repr((kind, targets)).encode()).hexdigest()[:12]
+        rendered.append(dict(node_id=key, node_type='source', label=f'{len(members)} {kind.replace("_", " ")} sources',
+            properties=dict(members=[n['node_id'] for n in members], sources=[n.get('label', n['node_id']) for n in members])))
+        mapping.update({n['node_id']: key for n in members})
+    edges, seen = [], {}
+    for edge in graph['edges']:
+        source = mapping.get(edge['source_node_id'], edge['source_node_id'])
+        identity = (source, edge['target_node_id'])
+        if identity not in seen:
+            merged = {**edge, 'source_node_id': source, 'member_edge_ids': []}
+            edges.append(merged)
+            seen[identity] = merged
+        seen[identity]['member_edge_ids'].append(edge['edge_id'])
+    return {**graph, 'nodes': rendered, 'edges': edges}
 
 
 class FlowNode(QGraphicsItem):
@@ -106,6 +138,9 @@ class MaterialFlowGraph(QWidget):
         controls = QHBoxLayout()
         controls.addWidget(QLabel('Drag nodes to arrange. Ctrl + wheel to zoom. Select a node for details.'))
         controls.addStretch()
+        self.show_sources = QCheckBox('Show all sources')
+        self.show_sources.toggled.connect(lambda: self.set_graph(self.graph, self.positions()) if self.graph else None)
+        controls.addWidget(self.show_sources)
         fit = QPushButton('Fit'); fit.clicked.connect(self.fit_graph); controls.addWidget(fit)
         arrange = QPushButton('Auto arrange'); arrange.clicked.connect(self.auto_arrange); controls.addWidget(arrange)
         layout.addLayout(controls)
@@ -140,8 +175,9 @@ class MaterialFlowGraph(QWidget):
         self.nodes = {}
         self.scene.clear()
         self.graph = deepcopy(graph)
+        display = self.graph if self.show_sources.isChecked() else compact_sources(self.graph)
         grouped = defaultdict(list)
-        for node in self.graph['nodes']:
+        for node in display['nodes']:
             item = FlowNode(node,self)
             self.nodes[node['node_id']] = item
             self.scene.addItem(item)
@@ -151,18 +187,19 @@ class MaterialFlowGraph(QWidget):
                 pos = (positions or {}).get(item.node['node_id'])
                 valid = isinstance(pos,(list,tuple)) and len(pos)==2 and all(isinstance(v,(float,int)) and math.isfinite(v) and abs(v)<1e7 for v in pos)
                 item.setPos(*pos if valid else (column*270,row*125))
-        for edge in self.graph['edges']:
+        for edge in display['edges']:
             if edge['source_node_id'] not in self.nodes or edge['target_node_id'] not in self.nodes:
                 raise ValueError('Material-flow edge refers to an unavailable node.')
             item = FlowEdge(edge,self.nodes[edge['source_node_id']],self.nodes[edge['target_node_id']])
             self.edges.append(item); self.scene.addItem(item)
         self._building = False
         self.update_edges()
-        self.caption.setText(f"{len(self.nodes):,} nodes · {len(self.edges):,} permitted routes. Layout changes do not change planning rules.")
+        self.caption.setText(f"{len(self.nodes):,} displayed nodes · {len(self.graph['edges']):,} permitted routes. "
+                             'Use Show all sources for individual stockpiles and grade blocks.')
         self.fit_graph()
 
     def positions(self):
-        return {key:[item.pos().x(),item.pos().y()] for key,item in self.nodes.items()}
+        return {key:[item.pos().x(),item.pos().y()] for key,item in self.nodes.items() if not key.startswith('view:')}
 
     def auto_arrange(self):
         self.set_graph(self.graph)
@@ -196,9 +233,13 @@ class MaterialFlowGraph(QWidget):
         active_edges = set(active_edges)
         for key,item in self.nodes.items():
             values = (annotations or {}).get(key,{})
+            members = item.node.get('properties', {}).get('members')
+            if members:
+                active = sum(bool((annotations or {}).get(member, {}).get('active')) for member in members)
+                values = dict(active=bool(active), text=f'{active} of {len(members)} sources active')
             item.metrics = values.get('text','')
             item.active = bool(values.get('active'))
             item.update()
         for item in self.edges:
-            item.active = item.edge['edge_id'] in active_edges
+            item.active = bool(active_edges.intersection(item.edge.get('member_edge_ids', [item.edge['edge_id']])))
             item.update_path()

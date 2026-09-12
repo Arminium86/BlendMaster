@@ -9,15 +9,46 @@ from pathlib import Path
 import unittest
 import pandas as pd
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt, QModelIndex
 from classes.MaterialFlowTopology import planning_topology
 from classes.MaterialFlowReview import FlowTimeline,saved_flow_data,saved_flow_plans
 from classes.TransportPlanning import initialise_transport
 from classes.TransportReports import write_transport_reports
 from GUI.MaterialFlowGraph import MaterialFlowGraph
-from GUI.MaterialFlowResults import MaterialFlowResults
+from GUI.MaterialFlowResults import FrameModel, MaterialFlowResults
 from tests.test_multi_feed_integration import make_multi_case
 from tests.test_multi_lane_optimizer import settings
 from tests.test_conveyor_cos import configuration
+
+class FrameModelTests(unittest.TestCase):
+    def test_headers_outside_frame_return_none(self):
+        for frame in (pd.DataFrame(), pd.DataFrame(columns=['source']),
+                      pd.DataFrame({'source': ['SP1']})):
+            model = FrameModel(frame)
+            for orientation, count in ((Qt.Horizontal, len(frame.columns)), (Qt.Vertical, len(frame))):
+                for section in (-1, count, count + 1):
+                    for role in (Qt.DisplayRole, Qt.ToolTipRole):
+                        with self.subTest(shape=frame.shape, orientation=orientation, section=section, role=role):
+                            self.assertIsNone(model.headerData(section, orientation, role))
+
+    def test_valid_headers_keep_labels_and_tooltips_even_without_rows(self):
+        model = FrameModel(pd.DataFrame(columns=['steady_state_duration', 'source_name']))
+        self.assertEqual(model.headerData(0, Qt.Horizontal), 'Duration (h)')
+        self.assertEqual(model.headerData(0, Qt.Horizontal, Qt.ToolTipRole), 'steady_state_duration')
+        self.assertEqual(model.headerData(1, Qt.Horizontal), 'Source Name')
+        self.assertIsNone(model.headerData(0, Qt.Horizontal, Qt.DecorationRole))
+        populated = FrameModel(pd.DataFrame({'source': ['SP1']}))
+        self.assertEqual(populated.headerData(0, Qt.Vertical), '1')
+
+    def test_cells_outside_frame_return_none(self):
+        for frame in (pd.DataFrame(), pd.DataFrame({'source': ['SP1']})):
+            model = FrameModel(frame)
+            for index in (QModelIndex(), model.createIndex(len(frame), 0),
+                          model.createIndex(0, len(frame.columns))):
+                for role in (Qt.DisplayRole, Qt.ToolTipRole):
+                    with self.subTest(shape=frame.shape, row=index.row(), column=index.column(), role=role):
+                        self.assertIsNone(model.data(index, role))
+        self.assertEqual(model.data(model.index(0, 0)), 'SP1')
 
 class MaterialFlowViewTests(unittest.TestCase):
     @classmethod
@@ -88,3 +119,23 @@ class MaterialFlowViewTests(unittest.TestCase):
             saved=saved_flow_data('Primary',path)
             self.assertEqual(saved['graph'],json.loads(json.dumps(case.material_flow_topology,default=str)))
             self.assertAlmostEqual(saved['frames']['transport_product_arrivals'].source_arrival_wmt.sum(),500)
+
+    def test_clearing_populated_results_leaves_safe_empty_models(self):
+        view = MaterialFlowResults()
+        self.addCleanup(view.deleteLater)
+        view.resize(900, 600)
+        view.show()
+        self.addCleanup(view.close)
+        for table in view.tables.values():
+            table.setModel(FrameModel(pd.DataFrame({'source': ['SP1']}), table))
+        view.cos_profile.setModel(FrameModel(pd.DataFrame({'source': ['SP1']}), view.cos_profile))
+        self.app.processEvents()
+        view.load_plan()
+        self.app.processEvents()
+        self.assertEqual(view.time_label.text(), 'No saved plan is available.')
+        for table in (*view.tables.values(), view.cos_profile):
+            model = table.model()
+            self.assertEqual((model.rowCount(), model.columnCount()), (0, 0))
+            self.assertIsNone(model.headerData(0, Qt.Horizontal))
+            self.assertIsNone(model.headerData(0, Qt.Horizontal, Qt.ToolTipRole))
+            self.assertFalse(table.grab().isNull())

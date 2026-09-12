@@ -644,6 +644,8 @@ class ManualBlendPlanner:
                     "blend_ID": blend_id,
                     "start_datetime": current,
                     "end_datetime": blend_end,
+                    "payload_start_datetime": sequence_row.get('_payload_start', current),
+                    "payload_end_datetime": sequence_row.get('_payload_end', blend_end),
                     "steady_state_duration": duration_hours,
                     "period": self._period_number(current),
                     "trigger": "Optimised decision point",
@@ -825,9 +827,17 @@ class ManualBlendPlanner:
         ).fillna(0)
 
         for state in states:
+            payload_start = pd.to_datetime(state.get('payload_start_datetime'), errors='coerce')
+            payload_end = pd.to_datetime(state.get('payload_end_datetime'), errors='coerce')
+            # Only a saved sub-second display truncation may shift this window.
+            # Edited or unrelated metadata cannot widen truck availability.
+            if (pd.isna(payload_start) or pd.isna(payload_end) or payload_end <= payload_start
+                    or abs((payload_start - state['start_datetime']).total_seconds()) >= 1.001
+                    or abs((payload_end - state['end_datetime']).total_seconds()) >= 1.001):
+                payload_start, payload_end = state['start_datetime'], state['end_datetime']
             rows = payloads[
-                (payloads["_delivered"] >= state["start_datetime"])
-                & (payloads["_delivered"] < state["end_datetime"])
+                (payloads["_delivered"] >= payload_start)
+                & (payloads["_delivered"] < payload_end)
             ]
             if rows.empty:
                 continue
@@ -1583,6 +1593,18 @@ class ManualBlendPlanner:
                 report[column] = [by_state.get(row["steady_state_number"], {}).get(
                     f"{row['source_type']}|{str(row['source']).upper()}", {}).get(column)
                     for _, row in report.iterrows()]
+        from classes.EquipmentLimits import require_equipment_limits
+        from classes.PlanReadiness import physical_violations
+        physical_errors = physical_violations(report) if not report.empty else []
+        if physical_errors:
+            raise ManualBlendPlanningError('; '.join(physical_errors))
+        limits = self.calendar_inputs.get('_equipment_limits', self.calendar_inputs)
+        try:
+            require_equipment_limits(report, limits, self.periods,
+                                     mode=(limits.get('multi_feed_configuration') or {}).get('mode', 'single'),
+                                     require_limits=bool(self.calendar_inputs.get('_require_equipment_limits', False)))
+        except ValueError as exc:
+            raise ManualBlendPlanningError(str(exc)) from exc
         return report
 
     def state_summaries(self, states, allocations=None):

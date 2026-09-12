@@ -473,7 +473,7 @@ class ScreenFlowStateTests(unittest.TestCase):
 
         UserInputs.handle_guidance_schedules_submit(window)
 
-        table_event = ("table", {}, {})
+        table_event = ("table", {"STALE": False}, {"STALE": False})
         self.assertLess(events.index("apply_brands"), events.index(table_event))
         self.assertLess(events.index("routes"), events.index(table_event))
         self.assertIn(table_event, events)
@@ -518,7 +518,7 @@ class ScreenFlowStateTests(unittest.TestCase):
             save_to_database=Mock()
         )
 
-        UserInputs.handle_data_streams_submit(window)
+        UserInputs.finish_data_stream_submission(window)
 
         window.opening_stockpile_inventories.save_to_database.assert_not_called()
         window.open_database_view.assert_called_once_with(navigate=True)
@@ -1885,12 +1885,14 @@ class ScreenFlowStateTests(unittest.TestCase):
         "GUI.InitialiseGUI.HaulCycleDataHandler.get_distinct_crusher_names",
         return_value=["Crusher A", "Crusher B"],
     )
-    def test_imported_cycles_start_with_all_crusher_nodes_unselected(
+    def test_imported_cycles_retain_existing_crusher_selections(
         self, _get_crushers
     ):
         window = UserInputs.__new__(UserInputs)
         window.haul_cycle_file_path = FakeLineEdit("Cycles.csv")
         window.stockpile_data = None
+        window.selected_haul_cycle_crusher_names = lambda: ["Crusher A"]
+        window.haul_cycle_crusher_mapping_choice = ["Crusher A"]
         selected_calls = []
         mapping_calls = []
         window.set_haul_cycle_crusher_items = (
@@ -1908,11 +1910,11 @@ class ScreenFlowStateTests(unittest.TestCase):
 
         self.assertEqual(
             selected_calls,
-            [(["Crusher A", "Crusher B"], [])],
+            [(["Crusher A", "Crusher B"], ["Crusher A"])],
         )
         self.assertEqual(
             mapping_calls,
-            [(["Crusher A", "Crusher B"], [], False)],
+            [(["Crusher A", "Crusher B"], ["Crusher A"], False)],
         )
 
     def test_database_view_exposes_auto_stockpile_turnover_block(self):

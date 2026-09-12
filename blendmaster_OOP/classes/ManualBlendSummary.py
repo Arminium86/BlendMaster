@@ -147,19 +147,9 @@ class ManualBlendSummary:
             physical_tonnes = pd.to_numeric(
                 stockpiles.get("source_actual_tonnes"), errors="coerce"
             ).fillna(0.0)
-            if {
-                "source_blend_ratio", "crusher_actual_tonnes"
-            }.issubset(stockpiles.columns):
-                contributions = (
-                    pd.to_numeric(
-                        stockpiles["source_blend_ratio"], errors="coerce"
-                    ).fillna(0.0)
-                    * pd.to_numeric(
-                        stockpiles["crusher_actual_tonnes"], errors="coerce"
-                    ).fillna(0.0)
-                )
-            else:
-                contributions = physical_tonnes
+            # Some legacy reports stored source_blend_ratio at whole-percent
+            # precision. Physical tonnes retain the actual executed recipe.
+            contributions = physical_tonnes
             source_names = stockpiles.get(
                 "parent_stockpile", pd.Series("", index=stockpiles.index)
             ).fillna("").astype(str).str.strip()

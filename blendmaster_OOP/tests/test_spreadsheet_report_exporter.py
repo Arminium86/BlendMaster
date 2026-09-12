@@ -39,7 +39,7 @@ class SpreadsheetReportExporterTests(unittest.TestCase):
             self.assertIn("2026-08-13 09:45:12", summary["A2"].value)
             self.assertEqual(summary["B5"].value, 1234.6)
             self.assertEqual(summary["B5"].number_format, "#,##0")
-            self.assertEqual(summary["C5"].number_format, "0.00")
+            self.assertEqual(summary["C5"].number_format, "0.0000")
             self.assertEqual(summary.freeze_panes, "A5")
             self.assertEqual(summary.auto_filter.ref, "A4:C5")
 

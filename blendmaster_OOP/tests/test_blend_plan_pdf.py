@@ -29,7 +29,7 @@ class BlendPlanPDFTests(unittest.TestCase):
         )
         self.assertEqual(
             BlendPlanPDF._format_value("source_grade_fe", 58.126),
-            "58.13",
+            "58.1260",
         )
 
     def test_blend_detail_sources_are_split_without_splitting_quantities(self):

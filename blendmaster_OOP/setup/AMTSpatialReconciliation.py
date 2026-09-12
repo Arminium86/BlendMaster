@@ -63,10 +63,12 @@ def zeroed_amt_footprints(snapshot):
     return {str(name).strip().upper() for name, rows in (snapshot or {}).items() if amt_zeroing_outcome(rows)}
 
 
-def guard_amt_snapshot(snapshot):
+def guard_amt_snapshot(snapshot, *, copy_unchanged=True):
     """Repair zeroed saved snapshots from raw evidence without a warehouse read."""
     from setup.AMTGradeBlockLineage import align_amt_grade_block_lineage
-    result = deepcopy(snapshot or {})
+    # UI callers already own their active snapshot. Only repaired footprints
+    # need a detached copy there; library callers retain full copy semantics.
+    result = deepcopy(snapshot or {}) if copy_unchanged else dict(snapshot or {})
     aliases = {"RAW_WMT": "raw_wmt", "FINAL_WMT": "balance",
                "INVENTORY_BALANCE_WMT": "inventory_balance_wmt",
                "UNATTRIBUTED_MOVEMENT_WMT": "unattributed_movement_wmt",
@@ -75,6 +77,8 @@ def guard_amt_snapshot(snapshot):
     for footprint, rows in result.items():
         if not amt_zeroing_outcome(rows):
             continue
+        if not copy_unchanged:
+            rows = deepcopy(rows)
         for row in rows:
             row.setdefault("FOOTPRINT", footprint)
             for target, alias in aliases.items():

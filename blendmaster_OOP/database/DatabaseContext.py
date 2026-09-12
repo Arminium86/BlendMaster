@@ -1,9 +1,12 @@
 import os
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 
 _lock = threading.RLock()
 _database_path = os.path.abspath("blendmaster.db")
+_task_database = ContextVar('blendmaster_task_database', default=None)
 
 
 def set_database_path(path):
@@ -19,5 +22,18 @@ def set_database_path(path):
 
 
 def get_database_path():
+    scoped = _task_database.get()
+    if scoped is not None:
+        return scoped
     with _lock:
         return _database_path
+
+
+@contextmanager
+def database_scope(path):
+    """Pin worker I/O to its originating scenario without changing the UI's DB."""
+    token = _task_database.set(os.path.abspath(os.fspath(path)))
+    try:
+        yield get_database_path()
+    finally:
+        _task_database.reset(token)

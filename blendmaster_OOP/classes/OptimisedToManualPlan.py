@@ -108,10 +108,31 @@ class OptimisedToManualPlan:
                 "The optimized result does not contain any positive crusher "
                 "feed to prepopulate."
             )
-        return data.sort_values(
+        data = data.sort_values(
             ["_start", "_end", "steady_state_number"],
             kind="stable",
         ).reset_index(drop=True)
+        # Legacy database timestamps truncate fractional seconds, while the
+        # optimiser retains precise duration. Restore contiguous boundaries
+        # before physical tonnes are divided by elapsed time in manual replay.
+        previous_end, previous_recorded_end = None, None
+        for _, group in data.groupby(self._state_group_columns(data), sort=False, dropna=False):
+            first = group.iloc[0]
+            start, end = first['_start'], first['_end']
+            duration = self._number(first.get('steady_state_duration'))
+            wall_hours = (end - start).total_seconds() / 3600
+            if duration > 0 and abs(duration - wall_hours) * 3600 < 1.001:
+                precise_start = previous_end if previous_recorded_end == start else start
+                precise_end = (precise_start + pd.Timedelta(hours=duration)).round('us')
+                if abs((precise_end - end).total_seconds()) < 1.001:
+                    if abs((precise_end - end).total_seconds()) < .00001:
+                        precise_end = end
+                    data.loc[group.index, '_start'] = precise_start
+                    data.loc[group.index, '_end'] = precise_end
+                    previous_end, previous_recorded_end = precise_end, end
+                    continue
+            previous_end, previous_recorded_end = end, end
+        return data
 
     @staticmethod
     def _state_group_columns(data):
@@ -377,8 +398,12 @@ class OptimisedToManualPlan:
                 "_fixed_steady_state": True,
                 "_crusher_rate": state_crusher_rate,
                 "_period_name": period_name,
-                "_exact_start": start.strftime("%Y-%m-%d %H:%M:%S"),
-                "_exact_end": end.strftime("%Y-%m-%d %H:%M:%S"),
+                "_exact_start": start.isoformat(sep=' '),
+                "_exact_end": end.isoformat(sep=' '),
+                # Payload delivery timestamps use the saved decision windows.
+                # Preserve their assignment when restoring sub-second duration.
+                "_payload_start": pd.Timestamp(first['start_datetime']).isoformat(sep=' '),
+                "_payload_end": pd.Timestamp(first['end_datetime']).isoformat(sep=' '),
                 # Preserve the optimiser's physical and mapped quantity
                 # totals.  A configured crusher/product field is not
                 # necessarily ROM WMT, so duration * crusher rate cannot be

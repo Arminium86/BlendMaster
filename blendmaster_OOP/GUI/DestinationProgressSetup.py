@@ -59,7 +59,8 @@ class EvidenceModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.columns)
 
     def data(self, index, role=Qt.DisplayRole):
-        if index.isValid() and role in (Qt.DisplayRole, Qt.ToolTipRole):
+        if (index.isValid() and 0 <= index.row() < len(self.records)
+                and 0 <= index.column() < len(self.columns) and role in (Qt.DisplayRole, Qt.ToolTipRole)):
             key = self.columns[index.column()][0]
             value = self.records[index.row()].get(key)
             if role == Qt.DisplayRole and key in ("wmt", "planned_wmt") and isinstance(value, (int, float)):
@@ -68,6 +69,8 @@ class EvidenceModel(QAbstractTableModel):
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and not 0 <= section < len(self.columns):
+            return None
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
             return self.columns[section][1]
         if role == Qt.SizeHintRole and orientation == Qt.Horizontal:
@@ -259,6 +262,27 @@ class DestinationProgressSetup(QWidget):
         return deepcopy(dict(order={k: order[k] for k in ("schema_version", "signature", "source_file", "orders", "areas", "supplemental_lanes") if k in order},
                              activity=self.snapshot["activity"], settings=self._settings,
                              context_signature=self.snapshot["context_signature"], scenario_id=scenario_id, site=site, start=start))
+
+    def prepared_state(self, *, copy_evidence=True):
+        """Persist accepted evidence so a handoff does not require another query."""
+        if not self.snapshot or self._pending:
+            return None
+        saved = dict(context_key=self._context_key,
+            lookback_hours=self._settings['lookback_hours'], snapshot=self.snapshot)
+        return deepcopy(saved) if copy_evidence else saved
+
+    def restore_prepared_state(self, saved):
+        """Reuse evidence only for the same site, time, files, mapping and lookback."""
+        saved = saved or {}
+        snapshot = saved.get('snapshot') or {}
+        if (self._pending or saved.get('context_key') != self._context_key
+                or saved.get('lookback_hours') != self._settings['lookback_hours']
+                or snapshot.get('context_signature') != self._settings['context_signature']
+                or not snapshot.get('order')):
+            return False
+        self.snapshot = deepcopy(snapshot)
+        self.render()
+        return True
 
     def update_activity_window(self):
         context = getattr(self, "_context", {})

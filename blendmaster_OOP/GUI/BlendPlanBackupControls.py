@@ -35,7 +35,11 @@ class BlendPlanBackupControls(QWidget):
         self.table.setRowCount(len(choices))
         for index, (point, names) in enumerate(choices.items()):
             self.table.setItem(index, 0, QTableWidgetItem(point))
-            combo = QComboBox()
+            combo = QComboBox(self.table)
+            # Create the popup before inserting rows. Windows accessibility
+            # can request it during rowsInserted, while Qt holds the model's
+            # connection mutex; lazy creation there deadlocks QComboBox.
+            combo.view()
             combo.addItem("Select backup…" if names else "No eligible fallback", "")
             for name in names:
                 combo.addItem(name, name)

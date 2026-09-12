@@ -112,18 +112,28 @@ class NativeDeliveryQA(unittest.TestCase):
                 result.tabs.setCurrentWidget(result.cos_profile)
                 result.grab().save(str(OUTPUT/'cos_profile.png'))
                 view=host.operational_blend_plans
+                from GUI.WorkflowDependencies import input_revision
+                host.optimisation_input_revision = input_revision(host)
                 view.backup_context=lambda data,sheets:({'A':['SP_A'],'B':['SP_B']},host.operational_plan_backups['Primary'])
                 view.run_async=None
                 view.refresh()
                 view.resize(1600,800)
                 view.grab().save(str(OUTPUT/'point_blend_plans.png'))
+                def wait_for_file_work():
+                    deadline = time.monotonic() + 30
+                    while host.background_tasks and time.monotonic() < deadline:
+                        self.app.processEvents()
+                        time.sleep(.01)
+                    self.assertFalse(host.background_tasks, 'Report export did not finish')
                 with patch('GUI.OperationalBlendPlanView.QFileDialog.getSaveFileName',return_value=(str(OUTPUT/'all_points.xlsx'),'Excel')):
                     view.export_xlsx()
+                    wait_for_file_work()
                 self.assertTrue((OUTPUT/'all_points.xlsx').exists(),view.status.text())
                 for point in ('A','B'):
                     view.points.setCurrentText(point)
                     with patch('GUI.OperationalBlendPlanView.QFileDialog.getSaveFileName',return_value=(str(OUTPUT/(point+'.pdf')),'PDF')):
                         view.export_pdf()
+                        wait_for_file_work()
                     self.assertTrue((OUTPUT/(point+'.pdf')).exists(),view.status.text())
                     subprocess.run(['pdftoppm','-scale-to','1500','-png',str(OUTPUT/(point+'.pdf')),str(OUTPUT/point)],check=True,capture_output=True)
                 # Save through the real project action; the generated file is confined
@@ -131,6 +141,13 @@ class NativeDeliveryQA(unittest.TestCase):
                 os.chdir(folder)
                 with patch('GUI.InitialiseGUI.QMessageBox.critical') as failure:
                     self.assertTrue(host.save_state(show_success=False),str(failure.call_args))
+                    from time import monotonic, sleep
+                    deadline = monotonic() + 30
+                    while host.background_tasks and monotonic() < deadline:
+                        self.app.processEvents()
+                        sleep(.01)
+                    self.assertFalse(host.background_tasks, 'Project save did not finish')
+                    self.assertFalse(host._project_save_pending)
                 project=next(folder.glob('*.prj'))
                 with project.open('rb') as stream:
                     saved=pickle.load(stream)

@@ -10,7 +10,7 @@ from classes.PrimaryDestinationAllocator import AUDIT_COLUMNS
 from classes.DestinationPlanReport import PUBLICATION_COLUMNS
 from classes.TransportReports import read_transport_reports
 
-def input_audit_snapshot(state):
+def input_audit_snapshot(state, *, copy_evidence=True):
     audits = []
     for source,row in (state.get('updated_stockpile_data') or state.get('stockpile_data') or {}).items():
         if row.get('reconciliation'):
@@ -24,7 +24,8 @@ def input_audit_snapshot(state):
             if audit:
                 outcomes[footprint] = audit
     outcomes.update({name:audit for name,audit in (state.get('AMT_footprint_exclusions') or {}).items() if audit.get('excluded')})
-    return dict(reconciliation=deepcopy(audits),amt=deepcopy(list(outcomes.values())))
+    result = dict(reconciliation=audits, amt=list(outcomes.values()))
+    return deepcopy(result) if copy_evidence else result
 
 def factor_rows(audits):
     result,seen = [],set()
@@ -108,6 +109,10 @@ def cross_feature_sheets(plan_id='Primary',database_name=None,product_report=Non
         labels = dict(destination_allocation_runs='Destination Activity',destination_primary_assignments='Destination Assignments',
                       destination_capacity_ledger='Destination Build Order',destination_capacity_balances='Destination Balances',
                       material_destination_plan='Material Destination Plan')
+        if 'plan_readiness' in tables:
+            result.append(('Plan Readiness', pd.read_sql_query(
+                'SELECT "check",status,detail FROM plan_readiness WHERE plan_id=? AND plan_type=?',
+                connection, params=(plan_id, plan_type))))
         for table in dict.fromkeys([*AUDIT_COLUMNS,*PUBLICATION_COLUMNS,'material_destination_plan']):
             if table not in tables:
                 continue
@@ -123,4 +128,13 @@ def cross_feature_sheets(plan_id='Primary',database_name=None,product_report=Non
     if plan_type=='optimised':
         result += [(name.replace('transport_','').replace('_',' ').title(),frame)
                    for name,frame in read_transport_reports(path,plan_id).items()]
+    sections = dict(result)
+    expected = ('Reconciliation Factors', 'Global Factors', 'AMT Outcomes', 'Plan Notes',
+                'Destination Activity', 'Destination Assignments', 'Product Quality', 'Cumulative Quality')
+    coverage = [dict(plan_id=plan_id, plan_type=plan_type, section=name,
+                     status=('missing saved snapshot' if name not in sections else
+                             'empty saved section' if sections[name].empty else 'available'),
+                     rows=len(sections[name]) if name in sections else 0)
+                for name in dict.fromkeys([*expected, *sections])]
+    result.insert(0, ('Audit Coverage', pd.DataFrame(coverage)))
     return result

@@ -130,13 +130,16 @@ class CrossFeatureIntegrationTests(unittest.TestCase):
 
     def test_each_point_layout_preserves_physical_recipes_and_combined_arrivals(self):
         case=self.case(combined=True)
-        plans=split_blend_plans(case.results)
+        legacy = case.results.assign(source_blend_ratio=.99)
+        plans=split_blend_plans(legacy)
+        self.assertTrue(legacy.source_blend_ratio.eq(.99).all())
         self.assertEqual(list(plans),['A','B'])
         self.assertEqual({key:value['report'].source_actual_tonnes.sum() for key,value in plans.items()},{'A':300,'B':300})
         for point,plan in plans.items():
             self.assertEqual(set(plan['report'].tipping_point),{point})
             self.assertTrue((plan['ratios']['Original ratio (%)']==plan['ratios']['Operational ratio (%)']).all())
             self.assertTrue((plan['ratios'].groupby('Steady state')['Operational ratio (%)'].sum()==100).all())
+            self.assertTrue(plan['report'].groupby('steady_state_number').source_blend_ratio.sum().sub(1).abs().lt(1e-9).all())
         report=case.build_product_build_report()
         self.assertEqual(report.groupby('contributing_opf').source_actual_tonnes_to_build.sum().to_dict(),{'OPF1':200,'OPF2':300})
 
@@ -259,12 +262,23 @@ class CrossFeatureIntegrationTests(unittest.TestCase):
         case=self.case()
         plans=split_blend_plans(case.results)
         view=OperationalBlendPlanView()
+        from classes.MultiFeedCalendar import calendar_key
+        view.site_host=SimpleNamespace(planning_period_count=lambda:3,
+            start_time_choice=pd.Timestamp(case.results.start_datetime.min()).to_pydatetime(),
+            calendar_inputs={calendar_key(point,field):dict.fromkeys(('Preplan','Period_1','Period_2','Period_3'),1000)
+                             for point in ('A','B') for field in ('crusher_rate','max_reclaim_rate')},
+            multi_feed_configuration=settings(), product_targets=[], last_run_outcome={})
         self.addCleanup(view.deleteLater)
+        from GUI.WorkflowDependencies import input_revision
+        view.site_host.optimisation_input_revision = input_revision(view.site_host)
         with TemporaryDirectory() as folder:
             path=Path(folder)
             write_transport_reports(case,path/'state.db')
+            previous_database=get_database_path()
+            set_database_path(str(path/'state.db'))
+            self.addCleanup(set_database_path,previous_database)
             sheets=cross_feature_sheets('Primary',path/'state.db',case.build_product_build_report())
-            view.set_data({'plan_id':'Primary'},plans,sheets)
+            view.set_data({'plan_id':'Primary','frames':{'feed':case.results}},plans,sheets)
             self.assertEqual(view.points.count(),2)
             self.assertGreater(view.tables['Sequence'].model().rowCount(),0)
             view.choices={'A':['SP_A'],'B':['SP_B']}

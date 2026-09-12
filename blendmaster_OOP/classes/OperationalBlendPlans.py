@@ -10,12 +10,21 @@ DETAIL_COLUMNS = ['start_datetime','end_datetime','steady_state_number','blend_I
                   'source_grade_mn','crusher_rate_output','selected_grade_stream']
 
 
-def split_blend_plans(report,stockpile_data=None):
+def split_blend_plans(report,stockpile_data=None,default_point=None):
     if report is None or report.empty:
         return {}
     report = report.copy()
-    if 'tipping_point' not in report:
-        report['tipping_point'] = 'Crusher'
+    if 'tipping_point' not in report or report['tipping_point'].fillna('').astype(str).str.strip().eq('').any():
+        if not default_point:
+            candidates = report.get('crusher', pd.Series(dtype=str)).dropna().astype(str).unique()
+            default_point = candidates[0] if len(candidates) == 1 else None
+        if not default_point:
+            raise ValueError('This saved plan has no tipping-point identity. Select its configured site model before exporting.')
+        if 'tipping_point' not in report:
+            report['tipping_point'] = str(default_point)
+        else:
+            missing = report['tipping_point'].fillna('').astype(str).str.strip().eq('')
+            report.loc[missing, 'tipping_point'] = str(default_point)
     result = {}
     for point,rows in report.groupby('tipping_point',sort=False,dropna=False):
         rows = rows[pd.to_numeric(rows.source_actual_tonnes,errors='coerce').fillna(0)>0].copy()
@@ -32,6 +41,9 @@ def split_blend_plans(report,stockpile_data=None):
             total = physical.sum()
             for (index,row),tonnes in zip(state.iterrows(),physical):
                 actual = tonnes/total if total else 0
+                # Detail, summary and ratio sheets must use the same physical
+                # recipe even when legacy saved ratios were display-rounded.
+                rows.loc[index, 'source_blend_ratio'] = actual
                 original = pd.to_numeric(row.get('original_source_feed_ratio',actual),errors='coerce')
                 original = actual if pd.isna(original) else float(original)
                 rounded = pd.to_numeric(row.get('rounded_source_feed_ratio',actual),errors='coerce')

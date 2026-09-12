@@ -41,6 +41,15 @@ def route(destination, minutes, origin="PRIMARY"):
 
 
 class DestinationRuleTests(unittest.TestCase):
+    def test_repeated_guidance_dates_reuse_parsing_without_changing_timezone(self):
+        from classes.DestinationRules import timestamp, _text_timestamp
+        _text_timestamp.cache_clear()
+        self.assertEqual(timestamp('18/08/2026 07:30'), timestamp('2026-08-18T07:30:00+08:00'))
+        before = _text_timestamp.cache_info().hits
+        timestamp('18/08/2026 07:30')
+        self.assertEqual(_text_timestamp.cache_info().hits, before + 1)
+        self.assertIsNone(timestamp('invalid'))
+
     def test_each_confirmed_level_and_blast_is_deliberately_ignored(self):
         candidates = [block(), block(flitch="106"), block(bench="110"), block(stage="2"), block(material="BA01")]
         for level in range(5):

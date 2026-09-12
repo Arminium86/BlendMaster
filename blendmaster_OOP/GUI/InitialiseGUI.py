@@ -8,6 +8,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineDownloadItem
 from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QDoubleValidator, QIntValidator, QPixmap, QKeySequence, QPainter, QPen
 from PyQt5.QtCore import Qt, QUrl, QDateTime, QDir, QObject, pyqtSignal, pyqtSlot, QThread, QTimer, QSize, QEvent
+from GUI.WorkflowMessages import WorkflowMessageBox as QMessageBox
+from GUI.WorkflowPermissions import control_available
+from GUI.WorkflowSnapshot import copy_active_state
+from GUI.WorkflowDependencies import manual_recipe_inputs
 from setup.OpeningStockpileInventories import (
     INVENTORY_ADDITIONAL_FIELDS,
     INVENTORY_INTEGER_FIELDS,
@@ -69,7 +73,7 @@ from GUI.SoftGradePreferenceControls import SoftGradePreferenceControls
 from GUI.ProductQualityReview import ProductQualityReview
 from classes.SoftProductGrades import objective_config
 from database.SQLiteDatabase import DatabaseManager
-from database.DatabaseContext import get_database_path, set_database_path
+from database.DatabaseContext import get_database_path, set_database_path, database_scope
 from setup.PlanningPlanTargets import PlanningPlanTargets
 from setup.DataStreamReconciliation import DataStreamReconciliation
 from setup.ReconciliationHistory import ReconciliationHistory
@@ -141,6 +145,9 @@ from classes.ProductTargets import (
     product_targets_identifier, product_targets_value,
 )
 from classes.ProductQualityLimits import QUALITY_FIELDS, quality_fields, quality_label, quality_order_note, QUALITY_DIRECTION_NOTE
+from classes.TargetRefresh import merge_refreshed_targets
+from classes.SiteWorkflow import normalise_role, require_action
+from GUI.WorkflowNavigation import WorkflowNavigation
 from classes.ProductTargetModes import (
     target_mode_fields, TARGET_MODE_LABELS, SOFT_MODE_NOTICE, require_supported_target_modes,
 )
@@ -398,7 +405,10 @@ def close_bootloader_splash():
     except Exception:
         pass
 
-class UserInputs(QMainWindow):
+from GUI.WorkflowPermissions import protect_support_operations, validate_planner_site_controls
+
+@protect_support_operations
+class UserInputs(WorkflowNavigation, QMainWindow):
     @property
     def product_build_settings(self):
         """Compatibility alias for integrations using the former Python name."""
@@ -436,6 +446,7 @@ class UserInputs(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
 
         self.initialise_all_variables()
+        self.access_role = normalise_role(os.environ.get("BLENDMASTER_ROLE", "planner"))
         self.clear_sqlite_session_data()
 
         # Placeholder for OpeningStockpileInventories
@@ -826,6 +837,10 @@ class UserInputs(QMainWindow):
 
         # Initialise main optimisation program
         self.run_program = Run(self)
+        from GUI.WorkflowWorkspace import install
+        install(self)
+        from GUI.SiteAutomation import install as install_site_automation
+        install_site_automation(self)
 
     def new_navigation_tabs(self):
         tabs = QTabWidget()
@@ -850,189 +865,14 @@ class UserInputs(QMainWindow):
         layout.addWidget(child_tabs)
         return container
 
-    def setup_navigation(self):
-        """Create the task-oriented parent/sub-tab navigation hierarchy."""
-        self.page_locations = {}
-        self.page_widgets = {}
-        self.navigation_parents = {}
-        self.navigation_tab_widgets = [self.tabs]
-        self.tabs.currentChanged.connect(
-            lambda index: self.handle_navigation_tab_changed(self.tabs, index)
-        )
 
-        self.setup_tabs = self.new_navigation_tabs()
-        self.setup_navigation_page = self.navigation_container(self.setup_tabs)
-        self.tabs.addTab(self.setup_navigation_page, "Setup")
-        self.navigation_parents[self.setup_tabs] = (
-            self.tabs,
-            self.setup_navigation_page,
-        )
 
-        self.workspace_tabs = self.new_navigation_tabs()
-        self.workspace_navigation_page = self.navigation_container(self.workspace_tabs)
-        self.tabs.addTab(self.workspace_navigation_page, "Workspace")
-        self.navigation_parents[self.workspace_tabs] = (
-            self.tabs,
-            self.workspace_navigation_page,
-        )
 
-        self.auto_blend_tabs = self.new_navigation_tabs()
-        self.auto_blend_navigation_page = self.navigation_container(self.auto_blend_tabs)
-        self.workspace_tabs.addTab(
-            self.auto_blend_navigation_page,
-            "Auto Blending Dashboard",
-        )
-        self.navigation_parents[self.auto_blend_tabs] = (
-            self.workspace_tabs,
-            self.auto_blend_navigation_page,
-        )
 
-        self.manual_blend_tabs = self.new_navigation_tabs()
-        self.manual_blend_navigation_page = self.navigation_container(self.manual_blend_tabs)
-        self.workspace_tabs.addTab(
-            self.manual_blend_navigation_page,
-            "Manual Blending Dashboard",
-        )
-        self.navigation_parents[self.manual_blend_tabs] = (
-            self.workspace_tabs,
-            self.manual_blend_navigation_page,
-        )
 
-        self.results_tabs = self.new_navigation_tabs()
-        self.results_navigation_page = self.navigation_container(self.results_tabs)
-        self.tabs.addTab(self.results_navigation_page, "Results")
-        self.navigation_parents[self.results_tabs] = (
-            self.tabs,
-            self.results_navigation_page,
-        )
 
-        self.grade_profiles_tabs = self.new_navigation_tabs()
-        self.grade_profiles_navigation_page = self.navigation_container(
-            self.grade_profiles_tabs
-        )
-        self.results_tabs.addTab(
-            self.grade_profiles_navigation_page,
-            "Grade Profiles",
-        )
-        self.navigation_parents[self.grade_profiles_tabs] = (
-            self.results_tabs,
-            self.grade_profiles_navigation_page,
-        )
 
-        # Old project files stored enabled state by the former flat-tab index.
-        self.legacy_tab_page_ids = [
-            "site_configuration",
-            "stockpile_inventories",
-            "amt_stockpiles",
-            "solver_configuration",
-            "product_targets",
-            "calendar",
-            "decision_point",
-            "optimised_blend_sequence",
-            "build_depletion_profiles",
-            "optimised_grade_profiles",
-            "reports",
-            "setup_blends",
-            "blend_sequence",
-            "manual_grade_profiles",
-            "agent",
-        ]
 
-    def register_page(self, page_id, tab_widget, page, caption, position=None):
-        if position is None:
-            tab_index = tab_widget.addTab(page, caption)
-        else:
-            tab_index = tab_widget.insertTab(position, page, caption)
-            for existing_page_id, (existing_tabs, existing_index) in list(
-                self.page_locations.items()
-            ):
-                if existing_tabs is tab_widget and existing_index >= tab_index:
-                    self.page_locations[existing_page_id] = (
-                        existing_tabs,
-                        existing_index + 1,
-                    )
-        self.page_locations[page_id] = (tab_widget, tab_index)
-        self.page_widgets[page_id] = page
-        return page_id
-
-    def set_page_enabled(self, page_id, enabled):
-        page_id = product_targets_identifier(page_id)
-        location = self.page_locations.get(page_id)
-        if location is None:
-            return
-        tab_widget, tab_index = location
-        tab_widget.setTabEnabled(tab_index, bool(enabled))
-
-    def is_page_enabled(self, page_id):
-        page_id = product_targets_identifier(page_id)
-        location = self.page_locations.get(page_id)
-        if location is None:
-            return False
-        tab_widget, tab_index = location
-        return tab_widget.isTabEnabled(tab_index)
-
-    def show_page(self, page_id, force=False):
-        page_id = product_targets_identifier(page_id)
-        if (
-            getattr(
-                self,
-                "project_load_keep_site_configuration_visible",
-                False,
-            )
-            and page_id != "site_configuration"
-            and not force
-        ):
-            return
-        location = self.page_locations.get(page_id)
-        if location is None:
-            return
-        page = self.page_widgets[page_id]
-        tab_widget, tab_index = location
-        current_tabs = tab_widget
-        while current_tabs in self.navigation_parents:
-            parent_tabs, parent_page = self.navigation_parents[current_tabs]
-            parent_tabs.setCurrentWidget(parent_page)
-            current_tabs = parent_tabs
-        tab_widget.setCurrentIndex(tab_index)
-        page.setFocus(Qt.OtherFocusReason)
-
-    def capture_page_states(self):
-        return {
-            page_id: self.is_page_enabled(page_id)
-            for page_id in self.page_locations
-        }
-
-    def normalized_page_states(self, raw_states):
-        if not isinstance(raw_states, dict):
-            return {}
-        raw_states = migrate_product_target_state({"tab_states": raw_states})["tab_states"]
-        normalized = {}
-        for key, enabled in raw_states.items():
-            if key in self.page_locations:
-                normalized[key] = bool(enabled)
-                continue
-            try:
-                legacy_index = int(key)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= legacy_index < len(self.legacy_tab_page_ids):
-                page_id = product_targets_identifier(self.legacy_tab_page_ids[legacy_index])
-                if page_id not in raw_states:
-                    normalized[page_id] = bool(enabled)
-        return normalized
-
-    def restore_page_states(self, raw_states):
-        states = self.normalized_page_states(raw_states)
-        for page_id, enabled in states.items():
-            self.set_page_enabled(page_id, enabled)
-        return states
-
-    def handle_navigation_tab_changed(self, tab_widget, tab_index):
-        page = tab_widget.widget(tab_index)
-        for page_id, registered_page in self.page_widgets.items():
-            if page is registered_page:
-                self.handle_main_tab_changed(page_id)
-                return
 
     def setup_scenario_toolbar(self):
         self.scenario_toolbar = QFrame()
@@ -1169,16 +1009,13 @@ class UserInputs(QMainWindow):
             getattr(self, "product_targets", []) or [],
             database_path,
         )
-        site_context = self.active_site_context()
         DatabaseManager().ensure_material_destination_plan_reports(
             database_name=database_path,
             crusher_destination=(
                 getattr(self, "aps_direct_tip_crusher_choice", None)
-                or site_context.get("crusher")
+                or getattr(self, "crusher_input_choice", None)
             ),
-            direct_tip_movement_rules=site_context.get(
-                "direct_tip_movement_rules", []
-            ),
+            direct_tip_movement_rules=getattr(self, "direct_tip_movement_rules", []),
         )
 
     @staticmethod
@@ -1291,10 +1128,10 @@ class UserInputs(QMainWindow):
 
     def capture_calendar_table_inputs(self):
         if getattr(self, "calendar_table_refresh_pending", False):
-            return copy.deepcopy(self.calendar_inputs or {})
+            return copy_active_state(self, self.calendar_inputs or {})
         if not hasattr(self, "main_table") or not hasattr(self, "calendar_headers"):
-            return copy.deepcopy(self.calendar_inputs or {})
-        captured = copy.deepcopy(self.calendar_inputs or {})
+            return copy_active_state(self, self.calendar_inputs or {})
+        captured = copy_active_state(self, self.calendar_inputs or {})
         headers = self.calendar_headers[1:]
         hierarchy = []
         for row_idx in range(self.main_table.rowCount()):
@@ -1383,7 +1220,7 @@ class UserInputs(QMainWindow):
     def active_site_context(self):
         from classes.CrossFeatureReports import input_audit_snapshot
         return {
-            'reporting_input_audits': input_audit_snapshot(vars(self)),
+            'reporting_input_audits': input_audit_snapshot(vars(self), copy_evidence=False),
             "multi_feed_settings": self.current_multi_feed_configuration(),
             "transport_settings": copy.deepcopy(getattr(self, "transport_settings", {})),
             "transport_opening_history": copy.deepcopy(getattr(self, "transport_opening_history", {})),
@@ -1403,9 +1240,7 @@ class UserInputs(QMainWindow):
             "direct_tip_movement_rules": copy.deepcopy(getattr(
                 self, "direct_tip_movement_rules", []
             )),
-            "aps_destination_guidance": copy.deepcopy(getattr(
-                self, "aps_destination_guidance", {}
-            )),
+            "aps_destination_guidance": getattr(self, "aps_destination_guidance", {}),
             "aps_stockpile_timing_guidance": copy.deepcopy(getattr(
                 self, "aps_stockpile_timing_guidance", {}
             )),
@@ -1471,8 +1306,8 @@ class UserInputs(QMainWindow):
                 self, "historical_recon_warnings", []
             )),
             "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
-            "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
-            "opf_reconciliation_inputs": copy.deepcopy(vars(self).get("opf_reconciliation_inputs") or {}),
+            "reconciliation_inputs": vars(self).get("reconciliation_inputs") or {},
+            "opf_reconciliation_inputs": vars(self).get("opf_reconciliation_inputs") or {},
             "data_stream_planning_categories": copy.deepcopy(getattr(
                 self, "data_stream_planning_categories", {}
             )),
@@ -1557,11 +1392,19 @@ class UserInputs(QMainWindow):
         if hasattr(self, "product_build_table"):
             self.store_product_targets(show_errors=False)
         calendar_inputs = (
-            copy.deepcopy(getattr(self, "calendar_inputs", {}) or {})
+            copy_active_state(self, getattr(self, "calendar_inputs", {}) or {})
             if restoring_project
             else self.capture_calendar_table_inputs()
         )
+        if not restoring_project and isinstance(vars(self).get('destination_progress'), DestinationProgressSetup):
+            if vars(self).get('_destination_restore_pending'):
+                self.sync_destination_progress_context()
+            self.destination_progress_snapshot = self.destination_progress.prepared_state(copy_evidence=False)
         fields = [
+            "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
+            "destination_progress_snapshot",
+            "site_workflow_contract", "site_workflow_runs", "guidance_import_audit",
+            "target_refresh_changes", "reconciliation_applied_revision",
             "hub_input_choice", "mine_input_choice", "opf_input_choice",
             "crusher_input_choice", "selected_site_crushers",
             "crusher_ratio_mode_choice", "crusher_contribution_ratio_choice",
@@ -1643,12 +1486,9 @@ class UserInputs(QMainWindow):
                  "planning_semantics_version": PLANNING_SEMANTICS_VERSION,
                  "flow_layout_schema_version": FLOW_LAYOUT_SCHEMA_VERSION}
         for field in fields:
-            value = getattr(self, field, None)
-            # The active scenario owns the current AMT payload and scenario
-            # activation deep-copies it before use. Sharing that active payload
-            # here avoids copying hundreds of raw and derived columns merely to
-            # move between setup pages.
-            state[field] = value if field == "AMT_stockpile_data" else copy.deepcopy(value)
+            value = (manual_recipe_inputs(self) if field == "blend_config_table_inputs"
+                     else getattr(self, field, None))
+            state[field] = copy_active_state(self, value)
         state["database_path"] = self.scenario_database_path(self.active_scenario_id)
         state["decision_table_snapshot"] = self.capture_table_snapshot(
             getattr(self, "decision_table", None)
@@ -1741,7 +1581,8 @@ class UserInputs(QMainWindow):
 
         if tab_index == getattr(self, "destination_progress_tab_index", None):
             self.sync_destination_progress_context()
-            QTimer.singleShot(0, self.destination_progress.request_refresh)
+            if self.destination_progress.snapshot is None:
+                QTimer.singleShot(0, self.destination_progress.request_refresh)
 
         if tab_index == getattr(self,'decision_levers_tab_index',None) and hasattr(self,'transport_rehandle_controls'):
             self.transport_rehandle_controls.set_settings(getattr(self,'transport_settings',{}))
@@ -1812,6 +1653,11 @@ class UserInputs(QMainWindow):
         self.scenario_switch_in_progress = True
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
+            for name in ("site_workflow_contract", "site_workflow_runs", "guidance_import_audit", "target_refresh_changes",
+                         "optimisation_input_revision", "manual_input_revision", "last_run_outcome", "reconciliation_applied_revision",
+                         "_haul_cycle_routes_revision", "destination_progress_snapshot"):
+                setattr(self, name, copy.deepcopy(state.get(name)))
+            self._destination_restore_pending = True
             self.reset_workflow_tabs_for_scenario()
             self.is_project_loaded = False
             refreshed_current_time = bool(
@@ -1897,7 +1743,7 @@ class UserInputs(QMainWindow):
                 state.get("selected_two_wp_product_crushers")
                 or state.get("two_wp_product_crushers") or []
             )
-            self.blend_mode_choice = state.get("blend_mode_choice") or 1
+            self.blend_mode_choice = 1
             self.product_brand_labels_choice = self.parse_product_brand_labels(
                 state.get("product_brand_labels_choice") or self.default_product_brand_labels()
             )
@@ -3406,12 +3252,14 @@ class UserInputs(QMainWindow):
     def destination_rule_context(self):
         return dict(
             areas=inventory_areas(getattr(self, "stockpile_data", None) or {}),
-            haul_routes=copy.deepcopy(getattr(self, "destination_haul_routes", {}) or {}))
+            haul_routes=getattr(self, "destination_haul_routes", {}) or {})
 
     def destination_allocation_context(self):
         panel = vars(self).get("destination_progress")
         if panel is None:
             return None
+        if vars(self).get('_destination_restore_pending'):
+            self.sync_destination_progress_context()
         context = panel.allocation_context(
             scenario_id=getattr(self, "active_scenario_id", "active"),
             site=getattr(self, "mine_input_choice", None),
@@ -3435,6 +3283,10 @@ class UserInputs(QMainWindow):
             state=getattr(self, "destination_progress_settings", None),
             supplemental_path=getattr(self, "file_path_24hr_choice", "") if int(getattr(self, "expit_mode_choice", 1) or 1) == 2 else "",
             selected_agents=getattr(self, "selected_24hr_expit_agents", []) or [])
+        if (vars(self).get('_destination_restore_pending')
+                and not vars(self).get('project_load_restore_in_progress')):
+            self.destination_progress.restore_prepared_state(vars(self).get('destination_progress_snapshot'))
+            self._destination_restore_pending = False
 
     def store_destination_order_audit(self, snapshot):
         try:
@@ -4071,7 +3923,8 @@ class UserInputs(QMainWindow):
                 self.product_brand_options() + extra_brands
             )
             self.product_brand_labels_input.setText(", ".join(self.product_brand_labels_choice))
-            self.product_targets = settings
+            self.product_targets, self.target_refresh_changes = merge_refreshed_targets(
+                getattr(self, 'product_targets', []), settings)
             self.populate_product_build_table()
             self.store_product_targets(show_errors=False)
             self.save_active_scenario_state()
@@ -4087,7 +3940,7 @@ class UserInputs(QMainWindow):
                 self,
                 "BlendMaster",
                 f"Loaded {len(settings)} product build target(s) for "
-                f"{mine} / {opf} / {crusher}.{scenario_note}",
+                f"{mine} / {opf} / {crusher}.{scenario_note}\nExisting target policies and overrides were retained. Review Refresh Changes for details.",
             )
 
         self.run_background_task(
@@ -4850,6 +4703,7 @@ class UserInputs(QMainWindow):
             self.current_site_start_time()
             if set_time_mode else datetime.now()
         )
+        reconciliation_time = vars(self).get('_workflow_run_start') or reconciliation_time
         context = copy.deepcopy(self.active_site_context())
         two_wp_path = str(getattr(self, "file_path_choice", "") or "")
         selected_agents = list(
@@ -4870,6 +4724,8 @@ class UserInputs(QMainWindow):
             "context": context,
             "two_wp": two_wp_path,
             "agents": selected_agents,
+            "reevaluate": bool(getattr(self, "reevaluate_aps_direct_tip_choice", False)),
+            "crushers": copy.deepcopy(getattr(self, "aps_direct_tip_crusher_choice", [])),
             "cache_signature": cache_signature,
             "cache_allowed": UserInputs.expit_input_cache_allowed(
                 self,
@@ -4894,8 +4750,8 @@ class UserInputs(QMainWindow):
                 inputs["start_time"],
                 2,
                 inputs["schedule_path"],
-                getattr(self, "reevaluate_aps_direct_tip_choice", False),
-                getattr(self, "aps_direct_tip_crusher_choice", []),
+                inputs.get("reevaluate", False),
+                inputs.get("crushers", []),
                 inputs["context"],
                 inputs["two_wp"],
                 inputs["agents"],
@@ -4926,6 +4782,7 @@ class UserInputs(QMainWindow):
             "cache_metadata": _cache_metadata if cache_hit else {},
             "cache_persist": bool(inputs.get("cache_allowed")),
             "start_time": inputs.get("start_time"),
+            "request_context": inputs.get("request_context"),
         }
 
     def refresh_expit_sequence_live(self):
@@ -4933,6 +4790,9 @@ class UserInputs(QMainWindow):
             return
         try:
             inputs = self.expit_sequence_refresh_inputs()
+            inputs['request_context'] = (
+                get_database_path(), getattr(self, 'active_scenario_id', None),
+                self.expit_input_cache_signature())
         except ValueError as exc:
             self.expit_sequence_status_label.setText(str(exc))
             return
@@ -4953,6 +4813,14 @@ class UserInputs(QMainWindow):
     def finish_expit_sequence_live_refresh(self, snapshot):
         self.expit_sequence_refresh_in_progress = False
         self.expit_sequence_refresh_button.setEnabled(True)
+        requested = (snapshot or {}).get('request_context')
+        if requested is not None:
+            current = (get_database_path(), getattr(self, 'active_scenario_id', None),
+                       self.expit_input_cache_signature())
+            if tuple(requested) != current:
+                self.expit_sequence_status_label.setText(
+                    'Inputs changed during refresh. Previous response discarded; refresh the current scenario.')
+                return
         self.expit_sequence_snapshot = snapshot or {}
         if (
             not self.expit_sequence_snapshot.get("cache_hit", False)
@@ -5683,6 +5551,7 @@ class UserInputs(QMainWindow):
         self.database_view_continue_button = QPushButton(
             "Continue to Solver Configuration"
         )
+        self.database_view_continue_button.setVisible(vars(self).get('access_role') != 'planner')
         self.database_view_continue_button.setEnabled(False)
         self.database_view_continue_button.clicked.connect(
             self.continue_from_database_view
@@ -7732,6 +7601,8 @@ class UserInputs(QMainWindow):
         table = self.database_view_table
         fields = self.database_view_headers()
         sources = self.database_view_selected_source_descriptors()
+        declared_kinds = {row['name']: row['kind']
+                          for row in normalize_field_definitions(vars(self).get('field_definitions'))}
         table.setSortingEnabled(False)
         table.clearContents()
         table.setRowCount(len(fields))
@@ -7768,6 +7639,7 @@ class UserInputs(QMainWindow):
                     field,
                     value,
                     vars(self).get("field_definitions"),
+                    declared_kinds=declared_kinds,
                 )
                 item = QTableWidgetItem(display)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -7803,15 +7675,16 @@ class UserInputs(QMainWindow):
         self.apply_database_view_filters()
 
     @staticmethod
-    def database_view_display_value(header, value, field_definitions=None):
+    def database_view_display_value(header, value, field_definitions=None, *, declared_kinds=None):
         """Format audit quantities as sums and weighted values as averages."""
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return ""
         number = numeric(value)
-        declared_kinds = {
-            row["name"]: row["kind"]
-            for row in normalize_field_definitions(field_definitions)
-        }
+        if declared_kinds is None:
+            declared_kinds = {
+                row["name"]: row["kind"]
+                for row in normalize_field_definitions(field_definitions)
+            }
         sum_property = (
             source_property_kind(header, declared_kinds) == "additive"
             or
@@ -7889,7 +7762,11 @@ class UserInputs(QMainWindow):
             self.refresh_database_view()
             return
         self.activate_manual_setup_tab()
-        self.navigate_to_solver_configuration()
+        if vars(self).get('access_role') == 'planner':
+            self.set_page_enabled('product_targets', True)
+            self.show_page('product_targets')
+        else:
+            self.navigate_to_solver_configuration()
 
     def setup_define_fields(self):
         """Create the canonical field contract shared by every source type."""
@@ -9311,6 +9188,8 @@ class UserInputs(QMainWindow):
         )
         self.data_stream_warning_label.hide()
         layout.addWidget(self.data_stream_warning_label)
+        self.grade_reconciliation_widgets = [self.reconciliation_review,
+            factor_label, factor_help, self.recon_factor_table, self.data_stream_warning_label]
 
         button_row = QHBoxLayout()
         self.refresh_data_streams_button = QPushButton("Refresh Snowflake Factors")
@@ -9832,9 +9711,14 @@ class UserInputs(QMainWindow):
         if application is None:
             return [], {}, []
         state, audits, warnings = vars(self), [], []
+        enrichment = (reconciliation_fingerprint(self.AMT_enrichment_request_signature())
+                      if hasattr(self, 'AMT_enrichment_request_signature') else '')
         selected = included_footprints(state.get("updated_stockpile_data"), state.get("AMT_footprint_exclusions"))
         zeroed = zeroed_amt_footprints(state.get("AMT_stockpile_data"))
         def resolve(row, name, kind):
+            prior = row.get('reconciliation') or {}
+            if kind == 'amt' and enrichment and prior.get('enrichment_signature') == enrichment:
+                return copy.deepcopy(prior)
             row = copy.deepcopy(row)
             self.apply_source_reconciliation(application, row, row.get("grade_streams") or {}, name, kind)
             return row["reconciliation"]
@@ -9906,9 +9790,10 @@ class UserInputs(QMainWindow):
         names = ("reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
                  "opf_input_choice", "product_brand_labels_choice", "start_time_choice", "field_mappings",
                  "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "AMT_footprint_exclusions")
-        context = SimpleNamespace(**copy.deepcopy({name: vars(self).get(name) for name in names}))
-        context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
-        context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
+        from GUI.InventoryStreamApplication import InventoryContext, FIELDS
+        names = tuple(dict.fromkeys((*names, *FIELDS)))
+        values = {name: vars(self).get(name) for name in names}
+        application_cache = vars(self).get('_reconciliation_application_cache')
         signature = self.reconciliation_review_signature()
         generation = vars(self).get("_reconciliation_review_generation", 0) + 1
         self._reconciliation_review_generation = generation
@@ -9918,6 +9803,10 @@ class UserInputs(QMainWindow):
         self.reconciliation_review.set_busy(True)
 
         def calculate():
+            context = InventoryContext(UserInputs, copy.deepcopy(values))
+            context._reconciliation_application_cache = application_cache
+            context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
+            context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
             return UserInputs.calculate_reconciliation_review(context), vars(context).get("_reconciliation_application_cache")
 
         def finish(result=None, error=None):
@@ -10236,7 +10125,7 @@ class UserInputs(QMainWindow):
         feed = getattr(self, 'multi_feed_configuration', None) or {}
         if feed.get('mode') == 'combined_opf':
             from classes.CombinedOPFReconciliation import evidence_signature
-            result = dict(factors={}, reconciliation_inputs={}, warnings=[], build_targets={}, target_errors={}, opf_reconciliation_inputs={})
+            result = dict(factors={}, reconciliation_inputs={}, warnings=[], build_targets={}, target_errors={}, opf_reconciliation_inputs={}, refresh_errors=[])
             for opf in dict.fromkeys(p['opf'] for p in feed['tipping_points']):
                 context = SimpleNamespace(**vars(self))
                 context.opf_input_choice = opf
@@ -10250,9 +10139,11 @@ class UserInputs(QMainWindow):
                 result['warnings'].extend(f'{opf}: {warning}' for warning in part['warnings'])
                 result['build_targets'].update(part['build_targets'])
                 result['target_errors'].update(part['target_errors'])
+                result['refresh_errors'].extend(f'{opf}: {error}' for error in part.get('refresh_errors', []))
                 if opf == self.opf_input_choice:
                     result['factors'], result['reconciliation_inputs'] = part['factors'], part['reconciliation_inputs']
             return result
+        refresh_errors = []
         try:
             factors, warnings = self.data_stream_reconciliation.fetch(
                 self.start_time_choice,
@@ -10260,6 +10151,7 @@ class UserInputs(QMainWindow):
                 self.product_brand_labels_choice,
             )
         except Exception as exc:
+            refresh_errors.append(str(exc))
             factors, warnings = self.data_stream_reconciliation.default_factors(
                 self.opf_input_choice,
                 self.product_brand_labels_choice,
@@ -10311,6 +10203,7 @@ class UserInputs(QMainWindow):
             "warnings": warnings,
             "build_targets": build_targets,
             "target_errors": target_errors,
+            "refresh_errors": refresh_errors,
         }
 
     def finish_cached_data_stream_inputs(self, request_signature, result):
@@ -10326,6 +10219,7 @@ class UserInputs(QMainWindow):
         self.finish_data_stream_inputs(copy.deepcopy(result or {}))
 
     def finish_data_stream_inputs(self, result):
+        self.data_stream_refresh_errors = list(result.get('refresh_errors') or [])
         self.opf_reconciliation_inputs = copy.deepcopy(result.get('opf_reconciliation_inputs') or {})
         self.reconciliation_inputs = copy.deepcopy(result.get("reconciliation_inputs") or {})
         self.historical_recon_factors = copy.deepcopy(result.get("factors", {}))
@@ -10383,6 +10277,7 @@ class UserInputs(QMainWindow):
             "warnings": warnings,
             "build_targets": {},
             "target_errors": {},
+            "refresh_errors": [str(error_message)],
         }
         feed = vars(self).get('multi_feed_configuration') or {}
         if feed.get('mode') == 'combined_opf':
@@ -11025,6 +10920,18 @@ class UserInputs(QMainWindow):
             if vars(self).get("_reconciliation_review_signature") != self.reconciliation_review_signature():
                 self.prepare_data_streams()
                 return
+        try:
+            if vars(self).get('access_role') != 'planner':
+                self.capture_data_stream_configuration()
+            self.capture_recon_factor_table()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Data Streams", str(exc))
+            return
+        from GUI.InventoryStreamApplication import apply
+        apply(self, self.finish_data_stream_submission)
+
+    def capture_data_stream_configuration(self):
+        """Support owns stream choices; planner reconciliation uses saved choices."""
         self.selected_data_stream = self.data_stream_selector.currentData() or DEFAULT_STREAM
         self.crusher_tonnes_stream = self.crusher_tonnes_selector.currentData() or "modelled_rom_wmt"
         self.reclaimer_tonnes_stream = self.reclaimer_tonnes_selector.currentData() or "modelled_rom_wmt"
@@ -11033,25 +10940,12 @@ class UserInputs(QMainWindow):
             "rom": self.rom_planning_category_input.text(),
             "product": self.product_planning_category_input.text(),
         })
-        try:
-            self.capture_cb_lump_fines_settings()
-            self.capture_byproduct_build_settings()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Data Streams", str(exc))
-            return
-        try:
-            self.capture_recon_factor_table()
-            self.apply_canonical_field_mappings()
-            self.apply_grade_streams_to_inventory()
-            self.refresh_AMT_enrichment_if_needed(
-                persist=True,
-                refresh_map=True,
-            )
-            if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles():
-                self.prepare_data_streams()
-                return
-        except ValueError as exc:
-            QMessageBox.warning(self, "Data Streams", str(exc))
+        self.capture_cb_lump_fines_settings()
+        self.capture_byproduct_build_settings()
+
+    def finish_data_stream_submission(self):
+        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles():
+            self.prepare_data_streams()
             return
         if self.data_stream_pending_build_targets:
             # Stockpile Inventories has already established and persisted the
@@ -11072,6 +10966,8 @@ class UserInputs(QMainWindow):
                 if opf != self.opf_input_choice:
                     self.data_stream_reconciliation.save_to_database(
                         opf, self.start_time_choice, bundle['factors'], bundle.get('warnings') or [])
+        from GUI.WorkflowDependencies import reconciliation_input_revision
+        self.reconciliation_applied_revision = reconciliation_input_revision(self)
         self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
         # The field schema remains editable after Data Streams. It is common
@@ -11992,120 +11888,34 @@ class UserInputs(QMainWindow):
         dialog_width = min(max(text_width + 110, 360), 900)
         self.progress_dialog.setFixedWidth(dialog_width)
 
-    def run_background_task(
-        self, message, work_fn, on_success, on_error=None,
-        cancel_callback=None, show_progress=True,
-    ):
-        if show_progress:
-            self.show_progress_dialog(message, cancel_callback)
-
-        thread = QThread(self)
-        worker = BackgroundWorker(work_fn)
-        worker.moveToThread(thread)
-        task = (thread, worker)
-        self.background_tasks.append(task)
-
-        def cleanup():
-            try:
-                self.background_tasks.remove(task)
-            except ValueError:
-                pass
-
-        def handle_success(result):
-            if show_progress:
-                self.close_progress_dialog()
-            try:
-                on_success(result)
-            except Exception:
-                self.show_error_popup(traceback.format_exc())
-
-        def handle_error(error_message):
-            if show_progress:
-                self.close_progress_dialog()
-            if on_error:
-                on_error(error_message)
-            else:
-                self.show_error_popup(error_message)
-
-        thread.started.connect(worker.run)
-        worker.finished.connect(handle_success)
-        worker.failed.connect(handle_error)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(cleanup)
-        thread.start()
+    def run_background_task(self, message, work_fn, on_success, on_error=None,
+                            cancel_callback=None, show_progress=True):
+        from GUI.BackgroundTasks import run
+        return run(self, message, work_fn, on_success, on_error, cancel_callback, show_progress)
 
     def browse_file(self):
-        """Browse for the 2WP reference schedule."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select 2WP Mining.csv",
-            "",
-            "APS Mining.csv (*.csv);;All Files (*)",
-        )
-        if file_path:
-            self.file_path.setText(file_path)
-            self.set_two_wp_product_crusher_items([], [])
-            self.load_two_wp_product_crusher_names(False)
-            if hasattr(self, "aps_crusher_input"):
-                self.aps_crusher_input.clear()
-            if hasattr(self, "aps_ratio_crusher_input"):
-                self.aps_ratio_crusher_input.clear()
-            self.direct_tip_grade_block_sources = []
-            self.direct_tip_crusher_destinations = []
-            self.direct_tip_movement_rules = []
-            self.set_direct_tip_movement_options([], [])
-            self.refresh_direct_tip_rule_list()
+        from GUI.GuidanceImports import GuidanceImports
+        if not hasattr(self, "guidance_import_controller"):
+            self.guidance_import_controller = GuidanceImports(self)
+        self.guidance_import_controller.browse("two_wp")
 
     def browse_24hr_file(self):
-        """Browse for the 24HR movement schedule."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select 24HR Mining.csv",
-            "",
-            "APS Mining.csv (*.csv);;All Files (*)",
-        )
-        if file_path:
-            self.set_24hr_mining_path(
-                file_path,
-                reset_agents=True,
-                show_mapping_errors=True,
-            )
+        from GUI.GuidanceImports import GuidanceImports
+        if not hasattr(self, "guidance_import_controller"):
+            self.guidance_import_controller = GuidanceImports(self)
+        self.guidance_import_controller.browse("day_plan")
 
     def browse_two_wp_closing_stocks_file(self):
-        """Browse for the optional explicit 2WP closing-ROM workbook."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select 2WP Closing ROM Stocks.xlsx",
-            "",
-            "Excel Workbooks (*.xlsx);;All Files (*)",
-        )
-        if file_path:
-            self.two_wp_closing_stocks_path.setText(file_path)
+        from GUI.GuidanceImports import GuidanceImports
+        if not hasattr(self, "guidance_import_controller"):
+            self.guidance_import_controller = GuidanceImports(self)
+        self.guidance_import_controller.browse("closing_balance")
 
     def browse_haul_cycle_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select 2WP Haul Infinity Cycles.csv",
-            "",
-            "Haul Infinity Cycles.csv (*.csv);;All Files (*)",
-        )
-        if file_path:
-            self.haul_cycle_file_path.setText(file_path)
-            self.set_haul_cycle_crusher_items([], [])
-            self.set_haul_cycle_crusher_mapping_items(
-                [], [], use_default=False
-            )
-            self.haul_cycle_routes = {}
-            self.destination_haul_routes = {}
-            self.apply_haul_cycle_routes_to_stockpile_data()
-            self.load_haul_cycle_crusher_names(
-                show_messages=False,
-                reset_selection=True,
-            )
+        from GUI.GuidanceImports import GuidanceImports
+        if not hasattr(self, "guidance_import_controller"):
+            self.guidance_import_controller = GuidanceImports(self)
+        self.guidance_import_controller.browse("haul_cycles")
 
     def selected_haul_cycle_crusher_names(self):
         if not hasattr(self, "haul_cycle_crusher_input"):
@@ -12149,7 +11959,7 @@ class UserInputs(QMainWindow):
     def load_haul_cycle_crusher_names(
         self,
         show_messages=True,
-        reset_selection=True,
+        reset_selection=False,
     ):
         file_path = self.haul_cycle_file_path.text().strip()
         if not file_path:
@@ -12186,7 +11996,7 @@ class UserInputs(QMainWindow):
         self.set_haul_cycle_crusher_mapping_items(
             crusher_names,
             selected_mapping,
-            use_default=not reset_selection,
+            use_default=False,
         )
         self.refresh_haul_cycle_routes(show_errors=True)
         if getattr(self, "stockpile_data", None):
@@ -12286,12 +12096,17 @@ class UserInputs(QMainWindow):
             self.available_haul_cycle_crusher_names()
         )
         self.selected_haul_cycle_crushers = selected
-        if not file_path or not selected:
+        if not file_path:
             self.haul_cycle_routes = {}
             self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
             return False
         try:
+            from classes.GuidanceImport import file_revision
+            revision = (file_revision(file_path), tuple(sorted(selected)))
+            if revision == vars(self).get('_haul_cycle_routes_revision'):
+                self.apply_haul_cycle_routes_to_stockpile_data()
+                return True
             self.haul_cycle_routes = (
                 HaulCycleDataHandler.build_nearest_crusher_routes(
                     file_path,
@@ -12299,6 +12114,7 @@ class UserInputs(QMainWindow):
                 )
             )
             self.destination_haul_routes = HaulCycleDataHandler.build_destination_routes(file_path)
+            self._haul_cycle_routes_revision = revision
         except Exception as exc:
             self.haul_cycle_routes = {}
             self.destination_haul_routes = {}
@@ -12410,14 +12226,14 @@ class UserInputs(QMainWindow):
         retained_selection = [
             name for name in previous_selection if name in agent_names
         ]
-        selected_agents = retained_selection or agent_names
+        selected_agents = retained_selection
         self.set_24hr_expit_agent_items(agent_names, selected_agents)
         if agent_names:
             QMessageBox.information(
                 self,
                 "BlendMaster",
                 f"Found {len(agent_names)} expit dig circuit(s). "
-                "All circuits are selected by default; deselect any circuits to exclude.",
+                "Existing matching selections are retained; select any additional circuits to include.",
             )
         else:
             QMessageBox.information(
@@ -12556,7 +12372,7 @@ class UserInputs(QMainWindow):
             return
         previous = self.selected_two_wp_product_crusher_names()
         retained = [name for name in previous if name in names]
-        selected = retained or names
+        selected = retained
         self.set_two_wp_product_crusher_items(names, selected)
         self.available_two_wp_product_crushers = names
         self.selected_two_wp_product_crushers = selected
@@ -12713,7 +12529,7 @@ class UserInputs(QMainWindow):
         selected = set(self.selected_site_crushers)
         old.update(mode=mode, tipping_points=points,
             rehandle_rules=[r for r in old.get('rehandle_rules', []) if r['tipping_point'] in selected] if points else [],
-            route_reclaim_rates={})
+            route_reclaim_rates={})  # Retired route editor: Calendar owns point reclaim limits.
         self.multi_feed_configuration = multi_feed_settings(old)
         self.calendar_table_refresh_pending = True
         if hasattr(self, 'multi_feed_setup'):
@@ -12902,7 +12718,6 @@ class UserInputs(QMainWindow):
     def aps_guidance_input_signature(self):
         signature = {
             "cache_version": APS_GUIDANCE_CACHE_VERSION,
-            "evidence_settings": settings_signature(vars(self), evidence=True),
             "destination_guidance_version": (
                 ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
             ),
@@ -13351,11 +13166,12 @@ class UserInputs(QMainWindow):
             if self.time_mode_choice == 2
             else datetime.now()
         )
+        self.start_time_choice = vars(self).get('_workflow_run_start') or self.start_time_choice
         self.planning_period_count_choice = (
             self.planning_period_count_input.value()
         )
         self.expit_mode_choice = (
-            self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+            self.expit_mode.currentIndex() + 1 if control_available(self.expit_mode) else 1
         )
         self.expit_completion_tolerance_pct = float(
             self.expit_completion_tolerance_input.value()
@@ -13388,7 +13204,7 @@ class UserInputs(QMainWindow):
         )
         if self.haul_cycle_file_path_choice:
             self.refresh_haul_cycle_routes(show_errors=False)
-        self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+        self.blend_mode_choice = 1
         self.product_brand_labels_choice = self.parse_product_brand_labels(
             self.product_brand_labels_input.text()
         )
@@ -13415,7 +13231,7 @@ class UserInputs(QMainWindow):
         self.capture_site_ratio_and_movement_controls()
         self.expit_mode_choice = (
             self.expit_mode.currentIndex() + 1
-            if self.expit_mode.isEnabled()
+            if control_available(self.expit_mode)
             else 1
         )
         self.expit_completion_tolerance_pct = float(
@@ -13581,6 +13397,11 @@ class UserInputs(QMainWindow):
         if restoring_project:
             self.restore_site_configuration_controls()
         else:
+            try:
+                validate_planner_site_controls(self)
+            except PermissionError as exc:
+                QMessageBox.warning(self, "Site Configuration", str(exc))
+                return
             self.capture_site_configuration_controls()
             valid, validation_message = self.validate_site_configuration_constraints()
             if not valid:
@@ -13789,14 +13610,16 @@ class UserInputs(QMainWindow):
         current_crusher = selected_crushers[0]
         self.crusher_input_choice = current_crusher
         multiple = (getattr(self, 'multi_feed_configuration', None) or {}).get('mode', 'single') != 'single'
-        self.product_targets = copy.deepcopy([b for point in selected_crushers for b in (build_targets.get(point) or [])]
-                                            if multiple else build_targets.get(current_crusher) or [])
+        imported_targets = ([b for point in selected_crushers for b in (build_targets.get(point) or [])]
+                            if multiple else build_targets.get(current_crusher) or [])
+        self.product_targets, self.target_refresh_changes = merge_refreshed_targets(
+            getattr(self, 'product_targets', []), imported_targets)
         self.populate_product_build_table()
-        self.saved_blends_for_schedule = []
-        self.stored_blend_sequence_table_for_gantt = []
-        self.stored_blend_sequence_table_for_gantt_default = []
-        self.reset_workflow_tabs_for_scenario()
+        # Refreshing evidence is not permission to discard a manual plan or its
+        # target policy. Existing results remain historical until recalculated.
+        self.scenario_report_refresh_pending = True
         if reset_database:
+            self.reset_workflow_tabs_for_scenario()
             DatabaseManager.clear_all_tables(get_database_path())
             self.seed_active_scenario_database(force=True)
         current_state = self.capture_scenario_state()
@@ -13858,23 +13681,15 @@ class UserInputs(QMainWindow):
             )
             for field in identity_fields
         }
-        same_calendar_context = all(
+        same_site_context = all(
             str(context_identity[field] or "").strip().upper()
             == str(current_identity[field] or "").strip().upper()
             for field in identity_fields
-        ) and PeriodManager.normalize_period_count(
-            calendar_context.get(
-                "planning_period_count",
-                previous_scenario.get(
-                    "planning_period_count_choice",
-                    self.planning_period_count(),
-                ),
-            )
-        ) == self.planning_period_count()
+        )
         preserve_calendar_configuration = bool(
             fresh_site_configuration
             and getattr(self, "calendar_inputs", None)
-            and same_calendar_context
+            and same_site_context
         )
         preserved_use_selection = copy.deepcopy(
             getattr(self, "project_load_saved_stockpile_use_column", {}) or {}
@@ -13884,7 +13699,12 @@ class UserInputs(QMainWindow):
         )
         preserved_amt_exclusions = normalize_amt_exclusions(
             vars(self).get("AMT_footprint_exclusions")
-        ) if restoring_project or same_calendar_context else {}
+        ) if restoring_project or same_site_context else {}
+        persistent_fields = ('product_targets', 'saved_blends_for_schedule',
+            'stored_blend_sequence_table_for_gantt', 'stored_blend_sequence_table_for_gantt_default',
+            'manual_plan_states', 'manual_direct_tip_allocations', 'AMT_chunk_settings',
+            'stockpile_data_use_column', 'stockpile_data_AMT_column')
+        preserved_model_inputs = {key: copy.deepcopy(getattr(self, key, None)) for key in persistent_fields} if same_site_context else {}
         if fresh_site_configuration:
             build_targets = stockpile_data.get("build_targets") or {}
             target_errors = stockpile_data.get("target_errors") or {}
@@ -13942,6 +13762,11 @@ class UserInputs(QMainWindow):
             self.opening_stockpile_inventories.save_to_database(
                 self.stockpile_data
             )
+        for key, value in preserved_model_inputs.items():
+            if value is not None:
+                setattr(self, key, value)
+        if preserved_model_inputs:
+            self.plan_readiness_stale = True
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()
         # Project restore must hydrate Data Streams before capturing the active
@@ -14007,8 +13832,9 @@ class UserInputs(QMainWindow):
         else:
             self.set_page_enabled(self.guidance_schedules_tab_index, True)
             self.set_page_enabled(self.stockpile_tab_index, True)
-            self.apply_canonical_field_mappings()
-            self.apply_grade_streams_to_inventory(allow_pending=True)
+            if fresh_site_configuration or not vars(self).pop('_project_load_fields_prepared', False):
+                self.apply_canonical_field_mappings()
+                self.apply_grade_streams_to_inventory(allow_pending=True)
         self.validate_form()
 
         if restoring_project and getattr(
@@ -14094,18 +13920,8 @@ class UserInputs(QMainWindow):
             self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
-        # Changing a planned tipping-point on Guidance can cause the live table
-        # refresh above to seed an all-false default before 2WP brands have been
-        # applied.  Guidance submission is the authoritative point at which
-        # both inputs are available, so discard those provisional checkbox
-        # values and derive the defaults again.  Any manual edits happen on the
-        # Stockpile Inventories step after this point.
-        self.stockpile_data_use_column = {}
-        self.stockpile_data_AMT_column = {}
-
-        # Rebuild only after guidance has been applied.  With no prior user
-        # choices this derives the default Use selection from both 2WP brand
-        # guidance and the nearest planned tipping-point crusher.
+        # Retain explicit inventory selections when guidance is refreshed.
+        # setup_stockpile_table derives defaults only for genuinely new rows.
         self.setup_stockpile_table()
         self.save_active_scenario_state()
         self.set_page_enabled(self.stockpile_tab_index, True)
@@ -15080,7 +14896,7 @@ class UserInputs(QMainWindow):
             row.update(quality_fields(setting, validate=False))
             row.update(target_mode_fields(setting))
             for key, value in setting.items():
-                if str(key).startswith("planning_") or key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio"}:
+                if str(key).startswith("planning_") or key in {"opf", "crusher", "cbfl_campaign", "crusher_contribution_ratio", "_imported_target_values"}:
                     row[key] = copy.deepcopy(value)
             normalized.append(row)
         return normalized
@@ -16452,7 +16268,11 @@ class UserInputs(QMainWindow):
         if not isinstance(loaded_state, dict):
             raise ValueError("Agent project state must be a dictionary.")
 
-        loaded_state = copy.deepcopy(migrate_product_target_state(loaded_state))
+        # Normalisation replaces named settings. Raw AMT evidence and database
+        # snapshots can be very large and are not mutated by this operation.
+        loaded_state = dict(migrate_product_target_state(loaded_state))
+        if loaded_state.get('calendar_inputs') is not None:
+            loaded_state['calendar_inputs'] = dict(loaded_state['calendar_inputs'])
         site_config = loaded_state.pop("site_configuration", None)
         if isinstance(site_config, dict):
             self.merge_agent_site_configuration_into_state(loaded_state, site_config)
@@ -17713,7 +17533,13 @@ class UserInputs(QMainWindow):
             self.setup_AMT_stockpile_table()
             self.populate_define_fields_table()
             self.set_page_enabled(self.define_fields_tab_index, True)
-            self.show_page(self.define_fields_tab_index, force=True)
+            if vars(self).get('access_role') == 'planner':
+                self.set_page_enabled('grade_reconciliation', True)
+                if not getattr(self, 'project_load_restore_in_progress', False):
+                    self.show_page('grade_reconciliation', force=True)
+                    self.prepare_data_streams()
+            else:
+                self.show_page(self.define_fields_tab_index, force=True)
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -17800,6 +17626,18 @@ class UserInputs(QMainWindow):
         self.setup_blends_tab()
         self.set_page_enabled(self.blend_config_tab_index, True)
 
+    def restore_manual_sequence_view(self):
+        """Hydrate saved manual controls without requiring another submission."""
+        if not getattr(self, "saved_blends_for_schedule", None):
+            return
+        previous = self.is_project_loaded
+        self.is_project_loaded = True
+        try:
+            self.setup_sequence_tab()
+            self.populate_blend_sequence_table_if_project_is_loaded()
+        finally:
+            self.is_project_loaded = previous
+
     def fetch_optimised_blend_report(self, plan_id=None):
         plan_id = plan_id or (
             getattr(self, "manual_plan_selector", None).currentText()
@@ -17854,6 +17692,7 @@ class UserInputs(QMainWindow):
             connection.close()
 
     MANUAL_PLAN_STATE_FIELDS = (
+        "manual_input_revision",
         "blend_plan_backup_destinations",
         "blend_config_table_inputs",
         "saved_blends_for_schedule",
@@ -17876,7 +17715,9 @@ class UserInputs(QMainWindow):
             or "Primary"
         )
         self.manual_plan_states[plan_id] = {
-            field: copy.deepcopy(getattr(self, field, None))
+            field: copy.deepcopy(
+                manual_recipe_inputs(self) if field == "blend_config_table_inputs"
+                else getattr(self, field, None))
             for field in self.MANUAL_PLAN_STATE_FIELDS
         }
 
@@ -17963,6 +17804,7 @@ class UserInputs(QMainWindow):
         )
 
     def reset_manual_blending_plan_state(self):
+        self.manual_input_revision = None
         self.blend_config_table_inputs = {}
         self.blend_data_from_config_table_inputs = {}
         self.saved_blends_for_schedule = []
@@ -18195,6 +18037,9 @@ class UserInputs(QMainWindow):
         self.manual_direct_tip_allocations = allocations
         self.manual_steady_states = states
         self.manual_blend_report = report
+        if vars(self).get('access_role') is not None:
+            from GUI.WorkflowDependencies import manual_revision
+            self.manual_input_revision = manual_revision(self)
         self.manual_physical_balance_history = copy.deepcopy(
             getattr(planner, "physical_balance_history", [])
         )
@@ -18237,6 +18082,9 @@ class UserInputs(QMainWindow):
         self.set_page_enabled(self.blend_sequence_tab_index, True)
         self.set_page_enabled(self.grade_profile_tab_index, True)
         self.refresh_sqlite_reports()
+        if vars(self).get('access_role') is not None:
+            from GUI.WorkflowDependencies import manual_revision
+            self.manual_input_revision = manual_revision(self)
         self.save_active_scenario_state()
 
         if not automatic:
@@ -18836,7 +18684,7 @@ class UserInputs(QMainWindow):
         # lightweight non-window objects used by reconciliation tests.
         state = vars(self)
         payload = {
-            "planning_settings": settings_signature(state),
+            "planning_settings": settings_signature(state, evidence=True),
             "reconciliation": reconciliation_fingerprint({
                 "tonnage_recon_version": AMT_TONNAGE_RECON_VERSION,
                 "excluded_footprints": sorted(self.excluded_amt_footprints()),
@@ -19207,11 +19055,10 @@ class UserInputs(QMainWindow):
             )
         if not compatible:
             return False
-        self.AMT_stockpile_data = guard_amt_snapshot(self.included_AMT_snapshot(self.AMT_stockpile_data))
+        self.AMT_stockpile_data = guard_amt_snapshot(self.included_AMT_snapshot(self.AMT_stockpile_data), copy_unchanged=False)
         self.prune_zeroed_amt_chunks()
-        self.opening_stockpile_inventories.save_AMT_to_database(
-            self.AMT_stockpile_data
-        )
+        if vars(self).pop('_prepared_amt_database_path', None) != get_database_path():
+            self.opening_stockpile_inventories.save_AMT_to_database(self.AMT_stockpile_data)
         return True
 
     def finish_AMT_stockpile_table_from_fetch(
@@ -19277,7 +19124,7 @@ class UserInputs(QMainWindow):
     ):
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_data = compact_amt_stockpile_data(
-            guard_amt_snapshot(self.included_AMT_snapshot(AMT_stockpile_data))
+            guard_amt_snapshot(self.included_AMT_snapshot(AMT_stockpile_data), copy_unchanged=False)
         )
         self.prune_zeroed_amt_chunks()
         zeroed = zeroed_amt_footprints(self.AMT_stockpile_data)
@@ -19291,8 +19138,9 @@ class UserInputs(QMainWindow):
                 )
             else:
                 self.opening_stockpile_inventories.clear_AMT_stockpile_database()
+        new_map = vars(self).get('draw_AMT_map') is None
         self.start_dash_AMT_map_thread()
-        if not reuse_prepared or refresh_prepared_map:
+        if new_map or not reuse_prepared or refresh_prepared_map:
             self.refresh_AMT_map_data_from_database()
 
         # Excluded footprints stay visible here to allow restoration.
@@ -19407,9 +19255,11 @@ class UserInputs(QMainWindow):
                     or provenance.get("internal_recon_inventory_stockpile")
                     or ""
                 )
-                lineage_summary, product_coverage_summary = self.amt_lineage_summary(
-                    footprint_rows
-                )
+                prepared_summary = (vars(self).get('_amt_lineage_display') or {}).get(stockpile_name)
+                if prepared_summary and prepared_summary[0] == id(footprint_rows) and prepared_summary[1] == self.opf_input_choice:
+                    lineage_summary, product_coverage_summary = prepared_summary[2]
+                else:
+                    lineage_summary, product_coverage_summary = self.amt_lineage_summary(footprint_rows)
                 for caption, summary in (
                     ("Grade-block Lineage", lineage_summary),
                     ("Modelled Product Coverage", product_coverage_summary),
@@ -19567,22 +19417,41 @@ class UserInputs(QMainWindow):
         labels = {"fe": "Fe", "si": "SiO₂", "al": "Al₂O₃", "p": "P", "mn": "Mn"}
         product_coverage = []
         source_prefix = f"MODELLED_{slot.upper()}"
+        source_names = {"si": "SIO2", "al": "AL2O3"}
+        coverage_rows = []
+        for row in rows:
+            row = row or {}
+            tonnes = numeric(row.get("FINAL_WMT")) or 0.0
+            if tonnes <= 0:
+                continue
+            percentages = {analyte: numeric(row.get(
+                f"{source_prefix}_{source_names.get(analyte, analyte.upper())}_COVERAGE_PCT"
+            )) for analyte in ANALYTES}
+            if any(value is None for value in percentages.values()):
+                # The source catalogue can be large. Decode it once per hex,
+                # then keep each analyte's own non-null tonnage denominator.
+                properties = row.get('modelled_properties') or row.get('MODELLED_PROPERTIES_JSON') or {}
+                if isinstance(properties, str):
+                    try:
+                        properties = json.loads(properties)
+                    except (TypeError, ValueError):
+                        properties = {}
+                coverage_fields = (properties.get('coverage') or {}) if isinstance(properties, dict) else {}
+                for analyte, pct in percentages.items():
+                    if pct is None:
+                        fraction = numeric(coverage_fields.get(f'{slot.lower()}_{analyte}'))
+                        percentages[analyte] = fraction * 100.0 if fraction is not None else None
+            coverage_rows.append((tonnes, percentages))
         for analyte in ANALYTES:
-            source_name = {"si": "SIO2", "al": "AL2O3"}.get(
-                analyte, analyte.upper()
-            )
             weighted_coverage = 0.0
             total_tonnes = 0.0
-            for row in rows:
-                tonnes = numeric((row or {}).get("FINAL_WMT")) or 0.0
-                pct = numeric((row or {}).get(
-                    f"{source_prefix}_{source_name}_COVERAGE_PCT"
-                ))
-                if tonnes > 0:
+            for tonnes, percentages in coverage_rows:
+                pct = percentages[analyte]
+                if pct is not None:
                     total_tonnes += tonnes
-                    weighted_coverage += (pct or 0.0) * tonnes
-            pct = weighted_coverage / total_tonnes if total_tonnes > 0 else 0.0
-            product_coverage.append(f"{labels[analyte]} {pct:.2f}%")
+                    weighted_coverage += pct * tonnes
+            pct = weighted_coverage / total_tonnes if total_tonnes > 0 else None
+            product_coverage.append(f"{labels[analyte]} {pct:.2f}%" if pct is not None else f"{labels[analyte]} unavailable")
         return lineage_summary, f"{slot.upper()} | " + ", ".join(product_coverage)
 
     def enrich_AMT_grade_streams(self, data_source, amt_data):
@@ -19718,20 +19587,8 @@ class UserInputs(QMainWindow):
         return compact_amt_stockpile_data(enriched)
 
     def refresh_AMT_map_data_from_database(self):
-        draw_AMT_map = getattr(self, "draw_AMT_map", None)
-        if draw_AMT_map is None:
-            return
-
-        # Canonical mappings are persisted at hex granularity. Fetch those
-        # rows before rebuilding any already-generated chunk snapshots.
-        draw_AMT_map.excluded_footprints = self.excluded_amt_footprints()
-        draw_AMT_map.data = draw_AMT_map.fetch_data()
-        self.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
-        draw_AMT_map.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
-        draw_AMT_map.selected_points = copy.deepcopy(self.hex_sequence_table or [])
-        draw_AMT_map.unique_footprints = draw_AMT_map.get_unique_footprints()
-        draw_AMT_map.clean_up_hex_sequence_table()
-        draw_AMT_map.update_sequence_counter()
+        from GUI.AMTMapLoading import refresh
+        refresh(self)
 
     def AMT_chunk_reconciliation_request_signature(self):
         """Identify every input that can change a submitted AMT chunk."""
@@ -20218,9 +20075,8 @@ class UserInputs(QMainWindow):
         aps_destination_stockpiles = []
         if getattr(self, "file_path_choice", None):
             try:
-                aps_destination_stockpiles = ExpitDataHandler.get_distinct_stockpile_destinations(
-                    self.file_path_choice
-                )
+                from GUI.GuidancePreparation import calendar_destinations
+                aps_destination_stockpiles = calendar_destinations(self)
             except Exception as error:
                 print(f"Unable to read APS destination stockpiles for Calendar: {error}")
 
@@ -20643,14 +20499,6 @@ class UserInputs(QMainWindow):
             feed = multi_feed_settings(apply_calendar(feed, self.calendar_inputs, headers))
             self.multi_feed_configuration = feed
             self.calendar_inputs = legacy_aggregate_calendar(feed, self.calendar_inputs, headers)
-
-        # Calendar Cash is retained in the project schema for compatibility,
-        # but it is no longer a user input or an optimisation objective term.
-        zero_cash = {header: 0.0 for header in headers}
-        for stockpile in getattr(self, "calendar_stockpile_names", []):
-            self.calendar_inputs[
-                f"stockpiles_{str(stockpile).lower()}_cash"
-            ] = copy.deepcopy(zero_cash)
 
         self.store_stockpile_constraint_inputs()
         self.calendar_inputs["planning_period_count"] = self.planning_period_count()
@@ -21228,6 +21076,19 @@ class UserInputs(QMainWindow):
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
+        self._workflow_optimisation_finished = False
+        self.blend_mode_choice = 1
+        controller = vars(self).get('site_workflow_controller')
+        if controller:
+            from GUI.WorkflowDependencies import preparation_issues
+            issues = preparation_issues(self)
+            if issues:
+                if controller.active:
+                    controller.fail('\n'.join(issues))
+                else:
+                    self.calendar_workflow_status.setText('\n'.join(issues) + '\nUse Prepare Inputs to refresh the dependencies.')
+                    QMessageBox.information(self, 'Planning inputs need preparation', '\n'.join(issues))
+                return
 
         valid_ratio_group, ratio_message = self.validate_active_ratio_group_for_run()
         if not valid_ratio_group:
@@ -21322,6 +21183,9 @@ class UserInputs(QMainWindow):
         self.save_active_scenario_state()
 
         self.update_decision_point_tab_state()
+        if controller:
+            from GUI.WorkflowDependencies import input_revision
+            self.optimisation_input_revision = input_revision(self)
         self.run_background_task(
             "Optimising blends...",
             self.execute_run_program,
@@ -21423,6 +21287,8 @@ class UserInputs(QMainWindow):
             )
 
     def finish_run_program(self, periods):
+        self._workflow_optimisation_finished = True
+        self.last_run_outcome = getattr(periods, 'run_outcome', {}) or {}
         self.set_start_and_end_datetime(periods=periods)
         # Re-write the derived schedule in the active scenario database on
         # the UI thread.  The optimisation worker writes this too, but this
@@ -21436,10 +21302,13 @@ class UserInputs(QMainWindow):
         self.activate_manual_setup_tab()
         self.prepopulate_manual_from_optimised_result(automatic=True)
         self.refresh_sqlite_reports()
+        if vars(self).get('calendar_workflow_status') is not None:
+            from GUI.PlanReadiness import refresh
+            refresh(self)
         self.refresh_optimisation_plan_selectors()
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
-        self.show_page(self.results_tab_index)
+        self.show_page(self.calendar_tab_index)
 
         run_outcome = getattr(periods, "run_outcome", {}) or {}
         outcome_status = str(run_outcome.get("status") or "complete")
@@ -21510,7 +21379,7 @@ class UserInputs(QMainWindow):
         self.decision_input.setEnabled(False)
         self.enter_button.setEnabled(False)
         self.decision_select_button.setEnabled(False)
-        self.show_page(self.decision_point_tab_index)
+        self.show_page(self.calendar_tab_index)
         self.show_error_popup(error_message)
 
     def setup_results_tab(self):
@@ -21580,6 +21449,7 @@ class UserInputs(QMainWindow):
         )
         self.optimisation_plan_preview.setMaximumHeight(240)
         self.results_layout.addWidget(self.optimisation_plan_preview)
+        self.optimisation_plan_preview.hide()
         self.optimisation_snapshot_selected_columns = None
         self.optimisation_snapshot_known_columns = None
         self.optimisation_detail_selected_columns = None
@@ -22545,6 +22415,10 @@ class UserInputs(QMainWindow):
 
     def refresh_sqlite_reports(self):
         self.refresh_material_destination_plan_view()
+        if vars(self).get('access_role') == 'planner':
+            self.refresh_manual_blend_plan_report()
+            self.refresh_closing_rom_stocks_compliance()
+            return
         current_table = self.sqlite_report_selector.currentText()
         current_query = self.sqlite_report_query.text().strip()
         DatabaseManager().ensure_two_wp_grade_block_turnover_audit(
@@ -22767,7 +22641,14 @@ class UserInputs(QMainWindow):
         if wrap_text:
             table.resizeRowsToContents()
         if hasattr(self, "blend_plan_gantt_view"):
-            self.blend_plan_gantt_view.setUrl(QUrl("http://localhost:8052"))
+            if (getattr(self, 'stored_blend_sequence_table_for_gantt', None)
+                    and hasattr(self, 'start_or_update_dash_manual_chart_thread')):
+                self.manual_gantt_legend_and_tooltip = getattr(self, 'saved_blends_for_schedule', [])
+                self.start_or_update_dash_manual_chart_thread()
+                if not getattr(self, '_manual_report_service_started', False):
+                    self._manual_report_service_started = True
+            from GUI.ChartReadiness import connect_view
+            connect_view(self, self.blend_plan_gantt_view, 'http://localhost:8052')
         manual_chart = getattr(self, "draw_manual_gantt_chart", None)
         if manual_chart is not None:
             manual_chart.update_data(
@@ -22789,6 +22670,23 @@ class UserInputs(QMainWindow):
             options=options,
         )
 
+    def manual_report_passes_equipment_limits(self, report):
+        from classes.EquipmentLimits import require_equipment_limits
+        from classes.PlanReadiness import physical_violations
+        periods = PeriodManager(self.planning_period_count())
+        periods.calculate_periods(self.start_time_choice)
+        try:
+            problems = physical_violations(report)
+            if problems:
+                raise ValueError('; '.join(problems))
+            require_equipment_limits(report, self.calendar_inputs or {}, periods.get_periods(),
+                                     mode=(getattr(self, 'multi_feed_configuration', {}) or {}).get('mode', 'single'),
+                                     require_limits=True)
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Manual Blend Plan validation', str(exc))
+            return False
+        return True
+
     def export_manual_blend_plan_pdf(self):
         try:
             backups = self.validated_blend_plan_backups()
@@ -22796,6 +22694,8 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "Blend Plan backup destinations", str(exc))
             return
         raw_report = self.fetch_manual_blend_plan_report()
+        if not self.manual_report_passes_equipment_limits(raw_report):
+            return
         sequence = getattr(
             self, "stored_blend_sequence_table_for_gantt", []
         ) or []
@@ -22807,6 +22707,12 @@ class UserInputs(QMainWindow):
             )
             return
 
+        from GUI.PlanReadiness import publication_check
+        try:
+            readiness = publication_check(self, raw_report, str(getattr(self, 'active_manual_plan_id', 'Primary') or 'Primary'), 'manual')
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Blend Plan validation', str(exc))
+            return
         summaries = self.update_manual_gantt_blend_summaries(raw_report)
         report = order_balance_triplets(raw_report)
         available = self.optimisation_snapshot_available_columns(report)
@@ -22830,8 +22736,8 @@ class UserInputs(QMainWindow):
         if not file_path.lower().endswith(".pdf"):
             file_path += ".pdf"
 
-        try:
-            BlendPlanPDF.export(
+        def write():
+            return BlendPlanPDF.export(
                 file_path,
                 sequence_rows=sequence,
                 summaries=summaries,
@@ -22843,7 +22749,8 @@ class UserInputs(QMainWindow):
                 widths=getattr(
                     self, "manual_blend_plan_column_widths", {}
                 ) or {},
-                title="Blend Plan",
+                title="Blend Plan" + (" - REVIEW REQUIRED" if readiness["status"] != "ready" else ""),
+                notes=[readiness["message"]],
                 plan_id=str(
                     getattr(self, "active_manual_plan_id", "Primary")
                     or "Primary"
@@ -22856,16 +22763,8 @@ class UserInputs(QMainWindow):
                 backup_destinations=backups,
                 rounding_audit=rounding_audit_rows(sequence),
             )
-        except (BlendPlanPDFError, OSError, ValueError) as exc:
-            QMessageBox.warning(
-                self, "Export Blend Plan PDF", str(exc)
-            )
-            return
-        QMessageBox.information(
-            self,
-            "Export Blend Plan PDF",
-            f"Blend Plan PDF exported to:\n{file_path}",
-        )
+        from GUI.ReportExport import run
+        run(self, 'Export Blend Plan PDF', file_path, write)
 
     def manual_material_destination_plan_report(self):
         plan_id = str(
@@ -22898,6 +22797,8 @@ class UserInputs(QMainWindow):
             QMessageBox.information(self, "Blend Plan backup destinations", str(exc))
             return
         raw_report = self.fetch_manual_blend_plan_report()
+        if not self.manual_report_passes_equipment_limits(raw_report):
+            return
         sequence = getattr(
             self, "stored_blend_sequence_table_for_gantt", []
         ) or []
@@ -22909,6 +22810,12 @@ class UserInputs(QMainWindow):
             )
             return
 
+        from GUI.PlanReadiness import publication_check
+        try:
+            readiness = publication_check(self, raw_report, str(getattr(self, 'active_manual_plan_id', 'Primary') or 'Primary'), 'manual')
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Blend Plan validation', str(exc))
+            return
         summaries = self.update_manual_gantt_blend_summaries(raw_report)
         report = order_balance_triplets(raw_report)
         available = self.optimisation_snapshot_available_columns(report)
@@ -22944,29 +22851,27 @@ class UserInputs(QMainWindow):
             return
         if not file_path.lower().endswith(".xlsx"):
             file_path += ".xlsx"
-        try:
-            SpreadsheetReportExporter.export_xlsx(
+        from classes.CrossFeatureReports import cross_feature_sheets
+        audits = [(name, frame) for name, frame in cross_feature_sheets(
+            str(getattr(self, 'active_manual_plan_id', 'Primary') or 'Primary'),
+            product_report=raw_report, plan_type='manual')
+            if name not in {'Plan Readiness', 'Material Destination Plan'}]
+        def write():
+            return SpreadsheetReportExporter.export_xlsx(
                 file_path,
                 [
+                    ("Plan Readiness", pd.DataFrame(readiness['checks'])),
                     ("Blend Summary", blend_summary),
                     ("Backup Destinations", pd.DataFrame(backups, columns=["Tipping point", "Backup destination", "Applies to"])),
                     ("Ratio Rounding Audit", pd.DataFrame(rounding_audit_rows(sequence))),
                     ("Detailed Report", detailed_report),
                     ("Material Destination Plan", material_destination_plan),
-                ],
-                report_title="BlendMaster - Manual Blend Plan",
+                ] + audits,
+                report_title="BlendMaster - Manual Blend Plan - " + readiness['status'],
                 report_datetime=timestamp,
             )
-        except (SpreadsheetReportExportError, OSError, ValueError) as exc:
-            QMessageBox.warning(
-                self, "Export Blend Plan XLSX", str(exc)
-            )
-            return
-        QMessageBox.information(
-            self,
-            "Export Blend Plan XLSX",
-            f"Blend Plan workbook exported to:\n{file_path}",
-        )
+        from GUI.ReportExport import run
+        run(self, 'Export Blend Plan XLSX', file_path, write)
 
     def choose_manual_blend_plan_columns(self):
         report = self.fetch_manual_blend_plan_report()
@@ -23453,7 +23358,7 @@ class UserInputs(QMainWindow):
             )
             self.dash_thread_stockpile_profile.start()
 
-        self.update_chart_database_context()
+        self.update_chart_database_context(refresh_amt_map=False)
 
     def start_dash_AMT_map_thread(self):
         """Start the Dash app in a separate thread."""
@@ -23474,6 +23379,7 @@ class UserInputs(QMainWindow):
                 db_path,
                 port=8054,
                 excluded_footprints=self.excluded_amt_footprints(),
+                defer_load=True,
                 hex_sequence_table=self.hex_sequence_table,
                 chunk_settings=copy.deepcopy(self.AMT_chunk_settings),
                 source_property_kinds={
@@ -23532,9 +23438,8 @@ class UserInputs(QMainWindow):
             self.set_page_enabled(self.closing_rom_stocks_tab_index, True)
             self.set_page_enabled(self.sqlite_reports_tab_index, True)
             self.set_page_enabled(self.optimised_grade_profile_tab_index, True)
-        # Calendar submission always lands on Decision Point. Completed runs
-        # are routed to Results by finish_run_program.
-        self.show_page(self.decision_point_tab_index)
+        # Keep the submitted Calendar visible while the worker is running.
+        self.show_page(self.calendar_tab_index)
 
     def handle_decision_input(self):
         """Send input from the Decision Point tab to the CaseModellerBridge."""
@@ -23593,6 +23498,9 @@ class UserInputs(QMainWindow):
         """Display messages from CaseModeller in the Decision Point tab."""
         self.decision_output.append(message)
         plain_message = str(message).strip()
+        label = vars(self).get('calendar_workflow_status')
+        if label is not None and plain_message:
+            label.setText(plain_message[-600:])
         if plain_message.startswith("Choose") or "Manual mode" in plain_message or "Auto select mode" in plain_message:
             self.decision_status_label.setText(plain_message)
 
@@ -24697,7 +24605,7 @@ class UserInputs(QMainWindow):
                     blend_data["available"].append(available)
                     blend_data["sources"].append(sources)
                     blend_data["source_ratios"].append(
-                        f"{source_ratio:.6f}"
+                        repr(source_ratio)
                     )
                     blend_data["reclaim_rates"].append(
                         configured_reclaim_rate
@@ -24732,6 +24640,7 @@ class UserInputs(QMainWindow):
                         balance / self.crusher_rate
                         if self.crusher_rate > 0 else 0
                     )
+                exact_max_duration = max_duration
                 # The value is displayed and scheduled at one-decimal-hour
                 # precision. Nearest rounding can exceed the true inventory
                 # limit, so publish the largest safe one-decimal duration.
@@ -24747,7 +24656,8 @@ class UserInputs(QMainWindow):
 
                 # Create comma-separated strings for sources and source ratios
                 sources_combined = ", ".join(data["sources"])
-                source_ratios_combined = ", ".join(data["source_ratios"])
+                source_ratios_combined = ", ".join(
+                    f"{float(ratio):.6f}" for ratio in data["source_ratios"])
 
                 # Update blend results table
                 self.blend_results_table.setItem(row_idx, 0, self.create_centered_item(blend_id))
@@ -24757,7 +24667,12 @@ class UserInputs(QMainWindow):
                     else:
                         self.blend_results_table.setItem(row_idx, col_idx, self.create_centered_item(f"{avg_grade:.2f}"))
                 self.blend_results_table.setItem(row_idx, 6, self.create_centered_item(f"{balance:,.0f}"))
-                self.blend_results_table.setItem(row_idx, 7, self.create_centered_item(f"{max_duration:.1f}"))
+                maximum_item = self.create_centered_item(f"{max_duration:.1f}")
+                if data.get("rate_mode") in {"optimised", "rounded"}:
+                    # An unchanged imported state keeps its exact interval.
+                    # Display rounding must not shorten its stored allowance.
+                    maximum_item.setData(Qt.UserRole, exact_max_duration)
+                self.blend_results_table.setItem(row_idx, 7, maximum_item)
                 self.blend_results_table.setItem(row_idx, 9, self.create_centered_item(sources_combined))
                 self.blend_results_table.setItem(row_idx, 10, self.create_centered_item(source_ratios_combined))
 
@@ -24812,6 +24727,12 @@ class UserInputs(QMainWindow):
         """
         Store the blend results table data into self.saved_blends_for_schedule.
         """
+        if vars(self).get('access_role') is not None:
+            from GUI.WorkflowDependencies import manual_rate_issues
+            errors = manual_rate_issues(self)
+            if errors:
+                QMessageBox.warning(self, 'Manual equipment limits', '\n'.join(errors))
+                return False
         existing_sequence = copy.deepcopy(
             getattr(
                 self, "stored_blend_sequence_table_for_gantt", []
@@ -24839,6 +24760,8 @@ class UserInputs(QMainWindow):
 
                 if cell_item:
                     blend_data[header] = cell_item.text()
+                    if header == "Max Duration (hrs)" and cell_item.data(Qt.UserRole) is not None:
+                        blend_data[header] = cell_item.data(Qt.UserRole)
                 else:
                     blend_data[header] = None  # Handle empty cells
 
@@ -25409,6 +25332,7 @@ class UserInputs(QMainWindow):
         metadata_keys = {
             "_optimised_steady_state", "_fixed_steady_state",
             "_crusher_rate", "_period_name", "_exact_start", "_exact_end",
+            "_payload_start", "_payload_end",
             "_physical_feed_tonnes", "_stockpile_source_tonnes",
             "_product_build_actual_tonnes", "_rounding_audit",
             "Direct Tip Tonnes", "Direct Tip Ratio",
@@ -25536,16 +25460,18 @@ class UserInputs(QMainWindow):
                     remaining_hrs = float(item.text())
                     if remaining_hrs < 0:
                         QMessageBox.warning(
-                            None,
-                            "Warning",
-                            "One or more rows have negative values in 'Remaining Hrs'. Data has not been stored."
+                            self,
+                            "Manual sequence duration",
+                            f"Row {row + 1} exceeds its available blend duration by "
+                            f"{abs(remaining_hrs):.2f} hours. Shorten the duration or "
+                            "review the blend recipe before submitting."
                         )
                         return  # Exit the method without storing any data
                 except ValueError:
                     QMessageBox.warning(
-                        None,
-                        "Warning",
-                        "Invalid value detected in 'Remaining Hrs'. Data has not been stored."
+                        self,
+                        "Manual sequence duration",
+                        f"Row {row + 1} has an invalid remaining duration. Review its blend recipe."
                     )
                     return
 
@@ -25801,9 +25727,14 @@ class UserInputs(QMainWindow):
             getattr(self, "crusher_rate", None)
             or getattr(self, "crusher_rate_input_value", None)
         )
-        manual_calendar_inputs = copy.deepcopy(
+        manual_calendar_inputs = copy_active_state(self,
             getattr(self, "calendar_inputs", {}) or {}
         )
+        manual_calendar_inputs['_equipment_limits'] = copy.deepcopy({
+            key: value for key, value in manual_calendar_inputs.items() if key != 'site_context'})
+        manual_calendar_inputs['_require_equipment_limits'] = True
+        manual_calendar_inputs['_equipment_limits']['multi_feed_configuration'] = copy.deepcopy(
+            getattr(self, 'multi_feed_configuration', {}) or {})
         manual_calendar_inputs["crusher_rate"] = (
             self.manual_crusher_rate_values()
         )
@@ -25870,6 +25801,9 @@ class UserInputs(QMainWindow):
         self.update_manual_sequence_direct_tip_annotations(
             states, allocations
         )
+        if vars(self).get('access_role') is not None:
+            from GUI.WorkflowDependencies import manual_revision
+            self.manual_input_revision = manual_revision(self)
         self.write_active_manual_plan_reports(report)
         self.refresh_sqlite_reports()
         if hasattr(self, "draw_grade_profile_chart"):
@@ -26331,8 +26265,10 @@ class UserInputs(QMainWindow):
             })
         return pd.DataFrame(rows)
 
-    def save_state(self, show_success=True):
-        """Save the application state to a file using pickle."""
+    def save_state(self, show_success=True, *, close_after=False):
+        """Capture the application state and begin an atomic background save."""
+        if vars(self).get("_project_save_pending"):
+            return False
 
         if hasattr(self, "hub_input"):
             self.hub_input_choice = self.hub_input.currentText().strip()
@@ -26351,7 +26287,7 @@ class UserInputs(QMainWindow):
         elif self.start_time_choice is None:
             self.start_time_choice = datetime.now()
         if hasattr(self, "expit_mode"):
-            self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if self.expit_mode.isEnabled() else 1
+            self.expit_mode_choice = self.expit_mode.currentIndex() + 1 if control_available(self.expit_mode) else 1
         if hasattr(self, "expit_completion_tolerance_input"):
             self.expit_completion_tolerance_pct = float(
                 self.expit_completion_tolerance_input.value()
@@ -26406,7 +26342,7 @@ class UserInputs(QMainWindow):
                 else []
             )
         if hasattr(self, "blend_mode"):
-            self.blend_mode_choice = self.blend_mode.currentIndex() + 1
+            self.blend_mode_choice = 1
         if hasattr(self, "agent_enabled_checkbox"):
             self.agent_enabled_choice = self.agent_enabled_checkbox.isChecked()
         if hasattr(self, "agent_story_input"):
@@ -26424,10 +26360,7 @@ class UserInputs(QMainWindow):
         if hasattr(self, "product_build_table"):
             self.store_product_targets(show_errors=False)
 
-        if hasattr(self, "blend_data_from_config_table_inputs"):
-            self.blend_config_table_inputs = self.blend_data_from_config_table_inputs
-        elif self.blend_config_table_inputs is None:
-            self.blend_config_table_inputs = {}
+        self.blend_config_table_inputs = copy.deepcopy(manual_recipe_inputs(self) or {})
 
         if hasattr(self, "crusher_rate_input"):
             self.crusher_rate_input_values = (
@@ -26440,192 +26373,14 @@ class UserInputs(QMainWindow):
         self.store_solver_config_inputs(show_errors=False)
         self.save_active_scenario_state()
         
-        try:
-            scenarios_to_save = copy.deepcopy(self.site_scenarios)
-            for scenario_id, scenario_state in scenarios_to_save.items():
-                database_path = scenario_state.get("database_path") or self.scenario_database_path(scenario_id)
-                scenario_state["database_snapshot"] = self.snapshot_database(database_path)
-                scenario_state.pop("database_path", None)
-            
-            # Save the enabled/disabled state of tabs
-            tab_states = self.capture_page_states()
-
-            # Combine all class variables into a dictionary
-            state_to_save = {
-                "project_format_version": PROJECT_FORMAT_VERSION,
-                "planning_semantics_version": PLANNING_SEMANTICS_VERSION,
-                "flow_layout_schema_version": FLOW_LAYOUT_SCHEMA_VERSION,
-                "active_scenario_id": self.active_scenario_id,
-                "site_scenarios": scenarios_to_save,
-                "tab_states": tab_states,
-                "blend_mode_choice": self.blend_mode_choice,
-                "agent_enabled_choice": self.agent_enabled_choice,
-                "agent_story_text": self.agent_story_text,
-                "agent_run_instructions_text": self.agent_run_instructions_text,
-                "agent_bridge_port": self.agent_bridge_port,
-                "agent_console_text": agent_console_text,
-                "agent_latest_result": copy.deepcopy(getattr(self, "agent_latest_result", {})),
-                "agent_latest_proposals": copy.deepcopy(getattr(self, "agent_latest_proposals", [])),
-                "agent_proposals_table": agent_proposals_table,
-                "calendar_inputs": self.calendar_inputs,
-                "crusher_rate": self.crusher_rate,
-                "default_end_datetime": self.default_end_datetime,
-                "default_end_datetime_str": self.default_end_datetime_str,
-                "default_start_datetime": self.default_start_datetime,
-                "default_start_datetime_str": self.default_start_datetime_str,
-                "expit_mode_choice": self.expit_mode_choice,
-                "expit_completion_tolerance_pct": self.expit_completion_tolerance_pct,
-                "expit_refresh_tolerance_minutes": self.expit_refresh_tolerance_minutes,
-                "expit_live_refresh_enabled": self.expit_live_refresh_enabled,
-                "expit_live_refresh_minutes": self.expit_live_refresh_minutes,
-                "file_path_choice": self.file_path_choice,
-                "file_path_24hr_choice": self.file_path_24hr_choice,
-                "available_24hr_expit_agents": self.available_24hr_expit_agents,
-                "selected_24hr_expit_agents": self.selected_24hr_expit_agents,
-                "haul_cycle_file_path_choice": self.haul_cycle_file_path_choice,
-                "available_haul_cycle_crushers": self.available_haul_cycle_crushers,
-                "selected_haul_cycle_crushers": self.selected_haul_cycle_crushers,
-                "haul_cycle_routes": self.haul_cycle_routes,
-                "destination_haul_routes": copy.deepcopy(getattr(self, "destination_haul_routes", {})),
-                "product_brand_labels_choice": self.product_brand_labels_choice,
-                "selected_data_stream": self.selected_data_stream,
-                "crusher_tonnes_stream": self.crusher_tonnes_stream,
-                "reclaimer_tonnes_stream": self.reclaimer_tonnes_stream,
-                "product_build_tonnes_stream": self.product_build_tonnes_stream,
-                "byproducts_enabled": self.byproducts_enabled,
-                "byproduct_quantity_fields": self.byproduct_quantity_fields,
-                "byproduct_grade_fields": self.byproduct_grade_fields,
-                "field_definitions": self.field_definitions,
-                "field_mappings": self.field_mappings,
-                "field_mapping_schema_version": int(getattr(
-                    self, "field_mapping_schema_version", 0
-                ) or 0),
-                "aps_grade_field_mappings": self.aps_grade_field_mappings,
-                "aps_source_property_field_mappings": (
-                    self.aps_source_property_field_mappings
-                ),
-                "cb_lump_fines_mode": self.cb_lump_fines_mode,
-                "cb_lump_percentage": self.cb_lump_percentage,
-                "historical_recon_factors": self.historical_recon_factors,
-                "historical_recon_warnings": self.historical_recon_warnings,
-                "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
-                "reconciliation_inputs": copy.deepcopy(vars(self).get("reconciliation_inputs") or {}),
-                "opf_reconciliation_inputs": copy.deepcopy(vars(self).get("opf_reconciliation_inputs") or {}),
-                "data_stream_planning_categories": self.data_stream_planning_categories,
-                "product_targets": self.product_targets,
-                "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
-                "destination_progress_settings": progress_settings(getattr(self, "destination_progress_settings", None)),
-                "multi_feed_configuration": self.current_multi_feed_configuration(),
-                "transport_settings": copy.deepcopy(getattr(self, "transport_settings", {})),
-                "transport_opening_history": copy.deepcopy(getattr(self, "transport_opening_history", {})),
-                "flow_node_positions": copy.deepcopy(getattr(self, "flow_node_positions", {})),
-                "operational_plan_backups": copy.deepcopy(getattr(self, "operational_plan_backups", {})),
-                "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
-                "group_2wp_build_targets_by_brand_choice": (
-                    self.group_2wp_build_targets_by_brand_choice
-                ),
-                "aps_stockpile_brand_map": getattr(self, "aps_stockpile_brand_map", {}),
-                "aps_stockpile_timing_guidance": getattr(
-                    self, "aps_stockpile_timing_guidance", {}
-                ),
-                "aps_active_blend_guidance": getattr(
-                    self, "aps_active_blend_guidance", []
-                ),
-                "aps_destination_guidance": getattr(
-                    self, "aps_destination_guidance", {}
-                ),
-                "aps_guidance_request_signature": getattr(
-                    self, "aps_guidance_request_signature", ""
-                ),
-                "reevaluate_aps_direct_tip_choice": self.reevaluate_aps_direct_tip_choice,
-                "aps_direct_tip_crusher_choice": self.aps_direct_tip_crusher_choice,
-                "mine_input_choice": self.mine_input_choice,
-                "hub_input_choice": self.hub_input_choice,
-                "opf_input_choice": self.opf_input_choice,
-                "crusher_input_choice": self.crusher_input_choice,
-                "selected_site_crushers": self.selected_site_crushers,
-                "crusher_ratio_mode_choice": self.crusher_ratio_mode_choice,
-                "crusher_contribution_ratio_choice": self.crusher_contribution_ratio_choice,
-                "crusher_ratio_configured": self.crusher_ratio_configured,
-                "aps_ratio_crusher_choices": self.aps_ratio_crusher_choices,
-                "direct_tip_grade_block_sources": self.direct_tip_grade_block_sources,
-                "direct_tip_crusher_destinations": self.direct_tip_crusher_destinations,
-                "direct_tip_movement_rules": self.direct_tip_movement_rules,
-                "opening_stockpile_inventories": self.opening_stockpile_inventories,
-                "saved_blends_for_schedule": self.saved_blends_for_schedule,
-                "start_time_choice": self.start_time_choice,
-                "planning_period_count_choice": self.planning_period_count_choice,
-                "stockpile_data": self.stockpile_data,
-                "inventory_data_request_signature": getattr(
-                    self, "inventory_data_request_signature", ""
-                ),
-                "stockpile_data_use_column": self.stockpile_data_use_column,
-                "stored_blend_sequence_table_for_gantt": self.stored_blend_sequence_table_for_gantt,
-                "stored_blend_sequence_table_for_gantt_default": self.stored_blend_sequence_table_for_gantt_default,
-                "manual_direct_tip_allocations": self.manual_direct_tip_allocations,
-                "manual_steady_states": self.manual_steady_states,
-                "manual_ratio_rounding": rounding_settings(getattr(self, "manual_ratio_rounding", None)),
-                "blend_plan_backup_destinations": copy.deepcopy(getattr(self, "blend_plan_backup_destinations", None) or {}),
-                "time_mode_choice": self.time_mode_choice,
-                "updated_stockpile_data": self.updated_stockpile_data,
-                "blend_config_table_inputs":  self.blend_config_table_inputs,
-                "crusher_rate_input_value": self.crusher_rate_input_value,
-                "crusher_rate_input_values": (
-                    self.crusher_rate_input_values
-                ),
-                'hex_sequence_table': self.hex_sequence_table,
-                'stockpile_data_AMT_column': self.stockpile_data_AMT_column,
-                'AMT_stockpile_data': getattr(self, "AMT_stockpile_data", {}),
-                'AMT_data_request_signature': getattr(
-                    self, "AMT_data_request_signature", ""
-                ),
-                'AMT_enrichment_signature': getattr(
-                    self, "AMT_enrichment_signature", ""
-                ),
-                'AMT_chunk_reconciliation_signature': getattr(
-                    self, "AMT_chunk_reconciliation_signature", ""
-                ),
-                'AMT_refresh_tolerance_minutes': max(0, int(getattr(
-                    self, "AMT_refresh_tolerance_minutes", 30
-                ) or 0)),
-                'AMT_last_refresh_datetime': getattr(
-                    self, "AMT_last_refresh_datetime", None
-                ),
-                'AMT_chunk_settings': self.AMT_chunk_settings,
-                'AMT_footprint_exclusions': normalize_amt_exclusions(vars(self).get("AMT_footprint_exclusions")),
-                "database_view_selected_columns": copy.deepcopy(
-                    getattr(self, "database_view_selected_columns", None)
-                ),
-                "database_view_known_columns": copy.deepcopy(
-                    getattr(self, "database_view_known_columns", None)
-                ),
-                "database_view_show_coverage_fields": bool(
-                    getattr(self, "database_view_show_coverage_fields", False)
-                ),
-                "database_view_selected_sources": copy.deepcopy(
-                    getattr(self, "database_view_selected_sources", None)
-                ),
-                "database_view_known_sources": copy.deepcopy(
-                    getattr(self, "database_view_known_sources", None)
-                ),
-                "solver_config": self.solver_config,
-            }
-            # Generate a timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-
-            # Use the timestamp in the filename
-            filename = f'blendmaster_{timestamp}.prj'
-            
-            # Serialize the dictionary to a file
-            with open(filename, 'wb') as file:
-                pickle.dump(migrate_product_target_state(state_to_save), file)
-
-            if show_success:
-                QMessageBox.information(self, "BlendMaster", "Project saved successfully!")
-            return True
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save project: {str(e)}")
-            return False
+        from GUI.ProjectSaving import begin
+        legacy_state = {name: getattr(self, name, None) for name in (
+            "agent_enabled_choice", "agent_story_text", "agent_run_instructions_text",
+            "agent_bridge_port", "agent_latest_result", "agent_latest_proposals",
+            "opening_stockpile_inventories")}
+        legacy_state.update(agent_console_text=agent_console_text,
+                            agent_proposals_table=agent_proposals_table)
+        return begin(self, legacy_state, show_success=show_success, close_after=close_after)
 
     def load_state(self):
         """Load the application state from a user-selected file."""
@@ -26643,14 +26398,13 @@ class UserInputs(QMainWindow):
                 self.is_project_loaded = False
                 return
 
-            # Load the selected file
-            with open(file_path, 'rb') as file:
-                loaded_state = pickle.load(file)
-
-            self.restore_loaded_state(
-                loaded_state,
-                source_label=file_path,
-                show_success=True,
+            # Read/deserialise large saved projects without blocking painting.
+            from GUI.ProjectLoading import begin
+            self.run_background_task(
+                "Reading saved project…",
+                lambda: self.load_project_state_from_path(file_path),
+                lambda state: begin(self, state, file_path),
+                self.handle_site_config_error,
             )
             return
 
@@ -26770,7 +26524,7 @@ class UserInputs(QMainWindow):
         loaded_state = migrate_project_state(loaded_state)
         saved_scenarios = loaded_state.get("site_scenarios")
         if not isinstance(saved_scenarios, dict) or not saved_scenarios:
-            legacy_state = copy.deepcopy(loaded_state)
+            legacy_state = dict(loaded_state)
             legacy_state["scenario_id"] = self.active_scenario_id
             legacy_state["database_path"] = self.scenario_database_path(self.active_scenario_id)
             self.site_scenarios = {self.active_scenario_id: legacy_state}
@@ -26781,7 +26535,7 @@ class UserInputs(QMainWindow):
         for scenario_id, raw_state in saved_scenarios.items():
             if not isinstance(raw_state, dict):
                 continue
-            scenario_state = copy.deepcopy(raw_state)
+            scenario_state = dict(raw_state)
             database_snapshot = scenario_state.pop("database_snapshot", None)
             scenario_state.pop("site_scenarios", None)
             scenario_state = self.normalized_agent_project_state(scenario_state)
@@ -26804,36 +26558,43 @@ class UserInputs(QMainWindow):
             else next(iter(restored_scenarios))
         )
         self.site_scenarios = restored_scenarios
-        active_state = copy.deepcopy(restored_scenarios[self.active_scenario_id])
-        global_state = copy.deepcopy(loaded_state)
-        global_state.pop("site_scenarios", None)
+        active_state = restored_scenarios[self.active_scenario_id]
+        global_state = {key: value for key, value in loaded_state.items() if key != 'site_scenarios'}
         global_state.update(active_state)
         set_database_path(active_state["database_path"])
         return global_state
 
-    def restore_loaded_state(self, loaded_state, source_label=None, show_success=False):
+    def restore_loaded_state(self, loaded_state, source_label=None, show_success=False, prepared=False):
         """Restore app state using the same path as Load Project."""
         if not isinstance(loaded_state, dict):
             raise ValueError("Project state must be a dictionary.")
         loaded_state = migrate_project_state(loaded_state)
-        if not self.prompt_loaded_project_start_time(loaded_state):
+        if not prepared and not self.prompt_loaded_project_start_time(loaded_state):
             self.is_project_loaded = False
             return False
         self.is_project_loaded = True
-        self.project_load_keep_site_configuration_visible = bool(show_success)
+        self.project_load_keep_site_configuration_visible = True
         self.project_load_show_success = bool(show_success)
         self.project_load_source_label = str(source_label or "")
         if show_success:
             self.show_page(self.site_config_tab_index)
-        if not self.resolve_missing_aps_mining_csv_paths(loaded_state):
+        if not prepared and not self.resolve_missing_aps_mining_csv_paths(loaded_state):
             self.is_project_loaded = False
             self.finish_project_load_ui(success=False)
             return False
-        loaded_state = self.normalized_agent_project_state(loaded_state)
-        loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
+        if not prepared:
+            loaded_state = self.normalized_agent_project_state(loaded_state)
+            loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
         # Unpack loaded state into variables
-        self.blend_mode_choice = loaded_state.get("blend_mode_choice", None)
+        for name in ('site_workflow_contract', 'site_workflow_runs', 'guidance_import_audit',
+                     'target_refresh_changes', 'optimisation_input_revision',
+                     'manual_input_revision', 'last_run_outcome', 'reconciliation_applied_revision', '_haul_cycle_routes_revision',
+                     '_prepared_amt_database_path', '_amt_lineage_display',
+                     '_calendar_destination_stockpiles', '_project_load_fields_prepared', 'destination_progress_snapshot'):
+            setattr(self, name, copy.deepcopy(loaded_state.get(name)))
+        self._destination_restore_pending = True
+        self.blend_mode_choice = 1
         self.agent_enabled_choice = loaded_state.get("agent_enabled_choice", False)
         self.agent_story_text = loaded_state.get("agent_story_text", "")
         self.agent_run_instructions_text = loaded_state.get("agent_run_instructions_text", "")
@@ -27150,8 +26911,8 @@ class UserInputs(QMainWindow):
             self.AMT_refresh_tolerance_input.setValue(
                 self.AMT_refresh_tolerance_minutes
             )
-        self.data_stream_input_cache_signature = ""
-        self.data_stream_input_cache_result = {}
+        self.data_stream_input_cache_signature = str(loaded_state.get("data_stream_input_cache_signature") or "")
+        self.data_stream_input_cache_result = loaded_state.get("data_stream_input_cache_result") or {}
         self.data_stream_input_request_inflight = ""
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = loaded_state.get("AMT_chunk_settings", {})
@@ -27245,6 +27006,9 @@ class UserInputs(QMainWindow):
         return True
 
     def continue_project_load_after_stockpile_setup(self):
+        if vars(self).get('_amt_map_pending'):
+            QTimer.singleShot(100, self.continue_project_load_after_stockpile_setup)
+            return
         self.project_load_restore_in_progress = False
         has_selected_amt = any(
             (self.stockpile_data_AMT_column or {}).values()
@@ -27273,6 +27037,7 @@ class UserInputs(QMainWindow):
             self.set_start_and_end_datetime(periods)
             self.update_decision_point_tab_state()
             self.activate_manual_setup_tab()
+            self.restore_manual_sequence_view()
             self.refresh_sqlite_reports()
             self.refresh_optimisation_plan_selectors()
             self.start_dash_optimised_charts_thread()
@@ -27487,19 +27252,20 @@ class UserInputs(QMainWindow):
             print(f"Warning: failed to clear SQLite session data: {e}")
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(
-            self,
-            "Save Project?",
-            "Save project before closing?",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.Yes,
-        )
-        if reply == QMessageBox.Cancel:
-            event.ignore()
+        from GUI.WorkflowShutdown import wait_for_workers
+        if wait_for_workers(self, event):
             return
-        if reply == QMessageBox.Yes and not self.save_state(show_success=False):
-            event.ignore()
-            return
+        if not vars(self).get('_project_close_saved'):
+            reply = QMessageBox.question(
+                self, "Save Project?", "Save project before closing?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Yes:
+                event.ignore()
+                self.save_state(show_success=False, close_after=True)
+                return
         self.stop_agent_bridge(silent=True)
         shutil.rmtree(getattr(self, "scenario_session_directory", ""), ignore_errors=True)
         super().closeEvent(event)

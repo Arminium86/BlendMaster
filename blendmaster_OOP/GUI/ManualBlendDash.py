@@ -532,7 +532,7 @@ function buildLegendDetails(row) {
         const value = row[name];
         if (value === undefined || value === null || value === "") return "";
         const numeric = Number(value);
-        const displayed = Number.isFinite(numeric) ? numeric.toFixed(2) : String(value);
+        const displayed = Number.isFinite(numeric) ? numeric.toFixed(name === "Grade P" ? 4 : 2) : String(value);
         return "<div>" + name + ": " + escapeHtml(displayed) + "%</div>";
     };
     let html = "<div class='legend-heading'>Blend ID: " + escapeHtml(row["Blend ID"]) + "</div>";

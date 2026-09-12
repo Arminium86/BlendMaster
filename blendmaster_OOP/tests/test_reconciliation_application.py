@@ -99,6 +99,19 @@ def chunk_row(hex_id, block, tonnes, rom, product, product_dmt, signature="curre
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_review_factor_search_is_reused_but_baselines_and_lineage_stay_independent(self):
+        engine = application()
+        resolver = engine.resolvers['SF']
+        with patch.object(resolver, 'resolve_source', wraps=resolver.resolve_source) as search:
+            first, audit = apply(engine)
+            audit['by_brand']['SF']['records'][0]['blend_factors']['fe'] = 99
+            second, again = apply(engine, values=streams(rom=40))
+            self.assertEqual(search.call_count, 1)
+            self.assertAlmostEqual(second['adjusted_rom']['SF']['fe'], first['adjusted_rom']['SF']['fe'] * .8)
+            self.assertNotEqual(again['by_brand']['SF']['records'][0]['blend_factors']['fe'], 99)
+            apply(engine, blocks=composition((GB, 100)))
+            self.assertEqual(search.call_count, 2)
+
     def test_component_factors_are_rom_wmt_weighted_then_applied_to_source_baselines(self):
         original = streams()
         adjusted, audit = apply(values=original)
@@ -352,6 +365,8 @@ class ChunkAndIntegrationTests(unittest.TestCase):
                 view.store_AMT_chunk_settings = Mock(return_value=True)
                 view.ensure_AMT_map_panel = Mock()
                 view.start_dash_AMT_map_thread = Mock()
+                view.draw_AMT_map.init_layout = Mock()
+                view.run_background_task = lambda message, work, done, *args, **kwargs: done(work())
                 view.set_AMT_cache_status = Mock()
                 view.map_fields_available_list = Mock()
                 view.refresh_map_available_fields = Mock()

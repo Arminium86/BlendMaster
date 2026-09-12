@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from copy import deepcopy
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -65,7 +66,7 @@ def history_address(value):
     return mine, (*parts, pit_area)
 
 
-def timestamp(value):
+def _timestamp(value):
     try:
         result = pd.to_datetime(value, dayfirst="/" in text(value), errors="coerce")
         if pd.isna(result):
@@ -73,6 +74,15 @@ def timestamp(value):
         return result.tz_localize("Australia/Perth") if result.tzinfo is None else result.tz_convert("Australia/Perth")
     except (ValueError, TypeError, OverflowError):
         return None
+
+
+_text_timestamp = lru_cache(maxsize=8192)(_timestamp)
+
+
+def timestamp(value):
+    # Every payload ranks the same dated guidance rows. Timestamps are immutable;
+    # parse repeated strings once without changing timezone or ranking rules.
+    return _text_timestamp(value) if isinstance(value, str) else _timestamp(value)
 
 
 def positive(value):
