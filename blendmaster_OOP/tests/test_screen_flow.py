@@ -1095,7 +1095,6 @@ class ScreenFlowStateTests(unittest.TestCase):
         window.AMT_stockpile_tab_vertical_layout = object()
         window.AMT_cache_status_label = FakeVisibleWidget()
         window.refresh_AMT_data_button = FakeVisibleWidget()
-        window.load_AMT_button = FakeVisibleWidget()
         window.submit_AMT_button = FakeVisibleWidget()
 
         window.ensure_AMT_map_panel()
@@ -1103,7 +1102,6 @@ class ScreenFlowStateTests(unittest.TestCase):
         self.assertEqual(window.AMT_map_frame.show_count, 1)
         self.assertEqual(window.AMT_map_view.show_count, 1)
         self.assertEqual(window.refresh_AMT_data_button.show_count, 1)
-        self.assertEqual(window.load_AMT_button.show_count, 1)
         self.assertEqual(window.submit_AMT_button.show_count, 1)
         self.assertEqual(
             len(window.AMT_stockpile_table.cellChanged.callbacks), 1
@@ -1384,12 +1382,10 @@ class ScreenFlowStateTests(unittest.TestCase):
         window = UserInputs.__new__(UserInputs)
         window.AMT_map_view = FakeWebView(empty=True)
 
-        window.reload_AMT_map_view()
-
-        self.assertEqual(
-            window.AMT_map_view.set_urls,
-            ["http://localhost:8054"],
-        )
+        with patch('GUI.ChartReadiness.connect_view') as connect:
+            window.reload_AMT_map_view()
+        connect.assert_called_once_with(window, window.AMT_map_view, 'http://localhost:8054')
+        self.assertEqual(window.AMT_map_view.set_urls, [])
         self.assertEqual(window.AMT_map_view.reload_count, 0)
 
     def test_amt_submit_ignores_button_checked_state_and_navigates(self):

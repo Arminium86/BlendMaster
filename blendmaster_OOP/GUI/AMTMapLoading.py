@@ -27,6 +27,8 @@ def refresh(host):
         chart.update_sequence_counter()
         chart.refresh_call = True
         chart.init_layout()
+        from GUI.WorkflowViews import schedule
+        schedule(host, charts=True)
 
     def failed(error):
         if generation == host._amt_map_generation:

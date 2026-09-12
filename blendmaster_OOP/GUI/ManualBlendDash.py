@@ -1157,22 +1157,26 @@ class DrawOptimisedGradeProfiles:
         self.db_path = db_path
         self.port = port
         self.app = dash.Dash(__name__)
-        self.df = self.fetch_data()
-        self.app.layout = html.Div(id='main-container', children=[
-            dcc.Store(id='df-store', data=self.df.to_dict('records')),
-            html.Div(id='charts-container')
-        ])
+        # Each browser load reads the current scenario's committed reports.
+        # A static Store here kept the first run/site until a legacy POST.
+        self.app.layout = self.create_layout
         self.app.callback(
             Output('charts-container', 'children'),
             Input('df-store', 'data')
         )(self.update_charts)
         self.setup_routes()
 
+    def create_layout(self):
+        self.df = self.fetch_data()
+        return html.Div(id='main-container', children=[
+            dcc.Store(id='df-store', data=self.df.to_dict('records')),
+            html.Div(id='charts-container')
+        ])
+
     def setup_routes(self):
         @self.app.server.route("/trigger-refresh", methods=["POST"])
         def trigger_refresh():
-            self.df = self.fetch_data()
-            self.app.layout.children[0].data = self.df.to_dict('records')
+            # Compatibility for external callers; normal loads are automatic.
             return ("", 204)
 
     def fetch_data(self):

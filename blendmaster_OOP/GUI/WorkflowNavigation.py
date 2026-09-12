@@ -6,10 +6,10 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QTabWidget, QTabBar, QStyle,
 from classes.ProductTargets import product_targets_identifier, migrate_product_target_state
 
 WORKSPACE = ('site_configuration', 'guidance_schedules', 'stockpile_inventories',
-             'grade_reconciliation', 'amt_stockpiles', 'product_targets', 'expit_sequence',
+             'grade_reconciliation', 'amt_stockpiles', 'product_targets',
              'destination_progress', 'decision_levers', 'calendar', 'optimised_blend_sequence',
              'setup_blends', 'blend_sequence', 'blend_plan', 'material_destination_plan')
-VIEWS = ('database_view', 'opf_production_report', 'grade_profiles', 'material_flow_results',
+VIEWS = ('database_view', 'expit_sequence', 'opf_production_report', 'grade_profiles', 'material_flow_results',
          'build_depletion_profiles', 'closing_rom_stocks_compliance')
 SUPPORT = ('site_model', 'guidance_settings', 'define_fields', 'map_fields', 'data_streams',
            'solver_configuration', 'multi_feed_setup', 'material_flow', 'database_reports',
@@ -100,6 +100,8 @@ class WorkflowNavigation:
         for child in DEPENDENT_PAGES.get(page_id, ()):
             if child in self.page_locations:
                 self.set_page_enabled(child, enabled)
+        from GUI.WorkflowViews import schedule
+        schedule(self, results=page_id in ('optimised_grade_profiles', 'manual_grade_profiles'))
 
     def is_page_enabled(self, page_id):
         location = self.page_locations.get(product_targets_identifier(page_id))
@@ -115,6 +117,9 @@ class WorkflowNavigation:
         elif page_id == 'data_streams' and vars(self).get('access_role') == 'planner':
             page_id = 'grade_reconciliation'
         if not page_allowed(self, page_id):
+            return
+        from GUI.WorkflowViews import READY_PAGES
+        if page_id in READY_PAGES and not self.is_page_enabled(page_id):
             return
         if (getattr(self, 'project_load_keep_site_configuration_visible', False)
                 and page_id != 'site_configuration'):
@@ -164,6 +169,12 @@ class WorkflowNavigation:
         return states
 
     def handle_navigation_tab_changed(self, tab_widget, index):
+        current = tab_widget
+        while current in self.navigation_parents:
+            parent, container = self.navigation_parents[current]
+            if parent.currentWidget() is not container:
+                return
+            current = parent
         page = tab_widget.widget(index)
         for child, (parent, container) in list(self.navigation_parents.items()):
             if parent is tab_widget and container is page:
@@ -173,6 +184,9 @@ class WorkflowNavigation:
             if page is widget:
                 if not page_allowed(self, page_id):
                     return
+                views = vars(self).get('_workflow_views')
+                if views is not None:
+                    views.enter()
                 enter = vars(self).get('_workflow_page_enter')
                 if enter and enter(page_id):
                     return

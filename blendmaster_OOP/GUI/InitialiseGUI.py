@@ -778,9 +778,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.update_tab_tooltips()
 
         # Workflow controls
-        self.load_profiles_first_call = True
-        self.load_optimised_grade_profiles_first_call = True
-        self.load_AMT_map_first_call = True
         self.setup_blends_tab_first_call = True
         self.setup_blend_sequence_table_first_call = True
         self.setup_stockpile_table_first_call = True
@@ -1545,30 +1542,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         amt_chart = getattr(self, "draw_AMT_map", None)
         if amt_chart is not None and refresh_amt_map:
-            amt_chart.update_chunk_settings(copy.deepcopy(self.AMT_chunk_settings))
-            amt_chart.selected_points = copy.deepcopy(self.hex_sequence_table or [])
-            amt_chart.excluded_footprints = self.excluded_amt_footprints()
-            amt_chart.data = amt_chart.fetch_data()
-            amt_chart.unique_footprints = amt_chart.get_unique_footprints()
-            amt_chart.clean_up_hex_sequence_table()
-            amt_chart.update_sequence_counter()
-            try:
-                requests.post("http://localhost:8054/trigger-refresh", timeout=2)
-            except requests.exceptions.RequestException:
-                pass
-
-        if not reload_views:
-            return
-
-        for view_name in (
-            "gantt_chart_view",
-            "stockpile_profile_chart_view",
-            "optimised_grade_profile_chart_view",
-            "AMT_map_view",
-        ):
-            view = getattr(self, view_name, None)
-            if view is not None and not view.url().isEmpty():
-                view.reload()
+            self.refresh_AMT_map_data_from_database()
+        from GUI.WorkflowViews import schedule
+        schedule(self, results=True, charts=reload_views)
 
     def handle_main_tab_changed(self, tab_index):
         """Defer heavyweight report/chart work until the user opens that tab."""
@@ -1611,9 +1587,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             QTimer.singleShot(0, self.refresh_sqlite_reports)
 
         if tab_index == getattr(self, "expit_sequence_tab_index", None):
-            snapshot = getattr(self, "expit_sequence_snapshot", {}) or {}
-            if snapshot:
+            views = vars(self).get('_workflow_views')
+            if views is not None:
+                views.sync_expit_inputs()
+            if getattr(self, 'expit_sequence_snapshot', None):
                 QTimer.singleShot(0, self.render_expit_sequence_snapshot)
+            else:
+                QTimer.singleShot(0, self.refresh_expit_sequence_live)
 
     def refresh_manual_scenario_views(self, tab_states):
         def is_enabled(index):
@@ -2207,7 +2187,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.validate_form()
             # Reports and Dash views can be expensive (large SQLite previews,
             # Dash reloads and AMT map data fetches). They refresh on demand
-            # when their tab is next opened or its Load/Update button is used.
+            # when their tab is next opened.
             if hasattr(self, "material_destination_plan_view"):
                 self.material_destination_plan_view.set_context(get_database_path(), self.active_scenario_id)
             self.scenario_report_refresh_pending = True
@@ -4435,13 +4415,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.expit_sequence_tab = QWidget()
         self.expit_sequence_tab_index = self.register_page(
             "expit_sequence",
-            self.workspace_tabs,
+            self.results_tabs,
             self.expit_sequence_tab,
             "Expit Sequence",
-            # AMT Stockpiles and Product Targets are inserted ahead of
-            # this later during startup, leaving Expit Sequence immediately
-            # before the Auto Blending Dashboard in the final Workspace order.
-            position=0,
         )
         layout = QVBoxLayout(self.expit_sequence_tab)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -11817,6 +11793,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.save_button.setEnabled(
             site_fields_populated and guidance_fields_populated
         )
+        from GUI.WorkflowViews import schedule
+        schedule(self)
 
     def update_expit_mode_state(self, *_args):
         """Enable Expit transaction mode only for an imported 24HR schedule."""
@@ -17773,6 +17751,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         )
         self.write_manual_material_destination_plan(report)
         self.capture_active_manual_plan_state()
+        from GUI.WorkflowViews import schedule
+        schedule(self, results=True, charts=True)
 
     def write_manual_closing_rom_stocks_compliance(self, report):
         targets = ClosingROMStocksCompliance.normalize_target_rows(
@@ -17888,7 +17868,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             manual_chart.update_data([], [])
         if hasattr(self, "manual_gantt_view"):
             self.load_manual_gantt_chart()
-            QTimer.singleShot(250, self.manual_gantt_view.reload)
         if hasattr(self, "draw_grade_profile_chart"):
             self.draw_grade_profile_chart.update_data(pd.DataFrame())
 
@@ -18374,7 +18353,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "AMT_stockpile_tab_vertical_layout",
             "AMT_cache_status_label",
             "refresh_AMT_data_button",
-            "load_AMT_button",
             "submit_AMT_button",
         )
         if all(vars(self).get(name) is not None for name in required_widgets):
@@ -18382,7 +18360,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.AMT_map_view.show()
             self.AMT_cache_status_label.show()
             self.refresh_AMT_data_button.show()
-            self.load_AMT_button.show()
             self.submit_AMT_button.show()
             self.setup_AMT_stockpile_table_first_call = False
             return
@@ -18436,11 +18413,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "is this fresh. Set to 0 to refetch whenever the Now timestamp changes."
         )
 
-        self.load_AMT_button = QPushButton("Load or Update AMT Map")
-        self.load_AMT_button.setObjectName("loadAMTMapButton")
-        self.style_green_action_button(self.load_AMT_button, 220)
-        self.load_AMT_button.clicked.connect(self.load_AMT_map)
-
         self.submit_AMT_button = QPushButton("Submit")
         self.submit_AMT_button.setObjectName("submitAMTChunksButton")
         self.submit_AMT_button.setMinimumWidth(110)
@@ -18453,7 +18425,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         button_layout.addWidget(QLabel("AMT Refresh Tolerance:"))
         button_layout.addWidget(self.AMT_refresh_tolerance_input)
         button_layout.addWidget(self.refresh_AMT_data_button)
-        button_layout.addWidget(self.load_AMT_button)
         button_layout.addWidget(self.submit_AMT_button)
         button_layout.addStretch()
         self.AMT_stockpile_tab_vertical_layout.addLayout(button_layout)
@@ -19333,13 +19304,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.AMT_stockpile_table.blockSignals(False)
         self.ensure_AMT_map_panel()
 
-        # A freshly created web view has no URL.  Restored projects already
-        # contain their AMT rows and selected chunks, so reconnect the view
-        # automatically instead of requiring an otherwise unexplained button
-        # click.  The second reload covers slower Dash start-up on some PCs.
-        if getattr(self, "project_load_restore_in_progress", False):
-            QTimer.singleShot(250, self.reload_AMT_map_view)
-            QTimer.singleShot(1500, self.reload_AMT_map_view)
+        from GUI.WorkflowViews import schedule
+        schedule(self, charts=True)
 
     @staticmethod
     def aggregate_AMT_footprint_grade_streams(rows):
@@ -21275,6 +21241,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.project_load_keep_site_configuration_visible = False
         self.project_load_show_success = False
         self.project_load_source_label = ""
+        from GUI.WorkflowViews import schedule
+        schedule(self, results=True, charts=True)
         self.show_page(self.site_config_tab_index)
         if success and show_success:
             message = "Project loaded successfully!"
@@ -21288,6 +21256,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def finish_run_program(self, periods):
         self._workflow_optimisation_finished = True
+        from GUI.WorkflowViews import schedule
+        schedule(self, results=True, charts=True)
         self.last_run_outcome = getattr(periods, 'run_outcome', {}) or {}
         self.set_start_and_end_datetime(periods=periods)
         # Re-write the derived schedule in the active scenario database on
@@ -21476,14 +21446,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.gantt_chart_view.setStyleSheet("border: 0; background-color: #ffffff;")
         self.top_layout.addWidget(self.gantt_chart_view)
 
-        # Add a button to load the chart
-        self.load_chart_button = QPushButton("Load or Update Chart")
-        self.load_chart_button.setObjectName("loadResultsChartButton")
-        self.style_green_action_button(self.load_chart_button, 210)
-        self.load_chart_button.clicked.connect(self.load_gantt_chart)  # Connect button to function
-
         controls_layout = QHBoxLayout()
-        controls_layout.addWidget(self.load_chart_button)
         self.optimisation_snapshot_fields_button = QPushButton(
             "Choose Snapshot Fields..."
         )
@@ -21589,6 +21552,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
         report = self.fetch_optimised_blend_report(plan_id)
         self.populate_optimisation_plan_preview(report)
+        from GUI.WorkflowViews import schedule
+        schedule(self, charts=True)
 
     @staticmethod
     def default_optimisation_snapshot_columns(columns):
@@ -21948,42 +21913,28 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.ensure_AMT_map_panel()
         if getattr(self, "draw_AMT_map", None) is None:
             self.start_dash_AMT_map_thread()
-        if not self.store_AMT_chunk_settings():
+        if vars(self).get('_amt_map_pending'):
             return
 
-        try:
-            requests.post("http://localhost:8054/trigger-refresh", timeout=5)
-
-        except requests.exceptions.RequestException:
-            print("Refresh timed out.")
-
-        self.AMT_map_view.setUrl(QUrl("http://localhost:8054"))
-
-        self.load_AMT_map_first_call = False
+        self.reload_AMT_map_view()
 
     def reload_AMT_map_view(self):
         """Reconnect a restored AMT view after the Dash worker has started."""
         view = getattr(self, "AMT_map_view", None)
         if view is None:
             return
-        if view.url().isEmpty():
-            view.setUrl(QUrl("http://localhost:8054"))
-        else:
-            view.reload()
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, view, 'http://localhost:8054')
 
     def load_gantt_chart(self):
+        self.start_dash_optimised_charts_thread()
         plan_id = self.selected_optimisation_plan_id()
         chart = getattr(self, "draw_gantt_chart", None)
         if chart is not None:
             chart.set_plan_id(plan_id)
         self.resize_results_chart_area()
-        # A unique query string forces QWebEngine to reload both Dash
-        # callbacks after changing the selected plan.
-        refresh_token = uuid.uuid4().hex
-        self.gantt_chart_view.setUrl(QUrl(
-            "http://localhost:8050/"
-            f"?plan={plan_id}&refresh={refresh_token}"
-        ))
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, self.gantt_chart_view, f'http://localhost:8050/?plan={plan_id}')
 
     def resize_results_chart_area(self):
         desired_height = 520
@@ -22005,7 +21956,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         except Exception:
             desired_height = 520
 
-        available_height = self.results_tab.height() - self.load_chart_button.sizeHint().height() - 92
+        available_height = self.results_tab.height() - 92
         available_height = max(420, available_height)
         desired_height = max(420, min(desired_height, available_height))
 
@@ -22013,8 +21964,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.top_frame.setMaximumHeight(desired_height)
     
     def load_manual_gantt_chart(self):
-        # Load the Dash app into the QWebEngineView
-        self.manual_gantt_view.setUrl(QUrl("http://localhost:8052"))
+        self.start_or_update_dash_manual_chart_thread()
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, self.manual_gantt_view, 'http://localhost:8052')
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
@@ -22051,14 +22003,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.stockpile_profile_chart_view = CustomWebEngineView()  # Embed the Dash app
         self.stockpile_profile_chart_view.setStyleSheet("border: 0; background-color: #f8fafc;")
         self.bottom_layout.addWidget(self.stockpile_profile_chart_view)
-
-        # Add a button to load the chart
-        self.load_profile_chart_button = QPushButton("Load or Update Build and Depletion Profiles")
-        self.style_green_action_button(self.load_profile_chart_button, 360)
-        self.load_profile_chart_button.clicked.connect(self.load_profiles)  # Connect button to function
-
-        # Add the button to the layout at the bottom-left
-        self.profiles_layout.addWidget(self.load_profile_chart_button)
 
     def setup_closing_rom_stocks_compliance_tab(self):
         self.closing_rom_stocks_tab = QWidget()
@@ -23275,49 +23219,23 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         self.optimised_grade_profile_layout.addWidget(self.optimised_grade_profile_frame)
 
-        self.load_optimised_grade_profile_chart_button = QPushButton("Load or Update Chart")
-        self.load_optimised_grade_profile_chart_button.setObjectName("loadOptimisedGradeProfileButton")
-        self.style_green_action_button(self.load_optimised_grade_profile_chart_button, 210)
-        self.load_optimised_grade_profile_chart_button.clicked.connect(self.load_optimised_grade_profiles)
-        self.optimised_grade_profile_layout.addWidget(self.load_optimised_grade_profile_chart_button)
-
     def load_profiles(self):
-
-        if not self.load_profiles_first_call:
-       
-            # Send a request to trigger the refresh
-            try:
-                requests.post("http://localhost:8051/trigger-refresh", timeout=5)  # Timeout after 5 seconds
-            except requests.exceptions.Timeout:
-                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
-            except requests.exceptions.RequestException as e:
-                QMessageBox.critical(None, "Error", f"Failed to trigger refresh: {e}")
-
-        # Load the Dash app into the QWebEngineView
-        self.stockpile_profile_chart_view.setUrl(QUrl("http://localhost:8051"))
-
-        self.load_profiles_first_call = False
+        self.start_dash_optimised_charts_thread()
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, self.stockpile_profile_chart_view, 'http://localhost:8051')
     
     def load_grade_profiles(self):
         
         self.start_or_update_dash_manual_grade_profile_thread()
 
-        # Load the Dash app into the QWebEngineView
-        self.blend_grade_profile_chart_view.setUrl(QUrl("http://localhost:8053"))
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, self.blend_grade_profile_chart_view, 'http://localhost:8053')
 
     def load_optimised_grade_profiles(self):
         self.start_or_update_dash_optimised_grade_profile_thread()
 
-        if not self.load_optimised_grade_profiles_first_call:
-            try:
-                requests.post("http://localhost:8055/trigger-refresh", timeout=5)
-            except requests.exceptions.Timeout:
-                QMessageBox.critical(None, "Timeout", "The server did not respond in time.")
-            except requests.exceptions.RequestException:
-                pass
-
-        self.optimised_grade_profile_chart_view.setUrl(QUrl("http://localhost:8055"))
-        self.load_optimised_grade_profiles_first_call = False
+        from GUI.ChartReadiness import connect_view
+        connect_view(self, self.optimised_grade_profile_chart_view, 'http://localhost:8055')
 
     def start_or_update_dash_optimised_grade_profile_thread(self):
         if self.start_dash_optimised_grade_profile_first_call:
@@ -23328,6 +23246,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
             self.dash_thread_optimised_grade_profile.start()
             self.start_dash_optimised_grade_profile_first_call = False
+        self.draw_optimised_grade_profile_chart.db_path = get_database_path()
 
     def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
@@ -23358,7 +23277,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
             self.dash_thread_stockpile_profile.start()
 
-        self.update_chart_database_context(refresh_amt_map=False)
+        # The views connect lazily; starting a service must not trigger another
+        # chart refresh or a cycle of report checks.
 
     def start_dash_AMT_map_thread(self):
         """Start the Dash app in a separate thread."""
@@ -26182,14 +26102,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.blend_grade_profile_chart_view.setStyleSheet("border: 1px solid black;")
         self.grade_profile_frame_layout.addWidget(self.blend_grade_profile_chart_view)
 
-        # Add a button to load the chart
-        self.load_grade_profile_chart_button = QPushButton("Load or Update Chart")
-        self.style_green_action_button(self.load_grade_profile_chart_button, 210)
-        self.load_grade_profile_chart_button.clicked.connect(self.load_grade_profiles)  # Connect button to function
-
-        # Add the button to the layout at the bottom-left
-        self.grade_profile_layout.addWidget(self.load_grade_profile_chart_button)
-
     def start_or_update_dash_manual_grade_profile_thread(self):
         """Update or start the Dash app."""
         hex_sequence_table = copy.deepcopy(self.hex_sequence_table)
@@ -26202,6 +26114,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
             # Update data in the running Dash app
+            self.draw_grade_profile_chart.hex_sequence_table = hex_sequence_table
+            self.draw_grade_profile_chart.updated_stockpile_data = updated_stockpile_data
             self.draw_grade_profile_chart.update_data(grade_profile_data)  
         else:
             # Start the Dash app if not already running

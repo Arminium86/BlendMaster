@@ -31,7 +31,12 @@ permissions in the web application.
    basis and local overrides. Use Review Refresh Changes after a new 2WP. Manual
    overrides and policies must survive refresh. Check both product lanes where
    the site uses lump/fines products.
-7. **Expit Sequence and Destination Reconciliation:** wait for refresh to finish;
+7. **Views → Expit Sequence and Workspace → Destination Reconciliation:**
+   confirm both are disabled until their inputs are available, and hover for the
+   missing preparation. Expit requires a configured start, 24HR plan, selected
+   dig circuits and transaction reconciliation enabled. Destination requires a
+   configured start, 2WP and inventory Nearest Crusher assignments.
+   Open each available page and wait for refresh to finish;
    inspect actual versus planned movement, agent/dig circuit, lookback window,
    remaining allowance, build order and unresolved 24HR-only destinations.
 8. **Decision Levers and Calendar:** inspect the retained business controls and
@@ -66,6 +71,13 @@ permissions in the web application.
     Closing ROM Stocks Compliance. Confirm the correct site/plan selection and
     totals across views; opening a view must not alter planning inputs.
     On Build and Depletion Profiles, check the first and last source pages.
+    Grade Profiles must be disabled without results; its Optimised and Manual
+    pages enable independently as their results become available. Clear the
+    manual plan and switch sites to confirm obsolete availability is removed.
+    Gantt, AMT, build/depletion and grade charts should load automatically without
+    Load/Update buttons. Change the selected plan or regenerate results and
+    confirm the next view shows the new values. Return to a previously opened
+    chart after switching sites and confirm it shows the selected site's data.
 
 ## Support and agent handoff
 

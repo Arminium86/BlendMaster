@@ -19,13 +19,28 @@ enforce these actions on the server.
 
 | Area | Pages, in task order |
 | --- | --- |
-| Workspace | Site Configuration; Guidance Schedules; Stockpile Inventories; Grade Reconciliation; AMT Stockpiles; Product Targets; Expit Sequence; Destination Reconciliation; Decision Levers; Calendar; Optimised Blend Sequence; Manual Blending Dashboard; Manual Blend Sequence; Blend Plan; Material Destination Plan |
-| Views | Database View; OPF Production Report; Grade Profiles (optimised/manual); Material Flow; Build and Depletion Profiles; Closing ROM Stocks Compliance |
+| Workspace | Site Configuration; Guidance Schedules; Stockpile Inventories; Grade Reconciliation; AMT Stockpiles; Product Targets; Destination Reconciliation; Decision Levers; Calendar; Optimised Blend Sequence; Manual Blending Dashboard; Manual Blend Sequence; Blend Plan; Material Destination Plan |
+| Views | Database View; Expit Sequence; OPF Production Report; Grade Profiles (optimised/manual); Material Flow; Build and Depletion Profiles; Closing ROM Stocks Compliance |
 | Support | Site Model Settings; Guidance Settings; Define Fields; Map Fields; Data Streams; Solver Configuration; Multi Feed Setup; Conveyors & COS; Database Reports; Site Automation; Decision Diagnostics; Legacy Agent Bridge |
 
 The old Reports container is split across its destinations. Blend Plan keeps
 optimised/manual plans and displays the active single-point, multiple-point or
 combined-OPF mode. Quality, rounding, backup and direct-tip audit views remain.
+
+Expit Sequence is available after site/start setup, an available 24HR import,
+selected dig circuits and transaction reconciliation enabled in Guidance Settings.
+Destination Reconciliation requires site/start, an available 2WP import and
+inventories with Nearest Crusher assignments. Disabled pages explain missing
+preparation in their tooltips. Grade Profiles and its Optimised/Manual pages
+follow actual saved report rows in the active site's database; restored tab flags
+cannot enable an empty report.
+
+Embedded charts load automatically when an available page opens. Completed runs,
+manual report changes, plan selection and AMT map preparation refresh the visible
+chart; other charts update on their next visit. Local service startup is checked
+in a background worker. There are no chart Load/Update buttons or blocking HTTP
+refresh calls in the planner flow. Warehouse refresh and Submit actions retain
+their existing meaning. Changing hidden tabs does not start a warehouse refresh.
 The legacy bridge is retained under Support for compatibility; new scheduled
 handoffs use the site workflow. Best-result selection is automatic.
 

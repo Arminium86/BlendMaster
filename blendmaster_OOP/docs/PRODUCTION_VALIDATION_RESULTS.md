@@ -160,3 +160,35 @@ Live reconciliation and manual destination publication still have short
 synchronous phases. The complete site run's longest event-loop gap was 9.02
 seconds; the final manual restore/prepopulation/submission pass measured 8.72
 seconds. These pauses remain a production performance consideration.
+
+## 13 September follow-up: view availability and automatic charts
+
+Expit Sequence now belongs to Views. Expit and Destination Reconciliation are
+disabled until their required site, schedule and selection/inventory inputs are
+available. Grade Profiles and its Optimised/Manual children follow actual report
+rows in the active database. Saved tab flags and delayed results from a previous
+site cannot enable an unavailable view.
+
+Chart Load/Update buttons were removed. Available charts load on entry and refresh
+after prepared data, selected plans or generated reports change. Local service
+startup is checked in a background worker; a failed connection can be retried by
+reopening the page. Optimised grade layouts read committed reports on each load.
+Matching Expit evidence is reused until its inputs change. Hidden navigation
+groups do not trigger page entry work or warehouse refreshes.
+
+Validation completed:
+
+- Full regression suite: **1,180 tests passed in 47.327 seconds**.
+- Dash HTTP layout and callback checks: updated grades and a second database
+  produce the current chart values without calling the legacy refresh endpoint.
+- Native Qt checks: fresh-project disabled states, prepared-input availability,
+  independent grade pages, automatic entry loading, one refresh per changed
+  result, no remaining legacy buttons and reuse of the AMT panel all passed.
+  Navigation screenshots were inspected. Chromium was replaced by placeholders
+  in this isolated native check; Dash HTTP rendering was tested separately.
+- `git diff --check` passed. The running user application was left in place;
+  restart it to load the updated code and use the revised UI acceptance checklist.
+
+Evidence is in the user's Playground directory: `BlendMaster_view_flow_full_final.log`,
+`BlendMaster_view_flow_native.json`, `BlendMaster_view_flow_empty.png` and
+`BlendMaster_view_flow_optimised.png`. The native fixture is `bm_view_flow_native.py`.

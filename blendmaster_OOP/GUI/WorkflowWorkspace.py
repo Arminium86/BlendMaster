@@ -145,6 +145,8 @@ def install(host):
     review = QPushButton('Review Refresh Changes')
     review.clicked.connect(lambda: show_refresh_changes(host))
     host.product_build_layout.insertWidget(1, review)
+    from GUI.WorkflowViews import WorkflowViews
+    host._workflow_views = WorkflowViews(host)
     refresh_context(host)
 
 
@@ -164,6 +166,8 @@ def show_refresh_changes(host):
 
 
 def refresh_context(host):
+    from GUI.WorkflowViews import schedule
+    schedule(host)
     host.blend_mode.setCurrentIndex(0)
     host.blend_mode_choice = 1
     state = {key: getattr(host, key, '') for key in

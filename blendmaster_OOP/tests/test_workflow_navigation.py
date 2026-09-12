@@ -76,3 +76,13 @@ class WorkflowNavigationTests(unittest.TestCase):
             h.sync_destination_progress_context.side_effect = lambda: setattr(h.destination_progress, 'snapshot', None)
             UserInputs.handle_main_tab_changed(h, 'destination')
             schedule.assert_called_once_with(0, h.destination_progress.request_refresh)
+
+    def test_hidden_group_changes_do_not_start_page_refreshes(self):
+        h = self.host('support')
+        h.show_page('calendar')
+        h.handle_main_tab_changed = Mock()
+        h.results_tabs.setCurrentWidget(h.page_widgets['expit_sequence'])
+        h.handle_main_tab_changed.assert_not_called()
+        h.tabs.setCurrentWidget(h.results_navigation_page)
+        h.handle_main_tab_changed.assert_called_once_with('expit_sequence')
+        h.deleteLater()
