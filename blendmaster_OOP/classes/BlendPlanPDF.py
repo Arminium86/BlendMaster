@@ -174,6 +174,7 @@ class BlendPlanPDF:
         report_datetime=None,
         backup_destinations=None,
         rounding_audit=None,
+        notes=None,
     ):
         try:
             from reportlab.graphics.shapes import Drawing, Line, Rect, String
@@ -584,6 +585,9 @@ class BlendPlanPDF:
             return header
 
         story = report_header()
+        for note in notes or []:
+            story.append(Paragraph(html.escape(str(note)), styles['BlendPlanMetadata']))
+            story.append(Spacer(1, 4))
         if backup_destinations:
             story.append(Paragraph("Backup destinations — whole plan, all trucks including direct tip", styles["BlendPlanSection"]))
             for backup in backup_destinations:

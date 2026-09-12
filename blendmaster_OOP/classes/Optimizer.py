@@ -930,6 +930,25 @@ class Optimizer:
                 product_build_grade_weight_coefficients[lane][analyte] = coefficients
                 product_build_grade_weight_available[lane][analyte] = available
 
+        # Product is constrained at OPF arrival. Delayed tipping contributes only
+        # its in-window fraction; previously tipped FIFO material is mandatory
+        # product input with no second crusher or physical-source consumption.
+        for index, event in enumerate(event_pool):
+            fraction = getattr(event, '_transport_fraction', 1.0)
+            for lane in product_build_lanes:
+                product_build_coefficients_by_lane[lane][index] *= fraction
+                if product_build_stream_tonnes_by_lane[lane][index] is not None:
+                    product_build_stream_tonnes_by_lane[lane][index] *= fraction
+                for analyte in ('fe', 'si', 'al', 'p', 'mn'):
+                    product_build_grade_weight_coefficients[lane][analyte][index] *= fraction
+            if solver_config.get('_transport_engine'):
+                event._transport_product_weights = {a: (product_build_grade_weight_coefficients.get(PRODUCT_LANE, {}).get(a, grade_weight_coefficients[a])[index])
+                    for a in ('fe', 'si', 'al', 'p', 'mn')}
+            if getattr(event, '_transport_arrival', False):
+                crusher_coefficients[index] = reclaimer_coefficients[index] = 0.0
+                for coefficients in grade_weight_coefficients.values():
+                    coefficients[index] = 0.0
+
         # The decision variable is physical ROM depletion. Reclaimer capacity
         # is converted from the selected reclaimer stream back to that physical
         # basis for each source independently.
@@ -938,6 +957,15 @@ class Optimizer:
         for index, (event, coefficient) in enumerate(
             zip(event_pool, reclaimer_coefficients)
         ):
+            if getattr(event, '_transport_arrival', False):
+                if strict_mapped_fields and product_build_required:
+                    missing = [lane for lane in product_build_lanes if product_build_stream_tonnes_by_lane[lane][index] is None
+                        or (product_build_stream_tonnes_by_lane[lane][index] > Optimizer.SOLUTION_TOLERANCE and
+                            any(not product_build_grade_weight_available[lane][a][index] or product_build_grade_weight_coefficients[lane][a][index] <= 0 for a in ('fe','si','al','p','mn')))]
+                    if missing:
+                        raise ValueError(f'{event.source_name}: opening/in-transit product quantities or grade weights are missing for {missing}. Review opening history and field mappings.')
+                bounds.append((event.balance, event.balance))
+                continue
             reclaim_capacity = max(safe_float(event.rate), 0.0) * steady_state_duration
             mappings_available = (
                 crusher_stream_tonnes[index] is not None
@@ -1805,9 +1833,13 @@ class Optimizer:
 
         prob = LpProblem("blending", LpMinimize)
         x_vars = [
-            LpVariable(f"x_{i}", lowBound=0, upBound=bounds[i][1])
+            LpVariable(f"x_{i}", lowBound=bounds[i][0], upBound=bounds[i][1])
             for i in range(len(event_pool))
         ]
+
+        for event, variable in zip(event_pool, x_vars):
+            if getattr(event, '_transport_arrival', False):
+                prob += variable == event.balance
 
         # Optional minimum direct-tip commitment. Payload transactions remain
         # continuous, but a grade-block source must contribute either zero
@@ -2329,6 +2361,8 @@ class Optimizer:
                         transaction[
                             f"custom_constraint_{key}_source_denominator_contribution"
                         ] = denominator_contribution
+                    if hasattr(event, '_transport_product_weights'):
+                        transaction['transport_product_weights'] = {a: result.x[i]*c for a, c in event._transport_product_weights.items()}
                     transactions.append(transaction)
 
             return {

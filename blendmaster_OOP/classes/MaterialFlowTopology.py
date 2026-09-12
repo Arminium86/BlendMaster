@@ -2,7 +2,7 @@
 
 The graph describes possible routes, not actual movements or new constraints.
 It is rebuilt from model inputs on request and is never a second owner of solver
-state. Conveyor and COS nodes are explicit zero-delay pass-throughs until Task 30.
+state. Conveyor and COS nodes describe optional FIFO storage and Calendar rates.
 Simultaneous modes derive physical tipping points with shared source nodes.
 """
 
@@ -38,7 +38,8 @@ def planning_topology(*, multi_feed=None, **kwargs):
     sources = list(kwargs.get("sources") or [])
     nodes, edges = {}, {}
     for point in settings["tipping_points"]:
-        allowed = [r for r in sources if r["source_type"] != "stockpile" or route_allowed(settings, r["source"], point["name"])]
+        allowed = [r for r in sources if (route_allowed(settings, r['source'], point['name']) if r['source_type']=='stockpile'
+                   else point['direct_tip_enabled'] and (r.get('allowed_tipping_points') is None or point['name'] in r['allowed_tipping_points']))]
         graph = one_lane_topology(**{**kwargs, "sources": allowed,
                                     "site_context": {**context, "opf": point["opf"], "crusher": point["name"]},
                                     "crusher_targets": point["targets_by_period"]})
@@ -86,7 +87,7 @@ def planning_topology(*, multi_feed=None, **kwargs):
     return material_flow_topology(_identifier("multi_feed", context.get("hub"), context.get("mine")),
                                   mode="total_feed" if settings["mode"] == "multi_tipping_point" else "combined_opf",
                                   nodes=list(nodes.values()), edges=list(edges.values()),
-                                  properties=dict(adapter=settings["mode"], latency_enabled=False,
+                                  properties=dict(adapter=settings["mode"], latency_enabled=any(n["properties"].get("latency_enabled") for n in nodes.values()),
                                                   shared_physical_balances=True, stockpile_exclusive_tipping_point=True))
 
 
@@ -99,7 +100,7 @@ def _identifier(kind, *parts):
     return ":".join([kind, *(quote(_text(part), safe="") for part in parts)])
 
 
-def model_sources(stockpiles, grade_blocks):
+def model_sources(stockpiles, grade_blocks, direct_tip_point_by_payload=None):
     """Describe model sources while preserving payload IDs and APS slice names."""
     for stockpile in stockpiles:
         yield {
@@ -113,6 +114,7 @@ def model_sources(stockpiles, grade_blocks):
             "source": getattr(block, "source", None) or block.name,
             "source_type": "grade_block",
             "source_id": block.name,
+            "allowed_tipping_points": direct_tip_point_by_payload.get(str(block.name),[]) if direct_tip_point_by_payload is not None else None,
         }
 
 
@@ -123,6 +125,7 @@ def one_lane_topology(
     crusher_targets=None,
     product_build_settings=None,
     byproducts_enabled=False,
+    transport_settings=None,
 ):
     """Return a detached PhaseSchemas topology for one current planning lane.
 
@@ -149,6 +152,18 @@ def one_lane_topology(
     opf_id = _identifier("opf", *scope)
     synthetic = site["crusher"].lower().replace(" ", "_").startswith("total_feed")
     targets = deepcopy(dict(crusher_targets or {}))
+    from classes.TransportSettings import transport_settings as normalize_transport, reference_rate
+    transport = normalize_transport(transport_settings or context.get('transport_settings'))['tipping_points'].get(site['crusher'], {})
+    enabled = bool(transport.get('enabled'))
+    rate = reference_rate(targets)
+    conveyor_capacity = transport.get('conveyor_capacity_wmt',0) if enabled else 0
+    cos_capacity = transport.get('cos_capacity_wmt',0) if enabled else 0
+    delay = conveyor_capacity/rate if rate else 0
+    def storage(stage, capacity):
+        return dict(placeholder=not enabled or capacity<=0, latency_enabled=enabled and capacity>0,
+                    tipping_point=site['crusher'], opf=site['opf'], capacity_wmt=capacity,
+                    chunks=transport.get('cos_chunks',10) if stage=='cos' else None,
+                    reference_rate=rate, latency_hours=delay if stage=='conveyor' else None)
     nodes = [
         topology_node(
             tip_id, TOPOLOGY_NODE_TIPPING_POINT,
@@ -162,11 +177,11 @@ def one_lane_topology(
         ),
         topology_node(
             conveyor_id, TOPOLOGY_NODE_CONVEYOR, label="Conveyor",
-            properties={"placeholder": True, "latency_enabled": False},
+            properties=storage("conveyor", conveyor_capacity),
         ),
         topology_node(
             cos_id, TOPOLOGY_NODE_COS, label="COS",
-            properties={"placeholder": True, "latency_enabled": False},
+            properties=storage("cos", cos_capacity),
         ),
         topology_node(
             opf_id, TOPOLOGY_NODE_OPF,
@@ -189,7 +204,9 @@ def one_lane_topology(
         ))
 
     connect(tip_id, conveyor_id, edge_type=TOPOLOGY_EDGE_CONVEYOR)
+    edges[-1].update(latency_hours=delay, capacity_wmt=conveyor_capacity if enabled else None)
     connect(conveyor_id, cos_id, edge_type=TOPOLOGY_EDGE_COS)
+    edges[-1]["capacity_wmt"] = cos_capacity if enabled else None
     connect(cos_id, opf_id)
 
     grouped = {}
@@ -238,7 +255,7 @@ def one_lane_topology(
         properties={
             "adapter": "legacy_one_lane",
             "site_context": site,
-            "latency_enabled": False,
+            "latency_enabled": enabled,
             "legacy_synthetic_total_feed": synthetic,
             "route_semantics": "candidate_feed",
         },

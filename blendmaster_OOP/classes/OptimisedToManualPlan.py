@@ -172,6 +172,11 @@ class OptimisedToManualPlan:
             return f"Period_{int(text)}"
         return "Preplan"
 
+    def build_by_tipping_point(self):
+        """Produce separate operational recipes while retaining shared-plan identity."""
+        from classes.OperationalBlendPlans import split_blend_plans
+        return split_blend_plans(self.report,self.stockpile_data)
+
     def build(self):
         data = self._prepared_report()
         if 'tipping_point' in data and data['tipping_point'].dropna().nunique() > 1:

@@ -20,7 +20,7 @@ class DestinationActivityUnavailable(ConnectionError):
 
 
 class RecentDestinationActivity:
-    VERSION = 1
+    VERSION = 2
     MAX_HOURS = 24 * 31
     MAX_RECORDS = 200000
     SQL_PATH = Path(__file__).with_name("sql") / "recent_destination_activity.sql"
@@ -84,7 +84,7 @@ class RecentDestinationActivity:
                 temporary = Path(stream.name)
                 json.dump(payload, stream, allow_nan=False)
             temporary.replace(self._path(payload["request"]))
-            files = sorted((p for p in self.cache_directory.iterdir() if re.fullmatch(r"destinations-v1-[a-f0-9]{64}\.json", p.name)),
+            files = sorted((p for p in self.cache_directory.iterdir() if re.fullmatch(r"destinations-v[12]-[a-f0-9]{64}\.json", p.name)),
                            key=lambda p: p.stat().st_mtime, reverse=True)
             for path in files[24:]:
                 path.unlink(missing_ok=True)

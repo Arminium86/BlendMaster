@@ -206,8 +206,9 @@ def similarity_coefficients(events, builds, values, coefficients, config=None, s
         grades = quality_fields(build)
         for a in SCHEMA_ANALYTES:
             result[(lane, a)] = [source_preference(a, g, grades[f"target_{a}_target"], c,
-                                bool(event.is_grade_block), config)
-                                if event.is_stockpile or event.is_grade_block else dict.fromkeys(SIMILARITY_TOTALS, 0.0)
+                                bool(event.is_grade_block or getattr(event, '_transport_material', {}).get('source_type') == 'grade_block'), config)
+                                if event.is_stockpile or event.is_grade_block or getattr(event, '_transport_arrival', False)
+                                else dict.fromkeys(SIMILARITY_TOTALS, 0.0)
                                 for event, g, c in zip(events, values[lane][a], coefficients[lane][a])]
     return result
 

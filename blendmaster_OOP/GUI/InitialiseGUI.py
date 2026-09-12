@@ -56,6 +56,8 @@ from GUI.OPFProductionReport import OPFProductionReport
 from GUI.DestinationProgressSetup import DestinationProgressSetup
 from GUI.MultiFeedSetup import MultiFeedSetup
 from classes.MultiFeedSettings import multi_feed_settings
+from classes.PlanningPersistence import (migrate_project_state, settings_signature,
+    PROJECT_FORMAT_VERSION, PLANNING_SEMANTICS_VERSION, FLOW_LAYOUT_SCHEMA_VERSION)
 from classes.MultiFeedCalendar import apply_calendar, calendar_rows as multi_calendar_rows, legacy_aggregate_calendar
 from GUI.SelectionComboBox import SelectionComboBox
 from GUI.MaterialDestinationPlanView import MaterialDestinationPlanView
@@ -174,11 +176,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
 APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
-AMT_OPENING_CACHE_VERSION = 1
-AMT_CHUNK_RECONCILIATION_VERSION = 3
+AMT_OPENING_CACHE_VERSION = 2
+AMT_CHUNK_RECONCILIATION_VERSION = 4
 # Older Database View caches may contain an empty frame from a failed import.
-EXPIT_INPUT_CACHE_VERSION = 3
-APS_GUIDANCE_CACHE_VERSION = 1
+EXPIT_INPUT_CACHE_VERSION = 4
+APS_GUIDANCE_CACHE_VERSION = 2
 
 SITE_OPF_OPTIONS = {
     "CC": ["CC OPF01", "CC OPF02"],
@@ -1379,8 +1381,13 @@ class UserInputs(QMainWindow):
             table.resizeColumnsToContents()
 
     def active_site_context(self):
+        from classes.CrossFeatureReports import input_audit_snapshot
         return {
+            'reporting_input_audits': input_audit_snapshot(vars(self)),
             "multi_feed_settings": self.current_multi_feed_configuration(),
+            "transport_settings": copy.deepcopy(getattr(self, "transport_settings", {})),
+            "transport_opening_history": copy.deepcopy(getattr(self, "transport_opening_history", {})),
+            "flow_node_positions": copy.deepcopy(getattr(self, "flow_node_positions", {})),
             "opf_profiles": self.current_opf_profiles(),
             "scenario_id": self.active_scenario_id,
             "destination_reconciliation": self.destination_allocation_context(),
@@ -1578,6 +1585,7 @@ class UserInputs(QMainWindow):
             "selected_two_wp_product_crushers",
             "blend_mode_choice",
             "product_brand_labels_choice", "product_targets", "product_assay_report_settings", "destination_progress_settings", "multi_feed_configuration",
+            "transport_settings", "transport_opening_history", "flow_node_positions", "operational_plan_backups",
             "selected_data_stream", "crusher_tonnes_stream", "reclaimer_tonnes_stream",
             "product_build_tonnes_stream", "byproducts_enabled",
             "byproduct_quantity_fields", "byproduct_grade_fields",
@@ -1630,7 +1638,10 @@ class UserInputs(QMainWindow):
             "crusher_rate", "crusher_rate_input_value",
             "crusher_rate_input_values", "blend_config_table_inputs",
         ]
-        state = {"scenario_id": self.active_scenario_id, "calendar_inputs": calendar_inputs}
+        state = {"scenario_id": self.active_scenario_id, "calendar_inputs": calendar_inputs,
+                 "project_format_version": PROJECT_FORMAT_VERSION,
+                 "planning_semantics_version": PLANNING_SEMANTICS_VERSION,
+                 "flow_layout_schema_version": FLOW_LAYOUT_SCHEMA_VERSION}
         for field in fields:
             value = getattr(self, field, None)
             # The active scenario owns the current AMT payload and scenario
@@ -1732,6 +1743,13 @@ class UserInputs(QMainWindow):
             self.sync_destination_progress_context()
             QTimer.singleShot(0, self.destination_progress.request_refresh)
 
+        if tab_index == getattr(self,'decision_levers_tab_index',None) and hasattr(self,'transport_rehandle_controls'):
+            self.transport_rehandle_controls.set_settings(getattr(self,'transport_settings',{}))
+
+        if tab_index == getattr(self, 'transport_tab_index', None) and hasattr(self, 'transport_setup'):
+            from GUI.MaterialFlowIntegration import sync_setup
+            sync_setup(self)
+
         if tab_index == getattr(self, "multi_feed_tab_index", None) and hasattr(self, "multi_feed_setup"):
             self.sync_multi_feed_setup()
 
@@ -1790,7 +1808,7 @@ class UserInputs(QMainWindow):
             self.is_project_loaded = previous_project_loaded
 
     def restore_site_scenario(self, state):
-        state = copy.deepcopy(migrate_product_target_state(state or {}))
+        state = copy.deepcopy(migrate_project_state(state or {}))
         self.scenario_switch_in_progress = True
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
@@ -1940,6 +1958,10 @@ class UserInputs(QMainWindow):
             self.product_targets = copy.deepcopy(state.get("product_targets") or [])
             self.product_assay_report_settings = copy.deepcopy(state.get("product_assay_report_settings") or {})
             self.destination_progress_settings = progress_settings(state.get("destination_progress_settings"))
+            self.transport_settings = copy.deepcopy(state.get("transport_settings") or {})
+            self.transport_opening_history = copy.deepcopy(state.get("transport_opening_history") or {})
+            self.flow_node_positions = copy.deepcopy(state.get("flow_node_positions") or {})
+            self.operational_plan_backups = copy.deepcopy(state.get("operational_plan_backups") or {})
             self.multi_feed_configuration = multi_feed_settings(state.get("multi_feed_configuration"))
             self.plan_mode_input.setCurrentIndex(self.plan_mode_input.findData(self.multi_feed_configuration['mode']))
             if hasattr(self, "multi_feed_setup"):
@@ -2946,6 +2968,12 @@ class UserInputs(QMainWindow):
         feed_submit.clicked.connect(self.submit_multi_feed_setup)
         feed_layout.addWidget(feed_submit)
         self.set_page_enabled(self.multi_feed_tab_index, False)
+        from GUI.MaterialFlowIntegration import install_setup
+        install_setup(self)
+        from GUI.TransportRehandleControls import TransportRehandleControls
+        self.transport_rehandle_controls = TransportRehandleControls()
+        self.transport_rehandle_controls.changed.connect(lambda settings: setattr(self,'transport_settings',settings))
+        layout.addWidget(self.transport_rehandle_controls)
 
         blend_section = QLabel("Blend Composition")
         blend_section.setStyleSheet(
@@ -5765,6 +5793,7 @@ class UserInputs(QMainWindow):
             "multi_feed": context.get("multi_feed_settings"),
             "opf_mappings": {opf: {k: profile.get(k) for k in ('scenario_id', 'fields', 'aps_grade_field_mappings', 'aps_source_property_field_mappings', 'brands')} for opf, profile in (context.get('opf_profiles') or {}).items()},
             "cache_version": EXPIT_INPUT_CACHE_VERSION,
+            "planning_settings": settings_signature(vars(self)),
             "destination_rule_version": DESTINATION_RULE_VERSION,
             "destination_guidance_version": (
                 ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
@@ -10100,7 +10129,8 @@ class UserInputs(QMainWindow):
             "selected_opfs": sorted({p['opf'] for p in (vars(self).get('multi_feed_configuration') or {}).get('tipping_points', [])}),
             "per_opf_history_days": {p['opf']: required_history_days(vars(self).get('reconciliation_settings'), p['opf'], configured_brands(self.product_brand_labels_choice))
                                      for p in (vars(self).get('multi_feed_configuration') or {}).get('tipping_points', [])},
-            "combined_reconciliation_version": 1,
+            "combined_reconciliation_version": 2,
+            "evidence_settings": settings_signature(vars(self), evidence=True),
             "brands": configured_brands(self.product_brand_labels_choice),
             "crushers": sorted(
                 str(value) for value in (self.selected_site_crushers or [])
@@ -12872,6 +12902,7 @@ class UserInputs(QMainWindow):
     def aps_guidance_input_signature(self):
         signature = {
             "cache_version": APS_GUIDANCE_CACHE_VERSION,
+            "evidence_settings": settings_signature(vars(self), evidence=True),
             "destination_guidance_version": (
                 ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
             ),
@@ -13619,7 +13650,7 @@ class UserInputs(QMainWindow):
         if hasattr(start_time, "toPyDateTime"):
             start_time = start_time.toPyDateTime()
         payload = {
-            "cache_version": 1,
+            "cache_version": 2,
             "hub": str(getattr(
                 self, "hub_input_choice", ""
             ) or "").strip().upper(),
@@ -18035,6 +18066,14 @@ class UserInputs(QMainWindow):
     def prepopulate_manual_from_optimised_result(
         self, automatic=False
     ):
+        if (getattr(self, 'multi_feed_configuration', None) or {}).get('mode','single') != 'single':
+            if hasattr(self, 'operational_blend_plans'):
+                self.operational_blend_plans.refresh()
+                if not automatic:
+                    self.show_page(self.sqlite_reports_tab_index)
+                    self.reports_child_tabs.setCurrentWidget(self.operational_blend_plans)
+                return True
+            return False
         has_manual_plan = bool(
             getattr(
                 self, "stored_blend_sequence_table_for_gantt", []
@@ -18797,6 +18836,7 @@ class UserInputs(QMainWindow):
         # lightweight non-window objects used by reconciliation tests.
         state = vars(self)
         payload = {
+            "planning_settings": settings_signature(state),
             "reconciliation": reconciliation_fingerprint({
                 "tonnage_recon_version": AMT_TONNAGE_RECON_VERSION,
                 "excluded_footprints": sorted(self.excluded_amt_footprints()),
@@ -22419,6 +22459,8 @@ class UserInputs(QMainWindow):
             self, run_async=lambda work, success, failure: self.run_background_task(
                 "Loading saved destination plan…", work, success, failure, show_progress=False))
         self.reports_child_tabs.addTab(self.material_destination_plan_view, "Material Destination Plan")
+        from GUI.MaterialFlowIntegration import install_results
+        install_results(self)
         self.reports_child_tabs.currentChanged.connect(
             lambda: self.refresh_material_destination_plan_view()
             if self.reports_child_tabs.currentWidget() is self.material_destination_plan_view else None)
@@ -26410,7 +26452,9 @@ class UserInputs(QMainWindow):
 
             # Combine all class variables into a dictionary
             state_to_save = {
-                "project_format_version": 15,
+                "project_format_version": PROJECT_FORMAT_VERSION,
+                "planning_semantics_version": PLANNING_SEMANTICS_VERSION,
+                "flow_layout_schema_version": FLOW_LAYOUT_SCHEMA_VERSION,
                 "active_scenario_id": self.active_scenario_id,
                 "site_scenarios": scenarios_to_save,
                 "tab_states": tab_states,
@@ -26472,6 +26516,10 @@ class UserInputs(QMainWindow):
                 "product_assay_report_settings": copy.deepcopy(getattr(self, "product_assay_report_settings", {})),
                 "destination_progress_settings": progress_settings(getattr(self, "destination_progress_settings", None)),
                 "multi_feed_configuration": self.current_multi_feed_configuration(),
+                "transport_settings": copy.deepcopy(getattr(self, "transport_settings", {})),
+                "transport_opening_history": copy.deepcopy(getattr(self, "transport_opening_history", {})),
+                "flow_node_positions": copy.deepcopy(getattr(self, "flow_node_positions", {})),
+                "operational_plan_backups": copy.deepcopy(getattr(self, "operational_plan_backups", {})),
                 "auto_load_2wp_targets_choice": self.auto_load_2wp_targets_choice,
                 "group_2wp_build_targets_by_brand_choice": (
                     self.group_2wp_build_targets_by_brand_choice
@@ -26719,7 +26767,7 @@ class UserInputs(QMainWindow):
 
     def prepare_loaded_site_scenarios(self, loaded_state):
         """Restore v2 multi-site projects and wrap legacy projects as one scenario."""
-        loaded_state = migrate_product_target_state(loaded_state)
+        loaded_state = migrate_project_state(loaded_state)
         saved_scenarios = loaded_state.get("site_scenarios")
         if not isinstance(saved_scenarios, dict) or not saved_scenarios:
             legacy_state = copy.deepcopy(loaded_state)
@@ -26767,6 +26815,7 @@ class UserInputs(QMainWindow):
         """Restore app state using the same path as Load Project."""
         if not isinstance(loaded_state, dict):
             raise ValueError("Project state must be a dictionary.")
+        loaded_state = migrate_project_state(loaded_state)
         if not self.prompt_loaded_project_start_time(loaded_state):
             self.is_project_loaded = False
             return False
@@ -26933,6 +26982,10 @@ class UserInputs(QMainWindow):
         )
         self.product_assay_report_settings = copy.deepcopy(loaded_state.get("product_assay_report_settings") or {})
         self.destination_progress_settings = progress_settings(loaded_state.get("destination_progress_settings"))
+        self.transport_settings = copy.deepcopy(loaded_state.get("transport_settings") or {})
+        self.transport_opening_history = copy.deepcopy(loaded_state.get("transport_opening_history") or {})
+        self.flow_node_positions = copy.deepcopy(loaded_state.get("flow_node_positions") or {})
+        self.operational_plan_backups = copy.deepcopy(loaded_state.get("operational_plan_backups") or {})
         self.multi_feed_configuration = multi_feed_settings(loaded_state.get("multi_feed_configuration"))
         self.plan_mode_input.setCurrentIndex(self.plan_mode_input.findData(self.multi_feed_configuration['mode']))
         if hasattr(self, "multi_feed_setup"):
@@ -27336,6 +27389,8 @@ class UserInputs(QMainWindow):
         self.product_assay_report_settings = {}
         self.destination_progress_settings = progress_settings()
         self.multi_feed_configuration = multi_feed_settings()
+        self.transport_settings, self.transport_opening_history, self.flow_node_positions = {}, {}, {}
+        self.operational_plan_backups = {}
         if hasattr(self, 'plan_mode_input'):
             self.plan_mode_input.setCurrentIndex(0)
         self.auto_load_2wp_targets_choice = True

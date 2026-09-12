@@ -23,7 +23,7 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 
 def profile_signature(state, opfs):
-    return reconciliation_fingerprint({'version': 1, 'opfs': opfs,
+    return reconciliation_fingerprint({'version': 2, 'opfs': opfs,
         **{key: state.get(key) for key in SOURCE_FIELDS}})
 
 
@@ -133,4 +133,5 @@ def build_profiles(state, opfs, ui_class):
             chunks.append(chunk)
         context.hex_sequence_table = chunks
         result[opf] = profile_from_state(vars(context), str(state.get('active_scenario_id') or 'active'))
+        result[opf]['reconciliation_audits'] = [deepcopy(r['reconciliation']) for r in members.values() if r.get('reconciliation')]
     return result

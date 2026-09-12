@@ -53,7 +53,7 @@ class ProductAssayUnavailable(ConnectionError):
 
 
 class ProductAssayHistory:
-    VERSION = 1
+    VERSION = 2
     MAX_DAYS = 93
     MAX_RECORDS = 200000
     CACHE_ENTRIES = 24
@@ -111,7 +111,7 @@ class ProductAssayHistory:
                 json.dump(payload, stream, allow_nan=False)
             temporary.replace(self._path(payload["request"]))
             files = sorted((p for p in self.cache_directory.iterdir()
-                            if re.fullmatch(r"assay-v1-[a-f0-9]{64}\.json", p.name)), key=lambda p: p.stat().st_mtime, reverse=True)
+                            if re.fullmatch(r"assay-v[12]-[a-f0-9]{64}\.json", p.name)), key=lambda p: p.stat().st_mtime, reverse=True)
             for old in files[self.CACHE_ENTRIES:]:
                 old.unlink(missing_ok=True)
         finally:

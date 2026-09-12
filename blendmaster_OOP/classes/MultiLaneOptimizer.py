@@ -37,6 +37,9 @@ class MultiLaneOptimizer(Optimizer):
             point["active_brand"] = next(iter(brands), point["target"].get("brand", ""))
             if config.get("product_builds_configured") and not builds:
                 point["target"]["crusher_rate"] = 0.0
+        flow = config.get('_transport_engine')
+        start = config.get('current_steady_state_datetime')
+        rates = {p['name']: p['target']['crusher_rate'] for p in points}
         models, all_events = [], []
         for point_index, point in enumerate(points):
             events = []
@@ -67,7 +70,7 @@ class MultiLaneOptimizer(Optimizer):
                 lane_config.pop(key, None)
             steps = Optimizer.blending_problem_steps(events, point["target"], steady_state_duration,
                       None, None, periods, period_tracker,
-                      (point.get("min_stockpiles") if point.get("min_stockpiles") is not None else min_stockpiles) if point["target"]["crusher_rate"] > 0 else None,
+                      (point.get("min_stockpiles") if point.get("min_stockpiles") is not None else min_stockpiles) if point["target"]["crusher_rate"] > 0 and events else None,
                       point.get("max_stockpiles") if point.get("max_stockpiles") is not None else max_stockpiles,
                       min_stockpile_contribution_ratio, lane_config)
             try:
@@ -79,7 +82,41 @@ class MultiLaneOptimizer(Optimizer):
             for event in packet["events"]:
                 aggregate_event = deepcopy(event)
                 aggregate_event._multi_materialized = True
+                if flow:
+                    from datetime import timedelta
+                    from classes.ConveyorCOS import moment
+                    feed_start = max(start, moment(event.delivered_datetime)) if event.is_grade_block and event.delivered_datetime else start
+                    aggregate_event._transport_start = min(feed_start, start+timedelta(hours=steady_state_duration))
+                    available = steady_state_duration - (aggregate_event._transport_start-start).total_seconds()/3600
+                    aggregate_event._transport_fraction = flow.feed_fraction(point['name'], available, rates[point['name']])
                 all_events.append(aggregate_event)
+
+        if flow:
+            from datetime import timedelta
+            from classes.ConveyorCOS import material_event
+            known_arrivals = flow.preview(start + timedelta(hours=steady_state_duration), rates)
+            for index, incoming in enumerate(known_arrivals):
+                mat = incoming['material']
+                event = material_event(mat['event'], incoming['wmt'])
+                from classes.GradeStreams import apply_selected_stream, DEFAULT_STREAM
+                point = next(p for p in points if p['name'] == mat['tipping_point'])
+                warnings = apply_selected_stream(event, config.get('selected_data_stream') or DEFAULT_STREAM, point['active_brand'])
+                if config.get('strict_mapped_fields') and any(w.get('used_stream') != (config.get('selected_data_stream') or DEFAULT_STREAM) for w in warnings):
+                    raise ValueError(f'{mat["source"]}: arrival chemistry is unavailable for the receiving build brand.')
+                event._transport_arrival = True
+                event._transport_fraction = 1.0
+                event._transport_material = mat
+                event._transport_chunk = incoming['chunk_id']
+                event._multi_materialized = True
+                event._multi_key = ('arrival', index)
+                event._multi_point, event._multi_opf = mat['tipping_point'], mat['opf']
+                event._type = 'transport'
+                event._stockpile = None
+                event._grade_block = f'flow:{index}'
+                event._rate = event.balance / steady_state_duration
+                event._equipment = 'Conveyor / COS'
+                event._cost = event._cash = 0
+                all_events.append(event)
 
         # The aggregate model owns physical balances, the common equipment
         # boundary and product-build constraints. Crusher constraints stay local.
@@ -113,6 +150,8 @@ class MultiLaneOptimizer(Optimizer):
         physical = defaultdict(list)
         point_usage = defaultdict(list)
         for event, variable in zip(aggregate["events"], aggregate["variables"]):
+            if getattr(event, '_transport_arrival', False):
+                continue
             identity = ("stockpile", event.stockpile) if event.is_stockpile else ("payload", event.grade_block)
             physical[identity].append((event, variable))
             if event.is_stockpile:
@@ -135,6 +174,47 @@ class MultiLaneOptimizer(Optimizer):
             stockpile_choices[source].append(chosen)
         for choices in stockpile_choices.values():
             joint += lpSum(choices) <= 1
+        if flow:
+            for point, _, packet in models:
+                if point['name'] in flow.points:
+                    cfg = flow.points[point['name']]['config']
+                    from datetime import timedelta
+                    from classes.ConveyorCOS import moment
+                    end = start + timedelta(hours=steady_state_duration)
+                    available = [(e, v, max(start, moment(e.delivered_datetime)) if e.is_grade_block and e.delivered_datetime else start)
+                                 for e, v in zip(packet['events'], packet['variables'])]
+                    for _, variable, begin in available:
+                        if begin >= end:
+                            joint += variable == 0
+                    for boundary in sorted({begin for _, _, begin in available if begin < end}):
+                        joint += lpSum(v/((end-begin).total_seconds()/3600) for _, v, begin in available if begin <= boundary < end) <= rates[point['name']]
+                    # Opening payload service can extend beyond the nominal lag.
+                    # Reserve that outlet rate before admitting new uniform feed,
+                    # preserving FIFO and the conveyor's physical throughput.
+                    if cfg['conveyor_capacity_wmt'] > 0 and rates[point['name']] > 0:
+                        aligned = flow.fork(audit=False)
+                        aligned.prepare_rates(rates)
+                        queued = aligned.points[point['name']]['conveyor']
+                        lag = timedelta(hours=cfg['conveyor_capacity_wmt']/rates[point['name']])
+                        outlet_end = end+lag
+                        boundaries = {begin+lag for _,_,begin in available if begin < end}
+                        boundaries.update(t for row in queued for t in (row['start'],row['end'])
+                                          if start+lag <= t < outlet_end)
+                        for boundary in sorted(boundaries):
+                            occupied = sum(row['rate'] for row in queued if row['start'] <= boundary < row['end'])
+                            joint += lpSum(v/((end-begin).total_seconds()/3600) for _,v,begin in available
+                                           if begin+lag <= boundary < outlet_end) <= max(0,rates[point['name']]-occupied)
+                    # Total storage cannot exceed measured capacity, even at a rate transition.
+                    cfg = flow.points[point['name']]['config']
+                    departing = sum(r['wmt'] for r in known_arrivals if r['material']['tipping_point'] == point['name'])
+                    free = cfg['conveyor_capacity_wmt'] + cfg['cos_capacity_wmt'] - flow.balance(point['name'])
+                    retained = [v*(1-getattr(e, '_transport_fraction', 0)) for e, v in zip(aggregate['events'], aggregate['variables'])
+                                if e._multi_point == point['name'] and not getattr(e, '_transport_arrival', False)]
+                    joint += lpSum(retained) <= max(0, free+departing)
+                    service = cfg['spot_seconds'] + cfg['dump_seconds']
+                    if cfg['conveyor_capacity_wmt'] > 0 and service > 0:
+                        joint += lpSum(v for e, v in zip(packet['events'], packet['variables']) if e.is_stockpile) <= (
+                            cfg['rehandle_payload_wmt'] * 3600 / service * steady_state_duration)
         joint += objective
         limits = [p["time_limit"] for _, _, p in models if p["time_limit"] is not None]
         joint.solve(RetryingCBCSolver(msg=False, timeLimit=min(limits) if limits else None))
@@ -159,4 +239,34 @@ class MultiLaneOptimizer(Optimizer):
                 transaction.update(tipping_point=event._multi_point, opf=event._multi_opf,
                                    reconciliation_opf=event._multi_opf,
                                    reconciliation_scenario=getattr(event, "_reconciliation_scenario", ""))
+            if flow:
+                from classes.ConveyorCOS import material
+                tips, arrivals, physical_transactions = [], [], []
+                for transaction, (event, _) in zip(result['transactions'], reported):
+                    if getattr(event, '_transport_arrival', False):
+                        transaction.update(source_type='transport', transport_provenance=event._transport_material['provenance'],
+                                           transport_chunk_id=event._transport_chunk)
+                        arrivals.append(transaction)
+                    else:
+                        physical_transactions.append(transaction)
+                        quantity = float(transaction['actual_tonnes'])
+                        if quantity > 1e-8:
+                            fraction = getattr(event, '_transport_fraction', 1.0)
+                            if fraction > 0:
+                                arrival = deepcopy(transaction)
+                                arrival['actual_tonnes'] = quantity * fraction
+                                arrival['transport_provenance'] = 'modelled'
+                                arrivals.append(arrival)
+                            if event._multi_point in flow.points:
+                                event._source_property_weights = {**event.source_property_weights, **(config.get('source_property_weights') or {})}
+                                tips.append(dict(point=event._multi_point, material=material(event, point=event._multi_point,
+                                    opf=event._multi_opf, payload_id=transaction.get('source_id', '')), wmt=quantity,
+                                    start=getattr(event, '_transport_start', start)))
+                for arrival in arrivals:
+                    for analyte, weight in arrival.get('transport_product_weights', {}).items():
+                        arrival[f'selected_grade_weight_{analyte}_tonnes'] = weight
+                result['transactions'] = physical_transactions
+                result['transport_arrivals'] = arrivals
+                result['transport_tips'] = tips
+                result['transport_rates'] = rates
         return result

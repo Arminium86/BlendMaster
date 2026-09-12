@@ -190,6 +190,8 @@ class Run:
 
     @staticmethod
     def _case_blend_report(case_modeller):
+        from classes.TransportReports import write_transport_reports
+        write_transport_reports(case_modeller)
         results = case_modeller.results.copy()
         if (
             "source_actual_tonnes" in results
@@ -527,6 +529,22 @@ class Run:
         )
 
         stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        from classes.TransportSettings import transport_settings, transport_enabled
+        solver_config['transport_settings'] = transport_settings((site_context or {}).get('transport_settings'))
+        if transport_enabled(solver_config['transport_settings']):
+            from classes.MultiFeedSettings import period_lanes
+            from setup.TransportOpeningHistory import TransportOpeningHistory, opening_history_events
+            from classes.TransportSettings import reference_rate
+            feed = solver_config['multi_feed_settings']
+            if feed['mode'] == 'single':
+                points = [dict(name=(site_context or {}).get('crusher'), opf=(site_context or {}).get('opf'),
+                               opening_rate=reference_rate(crusher_target_data))]
+            else:
+                points = [dict(name=p['name'], opf=p['opf'], opening_rate=reference_rate(p['targets_by_period']))
+                          for p in feed['tipping_points']]
+            opening = TransportOpeningHistory().fetch((site_context or {}).get('mine'), start_time, points,
+                solver_config['transport_settings'], cached=(site_context or {}).get('transport_opening_history'))
+            solver_config['transport_history'] = opening_history_events(opening, site_context or {}, solver_config)
         # Keep every model seed and depletion report on the same participating
         # chunk set, including restored scenarios and APS-added destinations.
         hex_sequence_table = input_data.hex_sequence_table

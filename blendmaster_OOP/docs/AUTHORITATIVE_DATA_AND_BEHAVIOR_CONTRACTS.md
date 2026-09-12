@@ -1178,11 +1178,11 @@ Contracts:
 
 ## 14. Conveyor and COS latency (Phase 4)
 
-Deferred to Phase 4 by agreement, so it lands after Phase 1 to 3 are validated
-and does not destabilise the recent dynamic steady-state fix in
-`classes/Optimizer.py` (Q26).
+Implemented as optional Phase 4 transport, extending the validated Phase 1–3
+accounting and dynamic steady-state behavior in `classes/Optimizer.py` (Q26).
+See section 18 for implementation and validation details.
 
-Contract for when it is built:
+Contract:
 
 - Optional feature. COS capacity and conveyor capacity are WMT properties of a
   crusher, plus a COS chunk count.
@@ -1288,4 +1288,18 @@ This confirmed clarification supersedes the separate reconciliation scenarios de
 - AMT profiles are rebuilt from the selected chunks' member hexes while preserving chunk IDs, membership, sequence, physical tonnes and reclaim settings. Missing member rows or inconsistent masses require an AMT refresh/rebuild. Namespaced source properties continue to preserve each OPF's grades through shared inventory mixing and depletion; physical inventory is not duplicated.
 - Data Streams identifies all loaded OPFs and states that its factor table/source review displays the primary selected OPF. Primary effective-factor edits remain supported. Each tipping point consumes its own OPF profile internally. Factor records are persisted per OPF in SQLite and inputs survive project/scenario restoration.
 - Validation: 500 automated checks passed, including distinct standard/Auto results, inventory versus AMT product-slot mapping, missing history/member evidence, stale inputs, shared inventory, solver and report regressions. Isolated native Qt checks passed Data Streams submission, two OPF database factor records in one scenario, tab removal, actual project save/load, and single-mode availability. Warehouse responses were fixtures; the user's running session was not changed. Local screenshots and the updated review guide remain ignored artifacts.
-- Task 30 remains unstarted.
+- Task 30 was unstarted at this earlier checkpoint; section 18 records its subsequent completion.
+
+## 18. Tasks 30–35 implementation (12 September 2026)
+
+- Conveyor/COS transport is optional per physical tipping point. Physical ROM WMT remains the source-depletion basis; Product Targets use arrival quantities and declared mapped grade weights. Instant and delayed points are combined at their receiving OPF/build scope.
+- `TransportOpeningHistory` reads actual primary Expit/Rehandle crusher movements in the exact scenario-relative capacity/rate window. Opening chemistry is explicitly mapped and reconciled per OPF. Missing OPF evidence does not borrow another OPF's factors. Opening movement factor audits are retained with the plan.
+- Conveyor FIFO intervals retain payload/source identity and cannot overtake opening service or overbook outlet capacity. Rehandle payload size and spot/dump seconds limit enabled conveyor service and are available on Decision Levers. The reference rate is the first operating Calendar rate; subsequent Calendar rate changes alter speed and zero pauses transport.
+- COS fills sequential chunks and reclaims the oldest ready chunk concurrently. Full and partial-fill chunk boundaries constrain solver durations. Conveyor payload start/end events remain internal transport events, not added solver steady states. Unknown opening capacity stays empty with a coverage warning; inferred opening tonnes are zero.
+- Source and transport ledgers commit together only after successful arrival quantity/composition validation. Product-build repair checkpoints restore transport queues, physical balances and product progress together. Closing contents remain at the reported stop; there is no drain extension beyond the schedule horizon.
+- Setup and saved-result diagrams share stable topology identities. Movable node positions are scenario-owned presentation state and do not influence solver/cache signatures. Results have a time slider, active routes/rates/grades, tipping/arrival/product tables and a COS fill/composition profile.
+- Operational Blend Plans are published separately for each tipping point. Their exact recipes retain the shared joint solve. Per-point PDF and combined XLSX exports include validated plan-owned backup instructions. The existing single-point editable rounding path continues to publish original/rounded ratios and timing; the simultaneous publication path does not flatten independent crushers into one editable sequence.
+- Plan-owned reporting retains OPF contributions, destination order/activity/allocation evidence, advanced factor resolution/provenance, AMT participation/tonnage outcomes, soft quality deviations/penalties, and transport movement/closing ledgers and caveats.
+- Project format is 16, planning semantics version 1 and layout schema version 1. Migration preserves explicit current settings and supplies Standard/Hard/single/no-exclusions/transport-off defaults only where absent. All inactive scenarios are validated before embedded databases are restored. Unsupported newer schemas fail explicitly.
+- Prepared Expit/AMT/OPF/reconciliation signatures include their settings and data dependencies. Raw assay and destination activity cache versions are 2. Raw history can still be reused across local factor/method changes when the requested evidence window is unchanged; dependent enrichment is invalidated. Scheduling-report invalidation includes transport, topology and cross-feature audit tables.
+- Regression validation: 1,095 tests passed; native setup/results controls, export handlers and actual project save/restore also passed in isolation. The headless harness substitutes legacy Chromium chart surfaces because Windows TSF is unavailable, and warehouse hydration is stubbed. Live warehouse and production-size UI checks are recorded in `docs/TASK_30_35_UI_REVIEW.md`. Earlier Task 30/33 deferral notes are historical and superseded by this implementation.

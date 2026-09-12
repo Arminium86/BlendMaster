@@ -184,6 +184,8 @@ class DatabaseManager:
                 "optimisation_plan_blend_report", "optimisation_plan_build_report",
                 "optimisation_plan_product_build_report", "manual_plan_blend_report",
                 "two_wp_active_blend_report", "optimisation_plan_status", "closing_rom_stocks_compliance",
+                "transport_movements", "transport_contents", "transport_product_arrivals",
+                "material_flow_topology", "plan_feature_audits",
             }
             derived.update(AUDIT_COLUMNS)
             derived.update(PUBLICATION_COLUMNS)
@@ -204,6 +206,8 @@ class DatabaseManager:
                 self.PLAN_RESULT_TABLES["build"],
                 self.PLAN_RESULT_TABLES["product_build"],
                 "optimisation_plan_status",
+                "transport_movements", "transport_contents", "transport_product_arrivals",
+                "material_flow_topology", "plan_feature_audits",
                 "two_wp_active_blend_report",
                 "two_wp_grade_block_turnover_audit",
                 "closing_rom_stocks_compliance",

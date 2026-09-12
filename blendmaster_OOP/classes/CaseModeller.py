@@ -112,6 +112,7 @@ class CaseModeller:
         "previous_selected_grade_block_pairs", "grade_block_pair_locks",
         "selected_blend_signatures", "contingency_reuse_fallbacks",
         "previous_chemical_blend_signature",
+        "transport", "transport_candidates", "product_arrival_results", "transport_selected_arrivals",
     )
 
     def __init__(
@@ -305,6 +306,8 @@ class CaseModeller:
         self.grade_block_pair_locks = {}
         self.abort_callback = abort_callback or (lambda: False)
         self.abort_requested = False
+        from classes.TransportPlanning import initialise_transport
+        initialise_transport(self)
 
     @property
     def material_flow_topology(self):
@@ -312,7 +315,8 @@ class CaseModeller:
         return planning_topology(
             multi_feed=getattr(self, "multi_feed_configuration", None),
             site_context=getattr(self, "site_context", None),
-            sources=model_sources(self.stockpiles, self.grade_blocks),
+            sources=model_sources(self.stockpiles, self.grade_blocks, self.solver_config.get('direct_tip_point_by_payload')),
+            transport_settings=self.solver_config.get('transport_settings'),
             crusher_targets=self.crusher_targets,
             product_build_settings=self.product_build_settings,
             byproducts_enabled=self.byproducts_enabled,
@@ -500,6 +504,8 @@ class CaseModeller:
         }
 
     def update_product_build_runtime_state(self, selected_results):
+        if getattr(self, 'transport', None):
+            selected_results = self.transport_selected_arrivals
         if not self.product_build_settings or selected_results is None or selected_results.empty:
             return [] if self.byproducts_enabled else None
 
@@ -1097,7 +1103,7 @@ class CaseModeller:
         stockpile_only_guardrail_fallback = False
         guardrail_rejections = []
 
-        if not events:
+        if not events and not self.transport:
             result = {
                 "Linprog_result_object": SimpleNamespace(
                     success=False,
@@ -1132,7 +1138,7 @@ class CaseModeller:
                 f"{len(events)} source/equipment option(s) are available."
             )
 
-        while events and len(candidate_source_sets) < max_decision_blend_options:
+        while (events or self.transport) and len(candidate_source_sets) < max_decision_blend_options:
             self.check_abort_requested()
             print(f"Searching feasible blend option {self.blend_option}...")
             # Run optimization with dynamic steady states
@@ -1180,6 +1186,10 @@ class CaseModeller:
                 break
         
             elif result['Linprog_result_object'].success:
+                if self.transport and result['crusher_actual_tonnes'] <= Optimizer.SOLUTION_TOLERANCE and not candidate_source_sets:
+                    from classes.TransportPlanning import accept_transport_idle
+                    accept_transport_idle(self, result)
+                    return
                 if result['crusher_actual_tonnes'] > Optimizer.SOLUTION_TOLERANCE:
                     active_source_ids = self.active_source_ids_from_result(result)
                     active_source_signature = frozenset(active_source_ids)
@@ -1825,6 +1835,8 @@ class CaseModeller:
 
     def solver_config_for_current_step(self):
         solver_config = dict(self.solver_config or {})
+        if getattr(self, 'transport', None):
+            solver_config['_transport_engine'] = self.transport
         solver_config["current_steady_state_datetime"] = self.current_time
         solver_config["enforce_cumulative_product_build_grade"] = False
         current_indices = self.current_product_build_indices()
@@ -2877,6 +2889,8 @@ class CaseModeller:
 
     def record_results(self, result):
         """Record results from an optimization run into the main DataFrame."""
+        if 'transport_arrivals' in result:
+            self.transport_candidates[self.blend_option] = result
         two_wp_active_blend_fields = (
             self.two_wp_active_blend_report_fields(result)
         )
@@ -3062,6 +3076,13 @@ class CaseModeller:
 
     def append_results(self, filtered_decision_point_results_to_user_choice):
         """Append filtered results to the main DataFrame."""
+        from classes.TransportPlanning import commit_transport
+        commit_transport(self, filtered_decision_point_results_to_user_choice)
+        if getattr(self, 'transport', None):
+            filtered_decision_point_results_to_user_choice = filtered_decision_point_results_to_user_choice.copy()
+            for column in filtered_decision_point_results_to_user_choice:
+                if column.startswith('product_build_') and column.endswith(('_tonnes', '_weight')):
+                    filtered_decision_point_results_to_user_choice[column] = 0.0
         self.results = pd.concat([self.results, pd.DataFrame(filtered_decision_point_results_to_user_choice)], ignore_index=True)
     
     def save_optimised_blend_report(self):
@@ -3098,6 +3119,8 @@ class CaseModeller:
         )
         report_results = self.group_grade_block_rows(report_results)
         self.database_manager.write_optimised_blend_report_to_database(report_results, self.periods)
+        from classes.TransportReports import write_transport_reports
+        write_transport_reports(self)
 
     def product_build_grade_on_spec(self, build_state, build_setting):
         if target_mode_fields(build_setting)["target_mode"] == "soft":
@@ -3124,6 +3147,9 @@ class CaseModeller:
         return True
 
     def build_product_build_report(self):
+        if getattr(self, 'transport', None):
+            from classes.TransportPlanning import product_report_case
+            return product_report_case(self).build_product_build_report()
         columns = [
             "tipping_point", "contributing_opf",
             "product_build_id",
@@ -3396,7 +3422,11 @@ class CaseModeller:
         period_key = self.period_for_time(self.current_time)
         if period_key is None:
             return 0
-        return (
+        duration = (
             self.periods.get_periods()[f"{period_key}_end"]
             - self.current_time
         ).total_seconds() / 3600
+        if getattr(self, 'transport', None):
+            from classes.TransportPlanning import transport_rates
+            duration = self.transport.next_chunk_boundary_hours(transport_rates(self), duration)
+        return duration
