@@ -71,6 +71,12 @@ permissions in the web application.
     Closing ROM Stocks Compliance. Confirm the correct site/plan selection and
     totals across views; opening a view must not alter planning inputs.
     On Build and Depletion Profiles, check the first and last source pages.
+    In Material Flow, compare the active stockpile count and highlighted routes
+    with positive tipping transactions in each state. AMT chunks belonging to
+    the same parent stockpile count as one physical source. Toggle Show all
+    sources and Auto arrange: counts and highlights must persist. Closing/no
+    tipping states must show no active stockpile sources. Chunk closing balances
+    are labelled as chunk balances, not the whole footprint's remaining stock.
     Grade Profiles must be disabled without results; its Optimised and Manual
     pages enable independently as their results become available. Clear the
     manual plan and switch sites to confirm obsolete availability is removed.

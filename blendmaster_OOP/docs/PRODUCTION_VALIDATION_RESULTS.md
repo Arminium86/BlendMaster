@@ -192,3 +192,28 @@ Validation completed:
 Evidence is in the user's Playground directory: `BlendMaster_view_flow_full_final.log`,
 `BlendMaster_view_flow_native.json`, `BlendMaster_view_flow_empty.png` and
 `BlendMaster_view_flow_optimised.png`. The native fixture is `bm_view_flow_native.py`.
+
+## 13 September follow-up: active stockpile sources in Material Flow
+
+The saved Primary plan contained 11 positive stockpile transactions with AMT
+chunk source names. None matched the physical topology by displayed source name;
+all 11 matched its `parent_stockpile` identifiers. Material Flow now resolves
+physical parents first, with typed source names and saved source IDs as fallbacks.
+The transaction audit retains its original chunk rows. Source counts, tonnes,
+grades and source-to-tipping-point highlights use the same resolved ownership.
+Chunk closing balances are labelled explicitly. Switching between compact and
+individual sources or rearranging nodes retains the selected state's annotations.
+
+All eight saved steady states and the closing view were checked against positive
+stockpile transactions and actual tipping routes. State 0 now shows **2 of 17
+stockpile sources active**, representing 40,545.556 ROM WMT. The closing view
+shows zero active stockpile sources. A native Qt rendering of these saved results
+was visually inspected; source expansion/collapse retained the active count.
+The existing plan does not need to be optimised again to obtain the corrected view.
+
+Validation: **1,185 regression tests passed in 44.770 seconds**;
+`git diff --check` passed. Read-only evidence and the native screenshot are in the
+user's Playground directory: `BlendMaster_material_flow_sources_validation.json`,
+`BlendMaster_material_flow_sources_fixed.png` and
+`BlendMaster_material_flow_sources_full.log`. The reproducible check is
+`bm_material_flow_sources_check.py`.

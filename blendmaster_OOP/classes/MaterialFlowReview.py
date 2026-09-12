@@ -65,6 +65,54 @@ class FlowTimeline:
                     if key in ('feed','transport_contents'):
                         times.update(frame[column].dropna().tolist())
         self.times = sorted(times)
+        self.source_feeds = self.index_source_feeds(self.frames.get('feed', pd.DataFrame()))
+
+    def index_source_feeds(self, feed):
+        """Join report rows to physical nodes once, preserving the raw audit.
+
+        AMT reports name the consumed chunk; the topology names its parent
+        stockpile. Explicit parents take precedence over display names. Saved
+        payload/chunk IDs support older reports without guessing at suffixes.
+        """
+        names, aliases = {}, {}
+        for node in self.graph.get('nodes', []):
+            if node['node_type'] != 'source':
+                continue
+            props = node['properties']
+            kind, name = props.get('source_type', ''), str(props['source']).strip()
+            names[(kind, name)] = node['node_id']
+            for identity in props.get('source_ids', []):
+                aliases.setdefault((kind, str(identity).strip()), set()).add(node['node_id'])
+
+        def resolve(kind, name, identity, parent):
+            if parent and kind in ('stockpile', ''):
+                return names.get(('stockpile', parent))
+            kinds = (kind,) if kind else ('stockpile', 'grade_block')
+            matches = {names[(value, name)] for value in kinds if (value, name) in names}
+            if not matches:
+                matches = {node for value in kinds for node in aliases.get((value, identity), ())}
+            return next(iter(matches)) if len(matches) == 1 else None
+
+        columns = [feed.get(key, pd.Series('', index=feed.index)).fillna('').astype(str).str.strip()
+                   for key in ('source_type', 'source', 'source_id', 'parent_stockpile')]
+        columns[0] = columns[0].str.lower()
+        owners = pd.Series([resolve(*row) for row in zip(*columns)], index=feed.index, dtype=object)
+        return {node: rows for node, rows in feed.groupby(owners, sort=False)}
+
+    @classmethod
+    def source_closing_text(cls, last, props):
+        """Do not present an active AMT chunk's balance as the whole footprint."""
+        names = last.get('source_id', last.get('source', pd.Series('', index=last.index)))
+        names = names.fillna('').astype(str).str.strip()
+        chunks = bool(props.get('is_amt')) and names.ne(str(props['source'])).any()
+        if chunks:
+            # Repeated rows for the same chunk/point share one balance owner.
+            balance = cls.number(last, 'source_closing_balance').groupby(names).min().sum()
+            label = 'Chunk closing' if names.nunique() == 1 else 'Reported chunks closing'
+        else:
+            balance = cls.number(last, 'source_closing_balance').min()
+            label = 'Closing'
+        return f'\n{label} {balance:,.1f} WMT'
 
     @staticmethod
     def active(frame,at):
@@ -121,17 +169,15 @@ class FlowTimeline:
         for node in self.graph['nodes']:
             key,kind,props = node['node_id'],node['node_type'],node['properties']
             if kind=='source':
-                source = props['source']
-                source_nodes[key] = source
-                selected = self.where(feed,'source',source)
+                source_feed = self.source_feeds.get(key, feed.iloc[:0])
+                selected = self.active(source_feed, at)
+                source_nodes[key] = selected
                 annotations[key] = self.summary(selected)
-                history = self.where(self.frames.get('feed',pd.DataFrame()),'source',source)
+                history = source_feed
                 history = history[history.end_datetime<=at] if 'end_datetime' in history else history.iloc[:0]
                 if not history.empty and 'source_closing_balance' in history:
                     last = history[history.end_datetime==history.end_datetime.max()]
-                    # A shared stockpile's sequential report balances share one owner.
-                    balance = self.number(last,'source_closing_balance').min()
-                    annotations[key]['text'] += f'\nClosing {balance:,.1f} WMT'
+                    annotations[key]['text'] += self.source_closing_text(last, props)
             elif kind=='tipping_point':
                 point = props.get('crusher') or node['label']
                 tip_nodes[key] = point
@@ -168,7 +214,7 @@ class FlowTimeline:
         for edge in self.graph['edges']:
             source,target = edge['source_node_id'],edge['target_node_id']
             if source in source_nodes and target in tip_nodes:
-                rows = self.where(feed,'source',source_nodes[source])
+                rows = source_nodes[source]
                 rows = self.where(rows,'tipping_point',tip_nodes[target]) if 'tipping_point' in rows else rows
                 active = self.number(rows,'source_actual_tonnes').sum()>1e-6
             else:

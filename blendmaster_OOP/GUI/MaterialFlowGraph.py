@@ -133,6 +133,7 @@ class MaterialFlowGraph(QWidget):
         super().__init__(parent)
         self.graph = {}
         self.nodes,self.edges = {},[]
+        self._frame_annotations, self._frame_edges = {}, ()
         self._building = False
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -170,6 +171,8 @@ class MaterialFlowGraph(QWidget):
         from classes.PhaseSchemas import is_readable, TOPOLOGY_SCHEMA_VERSION
         if not is_readable(graph,TOPOLOGY_SCHEMA_VERSION):
             raise ValueError('Unsupported material-flow topology version.')
+        if graph != self.graph:
+            self._frame_annotations, self._frame_edges = {}, ()
         self._building = True
         self.edges = []
         self.nodes = {}
@@ -196,6 +199,7 @@ class MaterialFlowGraph(QWidget):
         self.update_edges()
         self.caption.setText(f"{len(self.nodes):,} displayed nodes · {len(self.graph['edges']):,} permitted routes. "
                              'Use Show all sources for individual stockpiles and grade blocks.')
+        self.show_frame(self._frame_annotations, self._frame_edges)
         self.fit_graph()
 
     def positions(self):
@@ -230,7 +234,9 @@ class MaterialFlowGraph(QWidget):
             self.details.appendPlainText('\n'+item.metrics)
 
     def show_frame(self,annotations=None,active_edges=()):
-        active_edges = set(active_edges)
+        self._frame_annotations = annotations or {}
+        self._frame_edges = tuple(active_edges)
+        active_edges = set(self._frame_edges)
         for key,item in self.nodes.items():
             values = (annotations or {}).get(key,{})
             members = item.node.get('properties', {}).get('members')
