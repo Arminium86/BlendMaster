@@ -129,6 +129,10 @@ def install(host):
     plan_layout.addWidget(host.plan_readiness_label)
     plan_layout.addWidget(plan_tabs)
     host.blend_plan_workflow_tabs = plan_tabs
+    from GUI.OperationalBlendPlanView import OperationalBlendPlanView
+    host.manual_operational_blend_plans = OperationalBlendPlanView(host, plan_type='manual',
+        run_async=lambda work, done, failed: host.run_background_task('Loading manual tipping-point plans…', work, done, failed))
+    plan_tabs.addTab(host.manual_operational_blend_plans, 'Manual per tipping point')
     host.register_page('blend_plan', host.workspace_tabs, plan_page, 'Blend Plan')
     plan_tabs.currentChanged.connect(lambda: enter_page(host, 'blend_plan'))
     tabs, index = host.page_locations['reports']
@@ -168,6 +172,8 @@ def show_refresh_changes(host):
 def refresh_context(host):
     from GUI.WorkflowViews import schedule
     schedule(host)
+    from GUI.PlannerPresentation import refresh as refresh_presentation
+    refresh_presentation(host)
     host.blend_mode.setCurrentIndex(0)
     host.blend_mode_choice = 1
     state = {key: getattr(host, key, '') for key in
@@ -178,6 +184,13 @@ def refresh_context(host):
     caption = {'single': 'Single tipping point', 'multi_tipping_point': 'Multiple tipping points',
                'combined_opf': 'Combined OPF'}.get(mode, mode)
     host.blend_plan_mode_label.setText('Blend Plan · ' + caption)
+    panel = vars(host).get('continuous_assay_panel')
+    if panel is not None:
+        panel.show_status()
+    tabs = host.blend_plan_workflow_tabs
+    if hasattr(host, 'manual_operational_blend_plans'):
+        tabs.setTabVisible(tabs.indexOf(host.manual_operational_blend_plans), mode != 'single')
+        tabs.setTabVisible(tabs.indexOf(host.blend_plan_page), mode == 'single')
     form = host._guidance_support_form
     for index in range(form.rowCount()):
         label = form.itemAt(index, QFormLayout.LabelRole)
@@ -199,6 +212,8 @@ def enter_page(host, page_id):
     if page_id == 'blend_plan':
         if host.blend_plan_workflow_tabs.currentWidget() is host.operational_blend_plans:
             QTimer.singleShot(0, host.operational_blend_plans.refresh)
+        elif host.blend_plan_workflow_tabs.currentWidget() is vars(host).get('manual_operational_blend_plans'):
+            QTimer.singleShot(0, host.manual_operational_blend_plans.refresh)
         else:
             QTimer.singleShot(0, host.refresh_manual_blend_plan_report)
             if getattr(host, 'start_time_choice', None):
@@ -215,6 +230,8 @@ def enter_page(host, page_id):
         return True  # Refresh is explicit and reports the evidence freshness.
     elif page_id == 'site_automation':
         host.site_automation_panel.refresh()
+    elif page_id == 'continuous_assays':
+        host.continuous_assay_panel.refresh()
     else:
         return False
     return True

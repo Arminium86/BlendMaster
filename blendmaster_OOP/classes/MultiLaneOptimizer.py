@@ -52,6 +52,13 @@ class MultiLaneOptimizer(Optimizer):
                     if not point["direct_tip_enabled"] or point["name"] not in allowed:
                         continue
                 event = deepcopy(original)
+                if event.is_grade_block and getattr(event, 'arrival_by_point', None):
+                    from datetime import timedelta
+                    arrival_time = event.arrival_by_point.get(point['name'])
+                    if arrival_time is None or not (start <= arrival_time < start + timedelta(hours=steady_state_duration)):
+                        continue
+                    event._delivered_datetime = arrival_time
+                    event.arrival_by_point = {}
                 event._multi_point = point["name"]
                 event._multi_opf = point["opf"]
                 event._multi_key = (point_index, event_index)
@@ -65,6 +72,7 @@ class MultiLaneOptimizer(Optimizer):
                 events.append(event)
             lane_config = {**config, **point["solver_config"], "direct_tip_enabled": point["direct_tip_enabled"],
                            "target_product_brand": point["active_brand"],
+                           "_transport_lane_can_idle": bool(flow and point["name"] in flow.points),
                            "target_product_builds": {}, "target_product_build_states": {}}
             for key in ("target_product_build", "target_product_build_state", "product_build_completion_constraint"):
                 lane_config.pop(key, None)

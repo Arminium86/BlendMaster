@@ -540,6 +540,8 @@ class DataLoader:
                 grade_p=record["source_grade_p"],
                 grade_mn=record["source_grade_mn"],
                 delivered_datetime=record.get("delivered_datetime"),
+                arrival_by_point=record.get('direct_tip_arrivals'),
+                rom_arrival=record.get('rom_arrival'),
                 destination=record.get("destination"),
                 agent=record.get("agent"),
                 start_datetime=record.get("start_datetime"),
@@ -576,8 +578,25 @@ class DataLoader:
                     },
                 },
             )
-            for record in payload_transactions.to_dict(orient="records")
+            for original in payload_transactions.to_dict(orient="records")
+            for record in [self.direct_tip_timing(original)]
         ]
+
+    def direct_tip_timing(self, payload):
+        from classes.HaulageRouteTiming import arrival, payload_context
+        if not payload_context(payload):
+            return payload
+        mapping = self.solver_config.get('direct_tip_point_by_payload')
+        if isinstance(mapping, dict):
+            points = mapping.get(str(payload.get('direct_tip_id')), [])
+        else:
+            from classes.MaterialDestinationPlan import MaterialDestinationPlan
+            site = (self.calendar_inputs or {}).get('site_context') or {}
+            points = [MaterialDestinationPlan._crusher_destination(payload, site.get('crusher'),
+                      MaterialDestinationPlan._normalized_rules(site.get('direct_tip_movement_rules')))]
+        arrivals = {point: arrival(payload, point)['delivered_datetime'] for point in points if point}
+        return dict(payload, direct_tip_arrivals=arrivals, rom_arrival=payload.get('delivered_datetime'),
+                    delivered_datetime=min(arrivals.values()) if arrivals else payload.get('delivered_datetime'))
 
     def payload_quantity_for_period(self, payload_record, period_name):
         delivered_datetime = pd.to_datetime(
@@ -593,7 +612,8 @@ class DataLoader:
         period_data = self.periods.get_periods()
         period_start = period_data[f"{period_name}_start"]
         period_end = period_data[f"{period_name}_end"]
-        if period_start <= delivered_datetime < period_end:
+        times = (payload_record.get('direct_tip_arrivals') or {}).values() or [delivered_datetime]
+        if any(period_start <= when < period_end for when in times):
             return payload_record["payload"]
         return 0
 

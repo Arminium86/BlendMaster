@@ -31,8 +31,11 @@ def result(host, report, plan_id='Primary', plan_type='manual', *, database=None
         mode=(getattr(host, 'multi_feed_configuration', {}) or {}).get('mode', 'single'), require_limits=True)
     with closing(sqlite3.connect(path)) as connection:
         destination = read_table(connection, 'material_destination_plan', plan_id, plan_type)
+        from classes.SavedResultViews import read_from_connection
+        product = read_from_connection(connection, plan_type, plan_id, 'product')
     readiness = evaluate(report, getattr(host, 'product_targets', []) or [], destination=destination,
-        equipment_errors=errors, run_status='complete' if plan_type == 'manual' else (getattr(host, 'last_run_outcome', {}) or {}).get('status', 'complete'))
+        product_report=product, equipment_errors=errors,
+        run_status='complete' if plan_type == 'manual' else (getattr(host, 'last_run_outcome', {}) or {}).get('status', 'complete'))
     from GUI.WorkflowDependencies import input_revision, manual_revision
     recorded = vars(host).get('manual_input_revision' if plan_type == 'manual' else 'optimisation_input_revision')
     current = manual_revision(host) if plan_type == 'manual' else input_revision(host)

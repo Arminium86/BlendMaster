@@ -30,6 +30,8 @@ class GradeBlockData:
         two_wp_first_reclaim_datetime=None,
         two_wp_destination_turnover_priority=None,
         two_wp_turnover_guidance_applicable=False,
+        arrival_by_point=None,
+        rom_arrival=None,
     ):
         self._name = name
         self._balance = balance
@@ -49,6 +51,8 @@ class GradeBlockData:
         self._grade_p = grade_p
         self._grade_mn = grade_mn
         self._delivered_datetime = delivered_datetime
+        self.arrival_by_point = dict(arrival_by_point or {})
+        self.rom_arrival = rom_arrival
         self._destination = destination
         self._agent = agent
         self._start_datetime = start_datetime

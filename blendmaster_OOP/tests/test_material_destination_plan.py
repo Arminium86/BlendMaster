@@ -12,6 +12,25 @@ from classes.PeriodManager import PeriodManager
 
 
 class MaterialDestinationPlanTests(unittest.TestCase):
+    def test_manual_destination_allocation_does_not_copy_attached_report_audits(self):
+        class Audit:
+            def __deepcopy__(self, memo):
+                raise AssertionError('An attached audit is not an allocation input')
+
+        payloads = pd.DataFrame([dict(direct_tip_id='P1', source='GB1', payload=100,
+            destination='Stockpiles/SP1', planned_destination='Stockpiles/SP1')])
+        feed = pd.DataFrame([dict(source_type='grade_block', source='GB1', source_id='P1',
+            source_actual_tonnes=40, tipping_point='PC')])
+        audit = Audit()
+        feed.attrs['transport_frames'] = audit
+        payloads.attrs['delivery_audit'] = audit
+        report = MaterialDestinationPlan.build(payloads, feed, 'manual')
+        self.assertEqual(report.assigned_tonnes.sum(), 100)
+        self.assertEqual(report.loc[report.assigned_destination.eq('PC'), 'assigned_tonnes'].sum(), 40)
+        self.assertIs(feed.attrs['transport_frames'], audit)
+        self.assertIs(payloads.attrs['delivery_audit'], audit)
+        self.assertEqual(feed.to_numpy()[0, feed.columns.get_loc('source_actual_tonnes')], 40)
+
     def test_simultaneous_direct_tip_keeps_each_physical_destination(self):
         payloads = pd.DataFrame([dict(direct_tip_id='P1', source='GB1', payload=100,
             destination='Stockpiles/SP1', planned_destination='Stockpiles/SP1')])

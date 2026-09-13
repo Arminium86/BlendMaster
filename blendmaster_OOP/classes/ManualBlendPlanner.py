@@ -85,6 +85,7 @@ class ManualBlendPlanner:
         "blend_option", "blend_ID", "steady_state_duration", "period",
         "actual_direct_tip_ratio", "source", "source_id", "source_type",
         "source_blend_ratio", "source_opening_balance",
+        "manual_feed_available_at",
         "source_actual_tonnes", "source_closing_balance",
         "reclaimer_source_tonnes", "crusher_source_tonnes", "product_build_source_tonnes",
         *[
@@ -161,6 +162,10 @@ class ManualBlendPlanner:
         site_context = self.calendar_inputs.get("site_context") or {}
         solver_config = self.calendar_inputs.get("solver_config") or {}
         self.solver_config = dict(solver_config)
+        for key in ('continuous_assay_settings', 'continuous_assay_state'):
+            self.solver_config[key] = deepcopy(site_context.get(key) or {})
+        from classes.ContinuousAssays import for_calculation
+        self.solver_config['continuous_assay_state'] = for_calculation(self.solver_config['continuous_assay_state'], self.stockpile_data, self.hex_sequence_table)
         self.custom_constraints = normalize_custom_constraints(
             solver_config.get("custom_constraints")
         )
@@ -311,6 +316,7 @@ class ManualBlendPlanner:
             crusher_targets=targets,
             product_build_settings=self.product_build_settings,
             byproducts_enabled=self.byproducts_enabled,
+            transport_settings=(self.calendar_inputs.get('site_context') or {}).get('transport_settings'),
         )
 
     def _configured_period_keys(self):
@@ -597,6 +603,8 @@ class ManualBlendPlanner:
     def build_steady_states(self):
         inventory = deepcopy(self._inventory_template)
         period_boundaries = self._period_boundaries()
+        from classes.ContinuousAssays import boundaries
+        period_boundaries = sorted(set(period_boundaries + boundaries(self.solver_config)))
         states = []
         produced_tonnes = 0.0
 
@@ -611,6 +619,8 @@ class ManualBlendPlanner:
             blend_end = sequence_row["_end"]
 
             if sequence_row.get("_fixed_steady_state"):
+                if any(current < boundary < blend_end for boundary in boundaries(self.solver_config)):
+                    raise ManualBlendPlanningError('An assay update falls inside an imported steady state. Recalculate the optimised plan and copy its updated allocations before replaying this fixed manual sequence.')
                 duration_hours = (
                     blend_end - current
                 ).total_seconds() / 3600
@@ -819,6 +829,13 @@ class ManualBlendPlanner:
         ].copy()
         if payloads.empty:
             return states
+        from classes.HaulageRouteTiming import arrival
+        from classes.MaterialDestinationPlan import MaterialDestinationPlan
+        site = self.calendar_inputs.get('site_context') or {}
+        payloads['_rom_delivered'] = pd.to_datetime(payloads.get('delivered_datetime'), errors='coerce')
+        payloads['delivered_datetime'] = [arrival(row, MaterialDestinationPlan._crusher_destination(
+            row, site.get('crusher'), MaterialDestinationPlan._normalized_rules(site.get('direct_tip_movement_rules'))))['delivered_datetime']
+            for row in payloads.to_dict('records')]
         payloads["_delivered"] = pd.to_datetime(
             payloads.get("delivered_datetime"), errors="coerce"
         )
@@ -838,6 +855,7 @@ class ManualBlendPlanner:
             rows = payloads[
                 (payloads["_delivered"] >= payload_start)
                 & (payloads["_delivered"] < payload_end)
+                & (payloads['_rom_delivered'] >= payload_start)
             ]
             if rows.empty:
                 continue
@@ -846,6 +864,7 @@ class ManualBlendPlanner:
                 if tonnes <= 0:
                     continue
                 candidate = {
+                    "manual_feed_available_at": group['_delivered'].max(),
                     "source": str(source or "Unknown grade block"),
                     "available_tonnes": tonnes,
                     "payload_count": len(group),
@@ -1203,6 +1222,9 @@ class ManualBlendPlanner:
         report_rows = []
         produced_tonnes = 0.0
         self.physical_balance_history = []
+        if states:
+            self.physical_balance_history.append(dict(snapshot_datetime=states[0]['start_datetime'], steady_state_number=0,
+                balances={name: sum(self._number(chunk.get('balance')) for chunk in chunks) for name, chunks in inventory.items()}))
 
         for state in states:
             blend = self.blends[state["blend_ID"]]
@@ -1260,6 +1282,12 @@ class ManualBlendPlanner:
                 source_properties = {}
                 accumulated_tonnes = 0.0
                 for chunk, opening, consumed_tonnes in consumed:
+                    from classes.ContinuousAssays import corrected_streams, corrected_properties
+                    original_streams = chunk.get('grade_streams')
+                    chunk['grade_streams'] = corrected_streams(original_streams, chunk['source_id'],
+                        self.solver_config, state['start_datetime'], self.opf, active_brand)
+                    if chunk['grade_streams'] is not original_streams:
+                        chunk['source_properties'] = corrected_properties(chunk.get('source_properties'), chunk['grade_streams'], active_brand)
                     consumed_properties = scale_additive_source_properties(
                         chunk.get("source_properties"),
                         consumed_tonnes / opening if opening > 0 else 0,
@@ -1318,6 +1346,7 @@ class ManualBlendPlanner:
                         candidate.get("direct_tip_ids", [])
                     ) or source,
                     "source_type": "grade_block",
+                    "manual_feed_available_at": candidate.get('manual_feed_available_at'),
                     "source_opening_balance": candidate[
                         "available_tonnes"
                     ],
@@ -1605,6 +1634,10 @@ class ManualBlendPlanner:
                                      require_limits=bool(self.calendar_inputs.get('_require_equipment_limits', False)))
         except ValueError as exc:
             raise ManualBlendPlanningError(str(exc)) from exc
+        report.attrs['physical_balance_history'] = deepcopy(self.physical_balance_history)
+        report.attrs['material_flow_topology'] = self.material_flow_topology
+        from classes.ManualTransport import replay
+        report = replay(report, self.calendar_inputs, self.periods, self.product_build_settings, self.material_flow_topology)
         return report
 
     def state_summaries(self, states, allocations=None):

@@ -89,6 +89,8 @@ def prepare(context, state):
     result = {k: v for k, v in state.items()
               if k not in ('site_scenarios', 'database_snapshot')}
     result.update(restored[active])
+    from classes.SharedProjects import group_hashes
+    result['_shared_input_baselines'] = {site: group_hashes(row) for site, row in restored.items()}
     return active, restored, result
 
 
@@ -107,6 +109,9 @@ def begin(host, state, source_label, *, show_success=True, ready=None, resolve_t
         set_database_path(prepared['database_path'])
         host.restore_loaded_state(prepared, source_label=source_label,
                                   show_success=show_success, prepared=True)
+        watcher = vars(host).get('shared_project_watcher')
+        if watcher:
+            watcher.loaded(source_label, prepared, scenarios)
         if ready:
             ready()
     host.run_background_task('Restoring saved site models…',

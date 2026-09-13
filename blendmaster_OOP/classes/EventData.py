@@ -31,6 +31,7 @@ class EventData:
         two_wp_first_reclaim_datetime=None,
         two_wp_destination_turnover_priority=None,
         two_wp_turnover_guidance_applicable=False,
+        arrival_by_point=None,
     ):
         self._stockpile = stockpile
         self._grade_block = grade_block
@@ -52,6 +53,7 @@ class EventData:
         self._is_amt = is_amt
         self._source_name = source_name
         self._delivered_datetime = delivered_datetime
+        self.arrival_by_point = dict(arrival_by_point or {})
         self._aps_brand = aps_brand or ""
         self._aps_brand_proportions = aps_brand_proportions or {}
         self._grade_streams = grade_streams

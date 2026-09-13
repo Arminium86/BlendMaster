@@ -10,16 +10,18 @@ from classes.ExpitDataHandler import ExpitDataHandler
 from classes.ConveyorCOS import moment, material
 from classes.EventData import EventData
 from classes.FieldDefinitions import apply_field_mappings, field_weight_map
+from classes.CustomConstraints import source_property_kind
 from classes.CombinedOPFReconciliation import opf_field_mappings
-from classes.GradeStreams import amt_grade_streams, configured_brands, apply_selected_stream
+from classes.GradeStreams import amt_grade_streams, inventory_grade_streams, configured_brands, apply_selected_stream
 from classes.ReconciliationApplication import ReconciliationApplication
 from setup.InventoryBuildLineage import canonical_block, block_record, finite_number
 from setup.RecentDestinationActivity import RecentDestinationActivity
+from setup.ActualCrusherFeed import destination_matches, FEED_PREDICATE
 from setup.AMTGradeBlockLineage import EXPIT_FEED_PROPERTY_COLUMNS, EXPIT_PRODUCT_PROPERTY_COLUMNS, GRADE_CONTROL_PROPERTY_COLUMNS, DIRECT_LINEAGE_TONNE_COLUMNS
 
 
 class TransportOpeningHistory(RecentDestinationActivity):
-    VERSION = 1
+    VERSION = 2
 
     def request(self, site, start, points, settings):
         settings = transport_settings(settings)
@@ -49,8 +51,7 @@ class TransportOpeningHistory(RecentDestinationActivity):
             if identity in seen:
                 continue
             seen.add(identity)
-            matches = [p for p in request['points'] if
-                ExpitDataHandler.crusher_destination_matches(row.get('DESTINATION_FMS'), site, p['name'], p['opf'])]
+            matches = [p for p in request['points'] if destination_matches(row, site, p)]
             if len(matches) != 1:
                 if len(matches) > 1:
                     raise ValueError('An actual destination matches several selected crushers; correct the crusher mapping.')
@@ -70,7 +71,7 @@ class TransportOpeningHistory(RecentDestinationActivity):
 
     def query(self, connection, request):
         columns = list(dict.fromkeys(['expit.INTERNAL_ID', 'expit.SOURCE', 'expit.SOURCE_FMS',
-            'expit.DESTINATION_FMS', 'expit.WMT_REPORTING', 'expit.FE', 'expit.SIO2', 'expit.AL2O3', 'expit.P', 'expit.MN',
+            'expit.DESTINATION', 'expit.DESTINATION_FMS', 'expit.WMT_REPORTING', 'expit.FE', 'expit.SIO2', 'expit.AL2O3', 'expit.P', 'expit.MN',
             *EXPIT_FEED_PROPERTY_COLUMNS.values(), *EXPIT_PRODUCT_PROPERTY_COLUMNS.values()]))
         start = moment(request['end'])-timedelta(hours=max(request['hours'].values()))
         sql = """SELECT """ + ', '.join(columns) + """,
@@ -79,10 +80,7 @@ class TransportOpeningHistory(RecentDestinationActivity):
           WHERE expit.TRANSACTION_DATETIME >= TO_TIMESTAMP_TZ(%s)
             AND expit.TRANSACTION_DATETIME < TO_TIMESTAMP_TZ(%s)
             AND UPPER(TRIM(expit.OPERATION)) = %s AND expit.IS_DELETED = FALSE
-            AND expit.DISCRIMINATOR = 'PrimaryMovement'
-            AND ((expit.MOVEMENT_CLASSIFICATION = 'Rehandle Ore' AND expit.MOVEMENT_SUBCLASSIFICATION = 'Rehandle Ore Primary')
-              OR (expit.MOVEMENT_TYPE = 'ExPit' AND expit.MOVEMENT_CLASSIFICATION = 'Expit Ore'
-                  AND expit.MOVEMENT_SUBCLASSIFICATION = 'Expit Ore'))
+            AND """ + FEED_PREDICATE + """
           ORDER BY OBSERVED_AT, INTERNAL_ID LIMIT 50001"""
         with connection.cursor() as cursor:
             cursor.execute('ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 60')
@@ -90,7 +88,10 @@ class TransportOpeningHistory(RecentDestinationActivity):
             records = [dict(zip((c[0].upper() for c in cursor.description), row)) for row in cursor.fetchall()]
         if len(records) > 50000:
             raise ValueError('Opening history exceeds 50,000 movements. Review opening rates/capacities.')
-        names = sorted({str(r.get('SOURCE_FMS') or '').strip().upper() for r in records})
+        records = [r for r in records if any(destination_matches(r, request['site'], p) for p in request['points'])]
+        self.enrich_stockpile_movements(connection, records)
+        names = sorted({str(name).strip().upper() for r in records for name in (r.get('SOURCE'), r.get('SOURCE_FMS'))
+                        if canonical_block(name)})
         if not names:
             return records
         # Use the same explicit Grade Control masses as AMT; never substitute
@@ -102,11 +103,12 @@ class TransportOpeningHistory(RecentDestinationActivity):
           CASE WHEN TRY_TO_NUMBER(BLAST_NO) BETWEEN 600 AND 699 AND TRY_TO_NUMBER(FLITCH_RL) IS NOT NULL
             THEN TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL)+1) ELSE FLITCH_RL END, '_', GB_NAME) AS FULL_NAME,
           """ + ', '.join(fields) + """
-          FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS gradeblock WHERE UPPER(MINE_CODE) = %s)
+          FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS gradeblock WHERE UPPER(MINE_CODE) IN
+          (SELECT SPLIT_PART(VALUE::STRING,'_',1) FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s)))))
           SELECT * FROM blocks WHERE UPPER(FULL_NAME) IN
           (SELECT VALUE::STRING FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s))))"""
         with connection.cursor() as cursor:
-            cursor.execute(block_sql, (request['site'].upper(), json.dumps(names)))
+            cursor.execute(block_sql, (json.dumps(names), json.dumps(names)))
             models = [dict(zip((c[0].upper() for c in cursor.description), row)) for row in cursor.fetchall()]
         by_name = {}
         for row in models:
@@ -128,7 +130,8 @@ class TransportOpeningHistory(RecentDestinationActivity):
         for row in historical:
             masses.setdefault(row['FULL_NAME'],{})[row['STREAM']] = row
         for row in records:
-            name = str(row.get('SOURCE_FMS') or '').strip().upper()
+            candidates = [str(row.get(key) or '').strip().upper() for key in ('SOURCE', 'SOURCE_FMS')]
+            name = next((n for n in candidates if n in by_name or n in masses), candidates[0])
             model = dict(by_name.get(name, {}))
             historical = masses.get(name,{})
             feed = historical.get('rom') or historical.get('i') or {}
@@ -148,6 +151,35 @@ class TransportOpeningHistory(RecentDestinationActivity):
             for alias, field in GRADE_CONTROL_PROPERTY_COLUMNS.items():
                 row[alias] = model.get(field.split('.')[-1])
         return records
+
+    @staticmethod
+    def enrich_stockpile_movements(connection, records):
+        """Read the exact source build as it existed when the movement tipped."""
+        from setup.OpeningStockpileInventories import _INVENTORY_EXTRA_SELECTS
+        movements = [dict(id=str(r['INTERNAL_ID']), source=r['SOURCE'], time=str(r['OBSERVED_AT']))
+                     for r in records if r.get('SOURCE') and not canonical_block(r['SOURCE'])]
+        if not movements:
+            return
+        extra = [(alias, expr) for alias, expr in _INVENTORY_EXTRA_SELECTS if 'M.' not in expr and 'SR.' not in expr]
+        core = [(f'{a}_{stream.lower()}', f'LT.{sql}_{stream}_WTAVG')
+                for stream in ('INSITU', 'ROM', 'PROD1', 'PROD2', 'PROD3')
+                for a, sql in (('fe','FE'),('si','SIO2'),('al','AL2O3'),('p','P'),('mn','MN'))]
+        core += [(f'grade_{a}', f'LT.{sql}_INSITU_WTAVG')
+                 for a, sql in (('fe','FE'),('si','SIO2'),('al','AL2O3'),('p','P'),('mn','MN'))]
+        columns = ', '.join(f'{expr} AS {alias}' for alias, expr in [*extra, *core])
+        sql = """WITH movements AS (SELECT VALUE:id::STRING AS ID, VALUE:source::STRING AS SOURCE,
+            TRY_TO_TIMESTAMP_NTZ(VALUE:time::STRING) AS OBSERVED_AT FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s))))
+            SELECT movements.ID AS MOVEMENT_ID, LT.BALANCEWMT AS BASIS_WMT, LT.TRANSACTIONDATETIME AS SOURCE_AS_OF,
+            """ + columns + """ FROM movements JOIN AA_OPERATIONS_MANAGEMENT.SELFSERVICE.INVENTORY_STOCKPILE_TRANSACTIONS LT
+            ON UPPER(LT.STOCKPILEBUILDNAME) = UPPER(movements.SOURCE) AND LT.TRANSACTIONDATETIME <= movements.OBSERVED_AT
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY movements.ID ORDER BY LT.TRANSACTIONDATETIME DESC) = 1"""
+        with connection.cursor() as cursor:
+            cursor.execute(sql, (json.dumps(movements),))
+            snapshots = {str(row[0]): dict(zip((c[0].upper() for c in cursor.description), row)) for row in cursor.fetchall()}
+        for row in records:
+            snapshot = snapshots.get(str(row['INTERNAL_ID']))
+            if snapshot:
+                row['OPENING_INVENTORY_FIELDS'] = snapshot
 
 
 def opening_history_events(bundle, context, config):
@@ -172,8 +204,18 @@ def opening_history_events(bundle, context, config):
         expanded = {**row, 'FINAL_WMT': row['wmt'], 'MODELLED_PROPERTIES_JSON': raw,
                     **{'MODELLED_'+k.upper(): v for k, v in raw.items()}}
         mappings = opf_field_mappings(context.get('field_mappings'), context.get('opf'), opf)
-        fields = apply_field_mappings(expanded, definitions, mappings, 'amt')
-        streams = amt_grade_streams(fields, fields, brands, factors, opf, strict_mappings=True)
+        inventory = row.get('OPENING_INVENTORY_FIELDS')
+        if inventory:
+            fields = apply_field_mappings(inventory, definitions, mappings, 'inventory')
+            basis = finite_number(inventory.get('BASIS_WMT'))
+            if basis is None or basis <= 0:
+                raise ValueError(f'{row["SOURCE"]}: opening source build has no positive physical basis at the movement time.')
+            fields = {k: v*row['wmt']/basis if v is not None and source_property_kind(k, kinds) == 'additive' else v
+                      for k, v in fields.items()}
+            streams = inventory_grade_streams(fields, brands, factors, opf, strict_mappings=True)
+        else:
+            fields = apply_field_mappings(expanded, definitions, mappings, 'amt')
+            streams = amt_grade_streams(fields, fields, brands, factors, opf, strict_mappings=True)
         block = canonical_block(row.get('SOURCE')) or canonical_block(row.get('SOURCE_FMS'))
         if opf not in applications:
             applications[opf] = ReconciliationApplication(samples=(factors_bundle.get('reconciliation_inputs') or (context.get('reconciliation_inputs') if primary else {}) or {}).get('samples', []),

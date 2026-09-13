@@ -3429,4 +3429,9 @@ class CaseModeller:
         if getattr(self, 'transport', None):
             from classes.TransportPlanning import transport_rates
             duration = self.transport.next_chunk_boundary_hours(transport_rates(self), duration)
+        from classes.ContinuousAssays import boundaries
+        for when in boundaries(self.solver_config):
+            hours = (when-self.current_time).total_seconds()/3600
+            if hours > 1e-8:
+                duration = min(duration, hours)
         return duration

@@ -186,6 +186,8 @@ class DatabaseManager:
                 "two_wp_active_blend_report", "optimisation_plan_status", "closing_rom_stocks_compliance",
                 "transport_movements", "transport_contents", "transport_product_arrivals",
                 "material_flow_topology", "plan_feature_audits",
+                'manual_plan_build_report', 'manual_plan_product_build_report', 'manual_material_flow_topology',
+                'manual_transport_movements', 'manual_transport_contents', 'manual_transport_product_arrivals',
             }
             derived.update(AUDIT_COLUMNS)
             derived.update(PUBLICATION_COLUMNS)
@@ -1137,6 +1139,7 @@ class DatabaseManager:
             "two_wp_destination_turnover_priority": "REAL",
             "grade_streams_json": "TEXT",
             "source_properties_json": "TEXT",
+            "haulage_json": "TEXT",
         }
         for column_name, column_type in optional_columns.items():
             if column_name not in existing_columns:
@@ -1182,6 +1185,8 @@ class DatabaseManager:
         results["aps_direct_tip_candidate"] = results["aps_direct_tip_candidate"].map(
             lambda value: str(value).strip().lower() in {"true", "1", "yes"}
         ).astype(int)
+        if 'haulage' in results.columns:
+            results['haulage_json'] = results['haulage'].map(lambda value: json.dumps(value if isinstance(value, dict) else {}, sort_keys=True))
         results["two_wp_turnover_guidance_applicable"] = results[
             "two_wp_turnover_guidance_applicable"
         ].map(
@@ -1222,7 +1227,8 @@ class DatabaseManager:
                 two_wp_first_reclaim_datetime,
                 two_wp_destination_turnover_priority,
                 grade_streams_json,
-                source_properties_json
+                source_properties_json,
+                haulage_json
             ) VALUES (
                 :agent, 
                 :source, 
@@ -1248,7 +1254,8 @@ class DatabaseManager:
                 :two_wp_first_reclaim_datetime,
                 :two_wp_destination_turnover_priority,
                 :grade_streams_json,
-                :source_properties_json
+                :source_properties_json,
+                :haulage_json
             )
             ''', row.to_dict())
 
@@ -2325,4 +2332,3 @@ class StockpileProfileReport:
         finally:
             # Close the database connection
             conn.close()
-

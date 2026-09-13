@@ -40,6 +40,7 @@ class BalanceTracker:
         source_property_weights=None,
     ):
         self.source_property_kinds = dict(source_property_kinds or {})
+        self._continuous_source_changed = set()
         self.source_property_weights = dict(source_property_weights or {})
         self.required_source_property_keys = (
             None
@@ -242,11 +243,17 @@ class BalanceTracker:
        
         if not expit_payload_transactions.empty:
 
-            # Sort the DataFrame by delivered_datetime (old to new)
-            expit_payload_transactions = expit_payload_transactions.sort_values(by=["destination", "delivered_datetime"])
+            # Imported evidence in attrs can contain complete schedule tables.
+            # Keep it on the caller's frame, not on every transient row Series.
+            expit_payload_transactions = pd.DataFrame(expit_payload_transactions, copy=False)
+            expit_payload_transactions.attrs = {}
+            delivered = expit_payload_transactions['delivered_datetime']
+            expit_payload_transactions = expit_payload_transactions.loc[
+                (delivered >= steady_state_start_time) & (delivered < steady_state_end_time)
+            ].sort_values(by=["destination", "delivered_datetime"])
 
             # Loop through expit payload transactions and build stockpiles
-            for _, transaction in expit_payload_transactions.iterrows():
+            for transaction in expit_payload_transactions.to_dict('records'):
                 name = self.resolve_payload_build_stockpile(transaction)
                 if not name:
                     continue
@@ -334,6 +341,7 @@ class BalanceTracker:
                             self.source_property_kinds,
                             self.source_property_weights,
                         )
+                        self._continuous_source_changed.add(name)
                         self.grade_streams[name] = (
                             reweight_grade_streams_from_properties(
                                 self.grade_streams.get(name),

@@ -24,6 +24,16 @@ def period_limit(calendar, field, period, point='', mode='single'):
     return number(values.get(label, values.get(label.replace('_', ' '), values.get(period))))
 
 
+def quantity(frame, column):
+    # Named SQLite report tables can retain optional columns from older manual
+    # recipes. NULL in those unused columns has the same meaning as an absent
+    # column; an explicit zero still remains zero and malformed values fail.
+    if column not in frame:
+        return frame['_tonnes']
+    raw = frame[column]
+    return pd.to_numeric(raw, errors='coerce').where(raw.notna(), frame['_tonnes'])
+
+
 def equipment_violations(report, calendar, periods, *, mode='single', require_limits=False):
     if report is None or report.empty:
         return []
@@ -44,6 +54,12 @@ def equipment_violations(report, calendar, periods, *, mode='single', require_li
         return ['The manual report contains invalid timestamps or source tonnes.']
     if (frame['_tonnes'] < -1e-6).any() or not frame['_tonnes'].map(math.isfinite).all():
         return ['Source tonnes must be finite and non-negative.']
+    for column in ('crusher_source_tonnes', 'reclaimer_source_tonnes'):
+        if column in frame:
+            supplied = frame[column].notna()
+            values = pd.to_numeric(frame.loc[supplied, column], errors='coerce')
+            if values.isna().any() or not values.map(math.isfinite).all() or (values < -1e-6).any():
+                return [f'The report contains invalid {column.replace("_", " ")}.']
     if (frame['_end'] <= frame['_start']).any():
         return ['Manual state duration must be positive.']
     boundaries = [(key[:-6], pd.Timestamp(start), pd.Timestamp(periods[key[:-6] + '_end']))
@@ -70,11 +86,11 @@ def equipment_violations(report, calendar, periods, *, mode='single', require_li
         if not stock.empty:
             names = stock.get('parent_stockpile', pd.Series('', index=stock.index)).fillna('').astype(str)
             names = names.mask(names.eq(''), stock.get('source', pd.Series('source', index=stock.index)))
-            reclaim = pd.to_numeric(stock.get('reclaimer_source_tonnes', stock['_tonnes']), errors='coerce')
+            reclaim = quantity(stock, 'reclaimer_source_tonnes')
             source_rates = (reclaim.groupby(names).sum(min_count=1) / duration).to_dict()
         else:
             source_rates = {}
-        crusher_tonnes = pd.to_numeric(state.get('crusher_source_tonnes', state['_tonnes']), errors='coerce')
+        crusher_tonnes = quantity(state, 'crusher_source_tonnes')
         checks = [('crusher_rate', 'crusher', crusher_tonnes.sum(min_count=1) / duration)]
         checks += ([('max_reclaim_rate', source, rate) for source, rate in source_rates.items()]
                    if mode == 'single' else [('max_reclaim_rate', 'aggregate reclaim', sum(source_rates.values()))])

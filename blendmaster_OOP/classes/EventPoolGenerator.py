@@ -65,7 +65,16 @@ class EventPoolGenerator:
                         })
 
         for grade_block in self.grade_blocks:
+            # A truck already dumped to ROM in a completed state cannot be
+            # redirected to a slower crusher route in a later state.
+            rom_arrival = getattr(grade_block, 'rom_arrival', None)
+            if rom_arrival is not None and rom_arrival < current_time:
+                continue
             delivered_datetime = grade_block.delivered_datetime
+            arrivals = getattr(grade_block, 'arrival_by_point', {}) or {}
+            if arrivals:
+                eligible = [when for when in arrivals.values() if current_time <= when < steady_state_end_time]
+                delivered_datetime = min(eligible) if eligible else None
             if (
                 delivered_datetime is None
                 or pd.isna(delivered_datetime)
@@ -99,6 +108,7 @@ class EventPoolGenerator:
                         "max_quantity": grade_block_max_quantity,
                         "source_name": grade_block.source or grade_block.name,
                         "delivered_datetime": delivered_datetime,
+                        'arrival_by_point': arrivals,
                         "grade_streams": grade_block.grade_streams,
                         "source_properties": grade_block.source_properties,
                         "source_property_kinds": getattr(
@@ -180,6 +190,7 @@ class EventPoolGenerator:
         """Update each event's balance in the pool based on the balance tracker."""
         for event in event_pool:
             if event.is_stockpile:
+                event._continuous_assay_eligible = event.stockpile not in getattr(balance_tracker, '_continuous_source_changed', set())
                 event.balance, event.grade_fe, event.grade_si, event.grade_al, event.grade_mn, event.grade_p  = balance_tracker.get_balance(event.stockpile)
                 event.grade_streams = balance_tracker.get_grade_streams(event.stockpile)
                 get_properties = getattr(
@@ -261,6 +272,7 @@ class EventPoolGenerator:
                 is_amt=record.get("is_amt", False),
                 source_name=record.get("source_name"),
                 delivered_datetime=record.get("delivered_datetime"),
+                arrival_by_point=record.get('arrival_by_point'),
                 aps_brand=record.get("aps_brand"),
                 aps_brand_proportions=record.get("aps_brand_proportions"),
                 grade_streams=record.get("grade_streams"),

@@ -34,7 +34,7 @@ def physical_violations(report):
     return errors
 
 
-def evaluate(report, targets=None, *, destination=None, equipment_errors=None, run_status='complete'):
+def evaluate(report, targets=None, *, product_report=None, destination=None, equipment_errors=None, run_status='complete'):
     dimensions = []
     def add(name, status, detail):
         dimensions.append(dict(check=name, status=status, detail=str(detail)))
@@ -47,26 +47,45 @@ def evaluate(report, targets=None, *, destination=None, equipment_errors=None, r
         add('Equipment', 'not_checked', 'Equipment audit was not supplied.')
     shortfalls = []
     frame = report if isinstance(report, pd.DataFrame) else pd.DataFrame()
+    product = product_report if isinstance(product_report, pd.DataFrame) else pd.DataFrame()
     for target in targets or []:
         name = str(target.get('build_name') or '')
         lane = str(target.get('byproduct') or '').lower()
-        prefix = 'product_build_' + (lane + '_' if lane in ('lump', 'fines') else '')
-        selected = frame
-        if prefix + 'name' in frame:
+        lane = lane if lane in ('lump', 'fines') else 'product'
+        prefix = 'product_build_' + (lane + '_' if lane != 'product' else '')
+        # Combined OPFs keep their authoritative build values in scoped columns.
+        # The legacy row-level build columns can be empty when output arrives
+        # through transport. Match the saved build's OPF as well as its name.
+        prefixes = [prefix, *(column[:-4] for column in frame.columns
+                    if column.startswith(f'product_build_{lane}@') and column.endswith('_name'))]
+        delivered = finite(target.get('opening_tonnes'))
+        for prefix in prefixes:
+            if prefix + 'name' not in frame:
+                continue
             selected = frame[frame[prefix + 'name'].fillna('').astype(str).eq(name)]
             opf = str(target.get('opf') or '')
             if opf and prefix + 'opf' in selected:
                 selected = selected[selected[prefix + 'opf'].fillna('').astype(str).eq(opf)]
-        else:
-            selected = pd.DataFrame()
-        delivered = max((finite(v) for v in selected.get(prefix + 'closing_tonnes', [])), default=finite(target.get('opening_tonnes')))
+            delivered = max(delivered, max((finite(v) for v in selected.get(prefix + 'closing_tonnes', [])), default=0.0))
+        # Transport output arrives independently of the source-tip rows. Its
+        # saved product report carries the actual cumulative OPF build state.
+        if 'product_build_name' in product:
+            selected = product[product['product_build_name'].fillna('').astype(str).eq(name)]
+            opf = str(target.get('opf') or '')
+            if opf and 'opf' in selected:
+                selected = selected[selected['opf'].fillna('').astype(str).eq(opf)]
+            if 'product_build_lane' in selected:
+                selected = selected[selected['product_build_lane'].fillna('product').astype(str).str.split('@').str[0].eq(lane)]
+            if not selected.empty:
+                delivered = max((finite(v) for v in selected.get('build_closing_tonnes', [])), default=delivered)
         remaining = max(finite(target.get('target_tonnes')) - delivered, 0)
         if remaining > .1:
             shortfalls.append(f'{name}: {remaining:,.1f} t remaining')
     add('Product targets', 'review' if shortfalls else 'pass' if targets else 'not_checked',
         '; '.join(shortfalls) or ('Targets attained.' if targets else 'No product targets configured.'))
+    quality_frame = product if not product.empty else frame
     quality = [row for grain in ('steady_state', 'cumulative_build')
-               for row in quality_report_rows(frame, grain=grain)
+               for row in quality_report_rows(quality_frame, grain=grain)
                if row.get('evaluation_basis') == row.get('grain')]
     # Cumulative policy is assessed on the last state for each build/analyte;
     # intermediate recovery trajectories remain available in the full audit.

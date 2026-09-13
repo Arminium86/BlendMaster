@@ -81,6 +81,9 @@ def build_publication(payloads, blend_report, allocation, context, *, plan_type,
             row["transitions"] = json.dumps(events[identity], sort_keys=True)
             row["transition_count"] = len(events[identity])
             row["assigned_destination"] = final.get("assigned_destination", "")
+            if final.get('delivered_datetime'):
+                row['delivered_datetime'] = final['delivered_datetime']
+                row['first_delivery'] = row['last_delivery'] = final['delivered_datetime']
             row["assigned_tonnes"] = final.get("assigned_wmt", 0.0)
             row["consumed_capacity_wmt"] = row["assigned_tonnes"]
             row["assignment_source"] = final.get("primary_rule") or "2WP build order" if row["assigned_tonnes"] else row["status"]

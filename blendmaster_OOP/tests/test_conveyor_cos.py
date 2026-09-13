@@ -107,6 +107,81 @@ class ConveyorCOSTests(unittest.TestCase):
         self.assertAlmostEqual(report.source_actual_tonnes_to_build.sum(),500)
         self.assertAlmostEqual(report.build_grade_fe.iloc[-1],57.6)
 
+    def test_opening_queue_can_idle_one_crusher_without_violating_minimum_sources(self):
+        periods = PeriodManager()
+        periods.calculate_periods(START)
+        history = [dict(time=START-timedelta(minutes=1), wmt=100, material=mat(56))]
+        flow = ConveyorCOS(configuration(100), START, {'A':100}, history)
+        cfg = settings()
+        cfg['tipping_points'][0]['min_stockpiles'] = 1
+        cfg['tipping_points'][0]['max_stockpiles'] = 4
+        for point in cfg['tipping_points']:
+            point['targets_by_period']['preplan']['brand'] = 'SS'
+        result = MultiLaneOptimizer(cfg).run_blending_optimization(
+            [fixture_module.DecisionLeverOptimizerTests.event('SP1'),
+             fixture_module.DecisionLeverOptimizerTests.event('SP2')],
+            fixture_module.DecisionLeverOptimizerTests.target(), .1, None, None,
+            periods, 'preplan', solver_config=dict(
+                _transport_engine=flow, current_steady_state_datetime=START,
+                active_blend_guidance_enabled=True, active_blend_guidance_incentive=10,
+                active_blend_guidance=[dict(product_brand='SS', start_datetime=START,
+                    end_datetime=START+timedelta(hours=1), stockpiles=['SP1'])]))
+        self.assertTrue(result['Linprog_result_object'].success)
+        self.assertAlmostEqual(result['tipping_point_results']['A']['crusher_actual_tonnes'], 0)
+        self.assertAlmostEqual(result['tipping_point_results']['B']['crusher_actual_tonnes'], 10)
+        self.assertEqual(result['transport_tips'], [])
+        self.assertAlmostEqual(flow.balance('A'), 100)  # A solve only previews the queue.
+
+    def test_feeding_transport_lane_still_requires_minimum_stockpile_contributions(self):
+        periods = PeriodManager()
+        periods.calculate_periods(START)
+        flow = ConveyorCOS(configuration(100), START, {'A':100})
+        cfg = settings()
+        cfg['tipping_points'][0].update(min_stockpiles=2, max_stockpiles=2)
+        cfg['source_subsets']['SP3'] = 'A'
+        result = MultiLaneOptimizer(cfg).run_blending_optimization(
+            [fixture_module.DecisionLeverOptimizerTests.event(name) for name in ('SP1','SP2','SP3')],
+            fixture_module.DecisionLeverOptimizerTests.target(), 1, None, None,
+            periods, 'preplan', min_stockpile_contribution_ratio=.2,
+            solver_config=dict(_transport_engine=flow, current_steady_state_datetime=START))
+        self.assertTrue(result['Linprog_result_object'].success)
+        lane = result['tipping_point_results']['A']
+        self.assertAlmostEqual(lane['crusher_actual_tonnes'], 100)
+        positive = [r['actual_tonnes'] for r in lane['transactions'] if r['actual_tonnes'] > 0]
+        self.assertEqual(len(positive), 2)
+        self.assertTrue(all(tonnes >= 20-1e-6 for tonnes in positive))
+
+    def test_nearly_full_chunk_does_not_create_a_rounding_only_solve(self):
+        flow = ConveyorCOS(configuration(0,100,1), START, {'A':100})
+        quantity = 100-1.4e-6
+        flow.add_feed('A', mat(), quantity, START, START+timedelta(hours=1), 100)
+        flow.advance(START+timedelta(hours=1), {'A':100})
+        self.assertGreater(flow.next_chunk_boundary_hours({'A':100}, 1), .99)
+        rows = flow.advance(START+timedelta(hours=2), {'A':100})
+        self.assertAlmostEqual(sum(row['wmt'] for row in rows), quantity, places=9)
+        self.assertAlmostEqual(flow.balance('A'), 0, places=9)
+        flow.assert_balance()
+
+    def test_small_delivery_tail_starts_a_new_chunk_without_losing_mass(self):
+        flow = ConveyorCOS(configuration(0,200,2), START, {'A':100})
+        quantity = 100+1e-7
+        flow.add_feed('A', mat(), quantity, START, START+timedelta(hours=1), 100)
+        arrivals = flow.advance(START+timedelta(hours=1), {'A':100})
+        self.assertEqual(len(flow.points['A']['chunks']), 2)
+        self.assertAlmostEqual(flow.balance('A')+sum(row['wmt'] for row in arrivals), quantity, places=9)
+        flow.assert_balance()
+
+    def test_final_reclaim_rounding_is_delivered_without_a_tiny_following_step(self):
+        flow = ConveyorCOS(configuration(0,100,1), START, {'A':100})
+        flow.add_feed('A', mat(), 100, START, START+timedelta(hours=1), 100)
+        flow.advance(START+timedelta(hours=1), {'A':100})
+        end = START+timedelta(hours=2, microseconds=-65)
+        arrivals = flow.advance(end, {'A':100})
+        self.assertAlmostEqual(sum(row['wmt'] for row in arrivals), 100, places=9)
+        self.assertAlmostEqual(flow.balance('A'), 0, places=9)
+        self.assertEqual(flow.next_chunk_boundary_hours({'A':100}, 1), 1)
+        flow.assert_balance()
+
 
 if __name__ == '__main__':
     unittest.main()

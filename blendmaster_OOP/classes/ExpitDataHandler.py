@@ -53,6 +53,7 @@ class ExpitDataHandler:
         "Destination.FullName",
         "HaulageResult.Times.Dumping",
         "HaulageResult.Times.LoadedTravel",
+        "Haulage.Truck",
         "HaulageResult.LoaderProductionRate.Wtph",
         "HaulageResult.Times.SpotAtDump",
         "HaulageResult.Times.SpotAtLoader",
@@ -93,7 +94,12 @@ class ExpitDataHandler:
         return sorted(value for value in values if value)
 
     def property_kind(self, value):
-        return source_property_kind(value, self.source_property_kinds)
+        key = canonical_property_key(value)
+        # The field declarations are a per-handler snapshot. Combined OPFs
+        # carry hundreds of fields across every payload; classify each once.
+        if key not in self._property_kind_cache:
+            self._property_kind_cache[key] = source_property_kind(key, self.source_property_kinds)
+        return self._property_kind_cache[key]
 
     def __init__(
         self,
@@ -113,6 +119,7 @@ class ExpitDataHandler:
         source_property_weights=None,
         preserve_source_payloads_for_reconciliation=False,
         destination_rule_context=None,
+        two_wp_path=None,
     ):
         self.include_crusher_destinations = bool(include_crusher_destinations)
         self.selected_crusher_names = self._normalize_selected_crusher_names(selected_crusher_name)
@@ -128,12 +135,15 @@ class ExpitDataHandler:
         self.use_destination_guidance = destination_guidance is not None
         self.destination_guidance = destination_guidance or {}
         rule_context = destination_rule_context or {}
+        from classes.HaulageRouteTiming import from_csv
+        self.haulage_timing = from_csv(two_wp_path or rule_context.get('two_wp_path'))
         self.destination_rules = DestinationRuleEngine(
             self.destination_guidance, areas=rule_context.get("areas"),
             haul_routes=rule_context.get("haul_routes"))
         self.source_stockpile_fallbacks = {}
         self.configured_product_brands = configured_product_brands or []
         self.source_property_kinds = dict(source_property_kinds or {})
+        self._property_kind_cache = {}
         self.source_property_weights = dict(source_property_weights or {})
         self.preserve_source_payloads_for_reconciliation = bool(
             preserve_source_payloads_for_reconciliation
@@ -182,6 +192,10 @@ class ExpitDataHandler:
             input_data,
             usecols=lambda column: column in required_columns,
         )
+        if 'Haulage.Truck' not in self.data.columns:
+            self.data['Haulage.Truck'] = ''
+        else:
+            self.data['Haulage.Truck'] = self.data['Haulage.Truck'].fillna('')
         missing_mapped_columns = sorted(
             self.mapped_grade_columns - set(self.data.columns)
         )
@@ -1774,7 +1788,7 @@ class ExpitDataHandler:
         # source/destination alone previously collapsed A > B > A into one A
         # record and removed the evidence needed to detect face reversals.
         sequence_identity = self.data[[
-            "Agent.Name", "Source.FullName", "Destination.FullName"
+            "Agent.Name", "Source.FullName", "Destination.FullName", "Haulage.Truck"
         ]].astype(str).agg("|".join, axis=1)
         self.data["__sequence_segment"] = (
             sequence_identity.ne(sequence_identity.shift()).cumsum()
@@ -1908,6 +1922,7 @@ class ExpitDataHandler:
 
         # Perform basic aggregation
         aggregation = {
+            "Haulage.Truck": "first",
             "Time.StartTime": "first",  # First row's start time
             "Time.EndTime": "last",    # Last row's end time
             "HaulageResult.Times.Dumping": "mean",
@@ -2074,6 +2089,7 @@ class ExpitDataHandler:
                     destination = row["Destination.FullName"]
                     source_name = row["Source.FullName"]
                     destination_metadata = self._payload_destination_metadata(row)
+                    destination_metadata['haulage'] = self.haulage_timing.payload_context(row, load_time)
                     row_grade_streams = aps_grade_streams(
                         row.to_dict(), self.grade_field_mappings, self.configured_product_brands
                     )
@@ -2166,6 +2182,7 @@ class ExpitDataHandler:
                             if (
                                 next_start_time == row["Time.EndTime"]
                                 and next_destination == destination
+                                and next_row.get('Haulage.Truck', '') == row.get('Haulage.Truck', '')
                                 and (
                                     not self.preserve_source_payloads_for_reconciliation
                                     or same_source
@@ -2310,6 +2327,9 @@ class ExpitDataHandler:
                             **destination_metadata,
                         })
 
+            from classes.HaulageRouteTiming import arrival
+            for result in self.results:
+                result.update(arrival(result, result.get('destination') or result.get('planned_destination')))
             return pd.DataFrame(self.results)
         return pd.DataFrame()
     

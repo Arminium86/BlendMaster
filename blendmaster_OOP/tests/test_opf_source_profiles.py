@@ -1,7 +1,7 @@
 import unittest
 from copy import deepcopy
 
-from classes.OPFSourceProfiles import register_profiles, namespace_record, apply_opf_profile
+from classes.OPFSourceProfiles import register_profiles, namespace_record, apply_opf_profile, prepare_inventory_profiles
 from classes.CustomConstraints import merge_source_properties, scale_additive_source_properties
 from classes.GradeStreams import legacy_grade_streams, apply_selected_stream
 from tests import test_decision_levers as fixtures
@@ -17,6 +17,29 @@ def configuration(opfs=('OPF1', 'OPF2')):
 
 
 class OPFSourceProfilesTests(unittest.TestCase):
+    def test_warehouse_balance_on_aps_destination_matches_physical_inventory(self):
+        cfg = configuration()
+        cfg['multi_feed_settings'] = dict(tipping_points=[dict(name='CR1', opf='OPF1', rom_area='CR1')],
+                                          source_subsets={'SP1': 'CR1'}, rehandle_rules=[])
+        source = dict(BALANCE=204583.05, BUILD='SP1_26001',
+                      grade_streams=legacy_grade_streams({'grade_fe': 58}),
+                      source_properties={'modelled_rom_wmt': 204583.05})
+        for profile in cfg['opf_profiles'].values():
+            profile.update(inventory={'SP1': source}, chunks={})
+        physical = {'SP1': dict(balance=204583.05, build='SP1_26001')}
+        prepare_inventory_profiles(physical, [], cfg)
+        event = fixtures.DecisionLeverOptimizerTests.event('SP1', balance=204583.05)
+        event.source_properties = physical['SP1']['source_properties']
+        apply_opf_profile(event, 'OPF1', cfg)
+        apply_selected_stream(event, 'adjusted_product', 'FB')
+        self.assertAlmostEqual(event.grade_fe, 58)
+        self.assertAlmostEqual(event.source_properties['modelled_rom_wmt'], 204583.05)
+        for balance in (204582, 0):
+            with self.subTest(balance=balance):
+                physical['SP1']['balance'] = balance
+                with self.assertRaisesRegex(ValueError, 'opening tonnes differ'):
+                    prepare_inventory_profiles(physical, [], cfg)
+
     def test_inbound_mix_and_depletion_preserve_independent_opf_grades(self):
         cfg = configuration()
         opening = {'modelled_rom_wmt': 100}
@@ -56,4 +79,3 @@ class OPFSourceProfilesTests(unittest.TestCase):
         self.assertTrue(result['Linprog_result_object'].success)
         self.assertEqual({r['opf']: r['grade_fe'] for r in result['transactions']}, {'OPF1': 50, 'OPF2': 55, 'OPF3': 60})
         self.assertAlmostEqual(sum(r['actual_tonnes'] for r in result['transactions']), 300)
-

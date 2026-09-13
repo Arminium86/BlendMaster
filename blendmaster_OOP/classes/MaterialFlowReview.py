@@ -11,7 +11,12 @@ REPORTS = dict(feed='optimisation_plan_blend_report',product='optimisation_plan_
 FALLBACKS = dict(feed='optimised_blend_report',product='product_build_report')
 
 
-def saved_flow_plans(database_name=None):
+def saved_flow_plans(database_name=None, *, plan_type='optimised'):
+    if plan_type == 'manual':
+        from classes.SavedResultViews import plan_names
+        return plan_names(database_name or get_database_path(), 'manual')
+    if plan_type != 'optimised':
+        raise ValueError('Unknown result type.')
     path = Path(database_name or get_database_path())
     if not path.exists():
         return []
@@ -26,27 +31,25 @@ def saved_flow_plans(database_name=None):
         return sorted(plans,key=lambda name:(name!='Primary',name))
 
 
-def saved_flow_data(plan_id='Primary',database_name=None):
+def saved_flow_data(plan_id='Primary',database_name=None, *, plan_type='optimised'):
     path = database_name or get_database_path()
-    frames = read_transport_reports(path,plan_id)
     graph,warnings = None,[]
     with closing(sqlite3.connect('file:'+str(path).replace('\\','/')+'?mode=ro',uri=True)) as connection:
+        connection.execute('BEGIN')
+        frames = read_transport_reports(path,plan_id,plan_type=plan_type,connection=connection)
         names = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if 'material_flow_topology' in names:
-            row = connection.execute('SELECT topology_json,warnings_json FROM material_flow_topology WHERE plan_id=?',(plan_id,)).fetchone()
+        topology_table = ('manual_' if plan_type == 'manual' else '') + 'material_flow_topology'
+        if topology_table in names:
+            row = connection.execute(f'SELECT topology_json,warnings_json FROM {topology_table} WHERE plan_id=?',(plan_id,)).fetchone()
             if row:
                 graph,warnings = json.loads(row[0]),json.loads(row[1])
                 from classes.PhaseSchemas import is_readable, TOPOLOGY_SCHEMA_VERSION
                 if not is_readable(graph,TOPOLOGY_SCHEMA_VERSION):
                     raise ValueError('Unsupported saved material-flow topology version. Recalculate this plan with a compatible application.')
-        for key,table in REPORTS.items():
-            if table in names:
-                frames[key] = pd.read_sql_query(f'SELECT * FROM "{table}" WHERE plan_id=?',connection,params=(plan_id,))
-            elif plan_id=='Primary' and FALLBACKS[key] in names:
-                frames[key] = pd.read_sql_query(f'SELECT * FROM "{FALLBACKS[key]}"',connection)
-            else:
-                frames[key] = pd.DataFrame()
-    return dict(graph=graph,frames=frames,warnings=warnings,plan_id=plan_id)
+        from classes.SavedResultViews import read_from_connection
+        for key in ('feed', 'product', 'build'):
+            frames[key] = read_from_connection(connection, plan_type, plan_id, key)
+    return dict(graph=graph,frames=frames,warnings=warnings,plan_id=plan_id,plan_type=plan_type)
 
 
 class FlowTimeline:

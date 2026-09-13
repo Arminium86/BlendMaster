@@ -393,6 +393,19 @@ class ReportHostTests(unittest.TestCase):
         host.opf_production_report.interval.setValue(3)
         self.assertEqual(host.product_assay_report_settings["refresh_minutes"], 3)
 
+    def test_one_combined_scenario_exposes_every_configured_opf(self):
+        host = self.host()
+        host.opf_input_choice = 'CC OPF01'
+        host.start_time_choice = END
+        host.active_scenario_id = 'combined'
+        host.product_brand_labels_choice = ['FB']
+        host.product_targets = []
+        host.site_scenarios = {}
+        host.multi_feed_configuration = dict(mode='combined_opf', tipping_points=[
+            dict(opf='CC OPF01'), dict(opf='CC OPF01'), dict(opf='CC OPF02')])
+        host.sync_opf_production_report_context()
+        self.assertEqual(host.opf_production_report.opfs, ['CC_OPF01', 'CC_OPF02'])
+
     def test_scenario_capture_and_project_migration_preserve_independent_report_filters(self):
         host = self.host()
         report_context(host.opf_production_report)

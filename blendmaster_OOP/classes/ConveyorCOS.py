@@ -14,10 +14,12 @@ import math
 
 import pandas as pd
 
-from classes.CustomConstraints import source_property_kind
+from classes.CustomConstraints import compiled_property_kinds, source_property_kind
 from classes.TransportSettings import transport_settings, history_lookback_hours
 
 EPS = 1e-8
+MASS_EPS = 1e-6  # Match the solver and queue-removal precision (one gram).
+FILL_EPS = 1e-4  # Accumulated solver rounding; keep the measured chunk mass.
 
 
 def moment(value):
@@ -35,8 +37,9 @@ def material_event(event, tonnes):
     balance = float(event.balance)
     if balance <= 0:
         raise ValueError('Cannot transport material with a non-positive physical basis.')
+    kinds = compiled_property_kinds(event.source_property_kinds)
     result.source_properties = {key: float(value)*float(tonnes)/balance
-        if source_property_kind(key, event.source_property_kinds) == 'additive' else value
+        if source_property_kind(key, kinds) == 'additive' else value
         for key, value in event.source_properties.items()}
     result._balance = float(tonnes)
     result._max_quantity = float(tonnes)
@@ -141,7 +144,7 @@ class ConveyorCOS:
             chunk['components'].append(dict(material=deepcopy(mat), wmt=take))
             chunk['wmt'] += take
             chunk['filled_wmt'] += take
-            chunk['sealed'] = chunk['filled_wmt'] >= capacity - EPS
+            chunk['sealed'] = chunk['filled_wmt'] >= capacity - FILL_EPS
             quantity -= take
 
     def balance(self, point):
@@ -255,6 +258,8 @@ class ConveyorCOS:
                 hours = (boundary-at).total_seconds()/3600
                 if capacity > EPS and ready and rate > EPS:
                     take = min(ready['wmt'], rate*hours)
+                    if ready['wmt']-take <= FILL_EPS:
+                        take = ready['wmt']
                     proportion = take/ready['wmt']
                     for component in ready['components']:
                         amount = component['wmt']*proportion
@@ -263,10 +268,12 @@ class ConveyorCOS:
                                                 start=at, end=boundary, chunk_id=ready['id']))
                         component['wmt'] -= amount
                     ready['wmt'] -= take
-                    if ready['wmt'] <= 1e-6:
+                    if ready['wmt'] <= MASS_EPS:
                         state['chunks'].popleft()
                 for row in active:
                     amount = min(row['remaining'], row['rate']*hours)
+                    if row['remaining']-amount <= FILL_EPS:
+                        amount = row['remaining']
                     row['remaining'] -= amount
                     if capacity > EPS:
                         mat = row['material']
@@ -278,7 +285,7 @@ class ConveyorCOS:
                     elif amount > EPS:
                         outputs.append(dict(material=deepcopy(row['material']), wmt=amount,
                                             start=at, end=boundary, chunk_id=None))
-                state['conveyor'] = deque(r for r in intervals if r['remaining'] > 1e-6)
+                state['conveyor'] = deque(r for r in intervals if r['remaining'] > MASS_EPS)
                 if sum(c['wmt'] for c in state['chunks']) > capacity + 1e-4:
                     raise ValueError(f'{point}: COS capacity would be exceeded; reduce tipping or correct opening evidence.')
                 at = boundary

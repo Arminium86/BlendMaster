@@ -15,9 +15,10 @@ from database.DatabaseContext import get_database_path
 
 
 class OperationalBlendPlanView(QWidget):
-    def __init__(self,parent=None,run_async=None,backup_context=None,save_backups=None):
+    def __init__(self,parent=None,run_async=None,backup_context=None,save_backups=None,plan_type='optimised'):
         super().__init__(parent)
         self.site_host = parent
+        self.plan_type = plan_type
         self.run_async,self.backup_context,self.save_backups = run_async,backup_context,save_backups
         self.plans_data,self.sheets,self.data = {},[],{}
         self.generation=0
@@ -31,6 +32,10 @@ class OperationalBlendPlanView(QWidget):
         bar.addWidget(QLabel('Tipping point'))
         self.points=QComboBox(); self.points.currentIndexChanged.connect(self.show_point); bar.addWidget(self.points)
         refresh=QPushButton('Refresh'); refresh.clicked.connect(self.refresh); bar.addWidget(refresh)
+        if plan_type == 'manual':
+            copy_button=QPushButton('Copy optimised allocations')
+            copy_button.clicked.connect(lambda: parent.prepopulate_manual_from_optimised_result())
+            bar.addWidget(copy_button)
         pdf=QPushButton('Export point PDF...'); pdf.clicked.connect(self.export_pdf); bar.addWidget(pdf)
         xlsx=QPushButton('Export all XLSX...'); xlsx.clicked.connect(self.export_xlsx); bar.addWidget(xlsx)
         bar.addStretch(); layout.addLayout(bar)
@@ -65,7 +70,7 @@ class OperationalBlendPlanView(QWidget):
     def refresh(self):
         selected=self.plans.currentText()
         try:
-            names=saved_flow_plans()
+            names=saved_flow_plans(plan_type=self.plan_type)
         except Exception as exc:
             self.status.setText(str(exc)); return
         self.plans.blockSignals(True); self.plans.clear(); self.plans.addItems(names)
@@ -90,11 +95,11 @@ class OperationalBlendPlanView(QWidget):
             self.status.setText('No saved plan is available.'); return
         self.status.setText('Preparing the saved plan layouts and audit evidence...')
         def work():
-            data=saved_flow_data(name,database)
+            data=saved_flow_data(name,database,plan_type=self.plan_type)
             points = [n.get('properties', {}).get('crusher') or n.get('label')
                       for n in (data.get('graph') or {}).get('nodes', []) if n.get('node_type') == 'tipping_point']
             point = points[0] if len(points) == 1 else default_point if not points else None
-            return data,split_blend_plans(data['frames']['feed'], default_point=point),cross_feature_sheets(name,database,data['frames']['product'])
+            return data,split_blend_plans(data['frames']['feed'], default_point=point),(cross_feature_sheets(name,database,data['frames']['product']) if self.plan_type == 'optimised' else [])
         def done(result):
             if sip.isdeleted(self) or generation!=self.generation or database!=get_database_path():
                 return
@@ -124,7 +129,7 @@ class OperationalBlendPlanView(QWidget):
         if self.site_host is not None and getattr(self.site_host, 'start_time_choice', None):
             from GUI.PlanReadiness import result
             readiness = result(self.site_host, data.get('frames', {}).get('feed', pd.DataFrame()),
-                               data.get('plan_id', 'Primary'), 'optimised')
+                               data.get('plan_id', 'Primary'), self.plan_type)
             self.status.setText(readiness['message'])
             label = vars(self.site_host).get('plan_readiness_label')
             if label is not None:
@@ -159,11 +164,11 @@ class OperationalBlendPlanView(QWidget):
         issues = physical_violations(report)
         if issues:
             raise ValueError('; '.join(issues))
-        readiness = result(self.site_host, report, self.data.get('plan_id', 'Primary'), 'optimised')
+        readiness = result(self.site_host, report, self.data.get('plan_id', 'Primary'), self.plan_type)
         blocked = [row['detail'] for row in readiness['checks'] if row['status'] == 'blocked']
         if blocked:
             raise ValueError('Plan export blocked: ' + '; '.join(blocked))
-        save(get_database_path(), readiness, self.data.get('plan_id', 'Primary'), 'optimised')
+        save(get_database_path(), readiness, self.data.get('plan_id', 'Primary'), self.plan_type)
         self.sheets = [(name, frame) for name, frame in self.sheets if name != 'Plan Readiness'] + [
             ('Plan Readiness', pd.DataFrame(readiness['checks']))]
         return readiness

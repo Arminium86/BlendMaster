@@ -88,6 +88,46 @@ class FakeWebView(FakeVisibleWidget):
 
 
 class ScreenFlowStateTests(unittest.TestCase):
+    def test_partial_guidance_after_import_does_not_disable_project_checkpoints(self):
+        window = SimpleNamespace(
+            current_crusher_ratio=lambda: None, crusher_ratio_mode=lambda: 'manual',
+            file_path=FakeLineEdit('2wp.xlsx'), file_path_24hr=FakeLineEdit('24hr.xlsx'),
+            selected_24hr_expit_agent_names=lambda: [], haul_cycle_file_path=FakeLineEdit(),
+            selected_two_wp_product_crusher_names=lambda: [],
+            hub_input=SimpleNamespace(currentIndex=lambda: -1),
+            site_scenarios={'site': {'solver_config': {'contingency_plan_max_blend_options': 14}}},
+            submit_button=Mock(), guidance_schedules_submit_button=Mock(), save_button=Mock())
+        with patch('GUI.WorkflowViews.schedule'):
+            UserInputs.validate_form(window)
+        window.submit_button.setEnabled.assert_called_once_with(False)
+        window.save_button.setEnabled.assert_called_once_with(True)
+
+    def test_database_view_can_open_while_advanced_factors_are_pending(self):
+        window = UserInputs.__new__(UserInputs)
+        window.reconciliation_settings = {'method': 'auto_max_confidence'}
+        window.historical_recon_factors = {}
+        window.hex_sequence_table = []
+        window.hex_sequence_table_argument = []
+        window.database_view_refresh_in_progress = False
+        window.database_view_refresh_generation = 0
+        window.database_view_table = Mock()
+        window.database_view_continue_button = Mock()
+        window.database_view_refresh_button = Mock()
+        window.database_view_summary_label = Mock()
+        window.start_time_choice = datetime(2026, 8, 18)
+        window.planning_period_count = lambda: 3
+        window.active_site_context = lambda: {}
+        window.expit_input_cache_signature = lambda **kwargs: 'inputs'
+        window.expit_input_cache_allowed = lambda: False
+        window.database_view_input_signature = lambda: 'inputs'
+        window.run_background_task = Mock()
+        # Before the fix this read-only action constructed a factor resolver
+        # with missing factors and raised out of the native Qt slot.
+        window.refresh_database_view()
+        self.assertTrue(window.database_view_refresh_in_progress)
+        self.assertEqual(window.AMT_chunk_reconciliation_signature, '')
+        window.run_background_task.assert_called_once()
+
     def test_expit_input_cache_round_trip_is_lossless(self):
         previous_database = get_database_path()
         with tempfile.TemporaryDirectory() as directory:
@@ -1381,10 +1421,11 @@ class ScreenFlowStateTests(unittest.TestCase):
     def test_restored_amt_map_view_reconnects_when_url_is_empty(self):
         window = UserInputs.__new__(UserInputs)
         window.AMT_map_view = FakeWebView(empty=True)
+        window.draw_AMT_map = SimpleNamespace(port=49181)
 
         with patch('GUI.ChartReadiness.connect_view') as connect:
             window.reload_AMT_map_view()
-        connect.assert_called_once_with(window, window.AMT_map_view, 'http://localhost:8054')
+        connect.assert_called_once_with(window, window.AMT_map_view, 'http://127.0.0.1:49181')
         self.assertEqual(window.AMT_map_view.set_urls, [])
         self.assertEqual(window.AMT_map_view.reload_count, 0)
 

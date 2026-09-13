@@ -8,7 +8,7 @@ import time
 from zoneinfo import ZoneInfo
 from PyQt5.QtCore import QObject, QTimer, QDateTime
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                             QPlainTextEdit, QFileDialog, QMessageBox)
+                             QPlainTextEdit, QFileDialog, QMessageBox, QLineEdit, QFormLayout)
 from classes.SiteWorkflow import (default_contract, validate_contract, require_action,
                                   WorkflowRun, fingerprint, source_arrival_status)
 from classes.GuidanceImport import file_revision, current_import_revisions
@@ -30,6 +30,14 @@ class SiteAutomationPanel(QWidget):
             'Previous accepted files remain usable while replacements are prepared.')
         note.setWordWrap(True)
         layout.addWidget(note)
+        shared_form = QFormLayout()
+        self.shared_folder = QLineEdit()
+        self.model_name = QLineEdit()
+        self.model_name.setPlaceholderText('Use the site / scenario name')
+        self.model_name.setMaxLength(120)
+        shared_form.addRow('Shared project folder', self.shared_folder)
+        shared_form.addRow('Project name', self.model_name)
+        layout.addLayout(shared_form)
         self.editor = QPlainTextEdit()
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.editor)
@@ -49,6 +57,10 @@ class SiteAutomationPanel(QWidget):
         layout.addWidget(self.status)
 
     def refresh(self):
+        from classes.SharedProjects import settings
+        shared = settings(vars(self.host).get('shared_project_settings'))
+        self.shared_folder.setText(shared['folder'])
+        self.model_name.setText(shared['model_name'])
         controller = self.host.site_workflow_controller
         self.editor.setPlainText(json.dumps(controller.contract(), indent=2))
         runs = getattr(self.host, 'site_workflow_runs', None) or []
@@ -61,9 +73,12 @@ class SiteAutomationPanel(QWidget):
         require_action(self.host.access_role, 'configure_automation')
         try:
             value = validate_contract(json.loads(self.editor.toPlainText()))
+            from classes.SharedProjects import settings
+            shared = settings(dict(folder=self.shared_folder.text(), model_name=self.model_name.text()))
             if value['site_id'] != self.host.active_scenario_id:
                 raise ValueError('The contract site ID must match the selected site model.')
             self.host.site_workflow_contract = value
+            self.host.shared_project_settings = shared
             self.host.save_active_scenario_state()
             self.status.setPlainText('Contract saved in this project session. Save Project to retain it between sessions.')
             return True
@@ -100,6 +115,7 @@ class SiteWorkflowController(QObject):
     def __init__(self, host):
         super().__init__(host)
         self.host, self.active, self.run = host, False, None
+        self.batch = None
         self.waiting, self.after_wait, self.stage_started = None, None, None
         self.last_attempt, self.retry_count = {}, {}
         self.timer = QTimer(self)
@@ -373,7 +389,37 @@ class SiteWorkflowController(QObject):
         issues = preparation_issues(h)
         if issues:
             raise ValueError('; '.join(issues))
-        self.await_ready()
+        def check_assays():
+            assays = vars(h).get('continuous_assay_controller')
+            if assays is not None:
+                assays.prepare_current()
+            self.await_ready()
+
+        from classes.TransportSettings import transport_enabled
+        if not transport_enabled(vars(h).get('transport_settings')):
+            check_assays()
+            return
+        from GUI.MaterialFlowIntegration import points_for_gui
+        from setup.TransportOpeningHistory import TransportOpeningHistory
+        service = TransportOpeningHistory()
+        mine, start = h.mine_input_choice, h.start_time_choice
+        points, transport = deepcopy(points_for_gui(h)), deepcopy(h.transport_settings)
+        request = service.request(mine, start, points, transport)
+        cached = vars(h).get('transport_opening_history')
+
+        def done(result):
+            current = service.request(h.mine_input_choice, h.start_time_choice,
+                                      points_for_gui(h), h.transport_settings)
+            if current != request:
+                raise ValueError('Opening-history inputs changed during preparation.')
+            h.transport_opening_history = result
+            panel = vars(h).get('transport_setup')
+            if panel is not None:
+                panel.show_history(result)
+            check_assays()
+
+        h.run_background_task('Checking opening conveyor/COS movements…',
+            lambda: service.fetch(mine, start, points, transport, cached=cached), done, self.fail)
 
     def stage_optimise(self):
         h = self.host
@@ -386,6 +432,8 @@ class SiteWorkflowController(QObject):
         self.await_ready()
 
     def cancel(self):
+        if self.batch:
+            self.batch.cancelled = True
         if self.active:
             self.cancel_requested = True
             self.host.run_program.request_abort()
@@ -419,6 +467,9 @@ class SiteWorkflowController(QObject):
         self.timer.stop()
         self.waiting = self.after_wait = None
         self.host._workflow_run_start = None
+        if self.batch:
+            self.batch.site_finished()
+            return
         self.host.tabs.setEnabled(True)
         self.host.scenario_selector.setEnabled(True)
         self.host.scenario_toolbar.setEnabled(True)
@@ -427,14 +478,11 @@ class SiteWorkflowController(QObject):
 
     def tick(self):
         h = self.host
-        if self.active or h.access_role == 'planner' or h.background_tasks or vars(h).get('_closing_requested'):
+        if self.active or self.batch or h.access_role == 'planner' or h.background_tasks or vars(h).get('_closing_requested') or vars(h).get('project_load_restore_in_progress'):
             return
         try:
-            contract = self.contract()
-            if not contract['enabled'] or self.retry_count.get(h.active_scenario_id, 0) > contract['retries']:
-                return
-            if time.monotonic() - self.last_attempt.get(h.active_scenario_id, 0) >= contract['refresh_minutes'] * 60:
-                self.start(contract['handoff'], scheduled=True)
+            from GUI.ScheduledSiteBatch import start_due_batch
+            start_due_batch(self)
         except ValueError as exc:
             self.status('Invalid site contract: ' + str(exc))
 
@@ -456,3 +504,5 @@ def install(host):
     host.scenario_toolbar.layout().addWidget(host.prepare_inputs_button)
     host.layout.insertLayout(1, status_bar)
     host.site_automation_panel.refresh()
+    from GUI.SharedProjects import install as install_shared_projects
+    install_shared_projects(host)

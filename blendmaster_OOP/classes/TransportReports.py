@@ -8,7 +8,10 @@ from database.DatabaseContext import get_database_path
 TABLES = ('transport_movements', 'transport_contents', 'transport_product_arrivals')
 
 
-def write_transport_reports(case, database_name=None):
+def write_transport_reports(case, database_name=None, *, plan_type='optimised'):
+    if plan_type not in ('optimised', 'manual'):
+        raise ValueError('Unknown result type.')
+    prefix = 'manual_' if plan_type == 'manual' else ''
     flow = getattr(case,'transport',None)
     if hasattr(case,'planning_horizon_end') and hasattr(case,'start_time'):
         from classes.CrossFeatureReports import write_case_audits
@@ -20,10 +23,11 @@ def write_transport_reports(case, database_name=None):
     with closing(sqlite3.connect(database_name or get_database_path())) as connection, connection:
         graph = getattr(case,'material_flow_topology',None)
         if graph:
-            connection.execute('CREATE TABLE IF NOT EXISTS material_flow_topology (plan_id TEXT PRIMARY KEY, topology_json TEXT, warnings_json TEXT)')
-            connection.execute('INSERT OR REPLACE INTO material_flow_topology VALUES (?,?,?)',
+            connection.execute(f'CREATE TABLE IF NOT EXISTS {prefix}material_flow_topology (plan_id TEXT PRIMARY KEY, topology_json TEXT, warnings_json TEXT)')
+            connection.execute(f'INSERT OR REPLACE INTO {prefix}material_flow_topology VALUES (?,?,?)',
                                (plan,json.dumps(graph,default=str),json.dumps(flow.warnings if flow else [])))
         for table, frame in zip(TABLES,frames):
+            table = prefix + table
             frame['plan_id'] = plan
             for column in frame:
                 if frame[column].dtype == object:
@@ -42,10 +46,16 @@ def write_transport_reports(case, database_name=None):
                 frame.to_sql(table,connection,if_exists='append',index=False)
 
 
-def read_transport_reports(database_name=None, plan_id='Primary'):
+def read_transport_reports(database_name=None, plan_id='Primary', *, plan_type='optimised', connection=None):
+    if plan_type not in ('optimised', 'manual'):
+        raise ValueError('Unknown result type.')
+    if connection is None:
+        with closing(sqlite3.connect('file:'+str(database_name or get_database_path()).replace('\\','/')+'?mode=ro',uri=True)) as connection:
+            connection.execute('BEGIN')
+            return read_transport_reports(database_name, plan_id, plan_type=plan_type, connection=connection)
     result = {}
-    with closing(sqlite3.connect('file:'+str(database_name or get_database_path()).replace('\\','/')+'?mode=ro',uri=True)) as connection:
-        tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        for table in TABLES:
-            result[table] = pd.read_sql_query(f'SELECT * FROM "{table}" WHERE plan_id=?',connection,params=(plan_id,)) if table in tables else pd.DataFrame()
+    tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in TABLES:
+        saved = ('manual_' if plan_type == 'manual' else '') + table
+        result[table] = pd.read_sql_query(f'SELECT * FROM "{saved}" WHERE plan_id=?',connection,params=(plan_id,)) if saved in tables else pd.DataFrame()
     return result

@@ -55,6 +55,25 @@ PERIOD_LABELS = ("Preplan", "Period_1", "Period_2")
 ANALYTES = ("fe", "si", "al", "p", "mn")
 
 
+class PropertyDeclarationSnapshotTests(unittest.TestCase):
+    def test_bulk_fields_preserve_alias_precedence_and_read_later_edits(self):
+        kinds = {'Custom Mass': 'additive', 'custom_mass': 'WEIGHTED_AVERAGE',
+                 'Visible Count': 'intensive', 'Hidden Assay': 'runtime'}
+        properties = {'custom_mass': 80, 'visible_count': 7, 'hidden_assay': 55}
+        self.assertEqual(constraint_property_fields(properties, 100, kinds),
+                         {'custom_mass': 80, 'visible_count': 7})
+        self.assertEqual(source_property_report_fields(properties, property_kinds=kinds),
+                         {'source_property_custom_mass': 80, 'source_property_visible_count': 7})
+        kinds['custom_mass'] = 'additive'
+        kinds['Hidden Assay'] = 'intensive'
+        self.assertEqual(constraint_property_fields(properties, 100, kinds),
+                         {'custom_mass': .8, 'custom_mass_per_source_wmt': .8,
+                          'visible_count': 7, 'hidden_assay': 55})
+        self.assertEqual(scale_additive_source_properties(properties, .5, kinds),
+                         {'custom_mass': 40, 'visible_count': 7, 'hidden_assay': 55})
+        self.assertEqual(properties['custom_mass'], 80)
+
+
 def period_values(value):
     return {label: value for label in PERIOD_LABELS}
 
@@ -784,6 +803,16 @@ class SourcePropertyBalanceTests(unittest.TestCase):
             "source_actual_tonnes": 40.0,
         }])
 
+        # Out-of-window deliveries must not enter this step, including one
+        # exactly at its exclusive end. Input audit metadata remains available.
+        base_payload = payloads.iloc[0].to_dict()
+        payloads = pd.DataFrame([
+            {**base_payload, 'delivered_datetime': start-timedelta(seconds=1)},
+            base_payload,
+            {**base_payload, 'delivered_datetime': start+timedelta(hours=1)},
+        ])
+        payloads.attrs['audit_schedule'] = pd.DataFrame({'evidence': [1,2,3]})
+
         tracker.update_balances(
             direct_tip_selection,
             payloads,
@@ -794,6 +823,8 @@ class SourcePropertyBalanceTests(unittest.TestCase):
 
         self.assertEqual(tracker.balance_copy["GB1"], 60.0)
         self.assertEqual(tracker.balance_copy["SP1"], 60.0)
+        self.assertEqual(len(payloads), 3)
+        self.assertEqual(payloads.attrs['audit_schedule'].evidence.tolist(), [1,2,3])
         # Forty percent of the payload was direct-tipped, so the inventory
         # receives 60% of the additive fines mass while retaining the same
         # intensive -1 mm percentage.

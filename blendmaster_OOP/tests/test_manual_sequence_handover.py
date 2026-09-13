@@ -82,6 +82,22 @@ class SequenceHandoverTests(unittest.TestCase):
         view.apply_manual_gantt_rows_to_table(transfer['sequence_rows'])
         changed.assert_not_called()
 
+    def test_opening_saved_manual_chart_before_blend_plan_hydrates_its_legend(self):
+        view, transfer = self.make_view()
+        view.stored_blend_sequence_table_for_gantt_default = []
+        view.crusher_rate = 100
+        with patch('GUI.ChartServer.start', return_value=Mock(is_alive=Mock(return_value=True))) as start:
+            UserInputs.start_or_update_dash_manual_chart_thread(view)
+            UserInputs.start_or_update_dash_manual_chart_thread(view)
+        start.assert_called_once()
+        self.assertEqual(view.draw_manual_gantt_chart.manual_gantt_legend_and_tooltip,
+                         transfer['blend_definitions'])
+        response = view.draw_manual_gantt_chart.app.server.test_client().get('/manual-gantt-data')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(len(payload['rows']), 2)
+        self.assertIn('SP1', str(payload['legend']))
+
     def test_remaining_hours_refresh_does_not_emit_user_edits(self):
         view, transfer = self.make_view()
         view.apply_manual_gantt_rows_to_table(transfer['sequence_rows'])

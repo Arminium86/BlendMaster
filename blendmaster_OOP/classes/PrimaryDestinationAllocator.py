@@ -22,7 +22,7 @@ from setup.InventoryBuildLineage import clean_text, finite_number
 from setup.ProductAssayHistory import awst
 
 
-VERSION = 4
+VERSION = 5
 AUDIT_COLUMNS = {
     "destination_allocation_runs": "plan_type plan_id schema_version context_signature status payload_count payload_wmt direct_tipped_wmt non_direct_wmt assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt overrun_wmt reason input_signature scenario_context_signature allocation_window_start allocation_window_end".split(),
     "destination_primary_assignments": "plan_type plan_id payload_id source delivered_datetime payload_wmt direct_tipped_wmt non_direct_wmt rom_area material_type planned_destination assigned_destination instance_id build_instance order_position assigned_wmt unresolved_wmt out_of_scope_wmt outside_window_wmt capacity_before_wmt capacity_after_wmt overrun_wmt capacity_basis selection_basis status reason context_signature".split(),
@@ -31,6 +31,9 @@ AUDIT_COLUMNS = {
 }
 AUDIT_COLUMNS["destination_primary_assignments"].extend([
     *METADATA_COLUMNS, "primary_rule", "alternate_destinations", "destination_rule_signature",
+    'haulage_basis', 'haulage_truck', 'haulage_truck_basis', 'haulage_route_source', 'haulage_route_row',
+    'haulage_destination', 'haulage_loaded_travel_minutes', 'haulage_spot_at_dump_minutes',
+    'haulage_dumping_minutes', 'haulage_loading_minutes', 'haulage_signature',
 ])
 AUDIT_COLUMNS["destination_allocation_runs"].append("destination_rule_signature")
 AUDIT_COLUMNS["destination_allocation_runs"].extend(
@@ -269,8 +272,38 @@ def allocate_final_plan(payload_transactions, blend_report, context, *, plan_typ
                           non_direct_wmt=max(0.0, row["payload"]-direct[identity]),
                           in_final_window=not delivered or ((not start or delivered >= start) and (not end or delivered < end)),
                           route_only_waste=MaterialDestinationPlan._truthy(row.get("route_only_waste", False))))
-    allocator.allocate(final)
-    result = allocator.result()
+    from classes.HaulageRouteTiming import arrival
+    original_payloads = {r['direct_tip_id']: r for r in payloads.to_dict('records')}
+    # A changed route may reorder deliveries or move one outside this plan.
+    # Replay from opening capacity until both routing and chronology agree.
+    seen_states = set()
+    for attempt in range(32):
+        allocator = PrimaryDestinationAllocator(context['order'], context.get('activity') or {}, settings,
+                    plan_type=plan_type, plan_id=plan_id, scenario_start=context.get('start'))
+        allocator.allocate(final)
+        result = allocator.result()
+        updated = {r['payload_id']: r for r in final}
+        changed = False
+        for assigned in result['assignments']:
+            if not assigned.get('assigned_destination'):
+                continue
+            timing = arrival(original_payloads[assigned['payload_id']], assigned['assigned_destination'])
+            delivered = awst(timing['delivered_datetime']).isoformat()
+            timing['delivered_datetime'] = delivered
+            assigned.update(timing)
+            candidate = updated[assigned['payload_id']]
+            eligible = (not start or delivered >= start) and (not end or delivered < end)
+            if awst(candidate['delivered_datetime']).isoformat() != delivered or candidate['in_final_window'] != eligible:
+                changed = True
+                candidate.update(delivered_datetime=delivered, in_final_window=eligible)
+        if not changed:
+            break
+        state = digest(final)
+        if state in seen_states:
+            raise ValueError('Route ETAs and destination capacity do not settle into a consistent order. Review the build allowances and recalculate.')
+        seen_states.add(state)
+    else:
+        raise ValueError('Route ETA reconciliation exceeded 32 passes. Review destination capacity before publishing this plan.')
     rule_context = context.get("destination_rules") or {}
     rules = DestinationRuleEngine(rule_context.get("guidance"),
                                   areas=rule_context.get("areas", context["order"]["areas"]),

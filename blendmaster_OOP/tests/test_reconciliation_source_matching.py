@@ -5,9 +5,10 @@ import json
 import math
 import random
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QDialog, QListWidget, QMainWindow
 
 from classes.ReconciliationApplication import aggregate_reconciliation
 from classes.ReconciliationControls import evidence_display_record, reconciliation_columns, reconciliation_report_rows
@@ -138,6 +139,57 @@ class EvidencePresentationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_database_refresh_retains_explicit_fields_across_schema_changes(self):
+        view = window()
+        view.database_view_show_coverage_fields = False
+        view.selected_data_stream = "adjusted_product"
+        view.database_view_selected_columns = ["source_id", "grade_adjusted_product_sf_fe"]
+        view.database_view_known_columns = ["source_id"]
+        original = list(view.database_view_selected_columns)
+        view.database_view_rows = [{"source_id": "SP1", "recon_sf_evidence_match_score_pct": 92}]
+        self.assertEqual(view.database_view_headers(), ["source_id"])
+        self.assertEqual(view.database_view_selected_columns, original)
+        view.database_view_rows[0]["grade_adjusted_product_sf_fe"] = 61.5
+        self.assertEqual(view.database_view_headers(), original)
+        self.assertEqual(view.database_view_selected_columns, original)
+
+    def test_database_can_offer_all_grade_streams_with_a_minimal_field_registry(self):
+        view = window()
+        view.database_view_show_coverage_fields = False
+        view.selected_data_stream = "adjusted_product"
+        view.field_definitions = [{"name": "modelled_rom_wmt", "kind": "additive"}]
+        row = view.database_view_record_with_streams({"source_type": "AMT Chunk"}, streams())
+        view.database_view_rows = [row]
+        headers = view.database_view_all_headers()
+        grades = [key for key in row if key.startswith("grade_") and any(
+            key.startswith("grade_" + stream + "_")
+            for stream in ("insitu", "modelled_rom", "adjusted_rom", "modelled_product", "adjusted_product"))]
+        self.assertGreater(len(grades), 20)
+        self.assertTrue(set(grades).issubset(headers))
+
+    def test_field_dialog_keeps_unavailable_choices_when_editing_available_fields(self):
+        view = window()
+        QMainWindow.__init__(view)
+        self.addCleanup(view.deleteLater)
+        view.database_view_show_coverage_fields = False
+        view.database_view_rows = [{"source_id": "SP1"}]
+        view.database_view_selected_columns = ["grade_adjusted_product_sf_fe", "source_id"]
+        view.user_facing_field_label = lambda name: name
+        view.populate_database_view_table = Mock()
+        view.save_active_scenario_state = Mock()
+
+        def choose_source_type(dialog):
+            fields = dialog.findChild(QListWidget)
+            for index in range(fields.count()):
+                item = fields.item(index)
+                item.setCheckState(Qt.Checked if item.data(Qt.UserRole) == "source_type" else Qt.Unchecked)
+            return QDialog.Accepted
+
+        with patch.object(QDialog, 'exec_', choose_source_type):
+            view.choose_database_view_columns()
+        self.assertEqual(view.database_view_selected_columns, ["grade_adjusted_product_sf_fe", "source_type"])
+        view.save_active_scenario_state.assert_called_once()
 
     def test_old_audit_displays_new_terminology_without_mutating_saved_data(self):
         _, audit = apply(application(settings={"method": "auto_max_confidence", "cells": [local(blend=1.5)]}))

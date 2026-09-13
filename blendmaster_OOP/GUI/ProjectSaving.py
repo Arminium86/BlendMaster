@@ -1,9 +1,9 @@
 """Capture controls on the UI thread; snapshot and write projects in a worker."""
-from datetime import datetime
 from pathlib import Path
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QMessageBox
 from classes.WorkflowCheckpoint import write_checkpoint
+from classes.SharedProjects import settings, filename
 
 
 def begin(host, legacy_state, *, show_success=True, close_after=False):
@@ -11,7 +11,10 @@ def begin(host, legacy_state, *, show_success=True, close_after=False):
     # evidence is replaced as a whole, and the worker locks the input widgets.
     scenarios = dict(host.site_scenarios)
     site = host.active_scenario_id
-    destination = Path.cwd() / f'blendmaster_{datetime.now():%Y%m%d_%H%M%S_%f}.prj'
+    shared = settings(vars(host).get('shared_project_settings'))
+    display_name = getattr(host, 'scenario_display_name', None)
+    name = shared['model_name'] or (display_name(scenarios[site]) if display_name else 'BlendMaster')
+    destination = Path.cwd() / filename(name)
     host._project_save_pending = True
 
     def completed(path):
@@ -31,5 +34,8 @@ def begin(host, legacy_state, *, show_success=True, close_after=False):
 
     host.run_background_task('Saving project and site databases…',
         lambda: write_checkpoint(scenarios, site, destination, host.snapshot_database,
-                                 legacy_state=legacy_state), completed, failed)
+                                 legacy_state=legacy_state, metadata={
+                                     'shared_project_settings': shared,
+                                     'shared_project_subscription': (vars(host).get('shared_project_subscription') or {})
+                                         if vars(host).get('access_role') == 'planner' else {}}), completed, failed)
     return True

@@ -140,7 +140,7 @@ class DestinationProgressSetup(QWidget):
         self.details.setReadOnly(True)
         self.details.setMaximumHeight(210)
         overview_layout.addWidget(self.details)
-        self.tabs.addTab(overview, "Progress")
+        self.tabs.addTab(overview, "Review Destinations")
         self.order_table, self.activity_table, self.audit_table = [self.new_table(records=True) for _ in range(3)]
         self.tabs.addTab(self.order_table, "2WP Build order")
         self.tabs.addTab(self.activity_table, "Actual movements")
@@ -406,8 +406,8 @@ class DestinationProgressSetup(QWidget):
             self.table.setCellWidget(i, 6, field)
         self.table.resizeRowsToContents()
         if refresh_evidence:
-            self.fill(self.order_table, order["orders"], [("rom_area", "ROM area"), ("material_type", "Material type"), ("order_position", "Order"), ("destination", "Destination"), ("build_instance", "Build instance"), ("first_inbound", "First planned inbound (AWST)"), ("last_inbound", "Last planned inbound (AWST)"), ("planned_wmt", "Planned ROM WMT"), ("csv_records", "CSV records")])
-            self.fill(self.activity_table, activity.get("records", []), [("rom_area", "ROM area"), ("material_type", "Material type"), ("destination", "Destination"), ("observed_at", "Inbound time (AWST)"), ("wmt", "ROM WMT"), ("source_block", "Source grade block"), ("destination_build", "Actual destination build"), ("movement_id", "Movement ID")])
+            self.fill(self.order_table, order["orders"], [("rom_area", "ROM area"), ("material_type", "Material type"), ("order_position", "Order"), ("destination", "Destination"), ("build_instance", "Build instance"), ("first_inbound", "First planned inbound (AWST)"), ("last_inbound", "Last planned inbound (AWST)"), ("planned_wmt", "Planned ROM WMT")])
+            self.fill(self.activity_table, activity.get("records", []), [("rom_area", "ROM area"), ("material_type", "Material type"), ("destination", "Destination"), ("observed_at", "Inbound time (AWST)"), ("wmt", "ROM WMT"), ("source_block", "Source grade block"), ("destination_build", "Actual destination build")])
             self.render_audit()
         if self.rows:
             self.table.selectRow(0)

@@ -137,6 +137,7 @@ class Run:
             ),
             destination_guidance=destination_guidance,
             destination_rule_context=site_context.get("destination_rules"),
+            two_wp_path=reference_path,
             selected_agent_names=selected_24hr_agents,
             grade_field_mappings=site_context.get(
                 "aps_grade_field_mappings", {}
@@ -517,6 +518,13 @@ class Run:
             register_profiles(solver_config, profiles)
             prepare_inventory_profiles(stockpile_data, hex_sequence_table, solver_config)
 
+        for key in ('continuous_assay_settings', 'continuous_assay_state'):
+            solver_config[key] = copy.deepcopy((site_context or {}).get(key) or {})
+        solver_config['continuous_assay_opf'] = (site_context or {}).get('opf')
+        from classes.ContinuousAssays import for_calculation
+        solver_config['continuous_assay_state'] = for_calculation(solver_config['continuous_assay_state'], stockpile_data, hex_sequence_table)
+        for profile in (solver_config.get('opf_profiles') or {}).values():
+            profile['continuous_assay_state'] = for_calculation(profile.get('continuous_assay_state'), profile['inventory'], list(profile['chunks'].values()))
         # Load input data (this is combined user input and opening inventories)
         loader_calendar_inputs = dict(calendar_inputs or {})
         loader_calendar_inputs["solver_config"] = solver_config

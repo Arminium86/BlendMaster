@@ -14,7 +14,7 @@ def input_revision(host):
     # Manual rounding belongs to the independently generated manual plan.
     # Editing that policy must not invalidate a completed optimised plan.
     planning_settings = {**state, 'manual_ratio_rounding': None}
-    return fingerprint(dict(schema=3, settings=settings_signature(planning_settings),
+    return fingerprint(dict(schema=4, settings=settings_signature(planning_settings),
         site=state.get('active_scenario_id'), start=state.get('start_time_choice'),
         site_model={key: state.get(key) for key in ('hub_input_choice', 'mine_input_choice',
             'opf_input_choice', 'crusher_input_choice', 'selected_site_crushers')},
@@ -24,6 +24,8 @@ def input_revision(host):
         sources=state.get('stockpile_data_use_column'), agents=state.get('selected_24hr_expit_agents'),
         amt_sources=state.get('stockpile_data_AMT_column'),
         reconciliation=state.get('reconciliation_applied_revision'), factors=state.get('historical_recon_factors'),
+        continuous_assay_revision=(state.get('continuous_assay_state') or {}).get('revision'),
+        continuous_assay_settings=state.get('continuous_assay_settings'),
         expit={key: state.get(key) for key in ('expit_mode_choice', 'expit_completion_tolerance_pct',
             'expit_refresh_tolerance_minutes', 'reevaluate_aps_direct_tip_choice', 'aps_direct_tip_crusher_choice',
             'selected_two_wp_product_crushers', 'selected_haul_cycle_crushers', 'haul_cycle_crusher_mapping_choice')},

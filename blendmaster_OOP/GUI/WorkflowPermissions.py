@@ -1,5 +1,6 @@
 """Operation checks at the desktop boundary; role comes from the trusted launcher."""
 from functools import wraps
+from inspect import signature
 from PyQt5.QtCore import Qt
 from classes.SiteWorkflow import require_action
 
@@ -30,6 +31,15 @@ def protect_support_operations(cls):
         if original is None:
             continue
         def protect(fn, action):
+            if len(signature(fn).parameters) == 1:
+                # Qt uses the callable's actual argument count when connecting
+                # clicked(bool). Keep no-argument handlers no-argument after
+                # decoration, so Qt discards its optional checked value.
+                @wraps(fn)
+                def wrapped(self):
+                    require_action(vars(self).get('access_role', 'support'), action)
+                    return fn(self)
+                return wrapped
             @wraps(fn)
             def wrapped(self, *args, **kwargs):
                 # Adapters without a UI session retain compatibility. A real

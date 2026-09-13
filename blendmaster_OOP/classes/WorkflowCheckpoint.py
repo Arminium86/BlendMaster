@@ -6,7 +6,7 @@ import tempfile
 from classes.PlanningPersistence import migrate_project_state
 
 
-def write_checkpoint(scenarios, active_site, destination, snapshot_database, *, legacy_state=None):
+def write_checkpoint(scenarios, active_site, destination, snapshot_database, *, legacy_state=None, metadata=None):
     saved = {}
     for site, state in scenarios.items():
         row = dict(state)
@@ -16,6 +16,8 @@ def write_checkpoint(scenarios, active_site, destination, snapshot_database, *, 
         saved[site] = row
     payload = dict(legacy_state or {})
     payload.update(saved[active_site], active_scenario_id=active_site, site_scenarios=saved)
+    if metadata:
+        payload.update(metadata)
     payload = migrate_project_state(payload)
     path = Path(destination).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

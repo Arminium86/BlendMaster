@@ -25,6 +25,37 @@ class PlanReadinessTests(unittest.TestCase):
         result = evaluate(self.report(), [{'build_name':'Missing build', 'target_tonnes':100}], equipment_errors=[])
         self.assertIn('100.0', next(r['detail'] for r in result['checks'] if r['check']=='Product targets'))
 
+    def test_scoped_product_and_byproduct_builds_keep_each_opf_separate(self):
+        for lane in ('product', 'lump', 'fines'):
+            with self.subTest(lane=lane):
+                report = self.report().drop(columns=['product_build_name', 'product_build_closing_tonnes'])
+                targets = []
+                for opf, produced in [('CC OPF01', 80), ('CC OPF02', 35)]:
+                    prefix = 'product_build_' + lane + '@' + opf.replace(' ', '%20') + '_'
+                    report[prefix + 'name'] = 'Shared build name'
+                    report[prefix + 'opf'] = opf
+                    report[prefix + 'closing_tonnes'] = produced
+                    targets.append(dict(build_name='Shared build name', opf=opf,
+                                        byproduct=lane if lane != 'product' else '', target_tonnes=100))
+                result = evaluate(report, targets, equipment_errors=[])
+                detail = next(row['detail'] for row in result['checks'] if row['check'] == 'Product targets')
+                self.assertEqual(detail, 'Shared build name: 20.0 t remaining; Shared build name: 65.0 t remaining')
+
+    def test_transport_arrivals_supply_build_progress_and_quality_separately_from_tips(self):
+        feed = self.report()
+        feed['product_build_closing_tonnes'] = 0
+        product = pd.DataFrame([dict(product_build_name='Build 1', opf=opf,
+            product_build_lane='product@' + opf, build_closing_tonnes=tonnes,
+            quality_audit=json.dumps(dict(schema_version=1, rows=[dict(grain='steady_state',
+                evaluation_basis='steady_state', analyte='p', build_name='Build 1', opf=opf,
+                quality_status='Soft limit breached')]))
+            ) for opf, tonnes in [('OPF1', 70), ('OPF2', 25)]])
+        targets = [dict(build_name='Build 1', opf=opf, target_tonnes=100) for opf in ('OPF1', 'OPF2')]
+        result = evaluate(feed, targets, product_report=product, equipment_errors=[])
+        checks = {row['check']: row for row in result['checks']}
+        self.assertEqual(checks['Product targets']['detail'], 'Build 1: 30.0 t remaining; Build 1: 75.0 t remaining')
+        self.assertEqual(checks['Product quality']['status'], 'review')
+
     def test_negative_inventory_and_nonfinite_tonnes_are_blocked(self):
         report = self.report(); report.loc[0, 'source_closing_balance']=-1
         self.assertTrue(physical_violations(report))

@@ -19,6 +19,8 @@ def profile_from_state(state, scenario_id):
     inventory = {**(state.get('stockpile_data') or {}), **(state.get('updated_stockpile_data') or {})}
     chunks = {str(r.get('hex') or r.get('chunk_id') or ''): r for r in state.get('hex_sequence_table') or []}
     return dict(scenario_id=scenario_id, opf=state.get('opf_input_choice'),
+                continuous_assay_settings=deepcopy(state.get('continuous_assay_settings') or {}),
+                continuous_assay_state=deepcopy(state.get('continuous_assay_state') or {}),
                 start=str(state.get('start_time_choice') or ''), mine=state.get('mine_input_choice'),
                 inventory=inventory, chunks=chunks,
                 fields=deepcopy(state.get('field_definitions') or []),
@@ -87,7 +89,11 @@ def prepare_inventory_profiles(stockpiles, chunks, config):
                 raise ValueError(f'{opf}: {identity} has no prepared grade streams. Submit Data Streams and AMT chunks in this scenario.')
             if str(source.get('build') or source.get('BUILD') or '') != str(row.get('build') or row.get('BUILD') or ''):
                 raise ValueError(f'{opf}: {identity} reconciliation refers to a different inventory build. Refresh Data Streams in this scenario.')
-            if abs(float(source.get('balance') or 0) - float(row.get('balance') or 0)) > 0.1:
+            # Unselected APS build destinations retain warehouse-style keys in
+            # the OPF profile, while the physical ledger normalises them.
+            source_balance = float(source.get('balance', source.get('BALANCE')) or 0)
+            physical_balance = float(row.get('balance', row.get('BALANCE')) or 0)
+            if abs(source_balance - physical_balance) > 0.1:
                 raise ValueError(f'{opf}: {identity} reconciliation opening tonnes differ from the physical inventory. Refresh Data Streams and rebuild AMT chunks in this scenario.')
             row.setdefault('source_properties', {}).update(namespace_record(source, opf, config))
 

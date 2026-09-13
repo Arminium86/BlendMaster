@@ -2299,8 +2299,12 @@ class DrawAMTStockpile:
         source_property_weights=None,
         excluded_footprints=None,
         defer_load=False,
+        selected_stream='adjusted_product',
+        crusher_field='modelled_rom_wmt',
+        product_field='modelled_product_wmt',
     ):
         self.db_path = db_path
+        self.selected_stream, self.crusher_field, self.product_field = selected_stream, crusher_field, product_field
         self.port = port
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
         self.selected_points = hex_sequence_table or []
@@ -2440,6 +2444,11 @@ class DrawAMTStockpile:
 
     def selected_table_data(self, rows=None):
         """Project rich chunk records onto the scalar-only columns shown in Dash."""
+        if vars(self).get('selected_stream'):
+            from classes.PlannerPresentation import chunk_display
+            return [{key: self.dash_table_scalar(value, key) for key, value in chunk_display(
+                row, self.selected_stream, self.crusher_field, self.product_field).items()}
+                for row in (rows if rows is not None else self.selected_points) if isinstance(row, dict)]
         display_rows = []
         for entry in rows if rows is not None else self.selected_points:
             if not isinstance(entry, dict):
@@ -3775,6 +3784,7 @@ class DrawAMTStockpile:
                 conn.close()
 
     def init_layout(self):
+        from classes.PlannerPresentation import CHUNK_COLUMNS, CHUNK_LABELS
         page_style = {
             "backgroundColor": "#f8fafc",
             "fontFamily": "Segoe UI, Arial, sans-serif",
@@ -3950,8 +3960,8 @@ class DrawAMTStockpile:
                         dash_table.DataTable(
                             id="selected-table",
                             columns=[
-                                {"name": column, "id": column}
-                                for column in self.SELECTED_TABLE_COLUMNS
+                                {"name": CHUNK_LABELS.get(column, column), "id": column}
+                                for column in (CHUNK_COLUMNS if vars(self).get('selected_stream') else self.SELECTED_TABLE_COLUMNS)
                             ],
                             data=self.selected_table_data(),
                             row_deletable=False,

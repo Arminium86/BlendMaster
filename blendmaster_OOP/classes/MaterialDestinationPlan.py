@@ -4,6 +4,7 @@ from collections import defaultdict
 import pandas as pd
 
 from classes.GradeBlockIdentity import parent_grade_block_name
+from classes.HaulageRouteTiming import arrival
 
 
 class MaterialDestinationPlan:
@@ -30,7 +31,13 @@ class MaterialDestinationPlan:
     @staticmethod
     def _frame(value):
         if isinstance(value, pd.DataFrame):
-            return value.copy()
+            # Allocation needs tabular values, not attached saved-plan frames.
+            # pandas propagates/deep-copies attrs during each column extraction;
+            # a manual snapshot can otherwise copy its entire transport audit
+            # thousands of times while constructing these transient records.
+            frame = pd.DataFrame(value, copy=True)
+            frame.attrs = {}
+            return frame
         return pd.DataFrame(value or [])
 
     @staticmethod
@@ -501,6 +508,7 @@ class MaterialDestinationPlan:
                 )
                 rows.append({
                     **base_row,
+                    **arrival(payload, assigned_destination),
                     "assigned_destination": assigned_destination,
                     "alternate_destination_1": alternate_1,
                     "alternate_destination_2": alternate_2,
@@ -527,6 +535,7 @@ class MaterialDestinationPlan:
                 )
                 rows.append({
                     **base_row,
+                    **arrival(payload, assigned_destination),
                     "assigned_destination": assigned_destination,
                     "alternate_destination_1": alternate_1,
                     "alternate_destination_2": alternate_2,

@@ -22,6 +22,20 @@ class EquipmentLimitsTests(unittest.TestCase):
     def test_lower_manual_rates_and_numeric_tolerance_are_allowed(self):
         self.assertEqual(equipment_violations(self.report({'A': 2000.000079, 'B': 1900}), self.calendar, self.periods), [])
 
+    def test_unused_legacy_quantity_columns_do_not_invalidate_copied_allocations(self):
+        report = self.report({'A': 1900})
+        for field in ('crusher_source_tonnes', 'reclaimer_source_tonnes'):
+            report[field] = None
+        self.assertEqual(equipment_violations(report, self.calendar, self.periods), [])
+        report['reclaimer_source_tonnes'] = 2250
+        self.assertTrue(equipment_violations(report, self.calendar, self.periods))
+        report['reclaimer_source_tonnes'] = 0
+        report['crusher_source_tonnes'] = 'invalid'
+        self.assertTrue(equipment_violations(report, self.calendar, self.periods))
+        mixed = self.report({'A': 1000, 'B': 1000})
+        mixed['crusher_source_tonnes'] = ['invalid', 1000]
+        self.assertTrue(equipment_violations(mixed, self.calendar, self.periods))
+
     def test_rounded_source_rate_is_blocked_even_when_crusher_total_fits(self):
         errors = equipment_violations(self.report({'A': 2259.4, 'B': 1900}), self.calendar, self.periods)
         self.assertEqual(len(errors), 1)

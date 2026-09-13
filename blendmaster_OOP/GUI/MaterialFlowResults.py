@@ -54,6 +54,11 @@ class MaterialFlowResults(QWidget):
         self._request = 0
         layout = QVBoxLayout(self)
         bar = QHBoxLayout()
+        self.result_type = QComboBox()
+        self.result_type.addItem('Optimised', 'optimised')
+        self.result_type.addItem('Manual', 'manual')
+        self.result_type.currentIndexChanged.connect(self.refresh)
+        bar.addWidget(self.result_type)
         bar.addWidget(QLabel('Saved plan'))
         self.plans = QComboBox()
         self.plans.currentIndexChanged.connect(self.load_plan)
@@ -99,7 +104,7 @@ class MaterialFlowResults(QWidget):
     def refresh(self):
         selected = self.plans.currentText()
         try:
-            plans = saved_flow_plans()
+            plans = saved_flow_plans(plan_type=self.result_type.currentData())
         except Exception as exc:
             self.failed(str(exc)); return
         self.plans.blockSignals(True)
@@ -114,6 +119,7 @@ class MaterialFlowResults(QWidget):
         request = self._request
         plan = self.plans.currentText()
         database = get_database_path()
+        plan_type = self.result_type.currentData()
         self.timeline = None
         self.slider.setEnabled(False)
         self.graph.scene.clear(); self.graph.nodes={}; self.graph.edges=[]
@@ -135,10 +141,10 @@ class MaterialFlowResults(QWidget):
             if request == self._request:
                 self.failed(message)
         if self.run_async:
-            self.run_async(lambda:saved_flow_data(plan,database),finish,failed)
+            self.run_async(lambda:saved_flow_data(plan,database,plan_type=plan_type),finish,failed)
         else:
             try:
-                finish(saved_flow_data(plan,database))
+                finish(saved_flow_data(plan,database,plan_type=plan_type))
             except Exception as exc:
                 failed(str(exc))
 

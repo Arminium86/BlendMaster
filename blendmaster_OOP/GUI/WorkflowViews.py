@@ -144,6 +144,7 @@ class WorkflowViews(QObject):
         self.expit_inputs = inputs
 
     def apply_results(self):
+        self.available('build_depletion_profiles', any(self.results.values()), 'Generate an optimised or manual plan to view its profiles.')
         self.available('optimised_grade_profiles', self.results['optimised'], 'Run optimisation to generate grade results for this site.')
         self.available('manual_grade_profiles', self.results['manual'], 'Submit Manual Blend Sequence to generate grade results for this site.')
         self.available('grade_profiles', any(self.results.values()), 'Generate an optimised or manual plan to view its grade profiles.')
@@ -167,7 +168,7 @@ class WorkflowViews(QObject):
         page = self.current_page()
         if page not in CHART_LOADERS or not host.is_page_enabled(page):
             return
-        if page in ('optimised_blend_sequence', 'build_depletion_profiles', 'optimised_grade_profiles') and not self.results['optimised']:
+        if page in ('optimised_blend_sequence', 'optimised_grade_profiles') and not self.results['optimised']:
             return
         if page == 'amt_stockpiles' and (vars(host).get('_amt_map_pending') or not vars(host).get('draw_AMT_map')):
             return

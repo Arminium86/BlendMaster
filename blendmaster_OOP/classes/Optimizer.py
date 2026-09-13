@@ -441,7 +441,8 @@ class Optimizer:
             if delivered_datetime is None:
                 continue
             try:
-                is_available = current_time <= delivered_datetime < steady_state_end_time
+                times = (getattr(event, 'arrival_by_point', {}) or {}).values() or [delivered_datetime]
+                is_available = any(current_time <= when < steady_state_end_time for when in times)
             except TypeError:
                 is_available = False
             if is_available:
@@ -506,8 +507,14 @@ class Optimizer:
         for stockpile in stockpile_data:
             if (stockpile.auto_turnover_datetime != None and 
                 (stockpile.to_dict().get(f"state_{period_tracker}", 0) == "Auto")):
-               if start_of_steady_state_datetime < stockpile.auto_turnover_datetime <= end_of_steady_state_datetime:
-                   time_to_turnover = (stockpile.auto_turnover_datetime - start_of_steady_state_datetime).total_seconds() / 3600
+               # Pandas-derived turnover times can carry nanoseconds, while
+               # Python timedelta advances the planning clock in microseconds.
+               # Round the boundary up so the next step is on/after turnover;
+               # truncation leaves a positive sub-microsecond remainder whose
+               # total_seconds() is zero and attempts a zero-duration solve.
+               turnover = pd.Timestamp(stockpile.auto_turnover_datetime).ceil('us')
+               if start_of_steady_state_datetime < turnover <= end_of_steady_state_datetime:
+                   time_to_turnover = (turnover - start_of_steady_state_datetime).total_seconds() / 3600
                    if time_to_turnover < updated_duration_auto_turnover:
                        updated_duration_auto_turnover = time_to_turnover
 
@@ -716,6 +723,8 @@ class Optimizer:
         for event in event_pool:
             if getattr(event, "_multi_materialized", False):
                 continue
+            from classes.ContinuousAssays import apply_event
+            apply_event(event, solver_config, target_product_brand)
             warnings = apply_selected_stream(
                 event, selected_data_stream, target_product_brand
             )
@@ -1980,7 +1989,15 @@ class Optimizer:
                     )
 
             if min_stockpiles is not None:
-                prob += lpSum(y_vars[name] for name in stockpile_event_indices) >= min_stockpiles
+                minimum = min_stockpiles
+                if config.get("_transport_lane_can_idle"):
+                    # Opening conveyor/COS contents can occupy all admission
+                    # capacity while the downstream plant continues processing.
+                    # Source-count requirements apply whenever new feed is tipped.
+                    feeding = LpVariable("transport_lane_feeding", cat=LpBinary)
+                    prob += total_feed <= sum(bound[1] for bound in bounds) * feeding
+                    minimum = min_stockpiles * feeding
+                prob += lpSum(y_vars[name] for name in stockpile_event_indices) >= minimum
             if max_stockpiles is not None:
                 prob += lpSum(y_vars[name] for name in stockpile_event_indices) <= max_stockpiles
             if excluded_source_sets:

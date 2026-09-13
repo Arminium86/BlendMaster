@@ -107,13 +107,23 @@ BUILTIN_CONSTRAINT_FIELDS = {
 }
 
 
+class _CompiledPropertyKinds(dict):
+    """Canonical declaration snapshot for one bulk property operation."""
+
+
+def compiled_property_kinds(property_kinds=None):
+    if isinstance(property_kinds, _CompiledPropertyKinds):
+        return property_kinds
+    return _CompiledPropertyKinds({
+        canonical_property_key(name): str(kind).strip().lower()
+        for name, kind in dict(property_kinds or {}).items()
+    })
+
+
 def source_property_kind(value: Any, property_kinds=None) -> str:
     """Classify an imported numeric field for safe mass-balance handling."""
     key = canonical_property_key(value)
-    declared = {
-        canonical_property_key(name): str(kind).strip().lower()
-        for name, kind in dict(property_kinds or {}).items()
-    }.get(key)
+    declared = compiled_property_kinds(property_kinds).get(key)
     if declared in {"additive", "weighted_average", "intensive", "runtime"}:
         return "intensive" if declared == "weighted_average" else declared
     if (
@@ -159,6 +169,7 @@ def constraint_property_fields(
     properties, source_balance=None, property_kinds=None
 ) -> dict:
     """Expose dimensionally safe per-tonne coefficients to expressions."""
+    property_kinds = compiled_property_kinds(property_kinds)
     result = {}
     try:
         balance = float(source_balance)
@@ -193,6 +204,7 @@ def merge_source_properties(
     property_weights=None,
 ) -> dict:
     """Merge source properties without averaging additive/control fields."""
+    property_kinds = compiled_property_kinds(property_kinds)
     current = dict(current or {})
     incoming = dict(incoming or {})
     current_tonnes = max(float(current_tonnes or 0), 0.0)
@@ -276,6 +288,7 @@ def merge_source_properties(
 def scale_additive_source_properties(
     properties, remaining_ratio, property_kinds=None
 ) -> dict:
+    property_kinds = compiled_property_kinds(property_kinds)
     ratio = min(max(float(remaining_ratio or 0), 0.0), 1.0)
     result = dict(properties or {})
     for key, value in list(result.items()):
@@ -330,6 +343,7 @@ def source_property_report_fields(
     active_fields=None,
 ) -> dict:
     """Flatten the active numeric source properties into report columns."""
+    property_kinds = compiled_property_kinds(property_kinds)
     result = {
         f"{prefix}{canonical_property_key(key)}": None
         for key in (active_fields or [])
@@ -362,6 +376,7 @@ def source_property_balance_report_fields(
     transaction.  Only opening and closing columns are added here so the
     report does not contain a duplicate ``actual_depletion`` alias.
     """
+    property_kinds = compiled_property_kinds(property_kinds)
     opening = dict(opening_properties or {})
     depleted = dict(depleted_properties or {})
     selected_keys = (

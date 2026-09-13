@@ -838,6 +838,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         install(self)
         from GUI.SiteAutomation import install as install_site_automation
         install_site_automation(self)
+        from GUI.SolverPresets import install as install_solver_presets
+        install_solver_presets(self)
+        from GUI.ContinuousAssays import install as install_continuous_assays
+        install_continuous_assays(self)
 
     def new_navigation_tabs(self):
         tabs = QTabWidget()
@@ -1217,6 +1221,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def active_site_context(self):
         from classes.CrossFeatureReports import input_audit_snapshot
         return {
+            'continuous_assay_settings': copy.deepcopy(vars(self).get('continuous_assay_settings') or {}),
+            'continuous_assay_state': copy.deepcopy(vars(self).get('continuous_assay_state') or {}),
             'reporting_input_audits': input_audit_snapshot(vars(self), copy_evidence=False),
             "multi_feed_settings": self.current_multi_feed_configuration(),
             "transport_settings": copy.deepcopy(getattr(self, "transport_settings", {})),
@@ -1398,6 +1404,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 self.sync_destination_progress_context()
             self.destination_progress_snapshot = self.destination_progress.prepared_state(copy_evidence=False)
         fields = [
+            "continuous_assay_settings", "continuous_assay_state", "continuous_assay_status",
             "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
             "destination_progress_snapshot",
             "site_workflow_contract", "site_workflow_runs", "guidance_import_audit",
@@ -1465,7 +1472,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "manual_blend_plan_column_aliases",
             "manual_blend_plan_column_widths",
             "manual_blend_plan_wrap_text",
-            "solver_config", "min_stockpiles", "max_stockpiles",
+            "solver_config", "solver_presets", "selected_solver_preset", "min_stockpiles", "max_stockpiles",
             "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
             "stored_blend_sequence_table_for_gantt",
             "stored_blend_sequence_table_for_gantt_default",
@@ -1776,6 +1783,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 state.get("historical_recon_warnings") or []
             )
             self.reconciliation_settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
+            for name in ('continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status'):
+                setattr(self, name, copy.deepcopy(state.get(name)))
             self.reconciliation_inputs = copy.deepcopy(state.get("reconciliation_inputs") or {})
             self.opf_reconciliation_inputs = copy.deepcopy(state.get("opf_reconciliation_inputs") or {})
             self.data_stream_planning_categories = normalise_planning_categories(
@@ -2002,6 +2011,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.calendar_inputs = copy.deepcopy(state.get("calendar_inputs") or {})
             self.calendar_table_refresh_pending = True
             self.solver_config = self.normalized_solver_config(state.get("solver_config") or {})
+            from classes.SolverPresets import preset_library
+            self.solver_presets = preset_library(state.get("solver_presets"))
+            self.selected_solver_preset = state.get("selected_solver_preset") or ''
             self.min_stockpiles = state.get("min_stockpiles")
             self.max_stockpiles = state.get("max_stockpiles")
             self.min_stockpile_contribution_ratio = state.get(
@@ -2160,6 +2172,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
             self.populate_product_build_table()
             self.load_solver_config_inputs()
+
+            if vars(self).get('solver_preset_controls'):
+                self.solver_preset_controls.refresh()
 
             if self.stockpile_data:
                 # Brand guidance depends on the active scenario's CSV, mine,
@@ -2765,6 +2780,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         decision_scroll.setFrameShape(QFrame.NoFrame)
         decision_content = QWidget()
         layout = QVBoxLayout(decision_content)
+        self.decision_levers_layout = layout
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
         decision_scroll.setWidget(decision_content)
@@ -3053,7 +3069,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if not cached or cached[0] != signature:
             cached = (signature, build_profiles(vars(self), opfs, UserInputs))
             self._combined_opf_profile_cache = cached
-        return cached[1]
+        bundle = vars(self).get('continuous_assay_state') or {}
+        return {opf: {**profile, 'continuous_assay_settings': vars(self).get('continuous_assay_settings') or {},
+                      'continuous_assay_state': bundle.get('profiles', {}).get(opf, {})}
+                for opf, profile in cached[1].items()}
 
     def setup_product_targets_tab(self):
         self.product_build_tab = QWidget()
@@ -3231,6 +3250,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def destination_rule_context(self):
         return dict(
+            two_wp_path=getattr(self, 'file_path_choice', '') or '',
             areas=inventory_areas(getattr(self, "stockpile_data", None) or {}),
             haul_routes=getattr(self, "destination_haul_routes", {}) or {})
 
@@ -3291,10 +3311,16 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return
         active_opf = getattr(self, "opf_input_choice", None)
         opfs, targets = [active_opf] if active_opf else [], []
+        opfs.extend(point['opf'] for point in
+                    (vars(self).get('multi_feed_configuration') or {}).get('tipping_points', [])
+                    if point.get('opf'))
         for scenario_id, state in (getattr(self, "site_scenarios", {}) or {}).items():
             if scenario_id == getattr(self, "active_scenario_id", None):
                 continue
             opf = state.get("opf_input_choice")
+            opfs.extend(point['opf'] for point in
+                        (state.get('multi_feed_configuration') or {}).get('tipping_points', [])
+                        if point.get('opf'))
             if opf:
                 opfs.append(opf)
                 targets.extend({**row, "opf": row.get("opf") or opf} for row in product_targets_value(state, []) or [])
@@ -3832,6 +3858,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def navigate_to_decision_levers(self):
         self.load_solver_config_inputs()
+        if vars(self).get('solver_preset_controls'):
+            self.solver_preset_controls.refresh()
         self.set_page_enabled(self.decision_levers_tab_index, True)
         self.show_page(self.decision_levers_tab_index)
 
@@ -6995,7 +7023,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def refresh_database_view(self):
         if getattr(self, "database_view_refresh_in_progress", False):
             return
-        self.reconcile_saved_AMT_chunk_grade_streams()
+        self.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
         self.database_view_refresh_in_progress = True
         self.database_view_refresh_pending = False
         self.database_view_refresh_generation = (
@@ -7203,7 +7231,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             for key in record
             if self.database_view_is_automatic_audit_field(key)
         })
-        headers = list(dict.fromkeys(evidence_display_column(h) for h in [*fixed, *defined, *audit, "warnings"]
+        stream_grades = sorted({
+            key
+            for record in self.database_view_rows
+            for key in record
+            if any(key.startswith(f"grade_{stream}_") for stream in STREAMS)
+            and key.rsplit("_", 1)[-1] in ANALYTES
+        })
+        headers = list(dict.fromkeys(evidence_display_column(h) for h in [*fixed, *defined, *stream_grades, *audit, "warnings"]
                                     if evidence_display_column(h) is not None))
         if include_coverage is None:
             include_coverage = bool(
@@ -7243,27 +7278,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if selected is None:
             selected = self.default_database_view_columns(all_headers)
             self.database_view_selected_columns = list(selected)
-        else:
-            known = getattr(self, "database_view_known_columns", None)
-            if known is not None:
-                new_defaults = [
-                    header
-                    for header in self.default_database_view_columns(
-                        all_headers
-                    )
-                    if header not in set(known)
-                ]
-                if new_defaults:
-                    selected = [*selected, *new_defaults]
-                    self.database_view_selected_columns = list(
-                        dict.fromkeys(selected)
-                    )
         self.database_view_known_columns = list(all_headers)
         selected_set = set(selected)
         headers = [header for header in all_headers if header in selected_set]
-        if not headers and all_headers:
-            headers = self.default_database_view_columns(all_headers)
-            self.database_view_selected_columns = list(headers)
         return headers
 
     def update_database_view_column_button(self):
@@ -7368,9 +7385,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             for index in range(field_list.count())
             if field_list.item(index).checkState() == Qt.Checked
         ]
-        self.database_view_selected_columns = (
-            chosen or self.default_database_view_columns(all_headers)
-        )
+        previous = list(vars(self).get("database_view_selected_columns") or [])
+        available = set(all_headers)
+        retained = [header for header in previous if header not in available or header in chosen]
+        self.database_view_selected_columns = list(dict.fromkeys([*retained, *chosen]))
         self.database_view_show_coverage_fields = coverage_checkbox.isChecked()
         self.database_view_known_columns = list(all_headers)
         self.populate_database_view_table()
@@ -10920,6 +10938,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.capture_byproduct_build_settings()
 
     def finish_data_stream_submission(self):
+        from GUI.OPFProfileLoading import ensure
+        if ensure(self, self.finish_data_stream_submission):
+            return
         if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles():
             self.prepare_data_streams()
             return
@@ -11790,8 +11811,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.guidance_schedules_submit_button.setEnabled(
             bool(getattr(self, "stockpile_data", None))
         )
+        # Save is a working checkpoint, including after a selective import.
+        # Readiness may gate preparation or calculation, but must not prevent
+        # a Planner from preserving current edits and historical results.
         self.save_button.setEnabled(
-            site_fields_populated and guidance_fields_populated
+            bool(getattr(self, 'site_scenarios', {})) or site_fields_populated
         )
         from GUI.WorkflowViews import schedule
         schedule(self)
@@ -13764,14 +13788,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.register_submitted_site_scenarios(build_targets)
         else:
             self.save_active_scenario_state()
-        message = (
-            f"Configuration successfully submitted for Hub: {self.hub_input_choice}, "
-            f"Mine: {self.mine_input_choice}, OPF: {self.opf_input_choice}, "
-            f"Crusher: {self.crusher_input_choice} "
-            f"({self.crusher_contribution_ratio_choice * 100:.2f}% contribution).\n\n"
-            f"The model now contains {len(self.site_scenarios)} site scenario(s). "
-            "Use Active Site Scenario above the tabs to switch inputs and outputs."
-        )
+        configured_crushers = getattr(self, 'selected_site_crushers', None) or [self.crusher_input_choice]
+        message = f"Configured {self.mine_input_choice}: {', '.join(configured_crushers)}."
         if target_errors:
             failed = ", ".join(sorted(target_errors))
             message += f"\n\n2WP build targets could not be loaded for: {failed}. Manual build entry remains available."
@@ -16133,7 +16151,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             raise FileNotFoundError(project_path)
         if project_path.lower().endswith(".prj"):
             with open(project_path, "rb") as file:
-                return pickle.load(file)
+                info = os.fstat(file.fileno())
+                state = pickle.load(file)
+                if isinstance(state, dict):
+                    state['_shared_read_revision'] = (info.st_size, info.st_mtime_ns, info.st_ino)
+                return state
         if project_path.lower().endswith(".json"):
             with open(project_path, "r", encoding="utf-8") as file:
                 return json.load(file)
@@ -17741,14 +17763,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return 0
 
     def write_active_manual_plan_reports(self, report):
-        manager = DatabaseManager()
-        manager.write_manual_blend_report_to_database(report)
-        manager.write_optimisation_plan_result(
-            "manual",
-            report,
-            getattr(self, "active_manual_plan_id", "Primary"),
-            self.active_manual_plan_rank(),
-        )
+        from classes.SavedPlanStore import write_manual_snapshot
+        write_manual_snapshot(get_database_path(), getattr(self, 'active_manual_plan_id', 'Primary'), report)
+        self.manual_physical_balance_history = copy.deepcopy(report.attrs.get('physical_balance_history', []))
         self.write_manual_material_destination_plan(report)
         self.capture_active_manual_plan_state()
         from GUI.WorkflowViews import schedule
@@ -17888,13 +17905,37 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self, automatic=False
     ):
         if (getattr(self, 'multi_feed_configuration', None) or {}).get('mode','single') != 'single':
-            if hasattr(self, 'operational_blend_plans'):
-                self.operational_blend_plans.refresh()
+            from GUI.WorkflowDependencies import input_revision
+            if vars(self).get('optimisation_input_revision') != input_revision(self):
                 if not automatic:
-                    self.show_page(self.sqlite_reports_tab_index)
-                    self.reports_child_tabs.setCurrentWidget(self.operational_blend_plans)
+                    QMessageBox.warning(self, 'Manual plan', 'Recalculate the optimised plan for the current inputs before copying its allocations.')
+                return False
+            from classes.SavedPlanStore import manual_copy
+            from classes.SavedResultViews import read_report
+            plan_id = getattr(self, 'active_manual_plan_id', 'Primary') or 'Primary'
+            existing = read_report(get_database_path(), 'manual', plan_id)
+            if not existing.empty:
+                if automatic:
+                    return False
+                if QMessageBox.question(self, 'Replace manual allocations?',
+                        'Replace this manual plan with the selected optimised allocations?',
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                    return False
+            try:
+                report = manual_copy(get_database_path(), plan_id)
+                self.write_active_manual_plan_reports(report)
+                self.manual_blend_report = report
+                from GUI.WorkflowDependencies import manual_revision
+                self.manual_input_revision = manual_revision(self)
+                self.capture_active_manual_plan_state()
+                if not automatic:
+                    self.show_page('blend_plan')
+                    self.blend_plan_workflow_tabs.setCurrentWidget(self.manual_operational_blend_plans)
                 return True
-            return False
+            except ValueError as exc:
+                if not automatic:
+                    QMessageBox.warning(self, 'Manual plan', str(exc))
+                return False
         has_manual_plan = bool(
             getattr(
                 self, "stored_blend_sequence_table_for_gantt", []
@@ -19787,7 +19828,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         """Ignore QPushButton.checked and always advance to Database View."""
         return self.store_hex_sequence_table(navigate=True)
 
-    def store_hex_sequence_table(self, navigate=True):
+    def store_hex_sequence_table(self, navigate=True, *, on_complete=None, on_error=None):
         try:
             self.validate_AMT_participation()
         except ValueError as exc:
@@ -19843,11 +19884,17 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
-            self.save_active_scenario_state()
-            self.set_page_enabled(self.database_view_tab_index, True)
-            self.database_view_refresh_pending = True
-            if navigate:
-                self.open_database_view()
+            def publish():
+                self.save_active_scenario_state()
+                self.set_page_enabled(self.database_view_tab_index, True)
+                self.database_view_refresh_pending = True
+                if navigate:
+                    self.open_database_view()
+                if on_complete:
+                    on_complete()
+            from GUI.OPFProfileLoading import ensure
+            if not ensure(self, publish, on_error=on_error):
+                publish()
             return True
         else:
             QMessageBox.warning(self, "BlendMaster", "Invalid entries detected!\nPlease regenerate chunks for the selected AMT stockpiles.")
@@ -20647,6 +20694,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             solver_config.get("custom_constraints") or []
         )
         self.populate_custom_constraint_table()
+
+        # Project restore calls this directly; sidebar navigation does not pass
+        # through navigate_to_decision_levers. Keep the visible library current.
+        if vars(self).get('solver_preset_controls'):
+            self.solver_preset_controls.refresh()
 
     def store_solver_config_inputs(self, show_errors=True):
         if self.calendar_inputs is None:
@@ -21921,10 +21973,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def reload_AMT_map_view(self):
         """Reconnect a restored AMT view after the Dash worker has started."""
         view = getattr(self, "AMT_map_view", None)
-        if view is None:
+        chart = vars(self).get('draw_AMT_map')
+        if view is None or chart is None:
             return
         from GUI.ChartReadiness import connect_view
-        connect_view(self, view, 'http://localhost:8054')
+        connect_view(self, view, f'http://127.0.0.1:{chart.port}')
 
     def load_gantt_chart(self):
         self.start_dash_optimised_charts_thread()
@@ -21934,7 +21987,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             chart.set_plan_id(plan_id)
         self.resize_results_chart_area()
         from GUI.ChartReadiness import connect_view
-        connect_view(self, self.gantt_chart_view, f'http://localhost:8050/?plan={plan_id}')
+        connect_view(self, self.gantt_chart_view, f'http://127.0.0.1:{self.draw_gantt_chart.port}/?plan={plan_id}')
 
     def resize_results_chart_area(self):
         desired_height = 520
@@ -21966,7 +22019,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def load_manual_gantt_chart(self):
         self.start_or_update_dash_manual_chart_thread()
         from GUI.ChartReadiness import connect_view
-        connect_view(self, self.manual_gantt_view, 'http://localhost:8052')
+        connect_view(self, self.manual_gantt_view, f'http://127.0.0.1:{self.draw_manual_gantt_chart.port}')
         
     def setup_profiles_tab(self):
         self.profiles_tab = QWidget()
@@ -22592,7 +22645,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 if not getattr(self, '_manual_report_service_started', False):
                     self._manual_report_service_started = True
             from GUI.ChartReadiness import connect_view
-            connect_view(self, self.blend_plan_gantt_view, 'http://localhost:8052')
+            chart = vars(self).get('draw_manual_gantt_chart')
+            if chart is not None:
+                connect_view(self, self.blend_plan_gantt_view, f'http://127.0.0.1:{chart.port}')
         manual_chart = getattr(self, "draw_manual_gantt_chart", None)
         if manual_chart is not None:
             manual_chart.update_data(
@@ -23222,31 +23277,30 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def load_profiles(self):
         self.start_dash_optimised_charts_thread()
         from GUI.ChartReadiness import connect_view
-        connect_view(self, self.stockpile_profile_chart_view, 'http://localhost:8051')
+        connect_view(self, self.stockpile_profile_chart_view, f'http://127.0.0.1:{self.draw_stockpile_profile_chart.port}')
     
     def load_grade_profiles(self):
         
         self.start_or_update_dash_manual_grade_profile_thread()
 
         from GUI.ChartReadiness import connect_view
-        connect_view(self, self.blend_grade_profile_chart_view, 'http://localhost:8053')
+        connect_view(self, self.blend_grade_profile_chart_view, f'http://127.0.0.1:{self.draw_grade_profile_chart.port}')
 
     def load_optimised_grade_profiles(self):
         self.start_or_update_dash_optimised_grade_profile_thread()
 
         from GUI.ChartReadiness import connect_view
-        connect_view(self, self.optimised_grade_profile_chart_view, 'http://localhost:8055')
+        connect_view(self, self.optimised_grade_profile_chart_view, f'http://127.0.0.1:{self.draw_optimised_grade_profile_chart.port}')
 
     def start_or_update_dash_optimised_grade_profile_thread(self):
         if self.start_dash_optimised_grade_profile_first_call:
-            self.draw_optimised_grade_profile_chart = DrawOptimisedGradeProfiles(get_database_path(), 8055)
-            self.dash_thread_optimised_grade_profile = threading.Thread(
-                target=self.draw_optimised_grade_profile_chart.run_app,
-                daemon=True
-            )
-            self.dash_thread_optimised_grade_profile.start()
+            from GUI.SavedGradeCharts import SavedGradeCharts
+            self.draw_optimised_grade_profile_chart = SavedGradeCharts(get_database_path(), 8055)
+            from GUI.ChartServer import start
+            self.dash_thread_optimised_grade_profile = start(self.draw_optimised_grade_profile_chart)
             self.start_dash_optimised_grade_profile_first_call = False
         self.draw_optimised_grade_profile_chart.db_path = get_database_path()
+        self.draw_optimised_grade_profile_chart.plan_id = self.selected_optimisation_plan_id()
 
     def start_dash_optimised_charts_thread(self):
         """Start the Dash app in a separate thread."""
@@ -23261,21 +23315,16 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 getattr(self, "optimisation_detail_column_widths", {}),
                 getattr(self, "optimisation_detail_wrap_text", True),
             )
-            self.dash_thread_gantt = threading.Thread(
-                target=self.draw_gantt_chart.run_app,
-                daemon=True,
-            )
-            self.dash_thread_gantt.start()
+            from GUI.ChartServer import start
+            self.dash_thread_gantt = start(self.draw_gantt_chart)
 
         if hasattr(self, "draw_stockpile_profile_chart"):
             self.draw_stockpile_profile_chart.db_path = db_path
         else:
-            self.draw_stockpile_profile_chart = DrawStockProfiles(db_path, port=8051)
-            self.dash_thread_stockpile_profile = threading.Thread(
-                target=self.draw_stockpile_profile_chart.run_app,
-                daemon=True,
-            )
-            self.dash_thread_stockpile_profile.start()
+            from GUI.SavedProfileCharts import SavedProfileCharts
+            self.draw_stockpile_profile_chart = SavedProfileCharts(db_path, port=8051)
+            from GUI.ChartServer import start
+            self.dash_thread_stockpile_profile = start(self.draw_stockpile_profile_chart)
 
         # The views connect lazily; starting a service must not trigger another
         # chart refresh or a cycle of report checks.
@@ -23311,11 +23360,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 source_property_weights=field_weight_map(
                     self.field_definitions
                 ),
+                selected_stream=self.selected_data_stream,
+                crusher_field=self.crusher_tonnes_stream,
+                product_field=self.product_build_tonnes_stream,
             )
 
-            # Use a thread to run the Dash app server
-            self.dash_thread_AMT_map = threading.Thread(target=self.draw_AMT_map.run_app, daemon=True)
-            self.dash_thread_AMT_map.start()
+            from GUI.ChartServer import start
+            self.dash_thread_AMT_map = start(self.draw_AMT_map)
 
         else:
             self.draw_AMT_map.excluded_footprints = self.excluded_amt_footprints()
@@ -23334,6 +23385,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
 
         self.start_dash_AMT_map_thread_first_call = False
+        self.draw_AMT_map.selected_stream = self.selected_data_stream
+        self.draw_AMT_map.crusher_field = self.crusher_tonnes_stream
+        self.draw_AMT_map.product_field = self.product_build_tonnes_stream
     
     def update_decision_point_tab_state(self):
         """Enable the Decision Point tab while a calendar run is executing."""
@@ -26062,15 +26116,21 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def start_or_update_dash_manual_chart_thread(self):
         """Update or start the Dash app."""
         gantt_data = self.stored_blend_sequence_table_for_gantt or self.stored_blend_sequence_table_for_gantt_default
+        # A saved sequence can be opened before Blend Plan has hydrated this
+        # derived legend. Its saved recipe definitions remain authoritative.
+        legend = (vars(self).get('manual_gantt_legend_and_tooltip')
+                  or vars(self).get('saved_blends_for_schedule') or [])
+        self.manual_gantt_legend_and_tooltip = legend
+        thread = vars(self).get('dash_thread_manual_gantt')
 
-        if hasattr(self, 'draw_manual_gantt_chart') and self.dash_thread_manual_gantt.is_alive():
+        if vars(self).get('draw_manual_gantt_chart') and thread and thread.is_alive():
             # Update data in the running Dash app
-            self.draw_manual_gantt_chart.update_data(gantt_data, self.manual_gantt_legend_and_tooltip)  
+            self.draw_manual_gantt_chart.update_data(gantt_data, legend)
         else:
             # Start the Dash app if not already running
-            self.draw_manual_gantt_chart = ManualBlendDash(gantt_data, self.manual_gantt_legend_and_tooltip, port=8052, crusher_rate=self.crusher_rate)
-            self.dash_thread_manual_gantt = threading.Thread(target=self.draw_manual_gantt_chart.run_app, daemon=True)
-            self.dash_thread_manual_gantt.start()
+            self.draw_manual_gantt_chart = ManualBlendDash(gantt_data, legend, port=8052, crusher_rate=self.crusher_rate)
+            from GUI.ChartServer import start
+            self.dash_thread_manual_gantt = start(self.draw_manual_gantt_chart)
 
     def setup_grade_profile_tab(self):
         # Create a tab for Grade Profiles (Manual)
@@ -26103,26 +26163,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.grade_profile_frame_layout.addWidget(self.blend_grade_profile_chart_view)
 
     def start_or_update_dash_manual_grade_profile_thread(self):
-        """Update or start the Dash app."""
-        hex_sequence_table = copy.deepcopy(self.hex_sequence_table)
-        updated_stockpile_data = copy.deepcopy(self.included_stockpile_data())
-        grade_profile_data = self.manual_grade_profile_data()
-        if grade_profile_data.empty:
-            grade_profile_data = (
-                self.draw_manual_gantt_chart.return_grade_profile_data()
-            )
-
-        if hasattr(self, 'draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive():
-            # Update data in the running Dash app
-            self.draw_grade_profile_chart.hex_sequence_table = hex_sequence_table
-            self.draw_grade_profile_chart.updated_stockpile_data = updated_stockpile_data
-            self.draw_grade_profile_chart.update_data(grade_profile_data)  
-        else:
-            # Start the Dash app if not already running
-            self.draw_grade_profile_chart = DrawGradeProfiles(grade_profile_data, hex_sequence_table, updated_stockpile_data, 8053)
-            self.dash_thread_grade_profile = threading.Thread(target=self.draw_grade_profile_chart.run_app, daemon=True)
-            self.dash_thread_grade_profile.start()
-            self.draw_grade_profile_chart.update_data(grade_profile_data)  
+        """Read the manual feed and cumulative product builds from the same saved plan."""
+        if not (vars(self).get('draw_grade_profile_chart') and self.dash_thread_grade_profile.is_alive()):
+            from GUI.SavedGradeCharts import SavedGradeCharts
+            self.draw_grade_profile_chart = SavedGradeCharts(get_database_path(), 8053, 'manual')
+            from GUI.ChartServer import start
+            self.dash_thread_grade_profile = start(self.draw_grade_profile_chart)
+        self.draw_grade_profile_chart.db_path = get_database_path()
+        self.draw_grade_profile_chart.plan_id = vars(self).get('active_manual_plan_id') or 'Primary'
 
     def manual_grade_profile_data(self):
         report = getattr(self, "manual_blend_report", None)
@@ -26502,6 +26550,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         # Unpack loaded state into variables
         for name in ('site_workflow_contract', 'site_workflow_runs', 'guidance_import_audit',
+                     'continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status',
+                     'solver_presets', 'selected_solver_preset',
                      'target_refresh_changes', 'optimisation_input_revision',
                      'manual_input_revision', 'last_run_outcome', 'reconciliation_applied_revision', '_haul_cycle_routes_revision',
                      '_prepared_amt_database_path', '_amt_lineage_display',
@@ -26894,6 +26944,21 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.solver_config = self.normalized_solver_config(
             loaded_state.get("solver_config", {})
         )
+        # active_site_context needs independent OPF chemistry. Restored AMT
+        # evidence can be large, so prepare it before the remaining UI setup.
+        self.project_load_restore_in_progress = True
+        from GUI.OPFProfileLoading import ensure
+        if ensure(self, lambda: self.finish_loaded_state_setup(loaded_state),
+                  on_error=self.handle_loaded_profile_error):
+            return True
+        return self.finish_loaded_state_setup(loaded_state)
+
+    def handle_loaded_profile_error(self, error):
+        self.project_load_restore_in_progress = False
+        self.finish_project_load_ui(success=False)
+        self.show_error_popup(error)
+
+    def finish_loaded_state_setup(self, loaded_state):
         if self.calendar_inputs is not None:
             self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
             self.calendar_inputs["site_context"] = self.active_site_context()
@@ -26923,7 +26988,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if vars(self).get('_amt_map_pending'):
             QTimer.singleShot(100, self.continue_project_load_after_stockpile_setup)
             return
-        self.project_load_restore_in_progress = False
         has_selected_amt = any(
             (self.stockpile_data_AMT_column or {}).values()
         )
@@ -26932,17 +26996,25 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 # A project saved before AMT submission has no scheduling
                 # sources yet.  Loading it must stop at AMT Stockpiles rather
                 # than manufacture calendar inputs and start optimisation.
+                self.project_load_restore_in_progress = False
                 self.set_page_enabled(self.AMT_stockpile_tab_index, True)
                 self.project_load_continuation_pending = False
                 self.finish_project_load_ui(success=True)
                 self.show_page(self.AMT_stockpile_tab_index, force=True)
                 return
-            if not self.store_hex_sequence_table(navigate=False):
+            if not self.store_hex_sequence_table(navigate=False,
+                    on_complete=self.finish_project_load_after_chunks,
+                    on_error=self.handle_loaded_profile_error):
+                self.project_load_restore_in_progress = False
                 self.set_page_enabled(self.AMT_stockpile_tab_index, True)
                 self.project_load_continuation_pending = False
                 self.finish_project_load_ui(success=True)
                 self.show_page(self.AMT_stockpile_tab_index, force=True)
-                return
+            return
+        self.finish_project_load_after_chunks()
+
+    def finish_project_load_after_chunks(self):
+        self.project_load_restore_in_progress = False
         if self.database_has_saved_optimisation_results(get_database_path()):
             periods = PeriodManager(self.planning_period_count())
             periods.calculate_periods(
@@ -26985,8 +27057,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.finish_project_load_ui(success=True)
             self.show_page(destination, force=True)
             return
-        self.project_load_continuation_pending = True
-        self.store_calendar_inputs()
+        # A prepared or invalidated working checkpoint can legitimately have a
+        # Calendar and no current result rows. Opening it must not launch a solve
+        # or replace the planner's manual/destination work as a side effect.
+        self.project_load_continuation_pending = False
+        self.finish_project_load_ui(success=True)
+        self.show_page('calendar', force=True)
         
     def initialise_all_variables(self):
         self.scenario_session_directory = tempfile.mkdtemp(prefix="blendmaster_sites_")
@@ -27200,6 +27276,11 @@ class NumericSortTableWidgetItem(QTableWidgetItem):
 
 
 class CustomTableWidget(QTableWidget):
+    def setHorizontalHeaderLabels(self, labels):
+        super().setHorizontalHeaderLabels(labels)
+        from GUI.PlannerPresentation import queue_table
+        queue_table(self)
+
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.Copy):
             self.copy_selection_to_clipboard()

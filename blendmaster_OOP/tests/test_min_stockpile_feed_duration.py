@@ -93,6 +93,18 @@ class MinimumStockpileFeedDurationTests(unittest.TestCase):
         self.assertEqual(modeller.current_time, turnover)
         self.assertAlmostEqual(modeller.results.iloc[0]["steady_state_duration"], 1)
 
+    def test_submicrosecond_turnover_crosses_boundary_without_a_zero_length_solve(self):
+        turnover = pd.Timestamp('2026-09-11 01:00:00.000000123')
+        other = self.stockpile(0, "BUILDING", state_preplan="Auto",
+                              equipment=[], auto_turnover_datetime=turnover)
+        modeller = self.modeller(balance=1000, other_stockpiles=[other])
+        self.run_step(modeller)
+        self.run_step(modeller)
+        self.assertEqual(modeller.current_time, datetime(2026, 9, 11, 6))
+        self.assertTrue((modeller.results['steady_state_duration'] > 0).all())
+        self.assertAlmostEqual(modeller.balance_tracker.balance_copy['SP1'], 400)
+        self.assertEqual(other.auto_turnover_datetime, turnover)
+
     def test_long_window_keeps_configured_minimum(self):
         modeller = self.modeller(balance=1000)
         output = self.run_step(modeller)
