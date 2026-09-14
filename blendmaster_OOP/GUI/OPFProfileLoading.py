@@ -13,10 +13,8 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
     if vars(host).get('_defer_opf_profile_preparation'):
         return False  # Restore sources/chunks before preparing their chemistry.
     config = vars(host).get('multi_feed_configuration') or {}
-    from classes.AMTReconciliation import chunks_ready, footprints
+    from classes.AMTReconciliation import chunks_ready
     from classes.ApprovedReconciliation import missing_sources
-    if config.get('mode') != 'combined_opf' and not footprints(vars(host)):
-        return False
     if not chunks_ready(vars(host)) or missing_sources(vars(host), planning=True):
         return False
     if vars(host).get('_opf_profile_preparation_pending'):
@@ -28,7 +26,11 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
     if not opfs or (not vars(host).get('grade_reconciliation_registry') and any(opf not in bundles or bundles[opf].get('signature') !=
                       evidence_signature(vars(host), opf, builds) for opf in opfs)):
         return False  # The existing reconciliation workflow must fetch evidence first.
-    if reusable_cache(vars(host), opfs):
+    cached = reusable_cache(vars(host), opfs)
+    if cached:
+        from GUI.OPFProfilePublication import publish
+        publish(host, cached[1])
+        host._combined_opf_profile_cache = (profile_signature(vars(host), opfs), cached[1])
         return False
     values = {key: vars(host)[key] for key in (*SOURCE_FIELDS, 'active_scenario_id') if key in vars(host)}
     previous_profiles = _previous_profiles if _previous_profiles is not None else vars(host).get('_combined_opf_profile_cache')
@@ -61,14 +63,8 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
             if not ensure(host, complete_all, on_error=fail_all, _previous_profiles=result):
                 complete_all()
             return
-        primary = result[1].get(host.opf_input_choice) or {}
-        for name in ('stockpile_data', 'updated_stockpile_data'):
-            for identity in list(vars(host).get(name) or {}):
-                if identity in primary.get('inventory', {}):
-                    vars(host)[name][identity] = deepcopy(primary['inventory'][identity])
-        for name in ('hex_sequence_table', 'hex_sequence_table_argument'):
-            if name in vars(host):
-                vars(host)[name] = [deepcopy(primary.get('chunks', {}).get(c.get('hex'), c)) for c in vars(host)[name] or []]
+        from GUI.OPFProfilePublication import publish
+        publish(host, result[1])
         host._combined_opf_profile_cache = (profile_signature(vars(host), opfs), result[1])
         complete_all()
 

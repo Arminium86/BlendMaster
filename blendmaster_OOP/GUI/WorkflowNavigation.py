@@ -91,6 +91,8 @@ class WorkflowNavigation:
 
     def set_page_enabled(self, page_id, enabled):
         page_id = product_targets_identifier(page_id)
+        from GUI.WorkflowSubmissions import blocked
+        enabled = bool(enabled) and not blocked(self, page_id)
         location = self.page_locations.get(page_id)
         if location is not None:
             vars(self).setdefault('_page_enabled_state', {})[page_id] = bool(enabled)
@@ -104,6 +106,9 @@ class WorkflowNavigation:
         schedule(self, results=page_id in ('optimised_grade_profiles', 'manual_grade_profiles'))
 
     def is_page_enabled(self, page_id):
+        from GUI.WorkflowSubmissions import blocked
+        if blocked(self, page_id):
+            return False
         location = self.page_locations.get(product_targets_identifier(page_id))
         return bool(location and location[0].isTabEnabled(location[1]))
 
@@ -145,6 +150,8 @@ class WorkflowNavigation:
 
     def advance_workspace(self, submitted_page):
         """Advance after successful submission; background preparation owns no navigation."""
+        from GUI.WorkflowSubmissions import submitted
+        submitted(self, submitted_page)
         state = vars(self)
         controller = state.get('site_workflow_controller')
         if (state.get('project_load_restore_in_progress') or state.get('scenario_switch_in_progress')
@@ -185,6 +192,9 @@ class WorkflowNavigation:
 
     def show_page(self, page_id, force=False):
         page_id = product_targets_identifier(page_id)
+        from GUI.WorkflowSubmissions import blocked
+        if blocked(self, page_id):
+            return
         controller = vars(self).get('site_workflow_controller')
         from GUI.InputPreparationLocks import RESULT_PAGES
         if controller and controller.active and page_id != 'calendar' and page_id not in RESULT_PAGES:

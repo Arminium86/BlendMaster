@@ -159,7 +159,7 @@ class OPFProfileLoadingTests(unittest.TestCase):
         continued.assert_not_called()
         host.deleteLater()
 
-    def test_loaded_calendar_waits_for_amt_profile_publication(self):
+    def test_loaded_calendar_waits_for_chunks_without_starting_profile_preparation(self):
         from GUI.InitialiseGUI import UserInputs
         host = SimpleNamespace(project_load_restore_in_progress=True,
             stockpile_data_AMT_column={'SP': True}, hex_sequence_table=[{'hex': 'chunk'}],
@@ -173,7 +173,8 @@ class OPFProfileLoadingTests(unittest.TestCase):
         self.assertTrue(host.project_load_restore_in_progress)
         host.database_has_saved_optimisation_results.assert_not_called()
         host.store_calendar_inputs.assert_not_called()
-        host.store_hex_sequence_table.call_args.kwargs['on_complete']()
+        with patch('GUI.OPFProfileLoading.ensure', side_effect=AssertionError('restore started preparation')):
+            host.store_hex_sequence_table.call_args.kwargs['on_complete']()
         self.assertFalse(host.project_load_restore_in_progress)
         host.store_calendar_inputs.assert_not_called()
         host.finish_project_load_ui.assert_called_once_with(success=True)

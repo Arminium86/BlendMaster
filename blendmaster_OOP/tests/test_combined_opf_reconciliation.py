@@ -182,6 +182,32 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
             self.assertAlmostEqual(row['grade_streams']['adjusted_product']['FB']['fe'], product)
         self.assertEqual(state, before)
 
+    def test_profile_application_reuses_read_only_evidence_without_enrichment_hash(self):
+        from tests.test_manual_grade_reconciliation import state as manual_state, manual
+        from tests.test_amt_reconciliation_grain import submit
+
+        class ReadOnlyEvidence(dict):
+            def __deepcopy__(self, memo):
+                raise AssertionError('Entire evidence archive copied for an OPF')
+
+        state = manual_state()
+        submit(state)
+        manual(state)
+        state['grade_reconciliation_registry']['sources']['unselected'] = ReadOnlyEvidence(detail={})
+        for bundle in state['opf_reconciliation_inputs'].values():
+            bundle['reconciliation_inputs']['unused_history'] = ReadOnlyEvidence(rows=[])
+        before = profile_signature(state, OPFS)
+        with patch.object(UserInputs, 'AMT_enrichment_request_signature', side_effect=AssertionError('unused hex cache hash')):
+            with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('automatic search')):
+                profiles = build_profiles(state, OPFS, UserInputs)
+        self.assertEqual(profile_signature(state, OPFS), before)
+        for opf in OPFS:
+            chunk = profiles[opf]['chunks']['SP_CHUNK_001']
+            self.assertAlmostEqual(chunk['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+        profiles[OPFS[0]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'] = 0
+        self.assertEqual(profile_signature(state, OPFS), before)
+        self.assertAlmostEqual(profiles[OPFS[1]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+
     def test_changed_scenario_start_reuses_approved_source_factors(self):
         from classes.CombinedOPFReconciliation import SourceContext
         from datetime import timedelta
@@ -191,9 +217,13 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
         approve_sources(state)
         context = SourceContext(**state, _ui_class=UserInputs)
         context.current_multi_feed_configuration = lambda: dict(mode='combined_opf', tipping_points=[{'opf': opf} for opf in OPFS])
+        context._combined_opf_profile_cache = (profile_signature(vars(context), OPFS), build_profiles(vars(context), OPFS, UserInputs))
         self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
         context.start_time_choice += timedelta(days=1)
         with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('automatic search')):
+            with patch('GUI.OPFProfileLoading.ensure', side_effect=AssertionError('view started preparation')):
+                self.assertEqual(context.current_opf_profiles(), {})
+            context._combined_opf_profile_cache = (profile_signature(vars(context), OPFS), build_profiles(vars(context), OPFS, UserInputs))
             self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
 
     def test_amt_chunks_reuse_membership_and_physical_mass_with_opf_product_slots(self):

@@ -405,8 +405,10 @@ def close_bootloader_splash():
         pass
 
 from GUI.WorkflowPermissions import protect_support_operations, validate_planner_site_controls
+from GUI.WorkflowSubmissions import guard_submissions, return_to as return_to_task
 
 @protect_support_operations
+@guard_submissions
 class UserInputs(WorkflowNavigation, QMainWindow):
     @property
     def product_build_settings(self):
@@ -1419,6 +1421,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.destination_progress_snapshot = self.destination_progress.prepared_state(copy_evidence=False)
         fields = [
             "_combined_opf_profile_cache",
+            "workflow_submission_state",
             "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
             "continuous_assay_settings", "continuous_assay_state", "continuous_assay_status",
             "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
@@ -1658,6 +1661,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
             for name in ("site_workflow_contract", "site_workflow_runs", "guidance_import_audit", "target_refresh_changes",
+                         "workflow_submission_state",
                          "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
                          "optimisation_input_revision", "manual_input_revision", "last_run_outcome", "reconciliation_applied_revision",
                          "_haul_cycle_routes_revision", "destination_progress_snapshot"):
@@ -3090,7 +3094,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.setup_calendar()
 
     def current_opf_profiles(self):
-        from classes.CombinedOPFReconciliation import build_profiles, profile_signature, evidence_signature, reusable_cache
+        from classes.CombinedOPFReconciliation import evidence_signature, reusable_cache
         if vars(self).get('_defer_opf_profile_preparation'):
             return {}
         config = self.current_multi_feed_configuration()
@@ -3106,13 +3110,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return {}
         cached = reusable_cache(vars(self), opfs)
         if not cached:
-            if 'background_tasks' in vars(self):
-                from GUI.OPFProfileLoading import ensure
-                from GUI.WorkflowViews import schedule
-                ensure(self, lambda: schedule(self, charts=True))
-                return {}
-            cached = (profile_signature(vars(self), opfs), build_profiles(vars(self), opfs, UserInputs))
-            self._combined_opf_profile_cache = cached
+            return {}  # Only an AMT or planning submission prepares source grades.
         bundle = vars(self).get('continuous_assay_state') or {}
         return {opf: {**profile, 'scenario_id': self.active_scenario_id,
                       'continuous_assay_settings': vars(self).get('continuous_assay_settings') or {},
@@ -3930,6 +3928,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         crusher = getattr(self, "crusher_input_choice", None)
         start_time = getattr(self, "start_time_choice", None)
         if not mine or not crusher or not start_time:
+            return_to_task(self, 'site_configuration', 'Submit Site Configuration before loading product targets.')
             QMessageBox.information(
                 self,
                 "BlendMaster",
@@ -9751,6 +9750,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.multi_feed_configuration = source_routing(vars(self))
         unrouted = unrouted_sources(vars(self))
         if unrouted or (after_chunking(vars(self)) and not chunks_ready(vars(self))):
+            return_to_task(self, 'stockpile_inventories' if unrouted else 'amt_stockpiles',
+                           'Assign source routes before reconciliation.' if unrouted else 'Submit AMT chunks before reconciliation.')
             self.update_reconciliation_review()
             self.reconciliation_review.status.setText(
                 'Assign a Subset / permitted feed point for: ' + ', '.join(unrouted) if unrouted else
@@ -9776,7 +9777,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return [], {}, []
         state, audits, warnings = vars(self), [], []
         enrichment = (reconciliation_fingerprint(self.AMT_enrichment_request_signature())
-                      if hasattr(self, 'AMT_enrichment_request_signature') else '')
+                      if not state.get('_manual_grade_reconciliation')
+                      and hasattr(self, 'AMT_enrichment_request_signature') else '')
         selected = included_footprints(state.get("updated_stockpile_data"), state.get("AMT_footprint_exclusions"))
         from classes.MultiFeedSettings import source_opfs, source_routing
         from classes.GradeStreams import normalise_opf
@@ -11078,7 +11080,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         try:
             require_approved(vars(self), planning=False)
         except ReconciliationRequired as exc:
-            self.show_page('grade_reconciliation', force=True)
+            return_to_task(self, exc.workflow_page, str(exc))
             self.update_reconciliation_review()
             self.reconciliation_review.status.setText(str(exc))
             return
@@ -11093,11 +11095,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
             return
-        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf':
-            self.finish_data_stream_submission()
-            return
-        from GUI.InventoryStreamApplication import apply
-        apply(self, self.finish_data_stream_submission)
+        self.finish_data_stream_submission()
 
     def capture_data_stream_configuration(self):
         """Support owns stream choices; planner reconciliation uses saved choices."""
@@ -11113,14 +11111,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.capture_byproduct_build_settings()
 
     def finish_data_stream_submission(self):
-        from GUI.OPFProfileLoading import ensure
-        if ensure(self, self.finish_data_stream_submission):
-            return
-        from classes.AMTReconciliation import chunks_ready
-        if (chunks_ready(vars(self)) and not vars(self).get('_defer_opf_profile_preparation') and
-                (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles()):
-            self.prepare_data_streams()
-            return
+        # Save approvals here; AMT or Calendar submission applies them to sources.
         if self.data_stream_pending_build_targets:
             # Stockpile Inventories has already established and persisted the
             # opening source set.  Applying later 2WP targets must not clear
@@ -14066,6 +14057,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def handle_guidance_schedules_submit(self):
         """Apply optional schedule guidance before inventory selection."""
         if not self.stockpile_data:
+            return_to_task(self, 'site_configuration', 'Submit Site Configuration before applying guidance schedules.')
             QMessageBox.warning(
                 self,
                 "Guidance Schedules",
@@ -19049,10 +19041,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.AMT_enrichment_signature = ""
             self.AMT_chunk_reconciliation_signature = ""
             return False
-        if allow_pending and self.reconciliation_factors_pending():
-            # Inventory submission fetches raw AMT fields for Map Fields before
-            # Data Streams has loaded reconciliation. Persist that raw snapshot
-            # but leave enrichment pending so submission calculates it later.
+        if (allow_pending and self.reconciliation_factors_pending()
+                and vars(self).get('_apply_amt_component_factors')):
+            # Applying adjustments requires approvals. Baseline mapping for the
+            # AMT map does not, and must still run before manual reconciliation.
             self.AMT_enrichment_signature = ""
             self.AMT_chunk_reconciliation_signature = ""
             if persist:
@@ -19687,13 +19679,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             product_coverage.append(f"{labels[analyte]} {pct:.2f}%" if pct is not None else f"{labels[analyte]} unavailable")
         return lineage_summary, f"{slot.upper()} | " + ", ".join(product_coverage)
 
-    def enrich_AMT_grade_streams(self, data_source, amt_data):
+    def enrich_AMT_grade_streams(self, data_source, amt_data, *, record_signature=True):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
         application = self.reconciliation_application() if vars(self).get('_apply_amt_component_factors') else None
         enriched = guard_amt_snapshot(self.included_AMT_snapshot(amt_data))
         from classes.ApprovedReconciliation import continuous_members
         managed_members = continuous_members(vars(self), vars(self).get('opf_input_choice'))
-        enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
+        enrichment_signature = (reconciliation_fingerprint(self.AMT_enrichment_request_signature())
+                                if application and record_signature else "")
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
@@ -19745,7 +19738,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 else:
                     streams['adjusted_rom'], streams['adjusted_product'] = {}, {}
                     row['reconciliation'] = {}
-                if application and row.get('reconciliation'):
+                if application and record_signature and row.get('reconciliation'):
                     row["reconciliation"]["enrichment_signature"] = enrichment_signature
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
@@ -20141,7 +20134,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 if on_complete:
                     on_complete()
             from GUI.OPFProfileLoading import ensure
-            if not ensure(self, publish, on_error=on_error):
+            if not selected_footprints or not ensure(self, publish, on_error=on_error):
                 publish()
             return True
         else:
@@ -21357,23 +21350,26 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
-        from classes.ApprovedReconciliation import missing_sources, required_message
-        missing = missing_sources(vars(self), planning=True)
-        if missing:
-            self.show_page('grade_reconciliation', force=True)
-            QMessageBox.information(self, 'Grade Reconciliation required', required_message(missing))
+        from classes.ApprovedReconciliation import require_approved, ReconciliationRequired
+        try:
+            require_approved(vars(self), planning=True)
+        except ReconciliationRequired as exc:
+            return_to_task(self, exc.workflow_page, str(exc))
+            QMessageBox.information(self, exc.title, str(exc))
             return
         self._workflow_optimisation_finished = False
         self.blend_mode_choice = 1
         controller = vars(self).get('site_workflow_controller')
         if controller:
-            from GUI.WorkflowDependencies import preparation_issues
-            issues = preparation_issues(self)
+            from GUI.WorkflowDependencies import preparation_tasks
+            tasks = preparation_tasks(self)
+            issues = [message for _, message in tasks]
             if issues:
                 if controller.active:
                     controller.fail('\n'.join(issues))
                 else:
-                    self.calendar_workflow_status.setText('\n'.join(issues) + '\nUse Prepare Inputs to refresh the dependencies.')
+                    return_to_task(self, tasks[0][0], '\n'.join(issues))
+                    self.calendar_workflow_status.setText('\n'.join(issues) + '\nResubmit the remaining Workspace tasks in order.')
                     QMessageBox.information(self, 'Planning inputs need preparation', '\n'.join(issues))
                 return
 
@@ -23852,6 +23848,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def show_error_popup(self, error_message, title=None):
         """Display an error message in a popup."""
         if isinstance(error_message, dict):
+            if error_message.get('workflow_page'):
+                return_to_task(self, error_message['workflow_page'], error_message.get('message', ''))
             title = error_message.get("title", title)
             error_message = error_message.get("message", "")
         if (title or "").lower() in {
@@ -25947,7 +25945,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from classes.ApprovedReconciliation import missing_sources, required_message
         missing = missing_sources(vars(self), planning=True)
         if missing:
-            self.show_page('grade_reconciliation', force=True)
+            return_to_task(self, 'grade_reconciliation', required_message(missing))
             raise ManualBlendPlanningError(required_message(missing))
         from GUI.InventoryRefresh import issue
         if issue(self, include_workflow=True):
@@ -26837,6 +26835,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # signature is checked after all restored AMT chunks are in place.
         self._combined_opf_profile_cache = loaded_state.get('_combined_opf_profile_cache')
         for name in ('site_workflow_contract', 'site_workflow_runs', 'guidance_import_audit',
+                     'workflow_submission_state',
                      'grade_reconciliation_registry', 'grade_reconciliation_policy_revision',
                      'continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status',
                      'solver_presets', 'selected_solver_preset',
@@ -27301,10 +27300,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def finish_project_load_after_chunks(self):
         self._defer_opf_profile_preparation = False
-        from GUI.OPFProfileLoading import ensure
-        if ensure(self, self.finish_project_load_after_chunks,
-                  on_error=self.handle_loaded_profile_error):
-            return
         if vars(self).get('calendar_inputs') is not None:
             self.calendar_inputs['site_context'] = self.active_site_context()
         self.project_load_restore_in_progress = False

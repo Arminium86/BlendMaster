@@ -11,6 +11,11 @@ from classes.AMTFootprintExclusions import included_footprints
 
 class ReconciliationRequired(RuntimeError):
     title = 'Grade Reconciliation required'
+    workflow_page = 'grade_reconciliation'
+
+    def __init__(self, message, workflow_page='grade_reconciliation'):
+        super().__init__(message)
+        self.user_message, self.workflow_page = message, workflow_page
 
 
 def fingerprint(value):
@@ -136,9 +141,9 @@ def require_approved(state, *, planning=True):
     from classes.AMTReconciliation import after_chunking, chunks_ready
     unrouted = unrouted_sources(state)
     if unrouted:
-        raise ReconciliationRequired('Assign a Subset / permitted feed point in Stockpile Inventories and Support → Multi-feed Setup for: ' + ', '.join(unrouted))
+        raise ReconciliationRequired('Assign a Subset / permitted feed point in Stockpile Inventories for: ' + ', '.join(unrouted), 'stockpile_inventories')
     if (planning or after_chunking(state)) and not chunks_ready(state):
-        raise ReconciliationRequired('Submit chunks for all selected AMT stockpiles before continuing.')
+        raise ReconciliationRequired('Submit chunks for all selected AMT stockpiles before continuing.', 'amt_stockpiles')
     missing = missing_sources(state, planning=planning)
     if missing:
         raise ReconciliationRequired(required_message(missing))

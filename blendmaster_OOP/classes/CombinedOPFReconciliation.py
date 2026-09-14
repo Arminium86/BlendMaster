@@ -108,14 +108,19 @@ def build_profiles(state, opfs, ui_class):
         ids = {(c.get('footprint'), str(h)) for c in selected_chunks for h in member_hexes(c)}
         inputs['AMT_stockpile_data'] = {name: [r for r in rows if (name, str(r.get('HEX', r.get('hex')))) in ids]
             for name, rows in (state.get('AMT_stockpile_data') or {}).items() if any(n == name for n, _ in ids)}
-        context = SourceContext(**deepcopy(inputs))
+        # Evidence is read-only during application. Copy physical sources for
+        # each OPF, but do not duplicate every OPF's history and approved audits.
+        evidence = {key: inputs.pop(key) for key in ('grade_reconciliation_registry',
+                    'reconciliation_inputs', 'opf_reconciliation_inputs') if key in inputs}
+        context = SourceContext(**deepcopy(inputs), **evidence)
         context._apply_amt_component_factors = not after_chunking(state)
         context._ui_class = ui_class
         context.opf_input_choice = opf
         context.field_mappings = opf_field_mappings(state.get('field_mappings'), state.get('opf_input_choice'), opf)
         bundle = (state.get('opf_reconciliation_inputs') or {}).get(opf) or {}
         context.historical_recon_factors = deepcopy(state.get('historical_recon_factors') if opf == state.get('opf_input_choice') else bundle.get('factors') or {})
-        context.reconciliation_inputs = deepcopy(bundle.get('reconciliation_inputs') or {})
+        context.reconciliation_inputs = (state.get('reconciliation_inputs', bundle.get('reconciliation_inputs'))
+            if opf == state.get('opf_input_choice') else bundle.get('reconciliation_inputs')) or {}
         context.historical_recon_warnings = list(bundle.get('warnings') or [])
         context.stockpile_data = vars(context).get('stockpile_data') or {}
         context.updated_stockpile_data = vars(context).get('updated_stockpile_data') or {}
@@ -137,7 +142,9 @@ def build_profiles(state, opfs, ui_class):
             ])
         context.apply_canonical_field_mappings()
         context.apply_grade_streams_to_inventory()
-        enriched = context.enrich_AMT_grade_streams({}, context.AMT_stockpile_data) if context.AMT_stockpile_data else {}
+        # These member rows are temporary inputs to chunks, not a cached AMT
+        # enrichment. The profile signature already validates the whole snapshot.
+        enriched = context.enrich_AMT_grade_streams({}, context.AMT_stockpile_data, record_signature=False) if context.AMT_stockpile_data else {}
         members = {(str(footprint), str(row.get('HEX') or row.get('hex'))): row for footprint, rows in enriched.items() for row in rows}
         builder = DrawAMTStockpile.__new__(DrawAMTStockpile)
         builder.source_property_kinds = {r['name']: r['kind'] for r in vars(context).get('field_definitions') or []}

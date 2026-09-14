@@ -165,18 +165,10 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
                 plan = context.calculate_AMT_chunk_plan(total, setting['average_reclaim_rate'], setting['chunk_reclaim_hours'])
                 context.AMT_chunk_settings[name] = {**setting, **plan, 'amt_total_wmt':total,
                     'inventory_total_wmt':inventory, 'raw_signed_amt_wmt':raw}
-            from classes.CombinedOPFReconciliation import build_profiles, evidence_signature, profile_signature, reusable_cache
-            from classes.AMTReconciliation import chunks_ready
-            from classes.ApprovedReconciliation import missing_sources
-            feed = vars(context).get('multi_feed_configuration') or {}
-            opfs = sorted({p['opf'] for p in feed.get('tipping_points', [])}) if feed.get('mode') == 'combined_opf' else []
-            bundles = vars(context).get('opf_reconciliation_inputs') or {}
-            if opfs and chunks_ready(vars(context)) and not missing_sources(vars(context), planning=True) and all(opf in bundles and bundles[opf].get('signature') ==
-                    evidence_signature(vars(context), opf, context.reconciliation_inventory_builds()) for opf in opfs):
-                context._combined_opf_profile_cache = reusable_cache(vars(context), opfs) or (
-                    profile_signature(vars(context), opfs), build_profiles(vars(context), opfs, implementation))
-            else:
-                context._combined_opf_profile_cache = None
+            from classes.CombinedOPFReconciliation import reusable_cache
+            # Opening refresh may reuse a valid profile; preparation waits for
+            # AMT/Calendar submission after the user has approved new sources.
+            context._combined_opf_profile_cache = reusable_cache(vars(context))
             check_cancel(cancel)
             service.save_to_database(context.included_AMT_snapshot(context.stockpile_data))
             service.save_AMT_to_database(context.AMT_stockpile_data)

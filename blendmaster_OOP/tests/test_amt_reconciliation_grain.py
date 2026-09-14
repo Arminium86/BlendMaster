@@ -162,7 +162,7 @@ class GrainTests(unittest.TestCase):
         panel.set_context(value['reconciliation_settings'], OPFS[0], ['FB'])
         panel.set_review(*saved_review(value))
         value['AMT_stockpile_data']['SP'].append({**deepcopy(value['AMT_stockpile_data']['SP'][0]), 'HEX': 'new'})
-        host = SimpleNamespace(**value, reconciliation_review=panel, show_page=Mock(), data_streams_submit_button=Mock())
+        host = SimpleNamespace(**value, reconciliation_review=panel, show_page=Mock(), set_page_enabled=Mock(), data_streams_submit_button=Mock())
         host.update_reconciliation_review = lambda: UserInputs.update_reconciliation_review(host)
         UserInputs.handle_data_streams_submit(host)
         self.assertGreater(panel.sources.topLevelItemCount(), 0)

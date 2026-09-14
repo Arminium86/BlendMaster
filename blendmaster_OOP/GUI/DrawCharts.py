@@ -4288,9 +4288,15 @@ class DrawAMTStockpile:
         # Round latitude, longitude, and grades to 2 decimal places for tooltips
         filtered_data["lat_tooltip"] = filtered_data["lat"].round(2)
         filtered_data["long_tooltip"] = filtered_data["long"].round(2)
-        for grade in ["grade_fe", "grade_si", "grade_al", "grade_p", "grade_mn"]:
-            filtered_data[grade] = pd.to_numeric(filtered_data[grade], errors="coerce").fillna(0)
-            filtered_data[f"{grade}_tooltip"] = filtered_data[grade].round(2)
+        from classes.PlannerPresentation import hex_grade_display
+        grade_columns = [name for name in ('grade_streams', 'GRADE_STREAMS',
+            'grade_fe', 'grade_si', 'grade_al', 'grade_p', 'grade_mn') if name in filtered_data]
+        displayed = [hex_grade_display(row) for row in filtered_data[grade_columns].to_dict('records')]
+        filtered_data['grade_basis'] = [label for label, _ in displayed]
+        for analyte in ANALYTES:
+            filtered_data[f'grade_{analyte}_tooltip'] = [
+                f'{values[analyte]:.2f}%' if values.get(analyte) is not None else 'Unavailable'
+                for _, values in displayed]
         for column in (
             "balance", "raw_wmt", "spatial_adjustment_wmt", "ledger_adjustment_wmt"
         ):
@@ -4344,7 +4350,7 @@ class DrawAMTStockpile:
                     "lat_tooltip", "long_tooltip", "chunk_sequence", "raw_wmt",
                     "spatial_adjustment_wmt", "ledger_adjustment_wmt",
                     "grade_block_count", "lineage_coverage_pct",
-                    "lineage_unmatched_final_wmt"
+                    "lineage_unmatched_final_wmt", "grade_basis"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
@@ -4358,11 +4364,12 @@ class DrawAMTStockpile:
                     "Grade Blocks: %{customdata[13]:.0f}<br>" +
                     "Lineage Coverage: %{customdata[14]:.2f}%<br>" +
                     "Unmatched Lineage: %{customdata[15]:,.0f} t<br>" +
-                    "Fe Grade: %{customdata[2]:.2f}%<br>" +
-                    "Si Grade: %{customdata[3]:.2f}%<br>" +
-                    "Al Grade: %{customdata[4]:.2f}%<br>" +
-                    "P Grade: %{customdata[5]:.2f}%<br>" +
-                    "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
+                    "%{customdata[16]}<br>" +
+                    "Fe Grade: %{customdata[2]}<br>" +
+                    "Si Grade: %{customdata[3]}<br>" +
+                    "Al Grade: %{customdata[4]}<br>" +
+                    "P Grade: %{customdata[5]}<br>" +
+                    "Mn Grade: %{customdata[6]}<extra></extra>"
                 )
             ))
 
@@ -4386,7 +4393,7 @@ class DrawAMTStockpile:
                     "lat_tooltip", "long_tooltip", "raw_wmt",
                     "spatial_adjustment_wmt", "ledger_adjustment_wmt",
                     "grade_block_count", "lineage_coverage_pct",
-                    "lineage_unmatched_final_wmt"
+                    "lineage_unmatched_final_wmt", "grade_basis"
                 ]],
                 hovertemplate=(
                     "Hex: %{customdata[0]}<br>" +
@@ -4399,11 +4406,12 @@ class DrawAMTStockpile:
                     "Grade Blocks: %{customdata[12]:.0f}<br>" +
                     "Lineage Coverage: %{customdata[13]:.2f}%<br>" +
                     "Unmatched Lineage: %{customdata[14]:,.0f} t<br>" +
-                    "Fe Grade: %{customdata[2]:.2f}%<br>" +
-                    "Si Grade: %{customdata[3]:.2f}%<br>" +
-                    "Al Grade: %{customdata[4]:.2f}%<br>" +
-                    "P Grade: %{customdata[5]:.2f}%<br>" +
-                    "Mn Grade: %{customdata[6]:.2f}%<extra></extra>"
+                    "%{customdata[15]}<br>" +
+                    "Fe Grade: %{customdata[2]}<br>" +
+                    "Si Grade: %{customdata[3]}<br>" +
+                    "Al Grade: %{customdata[4]}<br>" +
+                    "P Grade: %{customdata[5]}<br>" +
+                    "Mn Grade: %{customdata[6]}<extra></extra>"
                 )
             ))
 

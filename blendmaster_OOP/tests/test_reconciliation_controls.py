@@ -380,7 +380,8 @@ class NativeReviewTests(unittest.TestCase):
         view.update_reconciliation_review()
         self.assertTrue(view.data_streams_submit_button.isEnabled())
         view.handle_data_streams_submit()
-        _apply.assert_called_once()
+        _apply.assert_not_called()
+        view.data_stream_reconciliation.save_to_database.assert_called_once()
         view.refresh_AMT_enrichment_if_needed.assert_not_called()
         view.open_database_view.assert_not_called()
         view.advance_workspace.assert_called_once_with('grade_reconciliation')
@@ -389,7 +390,8 @@ class NativeReviewTests(unittest.TestCase):
         view.handle_data_streams_submit()
         view.prepare_data_streams.assert_not_called()
         view.show_page.assert_called_with('grade_reconciliation', force=True)
-        _apply.assert_called_once()
+        _apply.assert_not_called()
+        view.data_stream_reconciliation.save_to_database.assert_called_once()
 
     def test_default_and_local_changes_invalidate_submit_and_keep_model_in_sync(self):
         view = window()

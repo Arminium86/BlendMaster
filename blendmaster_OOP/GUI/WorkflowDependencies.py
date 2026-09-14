@@ -33,6 +33,9 @@ def input_revision(host):
         imports=current_import_revisions(state.get('guidance_import_audit'))))
     if state.get('opening_inputs_revision'):
         revision = fingerprint(dict(inputs=revision, opening=state['opening_inputs_revision']))
+    submission_revision = (state.get('workflow_submission_state') or {}).get('revision')
+    if submission_revision:
+        revision = fingerprint(dict(inputs=revision, resubmission=submission_revision))
     request = state.get('_inventory_refresh_request') or {}
     if request.get('status') in ('running', 'publishing', 'cancelling', 'failed'):
         revision = fingerprint(dict(inputs=revision, pending_opening=request.get('token')))
@@ -53,29 +56,33 @@ def reconciliation_input_revision(host):
 
 
 def preparation_issues(host):
+    return [message for _, message in preparation_tasks(host)]
+
+
+def preparation_tasks(host):
     issues = []
     from GUI.InventoryRefresh import issue
     if issue(host):
-        issues.append(issue(host))
+        issues.append(('stockpile_inventories', issue(host)))
     if not host.included_stockpile_data():
-        issues.append('Select and submit stockpile inventories.')
+        issues.append(('stockpile_inventories', 'Select and submit stockpile inventories.'))
     from classes.ApprovedReconciliation import missing_sources, required_message
     from classes.MultiFeedSettings import unrouted_sources
     from classes.AMTReconciliation import chunks_ready
     unrouted = unrouted_sources(vars(host))
     if unrouted:
-        issues.append('Assign a Subset / permitted feed point for: ' + ', '.join(unrouted))
+        issues.append(('stockpile_inventories', 'Assign a Subset / permitted feed point for: ' + ', '.join(unrouted)))
     if not chunks_ready(vars(host)):
-        issues.append('Submit chunks for all selected AMT stockpiles.')
+        issues.append(('amt_stockpiles', 'Submit chunks for all selected AMT stockpiles.'))
     missing = missing_sources(vars(host), planning=True)
     if missing:
-        issues.append(required_message(missing))
+        issues.append(('grade_reconciliation', required_message(missing)))
     if getattr(host, 'file_path_choice', '') and host.destination_allocation_context() is None:
-        issues.append('Refresh Destination Reconciliation for the current site, start and guidance files.')
+        issues.append(('destination_progress', 'Refresh Destination Reconciliation for the current site, start and guidance files.'))
     try:
         host.validate_AMT_participation()
     except ValueError as exc:
-        issues.append(str(exc))
+        issues.append(('amt_stockpiles', str(exc)))
     return issues
 
 

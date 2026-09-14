@@ -17,6 +17,7 @@ def refresh(host):
     values = {key:vars(host)[key] for key in (*FIELDS, 'AMT_chunk_reconciliation_signature',
         'AMT_chunk_settings', 'hex_sequence_table', 'hex_sequence_table_argument') if key in vars(host)}
     implementation = type(host)
+    original_chunks = vars(host).get('hex_sequence_table')
 
     def work():
         shadow.data = shadow.fetch_data()
@@ -37,7 +38,10 @@ def refresh(host):
         data, prepared = result
         chart.excluded_footprints, chart.data = excluded, data
         host._amt_map_pending = False
-        for key, value in prepared.items(): setattr(host, key, value)
+        # A profile worker can publish newer chemistry while the map is decoding.
+        # Do not replace those source records with this older map snapshot.
+        if vars(host).get('hex_sequence_table') is original_chunks:
+            for key, value in prepared.items(): setattr(host, key, value)
         if not prepared: host.reconcile_saved_AMT_chunk_grade_streams(allow_pending=True)
         chart.update_chunk_settings(deepcopy(host.AMT_chunk_settings))
         chart.selected_points = deepcopy(host.hex_sequence_table or [])

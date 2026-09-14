@@ -260,14 +260,25 @@ class ManualReviewUITests(unittest.TestCase):
         from PyQt5.QtWidgets import QMainWindow, QPushButton
         from GUI.ReconciliationReview import ReconciliationReview
         from tests.test_amt_reconciliation_grain import submit
-        for post in (False, True):
-            with self.subTest(after_chunking=post):
+        cases = ((False, True, True), (True, True, True), (False, False, True), (False, False, False))
+        for post, with_amt, combined in cases:
+            with self.subTest(after_chunking=post, amt=with_amt, combined=combined):
                 values = state()
                 values['multi_feed_configuration']['amt_reconcile_after_chunking'] = post
                 submit(values)
+                if not with_amt:
+                    for field in ('stockpile_data', 'updated_stockpile_data'):
+                        values[field].pop('SP', None)
+                    values.update(AMT_stockpile_data={}, hex_sequence_table=[], hex_sequence_table_argument=[],
+                                  stockpile_data_AMT_column={})
+                if not combined:
+                    values['multi_feed_configuration']['mode'] = 'single'
                 values['opf_reconciliation_inputs'][OPFS[1]]['reconciliation_inputs']['samples'] = period(
                     opf=OPFS[1], brand='FB', blend=.8, regression=1.2)
-                values['transport_opening_history'] = dict(records=[dict(SOURCE='CLOSED_BUILD', opf=OPFS[1],
+                if not combined:
+                    values['opf_reconciliation_inputs'] = {}  # Single-OPF evidence lives in the primary inputs.
+                opening_opf = OPFS[1] if combined else OPFS[0]
+                values['transport_opening_history'] = dict(records=[dict(SOURCE='CLOSED_BUILD', opf=opening_opf,
                     wmt=10, OPENING_INVENTORY_FIELDS={'BASIS_WMT':100, 'FE_ROM':50, 'FE_PROD3':55})])
                 host = UserInputs.__new__(UserInputs)
                 QMainWindow.__init__(host)
@@ -284,9 +295,9 @@ class ManualReviewUITests(unittest.TestCase):
                 self.assertTrue(host.data_streams_submit_button.isEnabled())
                 identities = [r['detail']['source_identity'] for r in host.grade_reconciliation_registry['sources'].values()]
                 opening = [i for i in identities if i[3] == 'OPENING TRANSPORT / CLOSED_BUILD']
-                self.assertEqual([i[1] for i in opening], ['CC_OPF02'])
+                self.assertEqual([i[1] for i in opening], ['CC_OPF02' if combined else 'CC_OPF01'])
                 kind = 'amt_chunk' if post else 'amt'
-                self.assertEqual({i[1] for i in identities if i[2] == kind}, {'CC_OPF01', 'CC_OPF02'})
+                self.assertEqual({i[1] for i in identities if i[2] == kind}, {'CC_OPF01', 'CC_OPF02'} if with_amt else set())
                 approved = deepcopy(host.grade_reconciliation_registry)
                 host.data_stream_pending_build_targets = {}
                 host.data_stream_reconciliation = Mock()
@@ -294,23 +305,35 @@ class ManualReviewUITests(unittest.TestCase):
                              'set_page_enabled', 'advance_workspace', 'show_page', 'show_error_popup'):
                     setattr(host, name, Mock())
                 for name in ('data_streams_tab_index', 'stockpile_tab_index', 'define_fields_tab_index',
-                             'map_fields_tab_index', 'guidance_schedules_tab_index'):
+                             'map_fields_tab_index', 'guidance_schedules_tab_index', 'database_view_tab_index'):
                     setattr(host, name, name)
                 host.run_background_task = lambda message, work, done, *args, **kwargs: done(work())
                 with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('repeat factor search')):
                     host.handle_data_streams_submit()
                     self.assertFalse(missing_sources(vars(host), planning=True))
                     self.assertEqual(host.grade_reconciliation_registry, approved)
-                    profiles = host._combined_opf_profile_cache[1]
-                    self.assertAlmostEqual(profiles[OPFS[0]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
-                    self.assertAlmostEqual(profiles[OPFS[1]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 40)
+                    self.assertNotIn('_combined_opf_profile_cache', vars(host))
                     host.start_confidence_search_review()
                     self.assertEqual(host.grade_reconciliation_registry, approved)
+                    self.assertNotIn('_combined_opf_profile_cache', vars(host))
+                    if with_amt and not post:
+                        host.store_AMT_chunk_settings = Mock(return_value=True)
+                        host.validate_AMT_participation = Mock()
+                        self.assertTrue(host.store_hex_sequence_table(navigate=False))
+                        self.assertIn('_combined_opf_profile_cache', vars(host))
                     # Stop after Calendar's approval gate, before starting an optimisation.
                     host.validate_active_ratio_group_for_run = Mock(return_value=(False, 'stop fixture'))
                     with patch('GUI.InitialiseGUI.QMessageBox.information'):
                         host.store_calendar_inputs()
                     host.validate_active_ratio_group_for_run.assert_called_once()
+                    profiles = host._combined_opf_profile_cache[1]
+                    self.assertEqual(set(profiles), set(OPFS) if combined else {OPFS[0]})
+                    if with_amt:
+                        self.assertAlmostEqual(profiles[OPFS[0]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+                        self.assertAlmostEqual(profiles[OPFS[1]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 40)
+                    else:
+                        self.assertAlmostEqual(profiles[OPFS[0]]['inventory']['INV']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+                    self.assertEqual(host.grade_reconciliation_registry, approved)
                 host.show_page.assert_not_called()
                 host.show_error_popup.assert_not_called()
 

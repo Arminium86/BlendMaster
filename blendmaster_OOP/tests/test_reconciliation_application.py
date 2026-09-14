@@ -439,7 +439,9 @@ class ChunkAndIntegrationTests(unittest.TestCase):
                     self.assertEqual(view.hex_sequence_table, expected_chunks)
                     self.assertEqual(view.hex_sequence_table_argument, expected_chunks)
                     self.assertEqual(view.AMT_chunk_reconciliation_signature, "")
-                    self.assertNotIn("grade_streams", view.AMT_stockpile_data["SP1"][0])
+                    baseline = view.AMT_stockpile_data["SP1"][0]['grade_streams']
+                    self.assertTrue(baseline['modelled_rom'])
+                    self.assertFalse(baseline['adjusted_product'])
                     view.AMT_stockpile_table.blockSignals.assert_called_with(False)
                     # Raw refreshes leave factor application to submitted-chunk preparation.
                     if not saved_chunks:

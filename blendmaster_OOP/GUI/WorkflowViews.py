@@ -97,6 +97,9 @@ class WorkflowViews(QObject):
         self.timer.start(0)
 
     def available(self, page, enabled, reason=''):
+        from GUI.WorkflowSubmissions import blocked
+        if blocked(self.host, page):
+            enabled, reason = False, 'Resubmit the preceding Workspace tasks first.'
         location = self.host.page_locations.get(page)
         if location is None:
             return

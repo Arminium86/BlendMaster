@@ -74,27 +74,30 @@ def namespace_record(row, opf, config):
 
 
 def prepare_inventory_profiles(stockpiles, chunks, config):
+    from classes.PlanningPrerequisites import PlanningPrerequisiteError
     settings = config['multi_feed_settings']
     profiles = config.get('opf_profiles') or {}
     required = {p['opf'] for p in settings['tipping_points']}
     if required - profiles.keys():
-        raise ValueError('Prepare Data Streams for all selected OPFs in this scenario: ' + ', '.join(sorted(required - profiles.keys())))
+        raise PlanningPrerequisiteError('Submit Grade Reconciliation, then the remaining Workspace tasks for: ' + ', '.join(sorted(required - profiles.keys())), 'grade_reconciliation')
     for row, identity, footprint, amt in [*( (r, n, n, False) for n, r in stockpiles.items() if not r.get('amt')),
                                        *((r, str(r.get('hex') or r.get('chunk_id')), r.get('footprint'), True) for r in chunks)]:
+        if not amt and row.get('aps_build_only') and identity in config.get('aps_build_only_sources', ()):
+            continue  # A build-only APS destination cannot feed opening inventory.
         for opf, profile in profiles.items():
             if not any(p['opf'] == opf and route_allowed(settings, footprint, p['name']) for p in settings['tipping_points']):
                 continue
             source = profile['chunks' if amt else 'inventory'].get(identity)
             if not source or not (source.get('grade_streams') or source.get('GRADE_STREAMS')):
-                raise ValueError(f'{opf}: {identity} has no prepared grade streams. Submit Data Streams and AMT chunks in this scenario.')
+                raise PlanningPrerequisiteError(f'{opf}: {identity} has no prepared grade streams. Review and submit Stockpile Inventories, then follow the Workspace tasks before planning.', 'stockpile_inventories')
             if str(source.get('build') or source.get('BUILD') or '') != str(row.get('build') or row.get('BUILD') or ''):
-                raise ValueError(f'{opf}: {identity} reconciliation refers to a different inventory build. Refresh Data Streams in this scenario.')
+                raise PlanningPrerequisiteError(f'{opf}: {identity} reconciliation refers to a different inventory build. Submit Stockpile Inventories, then the remaining Workspace tasks.', 'stockpile_inventories')
             # Unselected APS build destinations retain warehouse-style keys in
             # the OPF profile, while the physical ledger normalises them.
             source_balance = float(source.get('balance', source.get('BALANCE')) or 0)
             physical_balance = float(row.get('balance', row.get('BALANCE')) or 0)
             if abs(source_balance - physical_balance) > 0.1:
-                raise ValueError(f'{opf}: {identity} reconciliation opening tonnes differ from the physical inventory. Refresh Data Streams and rebuild AMT chunks in this scenario.')
+                raise PlanningPrerequisiteError(f'{opf}: {identity} reconciliation opening tonnes differ from the physical inventory. Submit Stockpile Inventories, then the remaining Workspace tasks.', 'stockpile_inventories')
             row.setdefault('source_properties', {}).update(namespace_record(source, opf, config))
 
 

@@ -27,6 +27,8 @@ class Worker(QThread):
         except Exception as exc:
             self.error = dict(title=getattr(exc, 'title', 'Error'),
                 message=getattr(exc, 'user_message', traceback.format_exc()))
+            if getattr(exc, 'workflow_page', None):
+                self.error['workflow_page'] = exc.workflow_page
 
 
 class Delivery(QObject):
@@ -56,8 +58,12 @@ class Delivery(QObject):
             self.host.close_progress_dialog()
         try:
             self.success(value)
-        except Exception:
-            self.failed(dict(title='Result could not be applied', message=traceback.format_exc()))
+        except Exception as exc:
+            error = dict(title=getattr(exc, 'title', 'Result could not be applied'),
+                         message=getattr(exc, 'user_message', traceback.format_exc()))
+            if getattr(exc, 'workflow_page', None):
+                error['workflow_page'] = exc.workflow_page
+            self.failed(error)
 
     @pyqtSlot(object)
     def failed(self, error):

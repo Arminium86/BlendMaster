@@ -39,6 +39,7 @@ class InfeasibleRunError(BlendMasterRunError):
 
 
 class StockpileSelectionRunError(BlendMasterRunError):
+    workflow_page = 'stockpile_inventories'
     def __init__(self, stockpile_name):
         message = (
             f"APS Mining.csv contains transactions with destination stockpile '{stockpile_name}', "
@@ -516,12 +517,14 @@ class Run:
             calendar_inputs,
             expit_payload_transactions,
         )
+        solver_config['aps_build_only_sources'] = self._validated_build_only_sources(stockpile_data, calendar_inputs)
         if solver_config['multi_feed_settings']['mode'] == 'combined_opf':
             from classes.OPFSourceProfiles import register_profiles, prepare_inventory_profiles
             profiles = (site_context or {}).get('opf_profiles') or {}
             for opf, profile in profiles.items():
                 if profile.get('mine') != (site_context or {}).get('mine') or pd.Timestamp(profile.get('start')) != pd.Timestamp(start_time):
-                    raise ValueError(f'{opf}: reconciliation inputs are stale for this mine or scenario start. Refresh Data Streams in this scenario.')
+                    from classes.PlanningPrerequisites import PlanningPrerequisiteError
+                    raise PlanningPrerequisiteError(f'{opf}: prepared source grades refer to a different mine or scenario start. Submit Grade Reconciliation, then the remaining Workspace tasks.', 'grade_reconciliation')
             stockpile_data, hex_sequence_table = copy.deepcopy(stockpile_data), copy.deepcopy(hex_sequence_table)
             register_profiles(solver_config, profiles)
             prepare_inventory_profiles(stockpile_data, hex_sequence_table, solver_config)
@@ -1123,6 +1126,7 @@ class Run:
             # stockpile identifier.
             build_only["name"] = opening_name.lower()
             build_only["amt"] = False
+            build_only['aps_build_only'] = True
             build_only["reclaim_threshold"] = float(build_only.get("reclaim_threshold") or 0)
             stockpile_data[opening_name] = build_only
             existing_names.add(opening_name.upper())
@@ -1136,6 +1140,18 @@ class Run:
                 + ", ".join(added)
             )
         return stockpile_data
+
+    @staticmethod
+    def _validated_build_only_sources(stockpiles, calendar):
+        sources = []
+        for name, row in stockpiles.items():
+            if not row.get('aps_build_only'):
+                continue
+            states = calendar.get(f'stockpiles_{name.lower()}_state') or {}
+            if not states or any(str(value).strip().lower() != 'build' for value in states.values()):
+                raise StockpileSelectionRunError(name)
+            sources.append(name)
+        return sources
 
     @staticmethod
     def _ensure_direct_tip_ids(expit_payload_transactions):
