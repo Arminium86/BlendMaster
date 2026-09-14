@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
 from classes.DestinationBuildOrder import extract_build_order, inventory_areas, digest
 from classes.DestinationSupplementalLanes import add_24hr_lanes, SUPPLEMENTAL_ORIGIN
 from classes.DestinationProgress import progress_settings, resolve_progress, remaining_2wp_estimates, ESTIMATED_CAPACITY_BASIS
+from classes.GuidanceImport import import_display_name
 from setup.RecentDestinationActivity import RecentDestinationActivity
 from setup.ProductAssayHistory import awst
 
@@ -235,9 +236,12 @@ class DestinationProgressSetup(QWidget):
         self.status.setText(message)
         self.validation.clear()
 
-    def set_context(self, *, scenario_id, site, scenario_start, path, inventories, state=None, supplemental_path="", selected_agents=None):
+    def set_context(self, *, scenario_id, site, scenario_start, path, inventories, state=None, supplemental_path="", selected_agents=None, import_audit=None):
         areas = inventory_areas(inventories)
         start = awst(scenario_start).isoformat() if scenario_start is not None else None
+        self.context_label.setText(f"Site: {site or 'not set'} · Scenario start: {start or 'not set'} AWST · 2WP: {import_display_name(path, import_audit) or 'not selected'}")
+        if supplemental_path:
+            self.context_label.setText(self.context_label.text() + f" · 24-hour plan: {import_display_name(supplemental_path, import_audit)}")
         key = context_key(scenario_id, site, start, path, areas, supplemental_path, selected_agents)
         if key == self._context_key:
             return
@@ -248,9 +252,6 @@ class DestinationProgressSetup(QWidget):
         self.lookback.blockSignals(True)
         self.lookback.setValue(self._settings["lookback_hours"])
         self.lookback.blockSignals(False)
-        self.context_label.setText(f"Site: {site or 'not set'} · Scenario start: {start or 'not set'} AWST · 2WP: {Path(path).name if path else 'not selected'}")
-        if supplemental_path:
-            self.context_label.setText(self.context_label.text() + f" · 24-hour plan: {Path(supplemental_path).name}")
         self.update_activity_window()
 
     def allocation_context(self, *, scenario_id, site, scenario_start, path, inventories, supplemental_path="", selected_agents=None):

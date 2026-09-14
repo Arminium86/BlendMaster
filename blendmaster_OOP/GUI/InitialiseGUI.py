@@ -1584,9 +1584,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             if self.destination_progress.snapshot is None:
                 QTimer.singleShot(0, self.destination_progress.request_refresh)
 
-        if tab_index == getattr(self,'decision_levers_tab_index',None) and hasattr(self,'transport_rehandle_controls'):
-            self.transport_rehandle_controls.set_settings(getattr(self,'transport_settings',{}))
-
         if tab_index == getattr(self, 'transport_tab_index', None) and hasattr(self, 'transport_setup'):
             from GUI.MaterialFlowIntegration import sync_setup
             sync_setup(self)
@@ -2835,10 +2832,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.set_page_enabled(self.multi_feed_tab_index, False)
         from GUI.MaterialFlowIntegration import install_setup
         install_setup(self)
-        from GUI.TransportRehandleControls import TransportRehandleControls
-        self.transport_rehandle_controls = TransportRehandleControls()
-        self.transport_rehandle_controls.changed.connect(lambda settings: setattr(self,'transport_settings',settings))
-        layout.addWidget(self.transport_rehandle_controls)
 
         blend_section = QLabel("Blend Composition")
         blend_section.setStyleSheet(
@@ -3343,7 +3336,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             inventories=getattr(self, "stockpile_data", None) or {},
             state=getattr(self, "destination_progress_settings", None),
             supplemental_path=getattr(self, "file_path_24hr_choice", "") if int(getattr(self, "expit_mode_choice", 1) or 1) == 2 else "",
-            selected_agents=getattr(self, "selected_24hr_expit_agents", []) or [])
+            selected_agents=getattr(self, "selected_24hr_expit_agents", []) or [],
+            import_audit=vars(self).get('guidance_import_audit'))
         if (vars(self).get('_destination_restore_pending')
                 and not vars(self).get('project_load_restore_in_progress')):
             self.destination_progress.restore_prepared_state(vars(self).get('destination_progress_snapshot'))
@@ -9923,8 +9917,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             context = InventoryContext(UserInputs, copy.deepcopy(values))
             context._manual_grade_reconciliation = True
             context._reconciliation_application_cache = None
-            context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
-            context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
+            # Source methods must bind to each OPF view, not this primary-OPF snapshot.
             from GUI.ManualGradeReconciliation import calculate
             return calculate(context, UserInputs)
 

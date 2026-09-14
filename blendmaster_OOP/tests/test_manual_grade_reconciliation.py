@@ -256,6 +256,64 @@ class ManualReviewUITests(unittest.TestCase):
         from PyQt5.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_background_review_and_submit_preserve_each_opfs_source_approvals(self):
+        from PyQt5.QtWidgets import QMainWindow, QPushButton
+        from GUI.ReconciliationReview import ReconciliationReview
+        from tests.test_amt_reconciliation_grain import submit
+        for post in (False, True):
+            with self.subTest(after_chunking=post):
+                values = state()
+                values['multi_feed_configuration']['amt_reconcile_after_chunking'] = post
+                submit(values)
+                values['opf_reconciliation_inputs'][OPFS[1]]['reconciliation_inputs']['samples'] = period(
+                    opf=OPFS[1], brand='FB', blend=.8, regression=1.2)
+                values['transport_opening_history'] = dict(records=[dict(SOURCE='CLOSED_BUILD', opf=OPFS[1],
+                    wmt=10, OPENING_INVENTORY_FIELDS={'BASIS_WMT':100, 'FE_ROM':50, 'FE_PROD3':55})])
+                host = UserInputs.__new__(UserInputs)
+                QMainWindow.__init__(host)
+                self.addCleanup(host.deleteLater)
+                host.__dict__.update(values)
+                host.reconciliation_review = ReconciliationReview(host)
+                host.reconciliation_review.set_context(values['reconciliation_settings'], OPFS[0], ['FB'])
+                host.data_streams_submit_button = QPushButton(host)
+                host.run_background_task = Mock()
+                host.start_confidence_search_review()
+                _, work, success, _ = host.run_background_task.call_args.args
+                success(work())  # Exercise the GUI worker, not just the calculation helper.
+                self.assertFalse(missing_sources(vars(host), planning=True))
+                self.assertTrue(host.data_streams_submit_button.isEnabled())
+                identities = [r['detail']['source_identity'] for r in host.grade_reconciliation_registry['sources'].values()]
+                opening = [i for i in identities if i[3] == 'OPENING TRANSPORT / CLOSED_BUILD']
+                self.assertEqual([i[1] for i in opening], ['CC_OPF02'])
+                kind = 'amt_chunk' if post else 'amt'
+                self.assertEqual({i[1] for i in identities if i[2] == kind}, {'CC_OPF01', 'CC_OPF02'})
+                approved = deepcopy(host.grade_reconciliation_registry)
+                host.data_stream_pending_build_targets = {}
+                host.data_stream_reconciliation = Mock()
+                for name in ('capture_recon_factor_table', 'capture_data_stream_configuration', 'save_active_scenario_state',
+                             'set_page_enabled', 'advance_workspace', 'show_page', 'show_error_popup'):
+                    setattr(host, name, Mock())
+                for name in ('data_streams_tab_index', 'stockpile_tab_index', 'define_fields_tab_index',
+                             'map_fields_tab_index', 'guidance_schedules_tab_index'):
+                    setattr(host, name, name)
+                host.run_background_task = lambda message, work, done, *args, **kwargs: done(work())
+                with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('repeat factor search')):
+                    host.handle_data_streams_submit()
+                    self.assertFalse(missing_sources(vars(host), planning=True))
+                    self.assertEqual(host.grade_reconciliation_registry, approved)
+                    profiles = host._combined_opf_profile_cache[1]
+                    self.assertAlmostEqual(profiles[OPFS[0]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+                    self.assertAlmostEqual(profiles[OPFS[1]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 40)
+                    host.start_confidence_search_review()
+                    self.assertEqual(host.grade_reconciliation_registry, approved)
+                    # Stop after Calendar's approval gate, before starting an optimisation.
+                    host.validate_active_ratio_group_for_run = Mock(return_value=(False, 'stop fixture'))
+                    with patch('GUI.InitialiseGUI.QMessageBox.information'):
+                        host.store_calendar_inputs()
+                    host.validate_active_ratio_group_for_run.assert_called_once()
+                host.show_page.assert_not_called()
+                host.show_error_popup.assert_not_called()
+
     def test_last_adjusted_column_and_selected_source_refresh_signal(self):
         from GUI.ReconciliationReview import ReconciliationReview
         from PyQt5.QtTest import QSignalSpy

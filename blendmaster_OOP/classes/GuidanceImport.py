@@ -3,6 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 import pandas as pd
@@ -13,6 +14,20 @@ def file_revision(path):
     resolved = Path(path).resolve(strict=True)
     stat = resolved.stat()
     return (str(resolved), stat.st_size, stat.st_mtime_ns)
+
+
+def import_display_name(path, audits=()):
+    """Show the delivery filename while retaining the accepted snapshot path."""
+    if not path:
+        return ''
+    source = Path(path)
+    for record in reversed(audits or []):
+        if Path(record.get('path') or '').name == source.name and record.get('delivery_path'):
+            return Path(record['delivery_path']).name
+    # Older projects may retain the managed copy without its import audit.
+    if 'accepted_inputs' in {part.casefold() for part in source.parts}:
+        return re.sub(r'(?:-[0-9a-f]{16})+$', '', source.stem) + source.suffix
+    return source.name
 
 
 def retain_selection(selected, available):
