@@ -9205,7 +9205,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.data_stream_warning_label.hide()
         layout.addWidget(self.data_stream_warning_label)
         self.grade_reconciliation_widgets = [self.reconciliation_review,
-            factor_label, factor_help, self.recon_factor_table, self.data_stream_warning_label]
+            factor_label, factor_help, self.recon_factor_table]
 
         button_row = QHBoxLayout()
         self.refresh_data_streams_button = QPushButton("Refresh Snowflake Factors")
