@@ -75,13 +75,13 @@ class Delivery(QObject):
             self.host.show_error_popup(error)
 
 
-def run(host, message, work, success, failure=None, cancel_callback=None, show_progress=True):
+def run(host, message, work, success, failure=None, cancel_callback=None, show_progress=True,
+        *, readable_results=False):
+    held = []
     if show_progress:
+        from GUI.InputPreparationLocks import acquire
         host._background_input_locks = vars(host).get('_background_input_locks', 0) + 1
-        for name in ('tabs', 'scenario_toolbar'):
-            widget = vars(host).get(name)
-            if widget is not None:
-                widget.setEnabled(False)
+        held = acquire(host, readable_results)
         host.show_progress_dialog(message, cancel_callback)
     thread = Worker(host, work, get_database_path())
     delivery = Delivery(host, thread, success, failure, show_progress)
@@ -91,13 +91,9 @@ def run(host, message, work, success, failure=None, cancel_callback=None, show_p
         if task in host.background_tasks:
             host.background_tasks.remove(task)
         if show_progress:
+            from GUI.InputPreparationLocks import release
             host._background_input_locks = max(0, vars(host).get('_background_input_locks', 1) - 1)
-            controller = vars(host).get('site_workflow_controller')
-            if not host._background_input_locks and not (controller and (controller.active or getattr(controller, 'batch', None))):
-                for name in ('tabs', 'scenario_toolbar'):
-                    widget = vars(host).get(name)
-                    if widget is not None:
-                        widget.setEnabled(True)
+            release(host, held)
         delivery.deleteLater()
     thread.finished.connect(delivery.finished)
     thread.finished.connect(clean)

@@ -164,6 +164,9 @@ class SiteWorkflowController(QObject):
             return False
         try:
             contract = self.contract()
+            capture_sources = getattr(h, 'capture_stockpile_table_choices', None)
+            if callable(capture_sources):
+                capture_sources()
             if not getattr(h, 'mine_input_choice', None) or not getattr(h, 'crusher_input_choice', None):
                 raise ValueError('Select a configured site model first.')
             if not any((getattr(h, 'stockpile_data_use_column', None) or {}).values()):
@@ -197,8 +200,8 @@ class SiteWorkflowController(QObject):
         h._workflow_run_start = start
         h.start_time_choice = start
         h.start_time.setDateTime(QDateTime(start))
-        h.tabs.setEnabled(False)
-        h.scenario_selector.setEnabled(False)
+        from GUI.InputPreparationLocks import acquire
+        self.input_lock = acquire(h, readable_results=True)
         h.prepare_inputs_button.setEnabled(False)
         h.cancel_preparation_button.setVisible(True)
         self.timer.start()
@@ -298,7 +301,9 @@ class SiteWorkflowController(QObject):
         h.handle_guidance_schedules_submit()
         if not self.active:
             return
-        h.store_stockpile_table()
+        if h.store_stockpile_table() is False:
+            self.fail('Stockpile submission did not start. Review the inventory refresh status and retry preparation.')
+            return
         self.await_ready(lambda: bool(h.updated_stockpile_data))
 
     def stage_reconciliation(self):
@@ -318,7 +323,10 @@ class SiteWorkflowController(QObject):
         if not h.selected_AMT_data_source():
             self.await_ready()
             return
-        h.setup_AMT_stockpile_table()
+        # Inventory submission already prepared the opening rows and native
+        # table in this run. Do not repeat guard/compaction on the GUI thread.
+        if (vars(h).get('_inventory_refresh_request') or {}).get('status') != 'ready':
+            h.setup_AMT_stockpile_table()
         def submit():
             h.validate_AMT_participation()
             draw = vars(h).get('draw_AMT_map')
@@ -326,6 +334,9 @@ class SiteWorkflowController(QObject):
                 raise ValueError('AMT model preparation is unavailable.')
             footprints = sorted(h.selected_amt_footprints() - h.excluded_amt_footprints())
             settings = deepcopy(h.AMT_chunk_settings)
+            from GUI.InventoryStreamApplication import InventoryContext, FIELDS
+            values = {name: vars(h)[name] for name in FIELDS if name in vars(h)}
+            implementation = type(h)
             for footprint in footprints:
                 if footprint not in settings:
                     raise ValueError(f'Support must configure AMT chunk sizes for {footprint}.')
@@ -345,12 +356,16 @@ class SiteWorkflowController(QObject):
                         rows, message = shadow.auto_generate_chunks_for_footprint(footprint, rows)
                     if not any(str(row.get('footprint', '')).upper() == footprint.upper() for row in rows):
                         raise ValueError(f'{footprint}: {message}')
-                return shadow.return_hex_sequence()
-            def done(rows):
-                draw.selected_points = deepcopy(rows)
-                h.hex_sequence_table = rows
-                h.hex_sequence_table_argument = deepcopy(rows)
-                h.reconcile_saved_AMT_chunk_grade_streams(force=True)
+                context = InventoryContext(implementation, deepcopy(values))
+                context.draw_AMT_map = shadow
+                context.hex_sequence_table = shadow.return_hex_sequence()
+                context.hex_sequence_table_argument = deepcopy(context.hex_sequence_table)
+                context.reconcile_saved_AMT_chunk_grade_streams(force=True)
+                return {name: vars(context).get(name) for name in ('hex_sequence_table',
+                    'hex_sequence_table_argument', 'AMT_chunk_reconciliation_signature')}
+            def done(result):
+                for name, value in result.items(): setattr(h, name, value)
+                draw.selected_points = deepcopy(h.hex_sequence_table)
                 if not h.store_hex_sequence_table(navigate=False):
                     raise ValueError('AMT chunk submission did not complete. Review AMT Stockpiles.')
                 self.await_ready()
@@ -439,6 +454,9 @@ class SiteWorkflowController(QObject):
             self.batch.cancelled = True
         if self.active:
             self.cancel_requested = True
+            inventory = vars(self.host).get('_inventory_refresh_controller')
+            if inventory is not None and inventory.held:
+                inventory.request_cancel()
             self.host.run_program.request_abort()
             self.status('Cancellation requested; waiting for the current operation to stop.')
 
@@ -446,7 +464,7 @@ class SiteWorkflowController(QObject):
         if not self.active:
             return
         self.run.error = str(error.get('message', error) if isinstance(error, dict) else error)
-        self.finish('failed')
+        self.finish('cancelled' if self.cancel_requested else 'failed')
 
     def finish(self, status):
         if status == 'plan_prepared' and (getattr(self.host, 'plan_readiness', {}) or {}).get('status') != 'ready':
@@ -470,12 +488,13 @@ class SiteWorkflowController(QObject):
         self.timer.stop()
         self.waiting = self.after_wait = None
         self.host._workflow_run_start = None
+        from GUI.InputPreparationLocks import release
+        release(self.host, getattr(self, 'input_lock', []))
+        self.input_lock = []
         if self.batch:
             self.batch.site_finished()
             return
-        self.host.tabs.setEnabled(True)
         self.host.scenario_selector.setEnabled(True)
-        self.host.scenario_toolbar.setEnabled(True)
         self.host.prepare_inputs_button.setEnabled(True)
         self.host.cancel_preparation_button.setVisible(False)
 

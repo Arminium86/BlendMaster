@@ -111,7 +111,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
         chart = SimpleNamespace(data=old, db_path='old', fetch_data=lambda: pd.DataFrame({'hex': ['new']}))
         h = SimpleNamespace(draw_AMT_map=chart, excluded_amt_footprints=lambda: set(), AMT_chunk_settings={}, hex_sequence_table=[])
         pending = []
-        h.run_background_task = lambda message, work, done, failed: pending.append((work, done))
+        h.run_background_task = lambda message, work, done, failed, **kwargs: pending.append((work, done))
         refresh(h)
         self.assertIs(chart.data, old)
         self.assertTrue(h._amt_map_pending)
@@ -178,6 +178,22 @@ class WorkflowIntegrationTests(unittest.TestCase):
             self.assertEqual(c.run.status, 'inputs_ready')
             self.assertEqual([name for name, _ in seen], list(PREPARATION_STEPS))
             self.assertEqual(len({start for _, start in seen}), 1)
+
+    def test_full_preparation_keeps_result_pages_available_until_cancel_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            h = self.host(directory); c = h.site_workflow_controller
+            h.page_widgets = {'stockpile_inventories': QWidget(), 'optimised_blend_sequence': QWidget()}
+            c.stage_imports = lambda: c.await_ready(lambda: False)
+            self.assertTrue(c.start())
+            self.assertTrue(h.tabs.isEnabled())
+            self.assertTrue(h.page_widgets['optimised_blend_sequence'].isEnabled())
+            self.assertFalse(h.page_widgets['stockpile_inventories'].isEnabled())
+            h.background_tasks.append('busy')
+            c.cancel(); c.poll()
+            self.assertFalse(h.page_widgets['stockpile_inventories'].isEnabled())
+            h.background_tasks.clear(); c.poll()
+            self.assertTrue(h.page_widgets['stockpile_inventories'].isEnabled())
+            self.assertEqual(c.run.status, 'cancelled')
 
     def test_review_handoff_includes_readiness_details_and_final_arrivals(self):
         with tempfile.TemporaryDirectory() as directory:

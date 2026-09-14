@@ -145,6 +145,9 @@ class WorkflowViews(QObject):
         self.expit_inputs = inputs
 
     def apply_results(self):
+        self.available('optimised_blend_sequence', self.results['optimised'], 'Generate a plan to view its saved sequence.')
+        for page in ('blend_plan', 'material_destination_plan', 'material_flow_results', 'closing_rom_stocks_compliance'):
+            self.available(page, any(self.results.values()), 'Generate a plan to view its saved results.')
         if (vars(self.host).get('multi_feed_configuration') or {}).get('mode','single') != 'single':
             for page in ('setup_blends','blend_sequence'):
                 self.available(page,any(self.results.values()),'Generate a plan to start from its saved allocations.')
@@ -166,10 +169,11 @@ class WorkflowViews(QObject):
     def ensure_current_chart(self):
         host = self.host
         workflow = vars(host).get('site_workflow_controller')
-        if (vars(host).get('project_load_restore_in_progress') or vars(host).get('scenario_switch_in_progress')
-                or (workflow and workflow.active)):
-            return
         page = self.current_page()
+        from GUI.InputPreparationLocks import RESULT_PAGES
+        if (vars(host).get('project_load_restore_in_progress') or vars(host).get('scenario_switch_in_progress')
+                or (workflow and workflow.active and page not in RESULT_PAGES)):
+            return
         if page not in CHART_LOADERS or not host.is_page_enabled(page):
             return
         if page in ('optimised_blend_sequence', 'optimised_grade_profiles') and not self.results['optimised']:

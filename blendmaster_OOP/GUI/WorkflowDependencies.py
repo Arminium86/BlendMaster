@@ -14,7 +14,7 @@ def input_revision(host):
     # Manual rounding belongs to the independently generated manual plan.
     # Editing that policy must not invalidate a completed optimised plan.
     planning_settings = {**state, 'manual_ratio_rounding': None}
-    return fingerprint(dict(schema=4, settings=settings_signature(planning_settings),
+    revision = fingerprint(dict(schema=4, settings=settings_signature(planning_settings),
         site=state.get('active_scenario_id'), start=state.get('start_time_choice'),
         site_model={key: state.get(key) for key in ('hub_input_choice', 'mine_input_choice',
             'opf_input_choice', 'crusher_input_choice', 'selected_site_crushers')},
@@ -30,22 +30,32 @@ def input_revision(host):
             'expit_refresh_tolerance_minutes', 'reevaluate_aps_direct_tip_choice', 'aps_direct_tip_crusher_choice',
             'selected_two_wp_product_crushers', 'selected_haul_cycle_crushers', 'haul_cycle_crusher_mapping_choice')},
         imports=current_import_revisions(state.get('guidance_import_audit'))))
+    if state.get('opening_inputs_revision'):
+        revision = fingerprint(dict(inputs=revision, opening=state['opening_inputs_revision']))
+    request = state.get('_inventory_refresh_request') or {}
+    if request.get('status') in ('running', 'publishing', 'cancelling', 'failed'):
+        revision = fingerprint(dict(inputs=revision, pending_opening=request.get('token')))
+    return revision
 
 
 def reconciliation_input_revision(host):
     """Track reconciliation inputs without treating generated chunks as edits."""
     state = vars(host)
-    return fingerprint(dict(settings=settings_signature(state, evidence=True),
+    revision = fingerprint(dict(settings=settings_signature(state, evidence=True),
         reconciliation=state.get('reconciliation_settings'), factors=state.get('historical_recon_factors'),
         history=state.get('data_stream_input_cache_signature'), site=state.get('active_scenario_id'),
         start=state.get('start_time_choice'), opf=state.get('opf_input_choice'),
         inventory=state.get('inventory_data_request_signature'), amt=state.get('AMT_data_request_signature'),
         sources=state.get('stockpile_data_use_column'), amt_sources=state.get('stockpile_data_AMT_column'),
         exclusions=state.get('AMT_footprint_exclusions')))
+    return fingerprint(dict(inputs=revision, opening=state['opening_inputs_revision'])) if state.get('opening_inputs_revision') else revision
 
 
 def preparation_issues(host):
     issues = []
+    from GUI.InventoryRefresh import issue
+    if issue(host):
+        issues.append(issue(host))
     if not host.included_stockpile_data():
         issues.append('Select and submit stockpile inventories.')
     if vars(host).get('reconciliation_applied_revision') != reconciliation_input_revision(host):

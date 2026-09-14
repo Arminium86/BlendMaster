@@ -34,8 +34,6 @@ def apply(host, on_complete):
     if vars(host).get('_data_stream_application_pending'):
         return
     host._data_stream_application_pending = True
-    host.tabs.setEnabled(False)
-    host.scenario_selector.setEnabled(False)
     # Freeze references while controls are locked; copy the large AMT payload
     # on the worker so even the copy does not block painting/input feedback.
     values = {name: vars(host)[name] for name in FIELDS if name in vars(host)}
@@ -63,10 +61,6 @@ def apply(host, on_complete):
         return result
     def unlock():
         host._data_stream_application_pending = False
-        controller = vars(host).get('site_workflow_controller')
-        if not controller or not controller.active:
-            host.tabs.setEnabled(True)
-            host.scenario_selector.setEnabled(True)
     def finished(result):
         for name, value in result.items():
             setattr(host, name, value)
@@ -78,4 +72,4 @@ def apply(host, on_complete):
     def failed(error):
         unlock()
         host.show_error_popup(error)
-    host.run_background_task('Applying reconciliation to inventory and AMT…', work, finished, failed)
+    host.run_background_task('Applying reconciliation to inventory and AMT…', work, finished, failed, readable_results=True)

@@ -92,7 +92,7 @@ class MultiManualWorkspace(QWidget):
             self.status.setText(f'{name}: {len(self.report):,} saved {self.kind} allocation rows across {len(points)} tipping points.'+
                 (' Copy the optimised allocations to start editing a manual plan.' if self.kind=='optimised' else ''))
         self.host.run_background_task('Loading manual allocations…',work,done,
-            lambda error:self.status.setText(str(error)))
+            lambda error:self.status.setText(str(error)),show_progress=False)
 
     def show_point(self):
         self.intervals.blockSignals(True); self.intervals.clear()
@@ -141,6 +141,8 @@ class MultiManualWorkspace(QWidget):
         if not indices or self.kind!='manual': return
         edited=self.report.copy()
         try:
+            from GUI.InventoryRefresh import issue
+            if issue(self.host, include_workflow=True): raise ValueError(issue(self.host, include_workflow=True))
             from GUI.WorkflowDependencies import input_revision, manual_revision
             if vars(self.host).get('manual_input_revision') != manual_revision(self.host):
                 raise ValueError('The saved allocations use an earlier input version. Recalculate and copy the optimised plan for the current inputs before editing.')

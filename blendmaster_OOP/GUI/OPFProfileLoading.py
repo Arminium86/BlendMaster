@@ -16,6 +16,7 @@ def ensure(host, on_complete, *, on_error=None):
     if config.get('mode') != 'combined_opf':
         return False
     if vars(host).get('_opf_profile_preparation_pending'):
+        vars(host).setdefault('_opf_profile_waiters', []).append((on_complete, on_error))
         return True
     opfs = sorted({point['opf'] for point in config.get('tipping_points', [])})
     bundles = vars(host).get('opf_reconciliation_inputs') or {}
@@ -28,6 +29,7 @@ def ensure(host, on_complete, *, on_error=None):
     values = {key: vars(host)[key] for key in (*SOURCE_FIELDS, 'active_scenario_id') if key in vars(host)}
     implementation = type(host)
     host._opf_profile_preparation_pending = True
+    host._opf_profile_waiters = [(on_complete, on_error)]
 
     def work():
         state = deepcopy(values)
@@ -35,18 +37,29 @@ def ensure(host, on_complete, *, on_error=None):
 
     def done(result):
         host._opf_profile_preparation_pending = False
+        waiters = vars(host).pop('_opf_profile_waiters', [])
+        def complete_all():
+            for complete, error in waiters:
+                try:
+                    complete()
+                except Exception as exc:
+                    (error or host.show_error_popup)(str(exc))
+        def fail_all(error):
+            for _, failure in waiters:
+                (failure or host.show_error_popup)(error)
         if result[0] != profile_signature(vars(host), opfs):
             # AMT map delivery may complete while the controls are locked.
             # Rebuild from that newer snapshot instead of publishing stale grades.
-            if not ensure(host, on_complete, on_error=on_error):
-                on_complete()
+            if not ensure(host, complete_all, on_error=fail_all):
+                complete_all()
             return
         host._combined_opf_profile_cache = result
-        on_complete()
+        complete_all()
 
     def failed(error):
         host._opf_profile_preparation_pending = False
-        (on_error or host.show_error_popup)(error)
+        for _, failure in vars(host).pop('_opf_profile_waiters', []):
+            (failure or host.show_error_popup)(error)
 
-    host.run_background_task('Preparing independent OPF source grades…', work, done, failed)
+    host.run_background_task('Preparing independent OPF source grades…', work, done, failed, readable_results=True)
     return True

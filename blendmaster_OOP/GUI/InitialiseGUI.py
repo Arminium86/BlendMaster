@@ -1462,6 +1462,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "stockpile_data", "stockpile_data_use_column",
             "stockpile_data_AMT_column", "updated_stockpile_data", "AMT_stockpile_data",
             "inventory_data_request_signature",
+            "opening_inputs_revision",
             "AMT_data_request_signature", "AMT_enrichment_signature",
             "AMT_chunk_reconciliation_signature",
             "AMT_refresh_tolerance_minutes", "AMT_last_refresh_datetime",
@@ -1861,6 +1862,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 state.get("aps_guidance_request_signature") or ""
             )
             self.stockpile_data = copy.deepcopy(state.get("stockpile_data"))
+            self.opening_inputs_revision = state.get('opening_inputs_revision')
+            self._inventory_refresh_request = {}
             self.inventory_data_request_signature = str(
                 (
                     state.get("inventory_data_request_signature")
@@ -3080,6 +3083,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return {}
         cached = reusable_cache(vars(self), opfs)
         if not cached:
+            if 'background_tasks' in vars(self):
+                from GUI.OPFProfileLoading import ensure
+                from GUI.WorkflowViews import schedule
+                ensure(self, lambda: schedule(self, charts=True))
+                return {}
             cached = (profile_signature(vars(self), opfs), build_profiles(vars(self), opfs, UserInputs))
             self._combined_opf_profile_cache = cached
         bundle = vars(self).get('continuous_assay_state') or {}
@@ -10110,6 +10118,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             lambda error_message: self.handle_data_stream_inputs_error(
                 error_message, request_signature
             ),
+            readable_results=True,
         )
 
     def data_stream_fetch_snapshot(self):
@@ -11915,9 +11924,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.progress_dialog.setFixedWidth(dialog_width)
 
     def run_background_task(self, message, work_fn, on_success, on_error=None,
-                            cancel_callback=None, show_progress=True):
+                            cancel_callback=None, show_progress=True, *, readable_results=False):
         from GUI.BackgroundTasks import run
-        return run(self, message, work_fn, on_success, on_error, cancel_callback, show_progress)
+        workflow = vars(self).get('site_workflow_controller')
+        readable_results = readable_results or bool(workflow and workflow.active)
+        locked = vars(self).get('_preparation_widget_locks') or {}
+        readable_results = readable_results or any(widget in locked for widget in (vars(self).get('page_widgets') or {}).values())
+        return run(self, message, work_fn, on_success, on_error, cancel_callback, show_progress,
+                   readable_results=readable_results)
 
     def browse_file(self):
         from GUI.GuidanceImports import GuidanceImports
@@ -13515,7 +13529,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def fetch_site_configuration_data(self, request_signature=None):
-        stockpile_data = self.fetch_stockpile_data()
+        workflow = vars(self).get('site_workflow_controller')
+        if workflow and workflow.active:
+            import tempfile
+            from database.DatabaseContext import database_scope
+            with tempfile.TemporaryDirectory(prefix='blendmaster-inventory-') as directory:
+                with database_scope(os.path.join(directory, 'opening.db')):
+                    stockpile_data = self.fetch_stockpile_data()
+        else:
+            stockpile_data = self.fetch_stockpile_data()
         return {
             "stockpile_data": stockpile_data,
             "inventory_data_request_signature": (
@@ -13558,6 +13580,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.updated_stockpile_data_keys = {}.keys()
         self.AMT_stockpile_data = {}
         self.inventory_data_request_signature = ""
+        self.opening_inputs_revision = None
+        self._inventory_refresh_request = {}
         self.AMT_footprint_exclusions = {}
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
@@ -13644,7 +13668,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # Refreshing evidence is not permission to discard a manual plan or its
         # target policy. Existing results remain historical until recalculated.
         self.scenario_report_refresh_pending = True
-        if reset_database:
+        workflow = vars(self).get('site_workflow_controller')
+        if reset_database and not (workflow and workflow.active):
             self.reset_workflow_tabs_for_scenario()
             DatabaseManager.clear_all_tables(get_database_path())
             self.seed_active_scenario_database(force=True)
@@ -13785,10 +13810,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.manual_steady_states = []
             self.manual_plan_states = {}
             self.populate_product_build_table()
-            DatabaseManager.clear_all_tables(get_database_path())
-            self.opening_stockpile_inventories.save_to_database(
-                self.stockpile_data
-            )
+            workflow = vars(self).get('site_workflow_controller')
+            if not (workflow and workflow.active):
+                DatabaseManager.clear_all_tables(get_database_path())
+                self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
         for key, value in preserved_model_inputs.items():
             if value is not None:
                 setattr(self, key, value)
@@ -17468,6 +17493,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def store_stockpile_table(self):
         """Store stockpile details entered by the user, filtering by the 'Use' column."""
+        if not vars(self).get('project_load_restore_in_progress') and 'background_tasks' in vars(self):
+            from GUI.InventoryRefresh import start
+            return start(self)
         
         updated_stockpile_data = {}
         max_rate_column = self.stockpile_table_column_index(
@@ -17909,6 +17937,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.blend_plan_backup_destinations = {}
 
     def clear_manual_blending_plan(self):
+        from GUI.InventoryRefresh import issue
+        if issue(self, include_workflow=True):
+            QMessageBox.information(self, 'Opening inputs', issue(self, include_workflow=True))
+            return False
         has_manual_data = bool(
             getattr(self, "saved_blends_for_schedule", [])
             or getattr(
@@ -17996,6 +18028,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def prepopulate_manual_from_optimised_result(
         self, automatic=False, source_plan_id=None
     ):
+        from GUI.InventoryRefresh import issue
+        if issue(self, include_workflow=not automatic):
+            if not automatic:
+                QMessageBox.information(self, 'Opening inputs', issue(self, include_workflow=True))
+            return False
         if source_plan_id is None:
             selected = getattr(self, 'selected_optimisation_plan_id', None)
             source_plan_id = selected() if callable(selected) else getattr(self, 'active_manual_plan_id', 'Primary')
@@ -18890,7 +18927,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 "No AMT stockpiles are selected for refresh.",
             )
             return
-        self.setup_AMT_stockpile_table(force_refresh=True)
+        if 'background_tasks' in vars(self) and not vars(self).get('project_load_restore_in_progress'):
+            from GUI.InventoryRefresh import start
+            start(self, force=True)
+        else:
+            self.setup_AMT_stockpile_table(force_refresh=True)
 
     def setup_AMT_stockpile_table(self, force_refresh=False):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -19210,15 +19251,21 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def finish_AMT_stockpile_table(
         self, data_source, AMT_stockpile_data, reuse_prepared=False,
-        refresh_prepared_map=False
+        refresh_prepared_map=False, *, prepared=False, prepared_totals=None
     ):
         headers = self.amt_stockpile_headers()
-        self.AMT_stockpile_data = compact_amt_stockpile_data(
-            guard_amt_snapshot(self.included_AMT_snapshot(AMT_stockpile_data), copy_unchanged=False)
-        )
-        self.prune_zeroed_amt_chunks()
+        self.AMT_stockpile_table.setColumnCount(len(headers))
+        self.AMT_stockpile_table.setHorizontalHeaderLabels(headers)
+        self.AMT_stockpile_table.verticalHeader().setVisible(False)
+        if prepared:
+            self.AMT_stockpile_data = AMT_stockpile_data
+        else:
+            self.AMT_stockpile_data = compact_amt_stockpile_data(
+                guard_amt_snapshot(self.included_AMT_snapshot(AMT_stockpile_data), copy_unchanged=False)
+            )
+            self.prune_zeroed_amt_chunks()
         zeroed = zeroed_amt_footprints(self.AMT_stockpile_data)
-        if zeroed:
+        if zeroed and not prepared:
             reuse_prepared = False
         if not reuse_prepared:
             if self.AMT_stockpile_data:
@@ -19266,12 +19313,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     self.AMT_stockpile_table.setItem(row_idx, headers.index("AMT Total WMT"), status)
                     continue
 
-                amt_total_wmt, inventory_total_wmt = (
-                    self.AMT_footprint_totals(stockpile_name, attributes)
-                )
-                raw_signed_amt_wmt = self.AMT_raw_signed_footprint_total(
-                    stockpile_name
-                )
+                if prepared_totals is not None and stockpile_name in prepared_totals:
+                    amt_total_wmt, inventory_total_wmt, raw_signed_amt_wmt = prepared_totals[stockpile_name]
+                else:
+                    amt_total_wmt, inventory_total_wmt = self.AMT_footprint_totals(stockpile_name, attributes)
+                    raw_signed_amt_wmt = self.AMT_raw_signed_footprint_total(stockpile_name)
                 chunk_setting = self.get_AMT_chunk_setting(stockpile_name)
                 average_reclaim_rate = chunk_setting.get(
                     "average_reclaim_rate", DEFAULT_AMT_RECLAIM_RATE_TPH
@@ -19342,7 +19388,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.AMT_stockpile_table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeToContents
             )
-        self.store_AMT_chunk_settings()
+        if not prepared:
+            self.store_AMT_chunk_settings()
         self.AMT_stockpile_table.blockSignals(False)
         self.ensure_AMT_map_panel()
 
@@ -21124,6 +21171,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     QMessageBox.information(self, 'Planning inputs need preparation', '\n'.join(issues))
                 return
 
+        from GUI.OPFProfileLoading import ensure
+        if ensure(self, self.store_calendar_inputs):
+            return
+
         valid_ratio_group, ratio_message = self.validate_active_ratio_group_for_run()
         if not valid_ratio_group:
             QMessageBox.information(
@@ -21990,7 +22041,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             if database == get_database_path() and plan_id == self.selected_optimisation_plan_id():
                 self.gantt_chart_view.set_report(report, points)
         self.run_background_task('Loading blend sequence…',
-            lambda: read_report(database, 'optimised', plan_id), done)
+            lambda: read_report(database, 'optimised', plan_id), done, show_progress=False)
 
     def resize_results_chart_area(self):
         desired_height = 520
@@ -25686,6 +25737,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return transactions
 
     def create_manual_blend_planner(self):
+        from GUI.InventoryRefresh import issue
+        if issue(self, include_workflow=True):
+            raise ManualBlendPlanningError(issue(self, include_workflow=True))
+        from GUI.OPFProfileLoading import ensure
+        if ensure(self, lambda: None):
+            raise ManualBlendPlanningError('OPF source grades are being prepared. Calculate the manual plan when preparation finishes.')
         start_time = (
             getattr(self, "start_time_choice", None)
             or getattr(self, "default_start_datetime", None)
@@ -26237,6 +26294,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def save_state(self, show_success=True, *, close_after=False, destination=None):
         """Capture the application state and begin an atomic background save."""
         if vars(self).get("_project_save_pending"):
+            return False
+        from GUI.InventoryRefresh import issue
+        if issue(self, include_workflow=True):
+            QMessageBox.information(self, 'Opening inputs', issue(self, include_workflow=True))
             return False
 
         if hasattr(self, "hub_input"):
@@ -26808,6 +26869,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             loaded_state.get("planning_period_count_choice", 3)
         )
         self.stockpile_data = loaded_state.get("stockpile_data", None)
+        self.opening_inputs_revision = loaded_state.get('opening_inputs_revision')
+        self._inventory_refresh_request = {}
         self.project_load_refresh_current_time = bool(
             loaded_state.get("project_load_refresh_current_time", False)
         )
@@ -27209,6 +27272,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.data_stream_reconciliation = DataStreamReconciliation()
         self.opening_stockpile_inventories = None
         self.inventory_data_request_signature = ""
+        self.opening_inputs_revision = None
+        self._inventory_refresh_request = {}
         self.saved_blends_for_schedule = None
         self.start_time_choice = None
         self.planning_period_count_choice = 3

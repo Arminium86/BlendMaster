@@ -136,7 +136,7 @@ def install(host):
     host.blend_plan_workflow_tabs = plan_tabs
     from GUI.OperationalBlendPlanView import OperationalBlendPlanView
     host.manual_operational_blend_plans = OperationalBlendPlanView(host, plan_type='manual',
-        run_async=lambda work, done, failed: host.run_background_task('Loading manual tipping-point plans…', work, done, failed))
+        run_async=lambda work, done, failed: host.run_background_task('Loading manual tipping-point plans…', work, done, failed, show_progress=False))
     plan_tabs.addTab(host.manual_operational_blend_plans, 'Manual per tipping point')
     host.register_page('blend_plan', host.workspace_tabs, plan_page, 'Blend Plan')
     plan_tabs.currentChanged.connect(lambda: enter_page(host, 'blend_plan'))
@@ -213,7 +213,8 @@ def enter_page(host, page_id):
     if getattr(host, 'scenario_switch_in_progress', False):
         return True
     controller = vars(host).get('site_workflow_controller')
-    if controller and controller.active:
+    from GUI.InputPreparationLocks import RESULT_PAGES
+    if controller and controller.active and page_id not in RESULT_PAGES:
         return True
     refresh_context(host)
     if page_id in ('setup_blends', 'blend_sequence') and (getattr(host,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':

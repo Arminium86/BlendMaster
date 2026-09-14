@@ -110,7 +110,8 @@ class WorkflowNavigation:
     def show_page(self, page_id, force=False):
         page_id = product_targets_identifier(page_id)
         controller = vars(self).get('site_workflow_controller')
-        if controller and controller.active and page_id != 'calendar':
+        from GUI.InputPreparationLocks import RESULT_PAGES
+        if controller and controller.active and page_id != 'calendar' and page_id not in RESULT_PAGES:
             return
         if page_id == 'reports':
             page_id = 'blend_plan'

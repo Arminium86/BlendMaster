@@ -83,6 +83,23 @@ start time and site/database context; results from an obsolete context are
 discarded. Cancel waits for an in-flight operation to stop before unlocking
 inputs. Individual stages have a 30-minute timeout.
 
+Submitting Stockpile Inventories prepares the new opening selection in a worker
+while the previous saved plan remains available for viewing. Compatible AMT
+footprints are reused; new or incompatible footprints are fetched. Refresh AMT
+Data explicitly requests a fresh snapshot of the selected footprints. The inline
+status offers cancellation, then Retry refresh or Keep previous inputs if the
+request fails or is cancelled. Cancelling waits for an in-flight warehouse query
+to return. Keeping the previous inputs also restores selection and edited
+inventory cells.
+
+Opening inventory and AMT tables are replaced together only after preparation
+and validation succeed. Existing optimised and manual reports are retained.
+Pending or failed refreshes block dependent calculations and project saving;
+after success, the new opening version requires reconciliation preparation and
+the old results remain historical until recalculated. Prepare Inputs also keeps
+saved-result navigation available through its background stages. See
+[inventory refresh implementation and verification](INVENTORY_REFRESH.md).
+
 The desktop scheduler checks the **active site** while a Support, Owner or Agent
 session is running. `refresh_minutes` controls the check interval; the source
 cadences describe expected deliveries. It does not wake a closed application or

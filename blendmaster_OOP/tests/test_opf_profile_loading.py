@@ -60,6 +60,28 @@ class OPFProfileLoadingTests(unittest.TestCase):
         self.assertEqual(delivered, [{'balance': 200}])
         host.deleteLater()
 
+    def test_plan_requested_during_profile_loading_continues_after_same_worker(self):
+        host, completed = self.host(), []
+        with patch('GUI.OPFProfileLoading.build_profiles', return_value={'ready': True}) as build:
+            self.assertTrue(ensure(host, lambda: completed.append('view')))
+            self.assertTrue(ensure(host, lambda: completed.append('calculation')))
+            self.drain(host)
+        build.assert_called_once()
+        self.assertEqual(completed, ['view', 'calculation'])
+        self.assertNotIn('_opf_profile_waiters', vars(host))
+        host.deleteLater()
+
+    def test_pending_profile_consumers_all_receive_failure_without_calculating(self):
+        host, completed, failures = self.host(), Mock(), []
+        with patch('GUI.OPFProfileLoading.build_profiles', side_effect=ValueError('missing evidence')):
+            ensure(host, completed, on_error=lambda error: failures.append(('view', error)))
+            ensure(host, completed, on_error=lambda error: failures.append(('calculation', error)))
+            self.drain(host)
+        completed.assert_not_called()
+        self.assertEqual([name for name, _ in failures], ['view', 'calculation'])
+        self.assertFalse(host._opf_profile_preparation_pending)
+        host.deleteLater()
+
     def test_missing_evidence_defers_to_existing_reconciliation_workflow(self):
         host = self.host()
         host.opf_reconciliation_inputs = {}
