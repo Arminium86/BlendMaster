@@ -46,7 +46,7 @@ class SequenceHandoverTests(unittest.TestCase):
             stored_blend_sequence_table_for_gantt=deepcopy(transfer['sequence_rows']),
             update_blend_id=Mock(), update_early_start_conditional_format=Mock(),
             start_or_update_dash_manual_chart_thread=Mock(), load_manual_gantt_chart=Mock(),
-            set_page_enabled=Mock(), grade_profile_tab_index=1)
+            set_page_enabled=Mock(), advance_workspace=Mock(), grade_profile_tab_index=1)
         for name in ('collect_blend_sequence_table_rows', 'preserve_optimised_sequence_metadata',
                      'update_remaining_hrs', 'apply_manual_gantt_rows_to_table',
                      'populate_blend_sequence_table_if_project_is_loaded', 'submit_blend_sequence_table_to_gantt'):
@@ -72,6 +72,7 @@ class SequenceHandoverTests(unittest.TestCase):
         with patch.object(QMessageBox, 'warning') as warning, patch.object(QMessageBox, 'information'):
             self.assertTrue(view.submit_blend_sequence_table_to_gantt())
         warning.assert_not_called()
+        view.advance_workspace.assert_called_once_with('blend_sequence')
         self.assertAlmostEqual(20, view.report.loc[view.report.source == 'SP1', 'source_actual_tonnes'].sum())
         self.assertAlmostEqual(32, view.report.loc[view.report.source == 'GB1', 'source_actual_tonnes'].sum())
 

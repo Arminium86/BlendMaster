@@ -139,6 +139,12 @@ def install(host):
         run_async=lambda work, done, failed: host.run_background_task('Loading manual tipping-point plans…', work, done, failed, show_progress=False))
     plan_tabs.addTab(host.manual_operational_blend_plans, 'Manual per tipping point')
     host.register_page('blend_plan', host.workspace_tabs, plan_page, 'Blend Plan')
+    continue_plan = QPushButton('Continue to Material Destination Plan')
+    continue_plan.clicked.connect(lambda: host.advance_workspace('blend_plan'))
+    plan_layout.addWidget(continue_plan)
+    continue_sequence = QPushButton('Continue to Manual Blending Dashboard')
+    continue_sequence.clicked.connect(lambda: host.advance_workspace('optimised_blend_sequence'))
+    host.results_layout.addWidget(continue_sequence)
     plan_tabs.currentChanged.connect(lambda: enter_page(host, 'blend_plan'))
     tabs, index = host.page_locations['reports']
     tabs.setTabVisible(index, False)

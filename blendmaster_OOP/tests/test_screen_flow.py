@@ -521,10 +521,10 @@ class ScreenFlowStateTests(unittest.TestCase):
         self.assertLess(events.index("routes"), events.index(table_event))
         self.assertLess(events.index(table_event), events.index("auto_select"))
         self.assertLess(events.index("auto_select"), events.index("save_state"))
-        self.assertLess(events.index("save_state"), events.index(("show", "stockpile_inventories", True)))
+        self.assertLess(events.index("save_state"), events.index(("show", "stockpile_inventories", False)))
         self.assertIn(table_event, events)
         self.assertIn(("enable", "stockpile_inventories", True), events)
-        self.assertIn(("show", "stockpile_inventories", True), events)
+        self.assertIn(("show", "stockpile_inventories", False), events)
 
     def test_data_stream_submission_does_not_rewrite_inventory_table(self):
         window = UserInputs.__new__(UserInputs)
@@ -555,6 +555,8 @@ class ScreenFlowStateTests(unittest.TestCase):
         window.define_fields_tab_index = "define_fields"
         window.map_fields_tab_index = "map_fields"
         window.data_streams_tab_index = "data_streams"
+        window.database_view_tab_index = "database_view"
+        window.advance_workspace = Mock()
         window.guidance_schedules_tab_index = "guidance_schedules"
         window.stockpile_data_AMT_column = {}
         window.hex_sequence_table = [1]
@@ -567,7 +569,8 @@ class ScreenFlowStateTests(unittest.TestCase):
         UserInputs.finish_data_stream_submission(window)
 
         window.opening_stockpile_inventories.save_to_database.assert_not_called()
-        window.open_database_view.assert_called_once_with(navigate=True)
+        window.open_database_view.assert_not_called()
+        window.advance_workspace.assert_called_once_with('grade_reconciliation')
 
     def test_field_definition_exchange_round_trip_preserves_contract(self):
         definitions = [{
@@ -1627,6 +1630,7 @@ class ScreenFlowStateTests(unittest.TestCase):
         }
         legacy_chunk = {
             "footprint": "OPF02_RP01_0501",
+            "balance": 100,
             "hex": "OPF02_RP01_0501_CHUNK_001",
             "grade_streams": {
                 "modelled_rom": {
@@ -1647,6 +1651,12 @@ class ScreenFlowStateTests(unittest.TestCase):
         window.hex_sequence_table = [legacy_chunk]
         window.hex_sequence_table_argument = [legacy_chunk]
 
+        # Legacy fallbacks now require the same explicit approval as new sources.
+        window.start_time_choice = datetime(2026, 8, 9)
+        window._manual_grade_reconciliation = True
+        window.reconciliation_application().apply(legacy_chunk['grade_streams'], source_id=legacy_chunk['footprint'],
+            source_kind='amt', source_wmt=100, contributing_blocks=[])
+        window._manual_grade_reconciliation = False
         window.reconcile_saved_AMT_chunk_grade_streams()
 
         for rows in (
@@ -1664,6 +1674,7 @@ class ScreenFlowStateTests(unittest.TestCase):
 
     def test_amt_chunk_reconciliation_rebuilds_once_per_input_signature(self):
         window = UserInputs.__new__(UserInputs)
+        window.grade_reconciliation_registry = {}
         window.product_brand_labels_choice = ["FB"]
         window.opf_input_choice = "CC OPF02"
         window.mine_input_choice = "CC"

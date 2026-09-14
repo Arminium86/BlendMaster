@@ -332,7 +332,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
         host.can_preserve_optimised_sequence = UserInputs.can_preserve_optimised_sequence
         for name in ('setup_sequence_tab', 'populate_blend_sequence_table_if_project_is_loaded',
                      'apply_manual_gantt_rows_to_table', 'start_or_update_dash_manual_chart_thread',
-                     'load_manual_gantt_chart', 'set_page_enabled', 'show_page'):
+                     'load_manual_gantt_chart', 'set_page_enabled', 'show_page', 'advance_workspace'):
             setattr(host, name, Mock())
         host.manual_gantt_view = SimpleNamespace(reload=Mock())
         host.blend_sequence_tab_index = 1
@@ -341,6 +341,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
             UserInputs.store_blend_results(host)
         self.assertEqual(host.saved_blends_for_schedule[0]['Max Duration (hrs)'], 10.136389)
         self.assertEqual(host.stored_blend_sequence_table_for_gantt, sequence)
+        host.advance_workspace.assert_called_once_with('setup_blends')
 
     def test_manual_rate_and_recipe_edits_require_regeneration(self):
         from GUI.WorkflowDependencies import manual_revision

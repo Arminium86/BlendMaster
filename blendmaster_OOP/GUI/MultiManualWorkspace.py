@@ -43,6 +43,10 @@ class MultiManualWorkspace(QWidget):
         self.sources.setAlternatingRowColors(True); layout.addWidget(self.sources,1)
         self.note=QLabel('Edit tonnes or timing for the selected interval. Shared stock, Calendar limits and Conveyor/COS arrivals are checked across every tipping point before applying.')
         self.note.setWordWrap(True); layout.addWidget(self.note)
+        continue_button = QPushButton('Continue to Blend Plan' if sequence else 'Continue to Manual Blend Sequence')
+        continue_button.setToolTip('Apply any interval edits before continuing.')
+        continue_button.clicked.connect(lambda: host.advance_workspace('blend_sequence' if sequence else 'setup_blends'))
+        layout.addWidget(continue_button)
 
     def refresh(self):
         selected=self.plans.currentText() or getattr(self.host,'active_manual_plan_id','Primary') or 'Primary'

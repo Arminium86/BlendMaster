@@ -84,6 +84,7 @@ class EvidenceModel(QAbstractTableModel):
 class DestinationProgressSetup(QWidget):
     settingsChanged = pyqtSignal(dict)
     auditReady = pyqtSignal(dict)
+    continueRequested = pyqtSignal()
 
     def __init__(self, parent=None, *, service=None, run_async):
         super().__init__(parent)
@@ -168,6 +169,9 @@ class DestinationProgressSetup(QWidget):
         footer.setWordWrap(True)
         footer.setStyleSheet("color: #526474;")
         layout.addWidget(footer)
+        self.continue_button = QPushButton('Continue to Decision Levers')
+        self.continue_button.clicked.connect(self.continueRequested)
+        layout.addWidget(self.continue_button)
         self.refresh.clicked.connect(lambda: self.request_refresh(force=True))
         self.lookback.valueChanged.connect(self.lookback_changed)
         self.table.itemSelectionChanged.connect(self.show_details)

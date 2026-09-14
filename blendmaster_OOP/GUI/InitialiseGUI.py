@@ -3277,6 +3277,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.destination_progress.settingsChanged.connect(
             lambda state: setattr(self, "destination_progress_settings", copy.deepcopy(state)))
         self.destination_progress.auditReady.connect(self.store_destination_order_audit)
+        self.destination_progress.continueRequested.connect(self.continue_from_destination_progress)
+
+    def continue_from_destination_progress(self):
+        if self.destination_allocation_context() is None:
+            self.destination_progress.status.setText('Refresh and review the current destinations before continuing.')
+            return False
+        self.save_active_scenario_state()
+        self.advance_workspace('destination_progress')
+        return True
 
     def destination_rule_context(self):
         return dict(
@@ -3884,7 +3893,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if not self.store_product_targets():
             return
         self.save_active_scenario_state()
-        self.navigate_to_decision_levers()
+        self.advance_workspace('product_targets')
 
     def navigate_to_decision_levers(self):
         self.load_solver_config_inputs()
@@ -3897,9 +3906,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if not self.store_solver_config_inputs():
             return
         self.save_active_scenario_state()
-        self.setup_calendar()
-        self.set_page_enabled(self.calendar_tab_index, True)
-        self.show_page(self.calendar_tab_index)
+        self.advance_workspace('decision_levers')
 
     def load_2wp_product_build_targets(self):
         mine = getattr(self, "mine_input_choice", None)
@@ -5583,9 +5590,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.refresh_database_view
         )
         self.database_view_continue_button = QPushButton(
-            "Continue to Solver Configuration"
+            "Continue to Product Targets"
         )
-        self.database_view_continue_button.setVisible(vars(self).get('access_role') != 'planner')
         self.database_view_continue_button.setEnabled(False)
         self.database_view_continue_button.clicked.connect(
             self.continue_from_database_view
@@ -7786,11 +7792,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.refresh_database_view()
             return
         self.activate_manual_setup_tab()
-        if vars(self).get('access_role') == 'planner':
-            self.set_page_enabled('product_targets', True)
-            self.show_page('product_targets')
-        else:
-            self.navigate_to_solver_configuration()
+        self.navigate_to_product_targets()
 
     def setup_define_fields(self):
         """Create the canonical field contract shared by every source type."""
@@ -11077,13 +11079,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         ):
             self.set_page_enabled(page_id, True)
         self.set_page_enabled(self.guidance_schedules_tab_index, True)
-        if any((self.stockpile_data_AMT_column or {}).values()):
-            self.set_page_enabled(self.AMT_stockpile_tab_index, True)
-            self.show_page(self.AMT_stockpile_tab_index, force=True)
-        else:
+        if not self.selected_amt_footprints():
             self.hex_sequence_table = []
             self.hex_sequence_table_argument = []
-            self.open_database_view(navigate=True)
+            self.set_page_enabled(self.database_view_tab_index, True)
+            self.database_view_refresh_pending = True
+        self.advance_workspace('grade_reconciliation')
 
     def setup_site_configuration(self):
         """Setup for the Site Configuration Form."""
@@ -13951,7 +13952,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.set_page_enabled(self.define_fields_tab_index, False)
             self.set_page_enabled(self.map_fields_tab_index, False)
             self.set_page_enabled(self.data_streams_tab_index, False)
-            self.show_page(self.guidance_schedules_tab_index, force=True)
+            self.advance_workspace('site_configuration')
         else:
             self.set_page_enabled(self.guidance_schedules_tab_index, True)
             self.set_page_enabled(self.stockpile_tab_index, True)
@@ -14049,7 +14050,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.auto_select_stockpiles()
         self.save_active_scenario_state()
         self.set_page_enabled(self.stockpile_tab_index, True)
-        self.show_page(self.stockpile_tab_index, force=True)
+        self.advance_workspace('guidance_schedules')
         self.validate_form()
 
     def handle_site_config_error(self, error_message):
@@ -17724,13 +17725,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.setup_AMT_stockpile_table()
             self.populate_define_fields_table()
             self.set_page_enabled(self.define_fields_tab_index, True)
-            if vars(self).get('access_role') == 'planner':
-                self.set_page_enabled('grade_reconciliation', True)
-                if not getattr(self, 'project_load_restore_in_progress', False):
-                    self.show_page('grade_reconciliation', force=True)
-                    self.prepare_data_streams()
-            else:
-                self.show_page(self.define_fields_tab_index, force=True)
+            self.set_page_enabled(self.map_fields_tab_index, True)
+            self.set_page_enabled(self.data_streams_tab_index, True)
+            self.advance_workspace('stockpile_inventories')
         else:
             QMessageBox.information(self, "BlendMaster", "No stockpiles selected!\nPlease select stockpiles to proceed.")
 
@@ -19968,7 +19965,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.opening_stockpile_inventories.clear_AMT_stockpile_database()
 
     def handle_AMT_submit_clicked(self, _checked=False):
-        """Ignore QPushButton.checked and always advance to Database View."""
+        """Ignore QPushButton.checked and advance after the chunks are published."""
         return self.store_hex_sequence_table(navigate=True)
 
     def store_hex_sequence_table(self, navigate=True, *, on_complete=None, on_error=None):
@@ -20032,7 +20029,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 self.set_page_enabled(self.database_view_tab_index, True)
                 self.database_view_refresh_pending = True
                 if navigate:
-                    self.open_database_view()
+                    self.advance_workspace('amt_stockpiles')
                 if on_complete:
                     on_complete()
             from GUI.OPFProfileLoading import ensure
@@ -21499,7 +21496,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.refresh_optimisation_plan_selectors()
         self.start_dash_optimised_charts_thread()
         self.save_active_scenario_state()
-        self.show_page(self.calendar_tab_index)
+        self.advance_workspace('calendar')
 
         run_outcome = getattr(periods, "run_outcome", {}) or {}
         outcome_status = str(run_outcome.get("status") or "complete")
@@ -24935,7 +24932,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 250, self.manual_gantt_view.reload
             )
         self.set_page_enabled(self.blend_sequence_tab_index, True)
-        self.show_page(self.blend_sequence_tab_index)
+        self.advance_workspace('setup_blends')
         from GUI.ProjectSaving import set_enabled
         set_enabled(self, True)
         QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
@@ -25670,6 +25667,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "generated. Use Steady States & Direct Tip to review available "
             "grade blocks and choose direct-tip tonnes.",
         )
+        self.advance_workspace('blend_sequence')
         return True
 
     def write_manual_material_destination_plan(self, report):

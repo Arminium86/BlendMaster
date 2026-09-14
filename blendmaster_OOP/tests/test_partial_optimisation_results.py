@@ -199,11 +199,12 @@ class PartialOptimisationResultsTests(unittest.TestCase):
         for name in ('set_start_and_end_datetime', 'activate_manual_setup_tab',
                      'prepopulate_manual_from_optimised_result', 'refresh_sqlite_reports',
                      'refresh_optimisation_plan_selectors', 'start_dash_optimised_charts_thread',
-                     'save_active_scenario_state', 'show_page'):
+                     'save_active_scenario_state', 'show_page', 'advance_workspace'):
             setattr(host, name, Mock())
         with patch('GUI.InitialiseGUI.QMessageBox.information') as notice:
             UserInputs.finish_run_program(host, periods)
         self.assertTrue(host._workflow_optimisation_finished)
+        host.advance_workspace.assert_called_once_with('calendar')
         for page in ('optimised_blend_sequence', 'reports', 'optimised_grades'):
             self.assertTrue(pages[page])
         self.assertTrue(result_presence(self.database)['optimised'])

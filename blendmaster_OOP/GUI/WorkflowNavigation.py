@@ -107,6 +107,59 @@ class WorkflowNavigation:
         location = self.page_locations.get(product_targets_identifier(page_id))
         return bool(location and location[0].isTabEnabled(location[1]))
 
+    def next_workspace_page(self, submitted_page):
+        """Use the visible task order for both roles, omitting inapplicable inputs."""
+        submitted_page = product_targets_identifier(submitted_page)
+        if submitted_page not in WORKSPACE:
+            return None
+        for page in WORKSPACE[WORKSPACE.index(submitted_page) + 1:]:
+            if page == 'amt_stockpiles' and not self.selected_amt_footprints():
+                continue
+            if page == 'destination_progress' and not vars(self).get('file_path_choice'):
+                continue
+            return page
+        return None
+
+    def advance_workspace(self, submitted_page):
+        """Advance after successful submission; background preparation owns no navigation."""
+        state = vars(self)
+        controller = state.get('site_workflow_controller')
+        if (state.get('project_load_restore_in_progress') or state.get('scenario_switch_in_progress')
+                or state.get('project_load_keep_site_configuration_visible')
+                or (controller and controller.active)):
+            return None
+        target = self.next_workspace_page(submitted_page)
+        if target is None:
+            return None
+        if target == 'product_targets':
+            self.activate_manual_setup_tab()
+            self.navigate_to_product_targets()
+        elif target == 'decision_levers':
+            self.navigate_to_decision_levers()
+        else:
+            if target == 'destination_progress':
+                from GUI.WorkflowViews import input_readiness
+                ready, reason = input_readiness(self)[target]
+                if not ready:
+                    from PyQt5.QtWidgets import QMessageBox
+                    QMessageBox.information(self, 'Destination Reconciliation', reason)
+                    return None
+                self.sync_destination_progress_context()
+            elif target == 'calendar':
+                self.setup_calendar()
+            elif target == 'blend_plan':
+                tabs = state.get('blend_plan_workflow_tabs')
+                if tabs is not None and submitted_page == 'blend_sequence':
+                    page = ('blend_plan_page' if (state.get('multi_feed_configuration') or {}).get('mode', 'single') == 'single'
+                            else 'manual_operational_blend_plans')
+                    if state.get(page) is not None:
+                        tabs.setCurrentWidget(state[page])
+            self.set_page_enabled(target, True)
+            self.show_page(target)
+            if target == 'grade_reconciliation':
+                self.prepare_data_streams()  # Display saved approvals; historical updates remain manual.
+        return target
+
     def show_page(self, page_id, force=False):
         page_id = product_targets_identifier(page_id)
         controller = vars(self).get('site_workflow_controller')
