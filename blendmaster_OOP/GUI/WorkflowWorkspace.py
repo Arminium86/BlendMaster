@@ -25,7 +25,8 @@ def move_rows(source, target, labels):
         if isinstance(widget, QLabel) and widget.text().strip() in labels:
             taken = source.takeRow(index)
             field = taken.fieldItem
-            target.insertRow(0, widget, field.widget() or field.layout())
+            field_widget = field.widget()
+            target.insertRow(0, widget, field_widget if field_widget is not None else field.layout())
 
 
 def hide_rows(source, labels):
@@ -37,13 +38,15 @@ def hide_rows(source, labels):
 
 def set_row_visible(form, index, visible):
     def visit(item):
-        if not item:
+        if item is None:
             return
-        if item.widget():
-            item.widget().setVisible(visible)
-        elif item.layout():
-            for child in range(item.layout().count()):
-                visit(item.layout().itemAt(child))
+        widget, layout = item.widget(), item.layout()
+        # Empty QListWidgets are falsey, but still occupy space in the form.
+        if widget is not None:
+            widget.setVisible(visible)
+        elif layout is not None:
+            for child in range(layout.count()):
+                visit(layout.itemAt(child))
     for role in (QFormLayout.LabelRole, QFormLayout.FieldRole):
         visit(form.itemAt(index, role))
 

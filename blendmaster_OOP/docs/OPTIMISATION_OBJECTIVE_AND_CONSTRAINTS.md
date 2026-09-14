@@ -537,6 +537,21 @@ may shorten it at:
 Payload arrivals inside a window do not create a boundary. Period boundaries,
 depletion, turnover and build completion create the next decision point.
 
+The planning clock accepts any finite positive solved duration that advances its
+timestamp, including millisecond remainders at a turnover or COS boundary. The
+solver's numerical tolerance is not a minimum time step. Such intervals retain
+their solved duration and tonnes; they are not inflated or discarded. Zero,
+invalid or sub-resolution intervals still fail rather than leaving time unchanged.
+
+If an unexpected error interrupts a steady state, BlendMaster restores the
+furthest fully completed checkpoint, including source balances, product-build
+totals and conveyor/COS contents. This checkpoint is retained even when the
+product-build repair loop is disabled. The unfinished state is excluded from
+all saved reports. When completed states exist, the run publishes a partial
+plan with the stopping error and solved-through timestamp, and enables Results
+and Reports. The original traceback remains in the run output. A failure before
+the first completed state does not publish a partial plan.
+
 ## Solver controls that do not change feasibility
 
 | Control | Purpose |

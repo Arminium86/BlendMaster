@@ -13941,9 +13941,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.destination_haul_routes = {}
             self.apply_haul_cycle_routes_to_stockpile_data()
 
-        # Retain explicit inventory selections when guidance is refreshed.
-        # setup_stockpile_table derives defaults only for genuinely new rows.
+        # Submission reapplies the rule after both brand and HI route guidance
+        # have refreshed, including inventories with saved checkbox states.
         self.setup_stockpile_table()
+        self.auto_select_stockpiles()
         self.save_active_scenario_state()
         self.set_page_enabled(self.stockpile_tab_index, True)
         self.show_page(self.stockpile_tab_index, force=True)
@@ -17025,36 +17026,70 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             text = text.rsplit("/", 1)[-1]
         return text
 
+    def operating_crushers_for_haul_node(self, nearest_crusher):
+        """Resolve an HI node to the selected model crushers without renaming it."""
+        if not isinstance(nearest_crusher, str) or not nearest_crusher.strip():
+            return []
+        nearest = nearest_crusher.strip()
+        state = vars(self)
+        feed = state.get("multi_feed_configuration") or {}
+        points = {point["name"]: point for point in feed.get("tipping_points", [])}
+        # Submitted model selections are authoritative, including an empty
+        # selection. The haul-cycle mapping can contain only the primary
+        # crusher, or nodes belonging to crushers outside this model.
+        crushers = state.get("selected_site_crushers")
+        if crushers is None:
+            if feed.get("mode", "single") != "single":
+                crushers = list(points)
+            elif "site_crusher_input" in state:
+                crushers = self.selected_site_crusher_names()
+            else:
+                crushers = [state.get("crusher_input_choice")]
+        mine = state.get("mine_input_choice") or ""
+        opf = state.get("opf_input_choice") or ""
+        matches = []
+        for crusher in crushers:
+            if not isinstance(crusher, str) or not crusher.strip():
+                continue
+            point = points.get(crusher, {})
+            # Reuse APS/Haul Infinity aliases, e.g. OPF02_PC -> RCH,
+            # and each configured tipping point's ROM-area name.
+            if (
+                self.normalized_crusher_display_name(nearest)
+                == self.normalized_crusher_display_name(crusher)
+                or ExpitDataHandler.crusher_destination_names_match(nearest, crusher)
+                or ExpitDataHandler.crusher_destination_names_match(nearest, point.get("rom_area"))
+                or (mine and ExpitDataHandler.crusher_destination_matches(
+                    nearest, mine, crusher, point.get("opf", opf)
+                ))
+            ):
+                matches.append(crusher)
+        return matches
+
     def default_stockpile_use_for_active_crusher(self, stockpile_data):
-        """Select stockpiles matching the planned crusher and brand guidance."""
-        mapped_nodes = {
-            self.normalized_crusher_display_name(value)
-            for value in self.current_haul_cycle_crusher_node()
-            if self.normalized_crusher_display_name(value)
-        }
-        if not mapped_nodes:
-            return {
-                stockpile_name: False
-                for stockpile_name in (stockpile_data or {})
-            }
+        """Select branded rows using the same mapping displayed in the table."""
+        def text_value(value):
+            if not isinstance(value, str):
+                return ""
+            value = value.strip()
+            return "" if value.casefold() in {"none", "nan", "null", "<na>", "nat"} else value
+
+        def has_brand(attributes):
+            for key in ("aps_brand_summary", "APS_BRAND_SUMMARY"):
+                if key in attributes:
+                    return bool(text_value(attributes[key]))
+            # Older inventories may retain only the underlying guidance.
+            for key in ("aps_brand", "APS_BRAND", "aps_brand_proportions", "APS_BRAND_PROPORTIONS"):
+                value = attributes.get(key)
+                brands = value if isinstance(value, dict) else (value,)
+                if any(text_value(brand) for brand in brands):
+                    return True
+            return False
+
         return {
-            stockpile_name: (
-                self.normalized_crusher_display_name(
-                    attributes.get(
-                        "nearest_crusher",
-                        attributes.get("NEAREST_CRUSHER", ""),
-                    )
-                )
-                in mapped_nodes
-                and bool(
-                    attributes.get("aps_brand")
-                    or attributes.get("APS_BRAND")
-                    or attributes.get("aps_brand_proportions")
-                    or attributes.get("APS_BRAND_PROPORTIONS")
-                    or attributes.get("aps_brand_summary")
-                    or attributes.get("APS_BRAND_SUMMARY")
-                )
-            )
+            stockpile_name: has_brand(attributes) and bool(self.operating_crushers_for_haul_node(
+                attributes.get("nearest_crusher", attributes.get("NEAREST_CRUSHER"))
+            ))
             for stockpile_name, attributes in (stockpile_data or {}).items()
         }
 
@@ -17072,6 +17107,18 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # checkbox must be selected as well, hence the identical dictionaries.
         self.stockpile_data_AMT_column.update(defaults)
         return defaults
+
+    def auto_select_stockpiles(self):
+        """Reapply guidance to an existing inventory, including saved projects."""
+        defaults = self.default_stockpile_use_for_active_crusher(self.stockpile_data)
+        self.stockpile_data_use_column = dict(defaults)
+        self.stockpile_data_AMT_column = dict(defaults)
+        for row in range(self.stockpile_table.rowCount()):
+            item = self.stockpile_table.item(row, 2)
+            if item is not None:
+                checked = defaults.get(item.text(), False)
+                self.set_stockpile_checkbox(row, 0, checked)
+                self.set_stockpile_checkbox(row, 1, checked)
 
     def setup_stockpile_table(self):
         """Setup for the stockpile table in the new Stockpiles tab with live conditional formatting."""
@@ -17186,6 +17233,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             nearest_crusher_item = QTableWidgetItem(nearest_crusher)
             nearest_crusher_item.setFlags(Qt.ItemIsEnabled)
             nearest_crusher_item.setTextAlignment(Qt.AlignCenter)
+            mapped_crushers = self.operating_crushers_for_haul_node(nearest_crusher)
+            crusher_tooltip = [
+                "Operating Crusher: " + ", ".join(mapped_crushers)
+                if mapped_crushers else "No matching Operating Crusher selected in Site Model Settings."
+            ]
             cycle_minutes = attributes.get(
                 "rehandle_cycle_time_minutes",
                 attributes.get("REHANDLE_CYCLE_TIME_MINUTES"),
@@ -17198,7 +17250,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     )
                 except (TypeError, ValueError):
                     cycle_tooltip = "Shortest selected haul cycle unavailable"
-                nearest_crusher_item.setToolTip(cycle_tooltip)
+                crusher_tooltip.append(cycle_tooltip)
+            nearest_crusher_item.setToolTip("\n".join(crusher_tooltip))
             self.stockpile_table.setItem(
                 row_idx,
                 headers.index("Nearest Crusher"),
@@ -17318,6 +17371,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             
             # Don't add the button if returning from the calendar
             if self.submit_calendar_first_call:
+                auto_select_button = QPushButton("Auto Select Stockpiles")
+                auto_select_button.setToolTip(
+                    "Select Use and AMT for rows with a 2WP Brand whose Nearest "
+                    "Crusher matches an operating crusher selected in Site Configuration."
+                )
+                auto_select_button.clicked.connect(self.auto_select_stockpiles)
+
                 select_all_use_button = QPushButton("Select All Stockpiles")
                 select_all_use_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(0, True))
 
@@ -17330,6 +17390,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 clear_AMT_button = QPushButton("Clear All Stockpiles as AMT")
                 clear_AMT_button.clicked.connect(lambda: self.set_all_stockpile_checkboxes(1, False))
 
+                button_layout.addWidget(auto_select_button)
                 button_layout.addWidget(select_all_use_button)
                 button_layout.addWidget(clear_use_button)
                 button_layout.addWidget(select_all_AMT_button)

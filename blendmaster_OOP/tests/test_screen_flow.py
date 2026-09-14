@@ -507,16 +507,21 @@ class ScreenFlowStateTests(unittest.TestCase):
             dict(window.stockpile_data_use_column),
             dict(window.stockpile_data_AMT_column),
         ))
+        window.auto_select_stockpiles = lambda: events.append("auto_select")
         window.save_active_scenario_state = lambda: events.append("save_state")
         window.set_page_enabled = lambda page, enabled: events.append(("enable", page, enabled))
         window.show_page = lambda page, force=False: events.append(("show", page, force))
         window.validate_form = lambda: events.append("validate")
 
-        UserInputs.handle_guidance_schedules_submit(window)
+        with patch('GUI.InitialiseGUI.DatabaseManager'):
+            UserInputs.handle_guidance_schedules_submit(window)
 
         table_event = ("table", {"STALE": False}, {"STALE": False})
         self.assertLess(events.index("apply_brands"), events.index(table_event))
         self.assertLess(events.index("routes"), events.index(table_event))
+        self.assertLess(events.index(table_event), events.index("auto_select"))
+        self.assertLess(events.index("auto_select"), events.index("save_state"))
+        self.assertLess(events.index("save_state"), events.index(("show", "stockpile_inventories", True)))
         self.assertIn(table_event, events)
         self.assertIn(("enable", "stockpile_inventories", True), events)
         self.assertIn(("show", "stockpile_inventories", True), events)
@@ -1999,6 +2004,8 @@ class ScreenFlowStateTests(unittest.TestCase):
 
     def test_stockpile_defaults_require_planned_crusher_and_brand_guidance(self):
         window = UserInputs.__new__(UserInputs)
+        window.selected_site_crushers = ["OPF02_PC"]
+        window.mine_input_choice = "CC"
         window.current_haul_cycle_crusher_node = lambda: ["Crushers/RCH"]
         stockpiles = {
             "MATCH": {
@@ -2024,6 +2031,8 @@ class ScreenFlowStateTests(unittest.TestCase):
 
     def test_stockpile_guidance_defaults_select_use_and_amt_together(self):
         window = UserInputs.__new__(UserInputs)
+        window.selected_site_crushers = ["OPF02_PC"]
+        window.mine_input_choice = "CC"
         window.current_haul_cycle_crusher_node = lambda: ["Crushers/RCH"]
         window.stockpile_data_use_column = {}
         window.stockpile_data_AMT_column = {}
@@ -2047,7 +2056,8 @@ class ScreenFlowStateTests(unittest.TestCase):
 
     def test_stockpile_guidance_defaults_select_none_without_tipping_point(self):
         window = UserInputs.__new__(UserInputs)
-        window.current_haul_cycle_crusher_node = lambda: []
+        window.selected_site_crushers = []
+        window.current_haul_cycle_crusher_node = lambda: ["Crushers/RCH"]
         window.stockpile_data_use_column = {}
         window.stockpile_data_AMT_column = {}
         stockpiles = {

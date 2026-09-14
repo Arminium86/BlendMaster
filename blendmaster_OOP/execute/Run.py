@@ -664,9 +664,23 @@ class Run:
                 )
         except Exception as error:
             stockpile_selection_error = self._stockpile_selection_error(error)
-            if stockpile_selection_error is not None:
-                raise stockpile_selection_error
-            raise
+            if not getattr(
+                primary_case_modeller, "partial_plan_restored_after_error", False
+            ):
+                if stockpile_selection_error is not None:
+                    raise stockpile_selection_error from error
+                raise
+            # CaseModeller has restored all runtime state to a completed
+            # boundary. Use the normal report/finalisation path so Results can
+            # display that prefix, while retaining the original diagnostic.
+            self.case_bridge.print(traceback.format_exc())
+            cause = stockpile_selection_error or error
+            primary_outcome_error = BlendMasterRunError(
+                f"Optimisation stopped: {type(cause).__name__}: {cause}\n"
+                "The unfinished steady state was discarded. The solved plan "
+                f"ends at {primary_case_modeller.current_time}.",
+                title="Partial Plan - Optimisation Error",
+            )
 
         completed_offspec_builds = (
             self._completed_offspec_product_build_names(
@@ -1005,6 +1019,10 @@ class Run:
             "message": primary_message,
             "off_spec_builds": completed_offspec_builds,
             "partial_plan_restored": partial_plan_restored,
+            "partial_plan_restored_after_error": bool(getattr(
+                primary_case_modeller, "partial_plan_restored_after_error", False
+            )),
+            "solved_through": str(primary_case_modeller.current_time),
             "result_row_count": primary_result_row_count,
         }
         return periods

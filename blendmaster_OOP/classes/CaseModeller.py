@@ -37,6 +37,7 @@ from database.SQLiteDatabase import DatabaseManager
 from classes.PeriodManager import PeriodManager
 import pandas as pd
 import copy
+import math
 from datetime import timedelta
 from typing import Callable, List, Optional
 from types import SimpleNamespace
@@ -583,7 +584,9 @@ class CaseModeller:
         return copy.deepcopy(state)
 
     def restore_product_build_repair_checkpoint(self, checkpoint):
-        for attribute, value in checkpoint.items():
+        # A checkpoint may also be retained as the furthest solved prefix.
+        # Replaying a repair must not mutate that saved state through aliases.
+        for attribute, value in copy.deepcopy(checkpoint).items():
             setattr(self, attribute, value)
 
     def restore_last_solved_checkpoint_for_reporting(self, checkpoint):
@@ -850,6 +853,7 @@ class CaseModeller:
         if not hasattr(self, "product_build_hard_repair_from_states"):
             self.product_build_hard_repair_from_states = {}
         self.partial_plan_restored_after_repair = False
+        self.partial_plan_restored_after_error = False
         print(
             "Active solver configuration: "
             f"Min Grade Block Pair Duration = "
@@ -870,39 +874,39 @@ class CaseModeller:
             self.check_abort_requested()
             if self.product_build_settings and self.current_product_build_index() is None:
                 raise ProductBuildCapacityComplete()
+            # Results, source balances, product counters and transport are
+            # committed within the step. Retain their common starting boundary
+            # even when product-build repair is disabled, so a late failure can
+            # never publish a partly applied steady state.
+            current_checkpoint = self.capture_product_build_repair_checkpoint()
             if self.product_build_repair_enabled():
-                current_checkpoint = self.capture_product_build_repair_checkpoint()
                 repair_checkpoints[self.steady_state_tracker] = current_checkpoint
-                checkpoint_results = current_checkpoint.get("results")
-                if (
-                    isinstance(checkpoint_results, pd.DataFrame)
-                    and not checkpoint_results.empty
-                ):
-                    # Keep this independently from repair_checkpoints because
-                    # the bounded repair search intentionally removes later
-                    # checkpoints as it rewinds farther into the schedule.
-                    # Compare schedule time, not state count: repaired states
-                    # can have different durations, so more state numbers do
-                    # not necessarily mean a later valid plan boundary.
-                    checkpoint_progress = current_checkpoint.get("current_time")
-                    try:
-                        farther_than_saved = (
-                            best_reporting_progress is None
-                            or checkpoint_progress > best_reporting_progress
-                        )
-                    except TypeError:
-                        farther_than_saved = (
-                            int(self.steady_state_tracker)
-                            > best_reporting_state
-                        )
-                    if farther_than_saved:
-                        best_reporting_checkpoint = copy.deepcopy(
-                            current_checkpoint
-                        )
-                        best_reporting_state = int(self.steady_state_tracker)
-                        best_reporting_progress = copy.deepcopy(
-                            checkpoint_progress
-                        )
+            checkpoint_results = current_checkpoint.get("results")
+            if (
+                isinstance(checkpoint_results, pd.DataFrame)
+                and not checkpoint_results.empty
+            ):
+                # Keep this independently from repair_checkpoints because
+                # the bounded repair search intentionally removes later
+                # checkpoints as it rewinds farther into the schedule.
+                # Compare schedule time, not state count: repaired states
+                # can have different durations, so more state numbers do
+                # not necessarily mean a later valid plan boundary.
+                checkpoint_progress = current_checkpoint.get("current_time")
+                try:
+                    farther_than_saved = (
+                        best_reporting_progress is None
+                        or checkpoint_progress > best_reporting_progress
+                    )
+                except TypeError:
+                    farther_than_saved = (
+                        int(self.steady_state_tracker)
+                        > best_reporting_state
+                    )
+                if farther_than_saved:
+                    best_reporting_checkpoint = current_checkpoint
+                    best_reporting_state = int(self.steady_state_tracker)
+                    best_reporting_progress = checkpoint_progress
             # Run optimization and only advance time if successful
             try:
                 self.run_optimization_step()
@@ -1047,6 +1051,18 @@ class CaseModeller:
                     f"(attempt {repair_attempts})."
                 )
                 continue
+            except Exception:
+                self.restore_product_build_repair_checkpoint(
+                    best_reporting_checkpoint or current_checkpoint
+                )
+                self.partial_plan_restored_after_error = not self.results.empty
+                if self.partial_plan_restored_after_error:
+                    print(
+                        "Optimisation stopped. Discarded the unfinished steady "
+                        "state and restored the successfully solved plan through "
+                        f"{self.current_time} for reporting."
+                    )
+                raise
             self.steady_state_tracker += 1
             self.check_abort_requested()
 
@@ -2877,9 +2893,22 @@ class CaseModeller:
     def advance_time(self):
         """Advance current time and update period if needed."""
         steady_state_duration = self.latest_result_duration()
-        if steady_state_duration <= Optimizer.SOLUTION_TOLERANCE:
-            raise ValueError("Steady state duration is zero; cannot advance optimisation time.")
-        self.current_time += timedelta(hours=steady_state_duration)
+        if not math.isfinite(steady_state_duration) or steady_state_duration <= 0:
+            raise ValueError(
+                "Steady state duration must be finite and positive; cannot "
+                f"advance optimisation time from {self.current_time} "
+                f"by {steady_state_duration!r} hours."
+            )
+        next_time = self.current_time + timedelta(hours=steady_state_duration)
+        # SOLUTION_TOLERANCE is a solver tolerance, not the clock resolution.
+        # A positive boundary shorter than 0.0036 seconds still advances a
+        # Python datetime and has already been solved/accounted at that duration.
+        if next_time <= self.current_time:
+            raise ValueError(
+                f"Steady state duration {steady_state_duration!r} hours is too "
+                f"short to advance the clock from {self.current_time}."
+            )
+        self.current_time = next_time
 
         # A shortened steady state can land exactly on any configured
         # period boundary, so resolve the tracker from the shared calendar.
