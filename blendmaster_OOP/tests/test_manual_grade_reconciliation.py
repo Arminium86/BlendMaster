@@ -21,7 +21,7 @@ def state():
     result.update(start_time_choice=AS_OF, historical_recon_warnings=[],
                   reconciliation_settings={'method': 'auto_max_confidence'},
                   grade_reconciliation_registry={},
-                  multi_feed_configuration={'mode': 'combined_opf', 'tipping_points': [{'name': 'Crusher '+opf, 'opf': opf} for opf in OPFS]})
+                  multi_feed_configuration={'mode': 'combined_opf', 'tipping_points': [{'name': 'Crusher '+opf, 'opf': opf, 'rom_area': 'Shared'} for opf in OPFS]})
     result['updated_stockpile_data']['INV'] = deepcopy(result['updated_stockpile_data']['SP'])
     result['updated_stockpile_data']['SP']['amt'] = True
     result['AMT_stockpile_data'] = {'SP': [dict(HEX=h, FINAL_WMT=wmt, balance=wmt,
@@ -114,7 +114,9 @@ class ManualGradeReconciliationTests(unittest.TestCase):
         values = pickle.loads(pickle.dumps(values))
         before = deepcopy(values['grade_reconciliation_registry']['sources'])
         identity = next(r['detail']['source_identity'] for r in before.values() if r['detail']['source_id'] == 'INV')
-        manual(values, [identity])
+        with patch('classes.ReconciliationApplication.datetime') as clock:
+            clock.now.return_value = AS_OF + timedelta(days=1)
+            manual(values, [identity])
         after = values['grade_reconciliation_registry']['sources']
         for key, row in before.items():
             if row['detail']['source_identity'] != identity:
@@ -128,6 +130,8 @@ class ManualGradeReconciliationTests(unittest.TestCase):
         from types import SimpleNamespace
         values = state()
         manual(values)
+        from tests.test_amt_reconciliation_grain import submit
+        submit(values)
         profiles = build_profiles(values, OPFS, UserInputs)
         for profile in profiles.values():
             audits = [r['reconciliation'] for r in profile['inventory'].values()] + profile['reconciliation_audits']

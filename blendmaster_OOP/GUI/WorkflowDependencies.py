@@ -60,6 +60,13 @@ def preparation_issues(host):
     if not host.included_stockpile_data():
         issues.append('Select and submit stockpile inventories.')
     from classes.ApprovedReconciliation import missing_sources, required_message
+    from classes.MultiFeedSettings import unrouted_sources
+    from classes.AMTReconciliation import chunks_ready
+    unrouted = unrouted_sources(vars(host))
+    if unrouted:
+        issues.append('Assign a Subset / permitted feed point for: ' + ', '.join(unrouted))
+    if not chunks_ready(vars(host)):
+        issues.append('Submit chunks for all selected AMT stockpiles.')
     missing = missing_sources(vars(host), planning=True)
     if missing:
         issues.append(required_message(missing))

@@ -55,6 +55,18 @@ class ActualCrusherFeedTests(unittest.TestCase):
         context=dict(opf='CC OPF02',field_definitions=default_field_definitions(),field_mappings=mappings)
         record=dict(INTERNAL_ID=1,SOURCE='SP-BUILD',SOURCE_FMS='SP',opf='CC OPF02',tipping_point='OPF02_PC',
                     time=START.isoformat(),wmt=200,OPENING_INVENTORY_FIELDS=snapshot)
+        # Opening inventory now needs a manual approval for this exact build and OPF.
+        from classes.ReconciliationApplication import ReconciliationApplication
+        from classes.GradeStreams import inventory_grade_streams
+        factors = {'FB': {stream: {a: {'effective': 1.0} for a in ('fe','si','al','p','mn')}
+                          for stream in ('blend', 'regression')}}
+        registry = {}
+        ReconciliationApplication(samples=[], standard_factors=factors, opf=context['opf'], brands=['FB'],
+            scenario_start=START, settings={'method': 'standard'}, registry=registry, mine='CC', allow_search=True).apply(
+                inventory_grade_streams({}, ['FB'], factors, context['opf']), source_id='SP',
+                source_instance='SP-BUILD', source_kind='inventory', source_wmt=1000, contributing_blocks=[])
+        context.update(mine='CC', product_brands=['FB'], historical_recon_factors=factors,
+                       grade_reconciliation_registry=registry, reconciliation_settings={'method': 'standard'})
         rows=opening_history_events(dict(request={'end':START.isoformat()},records=[record]),context,{})
         event=rows[0]['material']['event']
         self.assertAlmostEqual(event.source_properties['modelled_product_wmt'],.8)

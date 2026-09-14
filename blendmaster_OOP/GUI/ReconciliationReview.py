@@ -326,11 +326,8 @@ class ReconciliationReview(QWidget):
         self._report_rows = []
         self.export_button.setEnabled(False)
         self.summary.setText("Review pending for the current settings.")
-        self.sources.clear()
-        self._evidence_rows = []
-        self.evidence.clear()
-        self._records = {}
-        self._record_options = {}
+        # Keep the last review inspectable while the status explains why it
+        # cannot be submitted/exported. Context changes explicitly clear it.
         self.populate_matrix()
 
     def set_busy(self, busy):

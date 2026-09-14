@@ -1,7 +1,7 @@
 """Compose the role-specific workspace from the existing planning controls."""
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-                             QFrame, QScrollArea, QLabel, QPushButton, QTabWidget, QDialog, QTableView)
+                             QFrame, QScrollArea, QLabel, QPushButton, QTabWidget, QDialog, QTableView, QCheckBox)
 from classes.SiteWorkflow import require_action
 
 
@@ -68,6 +68,11 @@ def install(host):
                         'Planners select a configured site using the toolbar above.')
     help_label.setWordWrap(True)
     model_form.addRow(help_label)
+    host.amt_reconcile_after_chunking_checkbox = QCheckBox('Reconcile AMT after chunking')
+    host.amt_reconcile_after_chunking_checkbox.setToolTip(
+        'Checked: match historical evidence to each submitted chunk. Unchecked: match each component hex, then combine its contribution into chunk grades. Inventory stockpiles are reconciled in either mode.')
+    host.amt_reconcile_after_chunking_checkbox.toggled.connect(host.set_amt_reconciliation_grain)
+    model_form.addRow('AMT Grade Reconciliation:', host.amt_reconcile_after_chunking_checkbox)
     submit = QPushButton('Submit Site Model')
     submit.clicked.connect(host.handle_site_config_submit)
     model_form.addRow(submit)
@@ -181,6 +186,13 @@ def show_refresh_changes(host):
 
 
 def refresh_context(host):
+    from classes.AMTReconciliation import after_chunking
+    host.sync_workspace_order()
+    checkbox = vars(host).get('amt_reconcile_after_chunking_checkbox')
+    if checkbox is not None:
+        blocked = checkbox.blockSignals(True)
+        checkbox.setChecked(after_chunking(vars(host)))
+        checkbox.blockSignals(blocked)
     from GUI.WorkflowViews import schedule
     schedule(host)
     from GUI.PlannerPresentation import refresh as refresh_presentation
@@ -244,7 +256,8 @@ def enter_page(host, page_id):
     elif page_id == 'database_reports':
         QTimer.singleShot(0, host.refresh_sqlite_reports)
     elif page_id == 'grade_reconciliation':
-        return True  # Refresh is explicit and reports the evidence freshness.
+        host.prepare_data_streams()  # Render saved evidence only; searches remain explicit.
+        return True
     elif page_id == 'site_automation':
         host.site_automation_panel.refresh()
     elif page_id == 'continuous_assays':

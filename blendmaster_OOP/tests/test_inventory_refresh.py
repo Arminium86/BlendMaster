@@ -66,7 +66,7 @@ class Host(QMainWindow):
             for column, value in ((2,name),(3,''),(4,'1000'),(5,'0')):
                 self.stockpile_table.setItem(row,column,QTableWidgetItem(value))
         for name in ('save_active_scenario_state','setup_calendar','ensure_AMT_map_panel','finish_AMT_stockpile_table',
-                     'populate_define_fields_table','set_page_enabled','prepare_data_streams','show_error_popup'):
+                     'populate_define_fields_table','set_page_enabled','prepare_data_streams','show_error_popup','advance_workspace'):
             setattr(self,name,Mock())
 
 

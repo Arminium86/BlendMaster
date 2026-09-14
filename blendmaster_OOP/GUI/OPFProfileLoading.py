@@ -13,12 +13,16 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
     if vars(host).get('_defer_opf_profile_preparation'):
         return False  # Restore sources/chunks before preparing their chemistry.
     config = vars(host).get('multi_feed_configuration') or {}
-    if config.get('mode') != 'combined_opf':
+    from classes.AMTReconciliation import chunks_ready, footprints
+    from classes.ApprovedReconciliation import missing_sources
+    if config.get('mode') != 'combined_opf' and not footprints(vars(host)):
+        return False
+    if not chunks_ready(vars(host)) or missing_sources(vars(host), planning=True):
         return False
     if vars(host).get('_opf_profile_preparation_pending'):
         vars(host).setdefault('_opf_profile_waiters', []).append((on_complete, on_error))
         return True
-    opfs = sorted({point['opf'] for point in config.get('tipping_points', [])})
+    opfs = sorted({point['opf'] for point in config.get('tipping_points', [])}) if config.get('mode', 'single') != 'single' else [host.opf_input_choice]
     bundles = vars(host).get('opf_reconciliation_inputs') or {}
     builds = host.reconciliation_inventory_builds()
     if not opfs or (not vars(host).get('grade_reconciliation_registry') and any(opf not in bundles or bundles[opf].get('signature') !=
@@ -57,7 +61,15 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
             if not ensure(host, complete_all, on_error=fail_all, _previous_profiles=result):
                 complete_all()
             return
-        host._combined_opf_profile_cache = result
+        primary = result[1].get(host.opf_input_choice) or {}
+        for name in ('stockpile_data', 'updated_stockpile_data'):
+            for identity in list(vars(host).get(name) or {}):
+                if identity in primary.get('inventory', {}):
+                    vars(host)[name][identity] = deepcopy(primary['inventory'][identity])
+        for name in ('hex_sequence_table', 'hex_sequence_table_argument'):
+            if name in vars(host):
+                vars(host)[name] = [deepcopy(primary.get('chunks', {}).get(c.get('hex'), c)) for c in vars(host)[name] or []]
+        host._combined_opf_profile_cache = (profile_signature(vars(host), opfs), result[1])
         complete_all()
 
     def failed(error):

@@ -184,6 +184,8 @@ class SiteWorkflowController(QObject):
             now = datetime.now(ZoneInfo(contract['timezone']))
             start = now.replace(tzinfo=None) if h.time_mode.currentIndex() == 0 else h.current_site_start_time()
             self.run = WorkflowRun(h.active_scenario_id, start, fingerprint(paths), endpoint)
+            from classes.AMTReconciliation import after_chunking
+            self.run.amt_reconcile_after_chunking = after_chunking(vars(h))
             self.context = (h.active_scenario_id, get_database_path())
             self.paths, self.active_contract, self.scheduled = paths, contract, scheduled
         except (ValueError, KeyError) as exc:

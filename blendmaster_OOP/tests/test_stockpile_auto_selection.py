@@ -149,7 +149,13 @@ class StockpileAutoSelectionTests(unittest.TestCase):
         window.setup_stockpile_table()
         window.stockpile_table.sortItems(2, Qt.DescendingOrder)
         nearest_column = window.stockpile_table_column_index('Nearest Crusher')
+        subset_column = window.stockpile_table_column_index('Subset')
+        self.assertEqual(subset_column, nearest_column + 1)
+        from PyQt5.QtWidgets import QComboBox
         for row in range(window.stockpile_table.rowCount()):
+            subset = window.stockpile_table.cellWidget(row, subset_column)
+            self.assertIsInstance(subset, QComboBox)
+            self.assertFalse(subset.isEditable())
             name = window.stockpile_table.item(row, 2).text()
             item = window.stockpile_table.item(row, nearest_column)
             self.assertEqual(item.text(), window.stockpile_data[name]['nearest_crusher'])
@@ -232,7 +238,7 @@ class StockpileAutoSelectionTests(unittest.TestCase):
                         window.stockpile_table.cellWidget(row, column).findChild(QCheckBox).isChecked()
                         for row in range(window.stockpile_table.rowCount())}
                     self.assertEqual(visible, expected)
-                window.show_page.assert_called_once_with('stockpile_inventories', force=True)
+                window.show_page.assert_called_once_with('stockpile_inventories')
 
 
 if __name__ == '__main__':

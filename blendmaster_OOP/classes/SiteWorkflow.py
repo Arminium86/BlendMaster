@@ -128,12 +128,17 @@ class WorkflowRun:
     stages: list = field(default_factory=list)
     outputs: dict = field(default_factory=dict)
     error: str = ''
+    amt_reconcile_after_chunking: bool = False
 
     @property
     def steps(self):
         if self.endpoint not in ('prepare', 'plan'):
             raise ValueError('Unknown workflow endpoint.')
-        return PLAN_STEPS if self.endpoint == 'plan' else PREPARATION_STEPS
+        steps = list(PLAN_STEPS if self.endpoint == 'plan' else PREPARATION_STEPS)
+        if self.amt_reconcile_after_chunking:
+            a, b = steps.index('reconciliation'), steps.index('amt')
+            steps[a], steps[b] = steps[b], steps[a]
+        return tuple(steps)
 
     def record(self, stage, started, result=None):
         finished = datetime.now(started.tzinfo)

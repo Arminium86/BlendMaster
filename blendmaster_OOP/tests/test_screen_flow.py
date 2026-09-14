@@ -1612,7 +1612,7 @@ class ScreenFlowStateTests(unittest.TestCase):
         self.assertEqual(row["modelled_product_fe"], 53.0)
         self.assertEqual(row["adjusted_product_fe"], 54.0)
 
-    def test_legacy_amt_chunk_rebuilds_adjusted_product_from_current_factor(self):
+    def test_legacy_amt_chunk_waits_for_submitted_profile_preparation(self):
         window = UserInputs.__new__(UserInputs)
         window.product_brand_labels_choice = ["FB"]
         window.opf_input_choice = "CC OPF02"
@@ -1664,13 +1664,8 @@ class ScreenFlowStateTests(unittest.TestCase):
             window.hex_sequence_table_argument,
         ):
             streams = rows[0]["grade_streams"]
-            self.assertEqual(streams["modelled_rom"]["FB"]["fe"], 50.0)
-            self.assertAlmostEqual(
-                streams["adjusted_rom"]["FB"]["fe"], 55.0
-            )
-            self.assertAlmostEqual(
-                streams["adjusted_product"]["FB"]["fe"], 54.0
-            )
+            self.assertEqual(streams["modelled_rom"]["*"]["fe"], 50.0)
+            self.assertIsNone(streams["adjusted_product"]["FB"]["fe"])
 
     def test_amt_chunk_reconciliation_rebuilds_once_per_input_signature(self):
         window = UserInputs.__new__(UserInputs)

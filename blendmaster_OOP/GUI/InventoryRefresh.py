@@ -73,7 +73,8 @@ def collect(host):
             row['max_reclaim_rate'] = rate
         if subset_column is not None:
             item = host.stockpile_table.item(index, subset_column)
-            row['subset'] = item.text().strip() if item else ''
+            choice = host.stockpile_table.cellWidget(index, subset_column)
+            row['subset'] = choice.currentText().strip() if choice is not None else item.text().strip() if item else ''
         if use[name]:
             item = host.stockpile_table.item(index, threshold_column) if threshold_column is not None else None
             row['reclaim_threshold'] = host.parse_formatted_number(item.text(), 0.0) if item else 0.0
@@ -165,10 +166,12 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
                 context.AMT_chunk_settings[name] = {**setting, **plan, 'amt_total_wmt':total,
                     'inventory_total_wmt':inventory, 'raw_signed_amt_wmt':raw}
             from classes.CombinedOPFReconciliation import build_profiles, evidence_signature, profile_signature, reusable_cache
+            from classes.AMTReconciliation import chunks_ready
+            from classes.ApprovedReconciliation import missing_sources
             feed = vars(context).get('multi_feed_configuration') or {}
             opfs = sorted({p['opf'] for p in feed.get('tipping_points', [])}) if feed.get('mode') == 'combined_opf' else []
             bundles = vars(context).get('opf_reconciliation_inputs') or {}
-            if opfs and all(opf in bundles and bundles[opf].get('signature') ==
+            if opfs and chunks_ready(vars(context)) and not missing_sources(vars(context), planning=True) and all(opf in bundles and bundles[opf].get('signature') ==
                     evidence_signature(vars(context), opf, context.reconciliation_inventory_builds()) for opf in opfs):
                 context._combined_opf_profile_cache = reusable_cache(vars(context), opfs) or (
                     profile_signature(vars(context), opfs), build_profiles(vars(context), opfs, implementation))
@@ -271,6 +274,16 @@ class InventoryRefresh:
                     cell = self.host.stockpile_table.item(row, column) if column is not None else None
                     if cell is not None:
                         cell.setText(str(original.get(key, default)))
+                    if key == 'subset' and column is not None:
+                        value = str(original.get(key, default))
+                        picker = self.host.stockpile_table.cellWidget(row, column)
+                        if picker is not None:
+                            blocked = picker.blockSignals(True)
+                            if picker.findText(value) < 0:
+                                picker.addItem(value)
+                            picker.setCurrentText(value)
+                            picker.blockSignals(blocked)
+                        self.host.stockpile_data[item.text()]['subset'] = value
         self.label.setText('Previous opening inputs retained.'); self.retry.hide(); self.keep.hide()
 
     def start(self, *, force=False):
@@ -323,10 +336,7 @@ class InventoryRefresh:
                     reuse_prepared=True, refresh_prepared_map=True, prepared=True, prepared_totals=totals)
                 h.populate_define_fields_table()
                 h.set_page_enabled(h.define_fields_tab_index, True)
-                if vars(h).get('access_role') == 'planner':
-                    h.set_page_enabled('grade_reconciliation', True)
-                    workflow = vars(h).get('site_workflow_controller')
-                    if not workflow or not workflow.active: h.prepare_data_streams()
+                h.advance_workspace('stockpile_inventories')
                 from GUI.WorkflowViews import schedule
                 schedule(h, results=True, charts=True)
             except Exception as exc:

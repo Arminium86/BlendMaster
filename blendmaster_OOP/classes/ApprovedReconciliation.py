@@ -61,7 +61,7 @@ def opening_inventory_sources(state, opf):
 
 
 def selected_sources(state, *, planning=False):
-    """Physical builds and member hexes; chunking never creates new hex sources."""
+    """Physical builds and the chosen AMT reconciliation grain."""
     selected = included_footprints(state.get('updated_stockpile_data'), state.get('AMT_footprint_exclusions'))
     chunks = state.get('hex_sequence_table') or state.get('hex_sequence_table_argument') or []
     for name, row in selected.items():
@@ -70,6 +70,12 @@ def selected_sources(state, *, planning=False):
                 yield name, 'inventory', row, None, source_build(row)
             continue
         rows = (state.get('AMT_stockpile_data') or {}).get(name) or []
+        from classes.AMTReconciliation import after_chunking, chunk_build
+        if after_chunking(state):
+            for chunk in chunks:
+                if chunk.get('footprint') == name and (numeric(chunk.get('balance')) or 0) > 0:
+                    yield name, 'amt_chunk', chunk, chunk.get('hex'), chunk_build(state, chunk)
+            continue
         members = None
         if planning:
             matching = [c for c in chunks if c.get('footprint') == name]
@@ -92,6 +98,8 @@ def member_hexes(chunk):
 
 
 def missing_sources(state, *, planning=False):
+    from classes.MultiFeedSettings import source_opfs, source_routing
+    routing = source_routing(state)
     registry = state.get('grade_reconciliation_registry') or {}
     records = registry.get('sources') or {}
     policy = policy_signature(state.get('reconciliation_settings'), state.get('grade_reconciliation_policy_revision'))
@@ -100,11 +108,15 @@ def missing_sources(state, *, planning=False):
     for opf in opfs(state):
         excluded = continuous_members(state, opf)
         for name, kind, row, hex_id, build in selected_sources(state, planning=planning):
+            if normalise_opf(opf) not in source_opfs(state, name, row, settings=routing):
+                continue
             if row.get('reconciliation_opf') and normalise_opf(row['reconciliation_opf']) != normalise_opf(opf):
                 continue
             if kind == 'inventory' and continuous_inventory(state, opf, name, row):
                 continue
             if kind == 'amt' and (str(name).upper(), str(hex_id)) in excluded:
+                continue
+            if kind == 'amt_chunk' and continuous_chunk(state, opf, row):
                 continue
             identity = source_identity(state.get('mine_input_choice'), opf, kind, name, build, hex_id)
             absent = [brand for brand in brands if (records.get(source_key(identity, brand)) or {}).get('policy') != policy]
@@ -120,6 +132,13 @@ def required_message(missing):
 
 
 def require_approved(state, *, planning=True):
+    from classes.MultiFeedSettings import unrouted_sources
+    from classes.AMTReconciliation import after_chunking, chunks_ready
+    unrouted = unrouted_sources(state)
+    if unrouted:
+        raise ReconciliationRequired('Assign a Subset / permitted feed point in Stockpile Inventories and Support → Multi-feed Setup for: ' + ', '.join(unrouted))
+    if (planning or after_chunking(state)) and not chunks_ready(state):
+        raise ReconciliationRequired('Submit chunks for all selected AMT stockpiles before continuing.')
     missing = missing_sources(state, planning=planning)
     if missing:
         raise ReconciliationRequired(required_message(missing))
@@ -235,8 +254,11 @@ def record_active_sources(state, scope, profiles=None):
                 continue  # Activity never approves an unreconciled source.
             footprint = chunk.get('footprint')
             build = source_build(chunk, inventory.get(footprint))
-            if any((registry.get('sources', {}).get(source_key(source_identity(state.get('mine_input_choice'), opf, 'amt', footprint, build, h), brand)) or {}).get('policy') != policy
-                   for h in member_hexes(chunk) for brand in configured_brands(state.get('product_brand_labels_choice'))):
+            from classes.AMTReconciliation import after_chunking, chunk_build
+            identities = ([source_identity(state.get('mine_input_choice'), opf, 'amt_chunk', footprint, chunk_build(state, chunk), chunk.get('hex'))]
+                          if after_chunking(state) else [source_identity(state.get('mine_input_choice'), opf, 'amt', footprint, build, h) for h in member_hexes(chunk)])
+            if any((registry.get('sources', {}).get(source_key(identity, brand)) or {}).get('policy') != policy
+                   for identity in identities for brand in configured_brands(state.get('product_brand_labels_choice'))):
                 continue
             key = chunk_key(state, opf, chunk)
             if not continuous_chunk(state, opf, chunk):

@@ -151,7 +151,7 @@ class ReconciliationApplication:
 
     def apply(self, streams, *, source_id, source_kind, source_wmt, contributing_blocks,
               hex_id=None, warnings=(), grade_coverage=None, prior_audit=None, source_instance=None):
-        if source_kind not in {"inventory", "amt"}:
+        if source_kind not in {"inventory", "amt", "amt_chunk"}:
             raise ValueError("Advanced reconciliation applies only to inventory stockpiles and AMT hexes.")
         if self.settings["method"] == "standard" and self.registry is None:
             return deepcopy(streams), {}

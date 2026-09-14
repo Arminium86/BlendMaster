@@ -62,6 +62,7 @@ def raw_hex(hex_id="H1", *, block=GB, total=100, rom=50, product=60):
 def window():
     view = UserInputs.__new__(UserInputs)
     view._manual_grade_reconciliation = True  # Algorithm fixtures represent an explicit review action.
+    view._apply_amt_component_factors = True  # Detached profile preparation after chunk submission.
     view.grade_reconciliation_registry = {}
     view.product_brand_labels_choice = ["SF"]
     view.opf_input_choice = "CB OPF"
@@ -398,6 +399,7 @@ class ChunkAndIntegrationTests(unittest.TestCase):
         for saved_chunks in (False, True):
             with self.subTest(saved_chunks=saved_chunks), tempfile.TemporaryDirectory() as directory:
                 view = window()
+                view._apply_amt_component_factors = False  # Raw fetching only prepares modelled members.
                 view.historical_recon_factors = {}
                 view.updated_stockpile_data = {"SP1": {"amt": True, "balance": 100, "build": "SP1_26001"}}
                 view.stockpile_data = {}
@@ -439,21 +441,20 @@ class ChunkAndIntegrationTests(unittest.TestCase):
                     self.assertEqual(view.AMT_chunk_reconciliation_signature, "")
                     self.assertNotIn("grade_streams", view.AMT_stockpile_data["SP1"][0])
                     view.AMT_stockpile_table.blockSignals.assert_called_with(False)
-                    # Calculations still reject missing factors; only setup
-                    # refreshes may defer them.
-                    with self.assertRaisesRegex(ValueError, "standard factor record"):
-                        view.reconcile_saved_AMT_chunk_grade_streams(force=True)
+                    # Raw refreshes leave factor application to submitted-chunk preparation.
+                    if not saved_chunks:
+                        self.assertEqual(view.reconcile_saved_AMT_chunk_grade_streams(force=True), 0)
                     view.historical_recon_factors = {"SF": standard()}
                     view.calculate_reconciliation_review()
                     view._manual_grade_reconciliation = False
                     self.assertTrue(view.refresh_AMT_enrichment_if_needed())
                     stored = view.draw_AMT_map.data.iloc[0]
-                    self.assertAlmostEqual(stored["grade_streams"]["adjusted_product"]["SF"]["fe"], 54)
-                    self.assertTrue(stored["reconciliation"])
-                    self.assertTrue(view.AMT_chunk_reconciliation_signature)
+                    self.assertFalse(stored["grade_streams"]["adjusted_product"])
+                    self.assertFalse(stored["reconciliation"])
+                    self.assertFalse(view.AMT_chunk_reconciliation_signature)
                     if saved_chunks:
                         self.assertEqual(view.hex_sequence_table[0]["member_hexes"], expected_chunks[0]["member_hexes"])
-                        self.assertAlmostEqual(view.hex_sequence_table[0]["grade_streams"]["adjusted_product"]["SF"]["fe"], 54)
+                        self.assertEqual(view.hex_sequence_table, expected_chunks)
                 finally:
                     set_database_path(previous)
 

@@ -7,7 +7,7 @@ from GUI.BackgroundTasks import run
 from GUI.OPFProfileLoading import ensure
 from classes.CombinedOPFReconciliation import evidence_signature, profile_signature
 from tests import test_background_tasks as background
-from tests.test_combined_opf_reconciliation import source_state, OPFS
+from tests.test_combined_opf_reconciliation import source_state, OPFS, approve_sources
 
 
 class OPFProfileLoadingTests(unittest.TestCase):
@@ -16,8 +16,9 @@ class OPFProfileLoadingTests(unittest.TestCase):
 
     def host(self):
         host = background.Host()
-        host.__dict__.update(source_state())
-        host.multi_feed_configuration = dict(mode='combined_opf', tipping_points=[dict(opf=opf) for opf in OPFS])
+        values = source_state()
+        approve_sources(values)
+        host.__dict__.update(values)
         host.reconciliation_inventory_builds = lambda: ['B1']
         for opf, bundle in host.opf_reconciliation_inputs.items():
             bundle['signature'] = evidence_signature(vars(host), opf, ['B1'])
@@ -98,6 +99,7 @@ class OPFProfileLoadingTests(unittest.TestCase):
     def test_missing_evidence_defers_to_existing_reconciliation_workflow(self):
         host = self.host()
         host.opf_reconciliation_inputs = {}
+        host.grade_reconciliation_registry = {}
         self.assertFalse(ensure(host, lambda: self.fail('Unexpected continuation')))
         self.assertEqual(host.background_tasks, [])
         host.deleteLater()

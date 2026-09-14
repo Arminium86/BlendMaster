@@ -323,7 +323,9 @@ class AutoReviewTests(unittest.TestCase):
         view.reconciliation_settings["max_lookback_days"] = 1
         view.AMT_stockpile_data["SP1"][0]["FINAL_WMT"] = 0
         result = work()
-        self.assertEqual(result[0][1]["source_wmt"], 100)
+        # The large snapshot is copied on the worker; changes before it starts
+        # must still be rejected by the completion signature check.
+        self.assertFalse(result[0][0])
         success(result)
         self.assertFalse(view.data_streams_submit_button.isEnabled())
         self.assertEqual(view.reconciliation_settings["max_lookback_days"], 1)

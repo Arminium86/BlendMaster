@@ -23,13 +23,14 @@ def source_state():
         factors[opf] = DataStreamReconciliation.default_factors(opf, ['FB'], 'fixture')[0]
         for kind, value in [('blend', blend), ('regression', regression)]:
             factors[opf]['FB'][kind]['fe']['effective'] = value
-    raw = dict(balance=100, build='B1', FE_ROM=50, FE_PROD1=60, FE_PROD3=55, WMT_PROD1=90, WMT_PROD3=80)
+    raw = dict(balance=100, build='B1', subset='Shared', FE_ROM=50, FE_PROD1=60, FE_PROD3=55, WMT_PROD1=90, WMT_PROD3=80)
     mappings = []
     for family in ('inventory', 'amt', 'aps'):
         for target, source in [('modelled_rom_fe', 'FE_ROM'), ('modelled_product_fe', 'FE_PROD1'), ('modelled_rom_wmt', 'balance'), ('modelled_product_dmt', 'WMT_PROD1')]:
             mappings.append(dict(source_family=family, target_field=target, source_field=source))
     state = dict(active_scenario_id='only-scenario', mine_input_choice='CC', opf_input_choice=OPFS[0],
         start_time_choice=datetime(2026, 9, 1, 5), product_brand_labels_choice=['FB'],
+        multi_feed_configuration=dict(mode='combined_opf', tipping_points=[dict(name='Crusher '+opf, opf=opf, rom_area='Shared') for opf in OPFS]),
         stockpile_data={'SP': raw}, updated_stockpile_data={'SP': deepcopy(raw)}, AMT_stockpile_data={},
         hex_sequence_table=[], field_definitions=default_field_definitions(), field_mappings=mappings,
         reconciliation_settings={'method': 'standard'}, historical_recon_factors=factors[OPFS[0]],
@@ -43,6 +44,7 @@ def approve_sources(state, selected_opfs=OPFS):
     registry = state.setdefault('grade_reconciliation_registry', {})
     for opf in selected_opfs:
         view = SourceContext(**deepcopy(state), _ui_class=UserInputs, _manual_grade_reconciliation=True)
+        view._apply_amt_component_factors = True
         view.grade_reconciliation_registry = registry
         view.opf_input_choice = opf
         bundle = state['opf_reconciliation_inputs'][opf]
@@ -180,17 +182,19 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
             self.assertAlmostEqual(row['grade_streams']['adjusted_product']['FB']['fe'], product)
         self.assertEqual(state, before)
 
-    def test_changed_scenario_start_invalidates_saved_evidence(self):
+    def test_changed_scenario_start_reuses_approved_source_factors(self):
         from classes.CombinedOPFReconciliation import SourceContext
         from datetime import timedelta
         state = source_state()
         for opf in OPFS:
             state['opf_reconciliation_inputs'][opf]['signature'] = evidence_signature(state, opf, [])
+        approve_sources(state)
         context = SourceContext(**state, _ui_class=UserInputs)
         context.current_multi_feed_configuration = lambda: dict(mode='combined_opf', tipping_points=[{'opf': opf} for opf in OPFS])
         self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
         context.start_time_choice += timedelta(days=1)
-        self.assertEqual(context.current_opf_profiles(), {})
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('automatic search')):
+            self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
 
     def test_amt_chunks_reuse_membership_and_physical_mass_with_opf_product_slots(self):
         state = source_state()

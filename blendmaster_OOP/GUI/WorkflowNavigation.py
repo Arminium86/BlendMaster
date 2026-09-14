@@ -107,12 +107,35 @@ class WorkflowNavigation:
         location = self.page_locations.get(product_targets_identifier(page_id))
         return bool(location and location[0].isTabEnabled(location[1]))
 
+    def workspace_order(self):
+        from classes.AMTReconciliation import after_chunking
+        pages = list(WORKSPACE)
+        if after_chunking(vars(self)):
+            pages[3:5] = ['amt_stockpiles', 'grade_reconciliation']
+        return pages
+
+    def sync_workspace_order(self):
+        tabs = vars(self).get('workspace_tabs')
+        if tabs is None:
+            return
+        blocked = tabs.blockSignals(True)
+        try:
+            for index, page in enumerate(self.workspace_order()):
+                widget = self.page_widgets.get(page)
+                if widget is not None and tabs.indexOf(widget) >= 0:
+                    tabs.tabBar().moveTab(tabs.indexOf(widget), index)
+            for page, (owner, _) in list(self.page_locations.items()):
+                self.page_locations[page] = (owner, owner.indexOf(self.page_widgets[page]))
+        finally:
+            tabs.blockSignals(blocked)
+
     def next_workspace_page(self, submitted_page):
         """Use the visible task order for both roles, omitting inapplicable inputs."""
         submitted_page = product_targets_identifier(submitted_page)
-        if submitted_page not in WORKSPACE:
+        order = self.workspace_order()
+        if submitted_page not in order:
             return None
-        for page in WORKSPACE[WORKSPACE.index(submitted_page) + 1:]:
+        for page in order[order.index(submitted_page) + 1:]:
             if page == 'amt_stockpiles' and not self.selected_amt_footprints():
                 continue
             if page == 'destination_progress' and not vars(self).get('file_path_choice'):
@@ -156,7 +179,7 @@ class WorkflowNavigation:
                         tabs.setCurrentWidget(state[page])
             self.set_page_enabled(target, True)
             self.show_page(target)
-            if target == 'grade_reconciliation':
+            if target == 'grade_reconciliation' and state.get('_workflow_page_enter') is None:
                 self.prepare_data_streams()  # Display saved approvals; historical updates remain manual.
         return target
 

@@ -77,6 +77,8 @@ def multi_feed_settings(value=None):
             raise ValueError("Route capacity needs a stockpile and a configured tipping point.")
         rates[str(source)] = {str(point): number(rate, f"{source} → {point} reclaim rate") for point, rate in points.items()}
     return dict(schema_version=1, mode=mode, tipping_points=lanes, rehandle_rules=rules,
+                amt_reconcile_after_chunking=bool(value.get('amt_reconcile_after_chunking', False)),
+                amt_submission_signature=str(value.get('amt_submission_signature') or ''),
                 route_reclaim_rates=rates,
                 source_subsets={str(k): str(v).strip() for k, v in (value.get("source_subsets") or {}).items()},
                 opf_scenarios={},  # Legacy scenario selectors are obsolete; Data Streams owns every selected OPF.
@@ -122,8 +124,48 @@ def period_lanes(settings, period, base_target):
 
 
 def route_allowed(settings, source, point):
-    subset = settings["source_subsets"].get(source, "")
+    subset = next((v for k, v in settings.get('source_subsets', {}).items() if k.casefold() == str(source).casefold()), '')
     rule = next((r for r in settings["rehandle_rules"] if r["subset"].casefold() == subset.casefold()
                  and r["tipping_point"].casefold() == point.casefold()), None)
     area = next((r["rom_area"] for r in settings["tipping_points"] if r["name"] == point), point)
-    return rule["allowed"] if rule is not None else bool(subset and subset.casefold() == area.casefold())
+    return rule["allowed"] if rule is not None else bool(subset and route_area_key(subset) == route_area_key(area))
+
+
+def route_area_key(value):
+    import re
+    value = str(value or '').strip().upper().replace('\\', '/').rsplit('/', 1)[-1]
+    value = re.sub(r':(?:IN|OUT)$', '', value)
+    key = re.sub('[^A-Z0-9]', '', value)
+    return {'OPF1CRUSHER': 'OPF01', 'OPF01PC': 'OPF01', 'OPF1PC': 'OPF01',
+            'OPF2CRUSHER': 'OPF02', 'OPF02PC': 'OPF02', 'OPF2PC': 'OPF02', 'RCH': 'OPF02',
+            'HALCRUSHER': 'HAL', 'HALPC': 'HAL'}.get(key, key)
+
+
+def source_routing(state):
+    """The editable Subset is authoritative, including an explicitly blank value."""
+    settings = multi_feed_settings(state.get('multi_feed_configuration'))
+    for name, row in {**(state.get('stockpile_data') or {}), **(state.get('updated_stockpile_data') or {})}.items():
+        fallback = (state.get('stockpile_data') or {}).get(name) or {}
+        settings['source_subsets'][name] = str(row.get('subset', fallback.get('subset',
+            settings['source_subsets'].get(name, row.get('nearest_crusher', row.get('NEAREST_CRUSHER', ''))))) or '').strip()
+    return settings
+
+
+def source_opfs(state, name, row=None, *, settings=None):
+    from classes.GradeStreams import normalise_opf
+    if (row or {}).get('reconciliation_opf'):
+        return {normalise_opf(row['reconciliation_opf'])}
+    settings = source_routing(state) if settings is None else settings
+    if settings['mode'] == 'single':
+        return {normalise_opf(state.get('opf_input_choice'))}
+    return {normalise_opf(p['opf']) for p in settings['tipping_points'] if route_allowed(settings, name, p['name'])}
+
+
+def unrouted_sources(state):
+    from classes.AMTFootprintExclusions import included_footprints
+    from classes.AMTReconciliation import footprints
+    settings = source_routing(state)
+    active_amt = footprints(state)
+    return [name for name, row in included_footprints(state.get('updated_stockpile_data'), state.get('AMT_footprint_exclusions')).items()
+            if (not row.get('amt', row.get('AMT', False)) or name in active_amt)
+            and float(row.get('balance', row.get('BALANCE')) or 0) > 0 and not source_opfs(state, name, row, settings=settings)]

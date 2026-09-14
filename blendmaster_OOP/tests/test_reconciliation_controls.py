@@ -369,12 +369,12 @@ class NativeReviewTests(unittest.TestCase):
         view.product_planning_category_input = SimpleNamespace(text=lambda: "OPF Production")
         for name in ("capture_cb_lump_fines_settings", "capture_byproduct_build_settings", "apply_canonical_field_mappings",
                      "apply_grade_streams_to_inventory", "refresh_AMT_enrichment_if_needed", "save_active_scenario_state",
-                     "set_page_enabled", "open_database_view", "prepare_data_streams", "show_page"):
+                     "set_page_enabled", "open_database_view", "prepare_data_streams", "show_page", "advance_workspace"):
             setattr(view, name, Mock())
         view.data_stream_reconciliation = Mock()
         view.data_stream_pending_build_targets = {}
         view.stockpile_data_AMT_column = {}
-        for name in ("data_streams_tab_index", "stockpile_tab_index", "define_fields_tab_index", "map_fields_tab_index", "guidance_schedules_tab_index"):
+        for name in ("data_streams_tab_index", "stockpile_tab_index", "define_fields_tab_index", "map_fields_tab_index", "guidance_schedules_tab_index", "database_view_tab_index"):
             setattr(view, name, name)
         view.calculate_reconciliation_review()  # Explicit manual calculation precedes read-only status/submission.
         view.update_reconciliation_review()
@@ -382,7 +382,8 @@ class NativeReviewTests(unittest.TestCase):
         view.handle_data_streams_submit()
         _apply.assert_called_once()
         view.refresh_AMT_enrichment_if_needed.assert_not_called()
-        view.open_database_view.assert_called_once_with(navigate=True)
+        view.open_database_view.assert_not_called()
+        view.advance_workspace.assert_called_once_with('grade_reconciliation')
         view.prepare_data_streams.assert_not_called()
         view.reconciliation_settings["cells"] = [local(blend=2)]
         view.handle_data_streams_submit()

@@ -23,6 +23,32 @@ enforce these actions on the server.
 | Views | Database View; Expit Sequence; OPF Production Report; Grade Profiles (optimised/manual); Material Flow; Build and Depletion Profiles; Closing ROM Stocks Compliance |
 | Support | Site Model Settings; Guidance Settings; Define Fields; Map Fields; Data Streams; Solver Configuration; Multi Feed Setup; Conveyors & COS; Database Reports; Site Automation; Decision Diagnostics; Legacy Agent Bridge |
 
+Support > Site Model Settings includes **Reconcile AMT after chunking**. It is
+unchecked by default: Grade Reconciliation matches each AMT component hex,
+followed by AMT Stockpiles. When checked, AMT Stockpiles comes first and Grade
+Reconciliation matches the combined lineage of each submitted chunk. Both roles
+advance through this order on Submit; the automated preparation stages use the
+same order. Inventory stockpiles remain individual reconciliation sources.
+
+Independent OPF source-grade preparation waits until every included, positive
+AMT footprint has submitted chunks and its required factors are approved. In
+component mode, preparation combines the individually adjusted contributions
+using the configured grade weights. In chunk mode, it applies the chunk's
+approved factors to the aggregated modelled grades. Historical searches remain
+manual; changing chunk membership in chunk mode requires approval for the new
+chunk. Active chunks continue using their continuous-assay priors. Saved review
+rows and Last adjusted dates remain available after submission.
+
+The **Subset** dropdown sits beside **Nearest Crusher** in Stockpile Inventories.
+Nearest Crusher supplies the initial assignment and auto-selection uses its
+operating-crusher mapping plus a 2WP brand. Subset is authoritative for rehandle
+routing: explicit movement rules take precedence, then Subset matches the ROM
+area configured for a tipping point. Known crusher aliases are recognized.
+Multiple-point planning requires a permitted route for every selected source;
+an explicitly blank Subset requires correction. Reconciliation and independent
+grade preparation cover only permitted source–OPF pairs. Single-point mode uses
+the selected OPF.
+
 The old Reports container is split across its destinations. Blend Plan keeps
 optimised/manual plans and displays the active single-point, multiple-point or
 combined-OPF mode. Quality, rounding, backup and direct-tip audit views remain.

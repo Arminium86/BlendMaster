@@ -39,23 +39,15 @@ def apply(host, on_complete):
     # on the worker so even the copy does not block painting/input feedback.
     values = {name: vars(host)[name] for name in FIELDS if name in vars(host)}
     implementation = type(host)
-    service = host.opening_stockpile_inventories
     def work():
         context = InventoryContext(implementation, deepcopy(values))
         context._reconciliation_application_cache = None  # Never inherit manual-search permission.
         context.apply_canonical_field_mappings()
-        context.apply_grade_streams_to_inventory()
-        signature = context.AMT_enrichment_request_signature()
-        changed = bool(vars(context).get('AMT_stockpile_data')) and signature != vars(context).get('AMT_enrichment_signature')
-        if changed:
-            context.AMT_stockpile_data = context.enrich_AMT_grade_streams(context.selected_AMT_data_source(), context.AMT_stockpile_data)
-            service.save_AMT_to_database(context.AMT_stockpile_data)
+        if (vars(context).get('multi_feed_configuration') or {}).get('mode') != 'combined_opf':
+            context.apply_grade_streams_to_inventory()
         result = {name: vars(context).get(name) for name in ('stockpile_data', 'updated_stockpile_data',
             'historical_recon_warnings', 'data_stream_source_warnings', '_reconciliation_application_cache',
             'aps_grade_field_mappings', 'aps_source_property_field_mappings', 'field_mappings', 'field_definitions')}
-        if changed:
-            result.update(AMT_stockpile_data=context.AMT_stockpile_data, AMT_enrichment_signature=signature,
-                          AMT_chunk_reconciliation_signature='')
         return result
     def unlock():
         host._data_stream_application_pending = False
@@ -64,10 +56,8 @@ def apply(host, on_complete):
             setattr(host, name, value)
         unlock()
         host.prune_zeroed_amt_chunks()
-        if 'AMT_stockpile_data' in result:
-            host.refresh_AMT_map_data_from_database()
         on_complete()
     def failed(error):
         unlock()
         host.show_error_popup(error)
-    host.run_background_task('Applying reconciliation to inventory and AMT…', work, finished, failed, readable_results=True)
+    host.run_background_task('Saving approved reconciliation inputs…', work, finished, failed, readable_results=True)

@@ -12,7 +12,7 @@ from classes.ReconciliationControls import normalise_reconciliation_settings, re
 from classes.GradeStreams import configured_brands
 
 
-SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data', 'hex_sequence_table',
+SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data', 'hex_sequence_table', 'multi_feed_configuration',
                  'grade_reconciliation_registry', 'grade_reconciliation_policy_revision',
                  'hex_sequence_table_argument', 'AMT_footprint_exclusions', 'AMT_chunk_settings',
                  'field_definitions', 'field_mappings', 'field_mapping_schema_version',
@@ -24,7 +24,7 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 
 def profile_signature(state, opfs):
-    return reconciliation_fingerprint({'version': 3, 'opfs': opfs,
+    return reconciliation_fingerprint({'version': 4, 'opfs': opfs,
         **{key: state.get(key) for key in SOURCE_FIELDS}})
 
 
@@ -84,11 +84,32 @@ class SourceContext(SimpleNamespace):
 
 def build_profiles(state, opfs, ui_class):
     from GUI.DrawCharts import DrawAMTStockpile
+    from classes.AMTReconciliation import after_chunking
+    from classes.MultiFeedSettings import source_opfs, source_routing
+    from classes.ApprovedReconciliation import member_hexes
+    from classes.AMTFootprintExclusions import included_footprints
+    from classes.GradeStreams import normalise_opf
+    routing = source_routing(state)
+    selected = included_footprints(state.get('updated_stockpile_data'), state.get('AMT_footprint_exclusions'))
+    selected_names = {str(name).upper() for name in selected}
     result = {}
     cached = state.get('_combined_opf_profile_cache')
     previous = cached[1] if isinstance(cached, (tuple, list)) and len(cached) == 2 and isinstance(cached[1], dict) else {}
     for opf in opfs:
-        context = SourceContext(**deepcopy({key: state.get(key) for key in SOURCE_FIELDS if key in state}))
+        inputs = {key: state.get(key) for key in SOURCE_FIELDS if key in state}
+        for field in ('stockpile_data', 'updated_stockpile_data'):
+            inputs[field] = {name: row for name, row in (state.get(field) or {}).items()
+                             if str(name).upper() in selected_names
+                             and normalise_opf(opf) in source_opfs(state, name, row, settings=routing)}
+        selected_chunks = [c for c in state.get('hex_sequence_table') or state.get('hex_sequence_table_argument') or []
+                           if str(c.get('footprint')).upper() in selected_names
+                           and normalise_opf(opf) in source_opfs(state, c.get('footprint'), settings=routing)]
+        inputs['hex_sequence_table'], inputs['hex_sequence_table_argument'] = selected_chunks, []
+        ids = {(c.get('footprint'), str(h)) for c in selected_chunks for h in member_hexes(c)}
+        inputs['AMT_stockpile_data'] = {name: [r for r in rows if (name, str(r.get('HEX', r.get('hex')))) in ids]
+            for name, rows in (state.get('AMT_stockpile_data') or {}).items() if any(n == name for n, _ in ids)}
+        context = SourceContext(**deepcopy(inputs))
+        context._apply_amt_component_factors = not after_chunking(state)
         context._ui_class = ui_class
         context.opf_input_choice = opf
         context.field_mappings = opf_field_mappings(state.get('field_mappings'), state.get('opf_input_choice'), opf)
@@ -99,6 +120,10 @@ def build_profiles(state, opfs, ui_class):
         context.stockpile_data = vars(context).get('stockpile_data') or {}
         context.updated_stockpile_data = vars(context).get('updated_stockpile_data') or {}
         context.AMT_stockpile_data = vars(context).get('AMT_stockpile_data') or {}
+        if not context.stockpile_data and not context.updated_stockpile_data and not selected_chunks:
+            result[opf] = profile_from_state(vars(context), str(state.get('active_scenario_id') or 'active'))
+            result[opf]['reconciliation_audits'] = []
+            continue
         context.ensure_field_mapping_migration = lambda: None  # The owning scenario already migrated its schema.
         application = context.reconciliation_application()
         if application:
@@ -149,8 +174,11 @@ def build_profiles(state, opfs, ui_class):
                 if abs(float(rebuilt['balance']) - float(chunk['balance'])) > .1:
                     raise ValueError(f'{opf}: AMT chunk {chunk.get("hex")} no longer matches its member hexes. Rebuild AMT chunks in this scenario.')
                 # Preserve the selected chunk's identity, sequence, rates and geometry.
-                for key in ('grade_streams', 'reconciliation', 'defined_fields', 'source_properties', 'grade_stream_warnings', 'data_quality'):
+                for key in ('grade_streams', 'reconciliation', 'defined_fields', 'source_properties', 'modelled_properties', 'grade_stream_warnings', 'data_quality'):
                     chunk[key] = rebuilt[key]
+                if after_chunking(state):
+                    chunk['grade_streams'] = context.apply_source_reconciliation(application, chunk,
+                        chunk['grade_streams'], chunk['footprint'], 'amt_chunk')
                 context.sync_canonical_grade_fields(chunk, chunk['grade_streams'])
             else:
                 if opf != state.get('opf_input_choice'):
@@ -177,6 +205,7 @@ def build_profiles(state, opfs, ui_class):
                 context.sync_canonical_grade_fields(chunk, streams)
             chunks.append(chunk)
         context.hex_sequence_table = chunks
+        context.apply_cb_split_to_amt_chunks(chunks)
         result[opf] = profile_from_state(vars(context), str(state.get('active_scenario_id') or 'active'))
         result[opf]['reconciliation_audits'] = [deepcopy(r['reconciliation']) for r in members.values() if r.get('reconciliation')]
     return result

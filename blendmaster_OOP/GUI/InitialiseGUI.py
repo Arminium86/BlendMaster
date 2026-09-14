@@ -3039,22 +3039,34 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         layout.addStretch()
 
     def current_multi_feed_configuration(self):
-        value = multi_feed_settings(getattr(self, "multi_feed_configuration", None))
-        if not value['tipping_points'] and 'TOTAL_FEED' in str(getattr(self, 'crusher_input_choice', '')).upper():
-            mine, opf = getattr(self, 'mine_input_choice', ''), getattr(self, 'opf_input_choice', '')
+        state = vars(self)
+        value = multi_feed_settings(state.get("multi_feed_configuration"))
+        if not value['tipping_points'] and 'TOTAL_FEED' in str(state.get('crusher_input_choice', '')).upper():
+            mine, opf = state.get('mine_input_choice', ''), state.get('opf_input_choice', '')
             physical = [name for name in SITE_CRUSHER_OPTIONS.get((mine, opf), []) if 'TOTAL_FEED' not in name.upper()]
             if len(physical) > 1:
-                calendar = getattr(self, 'calendar_inputs', {}) or {}
+                calendar = state.get('calendar_inputs') or {}
                 aliases = {'OPF01_PC': 'OPF1 CRUSHER', 'HAL_PC': 'HAL CRUSHER', 'OPF02_PC': 'RCH'} if mine == 'CC' else {}
                 value.update(mode='multi_tipping_point', tipping_points=[dict(name=name, opf=opf, rom_area=aliases.get(name, name), targets_by_period={
                     ('preplan' if i == 0 else f'period_{i}'): dict(crusher_rate=float((calendar.get('crusher_rate') or {}).get(label) or 0) / len(physical))
                     for i, label in enumerate(self.planning_period_labels())}) for name in physical])
                 value = multi_feed_settings(value)
-        for name, row in (getattr(self, "stockpile_data", None) or {}).items():
+        for name, row in (state.get("stockpile_data") or {}).items():
             value["source_subsets"][name] = str(row.get("subset", value["source_subsets"].get(name, row.get("nearest_crusher", row.get("NEAREST_CRUSHER", "")))) or "")
         if value['mode'] != 'single':
-            value = apply_calendar(value, getattr(self, 'calendar_inputs', {}) or {}, self.planning_period_labels())
+            value = apply_calendar(value, state.get('calendar_inputs') or {}, self.planning_period_labels())
         return value
+
+    def set_amt_reconciliation_grain(self, enabled):
+        from classes.SiteWorkflow import require_action
+        require_action(vars(self).get('access_role', 'support'), 'site_model')
+        self.multi_feed_configuration = {**(vars(self).get('multi_feed_configuration') or {}),
+                                         'amt_reconcile_after_chunking': bool(enabled)}
+        self._reconciliation_review_generation = vars(self).get('_reconciliation_review_generation', 0) + 1
+        self._reconciliation_review_pending = False
+        self.sync_workspace_order()
+        if vars(self).get('reconciliation_review') is not None:
+            self.update_reconciliation_review()
 
     def sync_multi_feed_setup(self):
         config = self.current_multi_feed_configuration()
@@ -3068,7 +3080,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def submit_multi_feed_setup(self):
         try:
-            self.multi_feed_configuration = self.multi_feed_setup.settings()
+            value = self.multi_feed_setup.settings()
+            # These belong to Site Model / AMT submission, not this editor's snapshot.
+            current = vars(self).get('multi_feed_configuration') or {}
+            for key in ('amt_reconcile_after_chunking', 'amt_submission_signature'):
+                if key in current:
+                    value[key] = current[key]
+            self.multi_feed_configuration = value
             self.multi_feed_setup.validation.clear()
         except (ValueError, TypeError) as exc:
             self.multi_feed_setup.validation.setText(str(exc))
@@ -3084,6 +3102,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return {}
         config = self.current_multi_feed_configuration()
         if config['mode'] != 'combined_opf':
+            return {}
+        from classes.AMTReconciliation import chunks_ready
+        from classes.ApprovedReconciliation import missing_sources
+        if not chunks_ready(vars(self)) or missing_sources(vars(self), planning=True):
             return {}
         bundles = vars(self).get('opf_reconciliation_inputs') or {}
         opfs = sorted({p['opf'] for p in config['tipping_points']})
@@ -9701,6 +9723,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             review.set_context(vars(self).get("reconciliation_settings"), self.opf_input_choice,
                                configured_brands(self.product_brand_labels_choice))
             self.data_streams_submit_button.setEnabled(False)
+            if vars(self).get('grade_reconciliation_registry'):
+                self.update_reconciliation_review()
 
     def reconciliation_controls_changed(self, settings):
         self.reconciliation_settings = normalise_reconciliation_settings(settings)
@@ -9728,6 +9752,16 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def request_manual_grade_reconciliation(self, refresh_sources=None):
         """The only UI entry point permitted to fetch/search historical factors."""
+        from classes.AMTReconciliation import after_chunking, chunks_ready
+        from classes.MultiFeedSettings import source_routing, unrouted_sources
+        self.multi_feed_configuration = source_routing(vars(self))
+        unrouted = unrouted_sources(vars(self))
+        if unrouted or (after_chunking(vars(self)) and not chunks_ready(vars(self))):
+            self.update_reconciliation_review()
+            self.reconciliation_review.status.setText(
+                'Assign a Subset / permitted feed point for: ' + ', '.join(unrouted) if unrouted else
+                'Submit chunks for all selected AMT stockpiles before updating Grade Reconciliation.')
+            return
         self._manual_reconciliation_requested = True
         self._grade_reconciliation_refresh_sources = refresh_sources or []
         if refresh_sources:
@@ -9739,7 +9773,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **{name: state.get(name) for name in (
             "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors", "grade_reconciliation_policy_revision", "transport_opening_history",
             "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
-            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings", "AMT_footprint_exclusions")}})
+            "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings", "AMT_footprint_exclusions", "multi_feed_configuration")}})
 
     def calculate_reconciliation_review(self):
         """Preview evidence on copies; do not persist grades or alter AMT chunks."""
@@ -9750,6 +9784,28 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         enrichment = (reconciliation_fingerprint(self.AMT_enrichment_request_signature())
                       if hasattr(self, 'AMT_enrichment_request_signature') else '')
         selected = included_footprints(state.get("updated_stockpile_data"), state.get("AMT_footprint_exclusions"))
+        from classes.MultiFeedSettings import source_opfs, source_routing
+        from classes.GradeStreams import normalise_opf
+        from classes.AMTReconciliation import after_chunking
+        routing = source_routing(state)
+        selected = {name: row for name, row in selected.items()
+                    if normalise_opf(state.get('opf_input_choice')) in source_opfs(state, name, row, settings=routing)}
+        if after_chunking(state):
+            from classes.ApprovedReconciliation import selected_sources, continuous_chunk
+            for name, kind, row, hex_id, build in selected_sources(state):
+                if normalise_opf(state.get('opf_input_choice')) not in source_opfs(state, name, row, settings=routing):
+                    continue
+                managed = continuous_chunk(state, state.get('opf_input_choice'), row) if kind == 'amt_chunk' else None
+                if managed:
+                    audit = copy.deepcopy(managed['reconciliation'])
+                    audit.update(prediction_scope='amt_chunk', last_adjusted=managed.get('last_adjusted') or audit.get('last_adjusted'))
+                else:
+                    row = copy.deepcopy(row)
+                    self.apply_source_reconciliation(application, row, row.get('grade_streams') or {}, name, kind)
+                    audit = row['reconciliation']
+                audit['review_label'] = f"AMT chunk · {name} · {hex_id}" if kind == 'amt_chunk' else f"Inventory · {name} · {build}"
+                audits.append(audit)
+            return audits, aggregate_reconciliation([(a, a.get('source_wmt', 0)) for a in audits], source_kind='overall'), warnings
         from classes.ApprovedReconciliation import continuous_members, continuous_chunk
         managed_members = continuous_members(state, state.get('opf_input_choice'))
         zeroed = zeroed_amt_footprints(state.get("AMT_stockpile_data"))
@@ -9827,11 +9883,19 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             from classes.ApprovedReconciliation import missing_sources, required_message
             from GUI.ManualGradeReconciliation import saved_review
             missing = missing_sources(vars(self))
+            from classes.AMTReconciliation import after_chunking, chunks_ready
+            from classes.MultiFeedSettings import unrouted_sources
+            waiting = after_chunking(vars(self)) and not chunks_ready(vars(self))
+            unrouted = unrouted_sources(vars(self))
             review.set_busy(False)
             review.set_review(*saved_review(vars(self)))
             review.status.setText(required_message(missing) if missing else
                               'Existing source factors are valid. Update missing sources runs only when selected here.')
-            self.data_streams_submit_button.setEnabled(not missing)
+            if waiting:
+                review.status.setText('Submit chunks for all selected AMT stockpiles before Grade Reconciliation.')
+            elif unrouted:
+                review.status.setText('Assign a Subset / permitted feed point for: ' + ', '.join(unrouted))
+            self.data_streams_submit_button.setEnabled(not missing and not waiting and not unrouted)
             if not missing:
                 self._reconciliation_review_signature = self.reconciliation_review_signature()
             return []
@@ -10028,7 +10092,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if application is None:
             row.pop("reconciliation", None)
             return streams
-        if source_kind == "amt":
+        if source_kind == 'amt_chunk':
+            from classes.AMTReconciliation import chunk_lineage
+            blocks, warnings = chunk_lineage(vars(self), row)
+            total, hex_id = numeric(row.get('balance')), row.get('hex')
+        elif source_kind == "amt":
             blocks, warnings = amt_reconciliation_lineage(row)
             total = numeric(row.get("FINAL_WMT", row.get("balance")))
             hex_id = row.get("HEX", row.get("hex"))
@@ -10055,14 +10123,21 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     coverage = numeric(raw_fields.get(f"modelled_{source}_coverage_pct"))
                 if coverage is not None:
                     grade_coverage[stream][analyte] = coverage / 100.0
+        if source_kind == 'amt_chunk':
+            # Chunk properties already record the covered share of member tonnes.
+            coverage = (row.get('modelled_properties') or {}).get('coverage') or {}
+            grade_coverage = {stream: {a: numeric(coverage[f'{stream}_{a}']) or 0.0 for a in ANALYTES
+                                      if f'{stream}_{a}' in coverage}
+                              for stream in ('modelled_rom', 'modelled_product')}
         from classes.ApprovedReconciliation import ReconciliationRequired, source_build
         inventory = (vars(self).get('updated_stockpile_data') or {}).get(source_id) or {}
+        from classes.AMTReconciliation import chunk_build
         try:
             streams, audit = application.apply(
                 streams, source_id=source_id, source_kind=source_kind,
                 source_wmt=max(total or 0.0, 0.0), contributing_blocks=blocks, hex_id=hex_id,
                 warnings=warnings, grade_coverage=grade_coverage,
-                prior_audit=row.get("reconciliation"), source_instance=source_build(row, inventory),
+                prior_audit=row.get("reconciliation"), source_instance=(chunk_build(vars(self), row) if source_kind == 'amt_chunk' else source_build(row, inventory)),
             )
         except ReconciliationRequired as exc:
             if vars(self).get('_manual_grade_reconciliation'):
@@ -11006,11 +11081,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return messages
 
     def handle_data_streams_submit(self):
-        from classes.ApprovedReconciliation import missing_sources, required_message
-        missing = missing_sources(vars(self))
-        if missing:
+        from classes.ApprovedReconciliation import require_approved, ReconciliationRequired
+        try:
+            require_approved(vars(self), planning=False)
+        except ReconciliationRequired as exc:
             self.show_page('grade_reconciliation', force=True)
-            self.reconciliation_review.mark_stale(required_message(missing))
+            self.update_reconciliation_review()
+            self.reconciliation_review.status.setText(str(exc))
             return
         if vars(self).get("reconciliation_review") is not None:
             self.capture_recon_factor_table()
@@ -11022,6 +11099,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.capture_recon_factor_table()
         except ValueError as exc:
             QMessageBox.warning(self, "Data Streams", str(exc))
+            return
+        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf':
+            self.finish_data_stream_submission()
             return
         from GUI.InventoryStreamApplication import apply
         apply(self, self.finish_data_stream_submission)
@@ -11043,7 +11123,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from GUI.OPFProfileLoading import ensure
         if ensure(self, self.finish_data_stream_submission):
             return
-        if (not vars(self).get('_defer_opf_profile_preparation') and
+        from classes.AMTReconciliation import chunks_ready
+        if (chunks_ready(vars(self)) and not vars(self).get('_defer_opf_profile_preparation') and
                 (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles()):
             self.prepare_data_streams()
             return
@@ -11068,6 +11149,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                         opf, self.start_time_choice, bundle['factors'], bundle.get('warnings') or [])
         from GUI.WorkflowDependencies import reconciliation_input_revision
         self.reconciliation_applied_revision = reconciliation_input_revision(self)
+        self.update_reconciliation_review()
         self.save_active_scenario_state()
         self.set_page_enabled(self.data_streams_tab_index, True)
         # The field schema remains editable after Data Streams. It is common
@@ -17100,6 +17182,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "Stockpile Name",
             "2WP Brand",
             "Nearest Crusher",
+            "Subset",
             "Build",
             "Inventory Timestamp",
             "Balance (WMT)",
@@ -17112,7 +17195,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if self.is_total_feed_operating_crusher():
             headers.append("Max Reclaim Rate (t/h)")
         headers.append("Reclaim Threshold (WMT)")
-        headers.append("Subset")
         return headers
 
     def stockpile_table_column_index(self, caption):
@@ -17121,6 +17203,22 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             if header_item and header_item.text() == caption:
                 return column
         return None
+
+    def stockpile_subset_options(self):
+        config = self.current_multi_feed_configuration()
+        values = {p['rom_area'] for p in config['tipping_points']}
+        values.update(config['source_subsets'].values())
+        values.update(str(r.get('nearest_crusher', r.get('NEAREST_CRUSHER', '')) or '') for r in self.stockpile_data.values())
+        return [''] + sorted(values - {''})
+
+    def set_stockpile_subset(self, name, value):
+        if name in self.stockpile_data:
+            self.stockpile_data[name]['subset'] = value
+        column = self.stockpile_table_column_index('Subset')
+        for row in range(self.stockpile_table.rowCount()):
+            item = self.stockpile_table.item(row, 2)
+            if item is not None and item.text() == name and self.stockpile_table.item(row, column) is not None:
+                self.stockpile_table.item(row, column).setText(value)
 
     @staticmethod
     def normalized_crusher_display_name(value):
@@ -17262,6 +17360,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
 
         # Populate Stockpile Data
+        subset_options = self.stockpile_subset_options()
         for row_idx, (stockpile_name, attributes) in enumerate(data_source.items()):
            
             # "Use" Column (Checkbox)
@@ -17436,6 +17535,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             reclaim_value = attributes.get("reclaim_threshold", 0)
             subset = attributes.get("subset", attributes.get("nearest_crusher", attributes.get("NEAREST_CRUSHER", "")))
             self.stockpile_table.setItem(row_idx, headers.index("Subset"), QTableWidgetItem(str(subset or "")))
+            subset_choice = QComboBox()
+            options = list(subset_options)
+            if str(subset or '') not in options:
+                options.append(str(subset))
+            subset_choice.addItems(options)
+            subset_choice.setCurrentText(str(subset or ''))
+            subset_choice.setToolTip('Authoritative stockpile subset for Rehandle Movement Rules. Blank means no assigned route in a multi-feed model.')
+            subset_choice.currentTextChanged.connect(lambda value, name=stockpile_name: self.set_stockpile_subset(name, value))
+            self.stockpile_table.setCellWidget(row_idx, headers.index('Subset'), subset_choice)
             reclaim_value = float(reclaim_value)
             reclaim_item = NumericSortTableWidgetItem(f"{reclaim_value:,.0f}")
             reclaim_item.setData(Qt.UserRole, reclaim_value)
@@ -17611,8 +17719,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             name_item = self.stockpile_table.item(row, 2)
             if subset_column is not None and name_item is not None:
                 subset_item = self.stockpile_table.item(row, subset_column)
+                subset_choice = self.stockpile_table.cellWidget(row, subset_column)
                 if name_item.text() in self.stockpile_data:
-                    self.stockpile_data[name_item.text()]["subset"] = subset_item.text().strip() if subset_item else ""
+                    self.stockpile_data[name_item.text()]["subset"] = subset_choice.currentText().strip() if isinstance(subset_choice, QComboBox) else subset_item.text().strip() if subset_item else ""
             checkbox_widget = self.stockpile_table.cellWidget(row, 0)  # Get the widget in the "Use" column
             AMT_checkbox_widget = self.stockpile_table.cellWidget(row, 1)  # Get the widget in the "AMT" column
 
@@ -19587,7 +19696,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def enrich_AMT_grade_streams(self, data_source, amt_data):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
-        application = self.reconciliation_application()
+        application = self.reconciliation_application() if vars(self).get('_apply_amt_component_factors') else None
         enriched = guard_amt_snapshot(self.included_AMT_snapshot(amt_data))
         from classes.ApprovedReconciliation import continuous_members
         managed_members = continuous_members(vars(self), vars(self).get('opf_input_choice'))
@@ -19638,8 +19747,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     self.opf_input_choice,
                     strict_mappings=strict_mappings,
                 )
-                streams = self.apply_source_reconciliation(application, row, streams, footprint, "amt")
-                if application:
+                if vars(self).get('_apply_amt_component_factors'):
+                    streams = self.apply_source_reconciliation(application, row, streams, footprint, "amt")
+                else:
+                    streams['adjusted_rom'], streams['adjusted_product'] = {}, {}
+                    row['reconciliation'] = {}
+                if application and row.get('reconciliation'):
                     row["reconciliation"]["enrichment_signature"] = enrichment_signature
                 row["GRADE_STREAMS"] = streams
                 row["grade_streams"] = streams
@@ -19764,6 +19877,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         membership and modelled values remain authoritative; only the derived
         brand copies and historical reconciliation layers are rebuilt here.
         """
+        from classes.AMTReconciliation import after_chunking, chunks_ready
+        if after_chunking(vars(self)) or not chunks_ready(vars(self)):
+            return 0
+        if (vars(self).get('grade_reconciliation_registry') or {}).get('sources'):
+            return 0  # Approved chunk chemistry is published once after chunk submission.
         self.prune_zeroed_amt_chunks()
         if allow_pending and self.reconciliation_factors_pending():
             # The map and project loader can restore raw AMT data before Data
@@ -20012,15 +20130,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return False
 
         self.hex_sequence_table = candidate_chunks
+        from classes.AMTReconciliation import submission_signature
+        self.multi_feed_configuration = self.current_multi_feed_configuration()
+        self.multi_feed_configuration['amt_submission_signature'] = submission_signature(vars(self))
 
         if not any(not isinstance(item, dict) for item in self.hex_sequence_table):
-            try:
-                # AMT calculated by-products belong to the scheduling source,
-                # which is the submitted chunk rather than each underlying hex.
-                self.apply_cb_split_to_amt_chunks(self.hex_sequence_table)
-            except ValueError as exc:
-                QMessageBox.warning(self, "AMT Stockpiles", str(exc))
-                return False
+            # Product splits follow adjusted chunk grades in OPFProfileLoading.
             self.hex_sequence_table_argument = copy.deepcopy(self.hex_sequence_table)
             self.total_AMT_stockpile_balances = {}
             self.populate_total_AMT_stockpile_balances()
