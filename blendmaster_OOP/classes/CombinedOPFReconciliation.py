@@ -13,6 +13,7 @@ from classes.GradeStreams import configured_brands
 
 
 SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data', 'hex_sequence_table',
+                 'grade_reconciliation_registry', 'grade_reconciliation_policy_revision',
                  'hex_sequence_table_argument', 'AMT_footprint_exclusions', 'AMT_chunk_settings',
                  'field_definitions', 'field_mappings', 'field_mapping_schema_version',
                  'product_brand_labels_choice', 'mine_input_choice', 'opf_input_choice', 'start_time_choice',
@@ -84,19 +85,31 @@ class SourceContext(SimpleNamespace):
 def build_profiles(state, opfs, ui_class):
     from GUI.DrawCharts import DrawAMTStockpile
     result = {}
+    cached = state.get('_combined_opf_profile_cache')
+    previous = cached[1] if isinstance(cached, (tuple, list)) and len(cached) == 2 and isinstance(cached[1], dict) else {}
     for opf in opfs:
         context = SourceContext(**deepcopy({key: state.get(key) for key in SOURCE_FIELDS if key in state}))
         context._ui_class = ui_class
         context.opf_input_choice = opf
         context.field_mappings = opf_field_mappings(state.get('field_mappings'), state.get('opf_input_choice'), opf)
-        bundle = state['opf_reconciliation_inputs'][opf]
-        context.historical_recon_factors = deepcopy(state.get('historical_recon_factors') if opf == state.get('opf_input_choice') else bundle['factors'])
+        bundle = (state.get('opf_reconciliation_inputs') or {}).get(opf) or {}
+        context.historical_recon_factors = deepcopy(state.get('historical_recon_factors') if opf == state.get('opf_input_choice') else bundle.get('factors') or {})
         context.reconciliation_inputs = deepcopy(bundle.get('reconciliation_inputs') or {})
         context.historical_recon_warnings = list(bundle.get('warnings') or [])
         context.stockpile_data = vars(context).get('stockpile_data') or {}
         context.updated_stockpile_data = vars(context).get('updated_stockpile_data') or {}
         context.AMT_stockpile_data = vars(context).get('AMT_stockpile_data') or {}
         context.ensure_field_mapping_migration = lambda: None  # The owning scenario already migrated its schema.
+        application = context.reconciliation_application()
+        if application:
+            profile = previous.get(opf) or {}
+            # A chunk/grade-mapping edit invalidates the complete profile, but
+            # unchanged physical sources can still use their completed search.
+            # The application checks evidence + source signatures individually.
+            application.retain_audits([
+                *(row['reconciliation'] for row in (profile.get('inventory') or {}).values() if row.get('reconciliation')),
+                *(profile.get('reconciliation_audits') or []),
+            ])
         context.apply_canonical_field_mappings()
         context.apply_grade_streams_to_inventory()
         enriched = context.enrich_AMT_grade_streams({}, context.AMT_stockpile_data) if context.AMT_stockpile_data else {}
@@ -110,6 +123,16 @@ def build_profiles(state, opfs, ui_class):
         chunks = []
         for original in vars(context).get('hex_sequence_table') or vars(context).get('hex_sequence_table_argument') or []:
             chunk = deepcopy(original)
+            from classes.ApprovedReconciliation import continuous_chunk
+            managed = continuous_chunk(vars(context), opf, chunk)
+            if managed:
+                chunk['grade_streams'] = deepcopy(managed['grade_streams'])
+                chunk['reconciliation'] = deepcopy(managed['reconciliation'])
+                chunk['reconciliation'].update(prediction_scope='amt_chunk',
+                    last_adjusted=managed.get('last_adjusted') or chunk['reconciliation'].get('last_adjusted'))
+                context.sync_canonical_grade_fields(chunk, chunk['grade_streams'])
+                chunks.append(chunk)
+                continue
             ids = builder.member_hexes_from_entry(chunk)
             rows = [members.get((str(chunk.get('footprint')), str(identity))) for identity in ids]
             if rows and all(row is not None for row in rows):
@@ -140,7 +163,15 @@ def build_profiles(state, opfs, ui_class):
                 streams = amt_grade_streams(chunk, chunk, context.product_brand_labels_choice, context.historical_recon_factors, opf, strict_mappings=True)
                 application = context.reconciliation_application()
                 if application:
-                    streams, audit = application.apply(streams, source_id=str(chunk.get('hex') or ''), source_kind='amt', source_wmt=float(chunk.get('balance') or 0), contributing_blocks=[], warnings=['Member hexes unavailable; using global factors.'])
+                    from classes.ApprovedReconciliation import source_build, ReconciliationRequired
+                    try:
+                        streams, audit = application.apply(streams, source_id=str(chunk.get('footprint') or ''), source_kind='amt',
+                            source_wmt=float(chunk.get('balance') or 0), contributing_blocks=[],
+                            source_instance=source_build(chunk, context.updated_stockpile_data.get(chunk.get('footprint'))),
+                            warnings=['Member hexes unavailable; using manually approved fallback factors.'])
+                    except ReconciliationRequired as exc:
+                        streams['adjusted_rom'], streams['adjusted_product'] = {}, {}
+                        audit = dict(status='pending', by_brand={}, warnings=[str(exc)])
                     chunk['reconciliation'] = audit
                 chunk['grade_streams'] = streams
                 context.sync_canonical_grade_fields(chunk, streams)

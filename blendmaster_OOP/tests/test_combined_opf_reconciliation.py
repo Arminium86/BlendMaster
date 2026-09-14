@@ -8,8 +8,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from GUI.InitialiseGUI import UserInputs
-from classes.CombinedOPFReconciliation import build_profiles, evidence_signature, opf_field_mappings
+from classes.CombinedOPFReconciliation import build_profiles, evidence_signature, opf_field_mappings, profile_signature
+from classes.ReconciliationFactorResolver import ReconciliationFactorResolver
 from classes.FieldDefinitions import default_field_definitions
+from classes.GradeStreams import normalise_opf
 from setup.DataStreamReconciliation import DataStreamReconciliation
 
 OPFS = ['CC OPF01', 'CC OPF02']
@@ -35,7 +37,118 @@ def source_state():
     return state
 
 
+def approve_sources(state, selected_opfs=OPFS):
+    """Explicit manual preparation for profile/field-mapping fixtures."""
+    from classes.CombinedOPFReconciliation import SourceContext
+    registry = state.setdefault('grade_reconciliation_registry', {})
+    for opf in selected_opfs:
+        view = SourceContext(**deepcopy(state), _ui_class=UserInputs, _manual_grade_reconciliation=True)
+        view.grade_reconciliation_registry = registry
+        view.opf_input_choice = opf
+        bundle = state['opf_reconciliation_inputs'][opf]
+        view.reconciliation_inputs = bundle.get('reconciliation_inputs') or {}
+        view.historical_recon_factors = bundle['factors']
+        view.historical_recon_warnings = []
+        view.apply_canonical_field_mappings()
+        view.apply_grade_streams_to_inventory()
+        view.enrich_AMT_grade_streams({}, view.AMT_stockpile_data)
+
+
 class CombinedOPFReconciliationTests(unittest.TestCase):
+    def auto_amt_state(self):
+        from tests.test_reconciliation_factor_resolver import AS_OF, GB, composition, period
+        state = source_state()
+        state['start_time_choice'] = AS_OF
+        state['reconciliation_settings'] = {'method': 'auto_max_confidence'}
+        state['historical_recon_warnings'] = []
+        for opf, blend in zip(OPFS, [1.05, .95]):
+            state['opf_reconciliation_inputs'][opf]['reconciliation_inputs'] = dict(
+                samples=period(opf=opf, brand='FB', blend=blend),
+                inventory_lineage={'B1': dict(inventory_wmt=100, contributing_blocks=composition((GB, 100)))})
+        state['reconciliation_inputs'] = deepcopy(state['opf_reconciliation_inputs'][OPFS[0]]['reconciliation_inputs'])
+        state['AMT_stockpile_data'] = {'SP': [
+            dict(HEX=identity, FINAL_WMT=wmt, balance=wmt, FE_ROM=50, FE_PROD1=60, FE_PROD2=55,
+                 WMT_PROD1=wmt*.9, WMT_PROD2=wmt*.8,
+                 GRADE_BLOCK_LINEAGE_JSON=[dict(grade_block_name=GB, remaining_wmt=wmt)])
+            for identity, wmt in [('a', 40), ('b', 60)]]}
+        return state
+
+    def test_chunking_and_baseline_changes_reuse_per_opf_hex_and_inventory_searches(self):
+        state = self.auto_amt_state()
+        original = ReconciliationFactorResolver.resolve_source
+        calls = []
+        def resolve(engine, *args, **kwargs):
+            calls.append((engine.opf, args[1], kwargs.get('hex_id')))
+            return original(engine, *args, **kwargs)
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', resolve):
+            approve_sources(state)
+            first = build_profiles(state, OPFS, UserInputs)
+            self.assertEqual(len(calls), 6)  # One inventory and two hexes per OPF, before chunking.
+            state['_combined_opf_profile_cache'] = (profile_signature(state, OPFS), first)
+            state['hex_sequence_table'] = [dict(hex='chunk', footprint='SP', sequence=1,
+                balance=100, member_hexes=['a', 'b'])]
+            state['AMT_stockpile_data']['SP'][0]['FE_ROM'] = 40
+            calls.clear()
+            reused = build_profiles(state, OPFS, UserInputs)
+            self.assertEqual(calls, [])
+            for opf, factor in zip(OPFS, [1.05, .95]):
+                self.assertAlmostEqual(reused[opf]['chunks']['chunk']['grade_streams']['adjusted_rom']['FB']['fe'], 46*factor)
+        # Reuse must produce exactly the same grades and audit as a fresh search.
+        del state['_combined_opf_profile_cache']
+        self.assertEqual(reused, build_profiles(state, OPFS, UserInputs))
+
+    def test_primary_applied_hexes_are_reused_but_new_opf_stays_pending(self):
+        from classes.CombinedOPFReconciliation import SourceContext
+        state = self.auto_amt_state()
+        approve_sources(state, OPFS[:1])
+        context = SourceContext(**state, _ui_class=UserInputs)
+        context.AMT_stockpile_data = context.enrich_AMT_grade_streams({}, context.AMT_stockpile_data)
+        original = ReconciliationFactorResolver.resolve_source
+        searched = []
+        def resolve(engine, *args, **kwargs):
+            if args[1] == 'amt':
+                searched.append((engine.opf, kwargs.get('hex_id')))
+            return original(engine, *args, **kwargs)
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', resolve):
+            profiles = build_profiles(vars(context), OPFS, UserInputs)
+        self.assertEqual(searched, [])
+        self.assertEqual(profiles[OPFS[1]]['inventory']['SP']['reconciliation']['status'], 'pending')
+
+    def test_changed_hex_lineage_retains_manually_approved_factors(self):
+        from tests.test_reconciliation_factor_resolver import REMOTE
+        state = self.auto_amt_state()
+        approve_sources(state)
+        profiles = build_profiles(state, OPFS, UserInputs)
+        state['_combined_opf_profile_cache'] = (profile_signature(state, OPFS), profiles)
+        state['AMT_stockpile_data']['SP'][0]['GRADE_BLOCK_LINEAGE_JSON'][0]['grade_block_name'] = REMOTE
+        original = ReconciliationFactorResolver.resolve_source
+        calls = []
+        def resolve(engine, *args, **kwargs):
+            calls.append((engine.opf, args[1], kwargs.get('hex_id')))
+            return original(engine, *args, **kwargs)
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', resolve):
+            reused = build_profiles(state, OPFS, UserInputs)
+        self.assertEqual(calls, [])
+        del state['_combined_opf_profile_cache']
+        self.assertEqual(reused, build_profiles(state, OPFS, UserInputs))
+
+    def test_changed_opf_history_does_not_recalculate_the_other_opf(self):
+        state = self.auto_amt_state()
+        approve_sources(state)
+        profiles = build_profiles(state, OPFS, UserInputs)
+        state['_combined_opf_profile_cache'] = (profile_signature(state, OPFS), profiles)
+        state['opf_reconciliation_inputs'][OPFS[1]]['reconciliation_inputs']['samples'][0]['factors']['fe'] = 1.3
+        original = ReconciliationFactorResolver.resolve_source
+        calls = []
+        def resolve(engine, *args, **kwargs):
+            calls.append(engine.opf)
+            return original(engine, *args, **kwargs)
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', resolve):
+            reused = build_profiles(state, OPFS, UserInputs)
+        self.assertEqual(calls, [])
+        del state['_combined_opf_profile_cache']
+        self.assertEqual(reused, build_profiles(state, OPFS, UserInputs))
+
     def test_auto_uses_each_opfs_own_shift_history_for_the_same_source(self):
         from tests.test_reconciliation_factor_resolver import AS_OF, GB, composition, period
         state = source_state()
@@ -45,6 +158,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
             state['opf_reconciliation_inputs'][opf]['reconciliation_inputs'] = dict(
                 samples=period(opf=opf, brand='FB', blend=blend, regression=regression),
                 inventory_lineage={'B1': dict(inventory_wmt=100, contributing_blocks=composition((GB, 100)))})
+        approve_sources(state)
         profiles = build_profiles(state, OPFS, UserInputs)
         for opf, rom, product in zip(OPFS, [52.5, 47.5], [42, 33]):
             row = profiles[opf]['inventory']['SP']
@@ -54,6 +168,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
 
     def test_single_scenario_independent_factors_and_inventory_product_slots(self):
         state = source_state()
+        approve_sources(state)
         before = deepcopy(state)
         profiles = build_profiles(state, OPFS, UserInputs)
         for opf, rom, product in zip(OPFS, [55, 45], [72, 44]):
@@ -83,6 +198,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
                 dict(HEX='b', FINAL_WMT=60, balance=60, FE_ROM=50, FE_PROD1=60, FE_PROD2=55, WMT_PROD1=54, WMT_PROD2=48)]
         state['AMT_stockpile_data'] = {'SP': rows}
         state['hex_sequence_table'] = [dict(hex='original-id', footprint='SP', sequence=3, balance=100, member_hexes=['a', 'b'], average_reclaim_rate=777)]
+        approve_sources(state)
         profiles = build_profiles(state, OPFS, UserInputs)
         for opf, expected in zip(OPFS, [72, 44]):
             row = profiles[opf]['chunks']['original-id']

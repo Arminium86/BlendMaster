@@ -308,15 +308,11 @@ class SiteWorkflowController(QObject):
 
     def stage_reconciliation(self):
         h = self.host
-        h.prepare_data_streams()
-        def applied():
-            if vars(h).get('data_stream_refresh_errors'):
-                raise ValueError('Reconciliation refresh failed: ' + '; '.join(h.data_stream_refresh_errors))
-            h.handle_data_streams_submit()
-            from GUI.WorkflowDependencies import reconciliation_input_revision
-            self.await_ready(lambda: vars(h).get('reconciliation_applied_revision') == reconciliation_input_revision(h))
-        self.await_ready(lambda: not vars(h).get('_reconciliation_review_pending') and
-            vars(h).get('_reconciliation_review_signature') == h.reconciliation_review_signature(), applied)
+        from classes.ApprovedReconciliation import require_approved
+        require_approved(vars(h), planning=False)
+        h.handle_data_streams_submit()
+        from GUI.WorkflowDependencies import reconciliation_input_revision
+        self.await_ready(lambda: vars(h).get('reconciliation_applied_revision') == reconciliation_input_revision(h))
 
     def stage_amt(self):
         h = self.host

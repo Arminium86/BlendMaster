@@ -269,7 +269,8 @@ class NativeReviewTests(unittest.TestCase):
         self.assertEqual(self.widget.days.value(), 3)
         self.widget.method.setCurrentIndex(0)
         self.assertEqual(len(spy), 1)
-        self.assertFalse(self.widget.tabs.isVisible())
+        self.assertTrue(self.widget.tabs.isVisible())
+        self.assertFalse(self.widget.tabs.isTabEnabled(1))
         self.assertFalse(self.widget.minimum.isEnabled())
 
     def test_source_filter_evidence_and_navigation(self):
@@ -368,13 +369,14 @@ class NativeReviewTests(unittest.TestCase):
         view.product_planning_category_input = SimpleNamespace(text=lambda: "OPF Production")
         for name in ("capture_cb_lump_fines_settings", "capture_byproduct_build_settings", "apply_canonical_field_mappings",
                      "apply_grade_streams_to_inventory", "refresh_AMT_enrichment_if_needed", "save_active_scenario_state",
-                     "set_page_enabled", "open_database_view", "prepare_data_streams"):
+                     "set_page_enabled", "open_database_view", "prepare_data_streams", "show_page"):
             setattr(view, name, Mock())
         view.data_stream_reconciliation = Mock()
         view.data_stream_pending_build_targets = {}
         view.stockpile_data_AMT_column = {}
         for name in ("data_streams_tab_index", "stockpile_tab_index", "define_fields_tab_index", "map_fields_tab_index", "guidance_schedules_tab_index"):
             setattr(view, name, name)
+        view.calculate_reconciliation_review()  # Explicit manual calculation precedes read-only status/submission.
         view.update_reconciliation_review()
         self.assertTrue(view.data_streams_submit_button.isEnabled())
         view.handle_data_streams_submit()
@@ -384,7 +386,8 @@ class NativeReviewTests(unittest.TestCase):
         view.prepare_data_streams.assert_not_called()
         view.reconciliation_settings["cells"] = [local(blend=2)]
         view.handle_data_streams_submit()
-        view.prepare_data_streams.assert_called_once()
+        view.prepare_data_streams.assert_not_called()
+        view.show_page.assert_called_with('grade_reconciliation', force=True)
         _apply.assert_called_once()
 
     def test_default_and_local_changes_invalidate_submit_and_keep_model_in_sync(self):
@@ -418,10 +421,12 @@ class NativeReviewTests(unittest.TestCase):
         view = window()
         view.reconciliation_review = self.widget
         view.data_streams_submit_button = QPushButton()
-        view.calculate_reconciliation_review = Mock(side_effect=ValueError("Invalid history pair"))
-        messages = view.update_reconciliation_review()
+        view.run_background_task = Mock()
+        view.update_reconciliation_review(manual=True)
+        failure = view.run_background_task.call_args.args[3]
+        failure('Invalid history pair')
         self.assertFalse(view.data_streams_submit_button.isEnabled())
-        self.assertIn("Invalid history pair", messages[0])
+        self.assertIn('Invalid history pair', self.widget.status.text())
         self.assertTrue(self.widget.review_button.isEnabled())
 
     def test_csv_export_keeps_source_grain_confidence_and_levels_and_disables_when_stale(self):

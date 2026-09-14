@@ -306,6 +306,10 @@ class Run:
         prepared_expit_payload_transactions=None,
         expit_input_cache_signature=None,
     ):
+        from classes.ApprovedReconciliation import ReconciliationRequired, required_message
+        pending = (site_context or {}).get('grade_reconciliation_pending_sources') or []
+        if pending:
+            raise ReconciliationRequired(required_message(pending))
         require_supported_target_modes(product_targets_value(calendar_inputs or {}, []))
         self.abort_requested = False
         self.case_bridge.print(

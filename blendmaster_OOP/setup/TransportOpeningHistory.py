@@ -224,12 +224,39 @@ def opening_history_events(bundle, context, config):
             fields = apply_field_mappings(expanded, definitions, mappings, 'amt')
             streams = amt_grade_streams(fields, fields, brands, factors, opf, strict_mappings=True)
         block = canonical_block(row.get('SOURCE')) or canonical_block(row.get('SOURCE_FMS'))
-        if opf not in applications:
-            applications[opf] = ReconciliationApplication(samples=(factors_bundle.get('reconciliation_inputs') or (context.get('reconciliation_inputs') if primary else {}) or {}).get('samples', []),
-                standard_factors=factors, opf=opf, brands=brands, scenario_start=bundle['request']['end'],
-                settings=context.get('reconciliation_settings'))
-        streams, audit = applications[opf].apply(streams, source_id=str(row['INTERNAL_ID']), source_kind='inventory',
-            source_wmt=row['wmt'], contributing_blocks=[block_record(block,row['wmt'])] if block else [])
+        audit = {}
+        if inventory:
+            from classes.ApprovedReconciliation import ReconciliationRequired, continuous_inventory, policy_signature
+            from classes.GradeStreams import normalise_opf
+            registry = context.get('grade_reconciliation_registry') or {}
+            opening_state = dict(grade_reconciliation_registry=registry, mine_input_choice=context.get('mine'), product_brand_labels_choice=brands)
+            policy = policy_signature(context.get('reconciliation_settings'), context.get('grade_reconciliation_policy_revision'))
+            identities = {}
+            for record in registry.get('sources', {}).values():
+                identity = tuple(record.get('detail', {}).get('source_identity') or [])
+                if len(identity) == 6 and (record.get('policy') == policy or continuous_inventory(opening_state, opf, identity[3], {'build': identity[4]})):
+                    identities[identity] = max(identities.get(identity, ''), record.get('detail', {}).get('calculated_at') or '')
+            matches = [identity for identity in identities if len(identity) == 6 and identity[0] == str(context.get('mine') or '').strip().upper() and identity[1] == normalise_opf(opf)
+                       and identity[2] == 'inventory' and identity[4] == str(row.get('SOURCE') or '').strip().upper()]
+            if not matches:
+                raise ReconciliationRequired(f"{row.get('SOURCE')}: opening transport requires approved source factors. Refresh opening actual movements in Transport Settings, then open Grade Reconciliation and select Update missing sources.")
+            identity = max(matches, key=lambda key: identities[key])
+            managed = continuous_inventory(opening_state, opf, identity[3], {'build': identity[4]})
+            if managed:
+                for stream in ('adjusted_rom', 'adjusted_product'):
+                    streams[stream] = deepcopy(managed['grade_streams'].get(stream) or {})
+                audit = deepcopy(managed['reconciliation'])
+                audit.update(source_wmt=row['wmt'], prediction_scope='inventory',
+                             last_adjusted=managed.get('last_adjusted') or audit.get('last_adjusted'))
+            else:
+                if opf not in applications:
+                    applications[opf] = ReconciliationApplication(samples=[], standard_factors=factors, opf=opf, brands=brands,
+                        scenario_start=bundle['request']['end'], settings=context.get('reconciliation_settings'),
+                        registry=registry, mine=identity[0], policy_revision=context.get('grade_reconciliation_policy_revision'))
+                streams, audit = applications[opf].apply(streams, source_id=identity[3], source_instance=identity[4],
+                    source_kind='inventory', source_wmt=row['wmt'], contributing_blocks=[])
+        # Direct-tip grade blocks already use the configured APS/global stream;
+        # opening movements must not launch an inventory/hex history search.
         event = EventData(None, str(row['INTERNAL_ID']), 'grade_block', 'Opening actual movement', 0, 0, 1,
             0,0,0,0,0,row['wmt'],row['wmt'],0,'Reclaim',None,
             source_name=block or str(row.get('SOURCE_FMS') or row['SOURCE']), grade_streams=streams,

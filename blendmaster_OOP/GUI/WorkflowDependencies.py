@@ -24,6 +24,7 @@ def input_revision(host):
         sources=state.get('stockpile_data_use_column'), agents=state.get('selected_24hr_expit_agents'),
         amt_sources=state.get('stockpile_data_AMT_column'),
         reconciliation=state.get('reconciliation_applied_revision'), factors=state.get('historical_recon_factors'),
+        approved_factors=state.get('grade_reconciliation_registry'),
         continuous_assay_revision=(state.get('continuous_assay_state') or {}).get('revision'),
         continuous_assay_settings=state.get('continuous_assay_settings'),
         expit={key: state.get(key) for key in ('expit_mode_choice', 'expit_completion_tolerance_pct',
@@ -58,8 +59,10 @@ def preparation_issues(host):
         issues.append(issue(host))
     if not host.included_stockpile_data():
         issues.append('Select and submit stockpile inventories.')
-    if vars(host).get('reconciliation_applied_revision') != reconciliation_input_revision(host):
-        issues.append('Refresh and review Grade Reconciliation for the current inputs.')
+    from classes.ApprovedReconciliation import missing_sources, required_message
+    missing = missing_sources(vars(host), planning=True)
+    if missing:
+        issues.append(required_message(missing))
     if getattr(host, 'file_path_choice', '') and host.destination_allocation_context() is None:
         issues.append('Refresh Destination Reconciliation for the current site, start and guidance files.')
     try:

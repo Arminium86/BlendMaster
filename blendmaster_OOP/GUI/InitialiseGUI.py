@@ -1226,7 +1226,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def active_site_context(self):
         from classes.CrossFeatureReports import input_audit_snapshot
         from classes.ContinuousAssayScope import current_sources
+        from classes.ApprovedReconciliation import missing_sources
         return {
+            'grade_reconciliation_pending_sources': missing_sources(vars(self), planning=True),
+            'grade_reconciliation_registry': vars(self).get('grade_reconciliation_registry') or {},
+            'grade_reconciliation_policy_revision': vars(self).get('grade_reconciliation_policy_revision'),
             'time_mode_choice': vars(self).get('time_mode_choice'),
             'continuous_assay_active_sources': current_sources(vars(self), get_database_path(), datetime.now()),
             'continuous_assay_settings': copy.deepcopy(vars(self).get('continuous_assay_settings') or {}),
@@ -1318,6 +1322,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )),
             "reconciliation_settings": normalise_reconciliation_settings(vars(self).get("reconciliation_settings")),
             "reconciliation_inputs": vars(self).get("reconciliation_inputs") or {},
+            "grade_reconciliation_registry": vars(self).get('grade_reconciliation_registry') or {},
+            "grade_reconciliation_policy_revision": vars(self).get('grade_reconciliation_policy_revision'),
             "opf_reconciliation_inputs": vars(self).get("opf_reconciliation_inputs") or {},
             "data_stream_planning_categories": copy.deepcopy(getattr(
                 self, "data_stream_planning_categories", {}
@@ -1413,6 +1419,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.destination_progress_snapshot = self.destination_progress.prepared_state(copy_evidence=False)
         fields = [
             "_combined_opf_profile_cache",
+            "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
             "continuous_assay_settings", "continuous_assay_state", "continuous_assay_status",
             "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
             "destination_progress_snapshot",
@@ -1654,6 +1661,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
             for name in ("site_workflow_contract", "site_workflow_runs", "guidance_import_audit", "target_refresh_changes",
+                         "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
                          "optimisation_input_revision", "manual_input_revision", "last_run_outcome", "reconciliation_applied_revision",
                          "_haul_cycle_routes_revision", "destination_progress_snapshot"):
                 setattr(self, name, copy.deepcopy(state.get(name)))
@@ -3079,7 +3087,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return {}
         bundles = vars(self).get('opf_reconciliation_inputs') or {}
         opfs = sorted({p['opf'] for p in config['tipping_points']})
-        if any(opf not in bundles or bundles[opf].get('signature') != evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()) for opf in opfs):
+        if not vars(self).get('grade_reconciliation_registry') and any(opf not in bundles or bundles[opf].get('signature') != evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()) for opf in opfs):
             return {}
         cached = reusable_cache(vars(self), opfs)
         if not cached:
@@ -9172,7 +9180,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             configured_brands(vars(self).get("product_brand_labels_choice")),
         )
         self.reconciliation_review.settingsChanged.connect(self.reconciliation_controls_changed)
-        self.reconciliation_review.reviewRequested.connect(self.prepare_data_streams)
+        self.reconciliation_review.reviewRequested.connect(self.request_manual_grade_reconciliation)
+        self.reconciliation_review.refreshSourcesRequested.connect(self.request_manual_grade_reconciliation)
         layout.addWidget(self.reconciliation_review)
 
         factor_label = QLabel("Standard Global Factors · Advanced Fallback")
@@ -9702,22 +9711,31 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def reconciliation_global_factor_changed(self, item):
         if item.data(Qt.UserRole):
+            self.grade_reconciliation_policy_revision = str(uuid.uuid4())
             self._reconciliation_review_signature = ""
             self._reconciliation_review_generation = vars(self).get("_reconciliation_review_generation", 0) + 1
             self._reconciliation_review_pending = False
             self.reconciliation_review.set_busy(False)
             self.data_streams_submit_button.setEnabled(False)
-            self.reconciliation_review.mark_stale("Global factors edited. Calculate review before submitting.")
+            self.reconciliation_review.mark_stale("Global factors edited. Select Update missing sources before submitting.")
 
     def refresh_reconciliation_history(self, _checked=False):
         self.data_stream_input_cache_signature = ""
         self.data_stream_input_cache_result = {}
-        self.prepare_data_streams()
+        self.request_manual_grade_reconciliation()
+
+    def request_manual_grade_reconciliation(self, refresh_sources=None):
+        """The only UI entry point permitted to fetch/search historical factors."""
+        self._manual_reconciliation_requested = True
+        self._grade_reconciliation_refresh_sources = refresh_sources or []
+        if refresh_sources:
+            self.data_stream_input_cache_signature = ''
+        self.prepare_data_streams(manual=True)
 
     def reconciliation_review_signature(self):
         state = vars(self)
         return reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **{name: state.get(name) for name in (
-            "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors",
+            "reconciliation_settings", "reconciliation_inputs", "historical_recon_factors", "grade_reconciliation_policy_revision", "transport_opening_history",
             "opf_input_choice", "product_brand_labels_choice", "start_time_choice",
             "updated_stockpile_data", "AMT_stockpile_data", "hex_sequence_table", "field_mappings", "AMT_footprint_exclusions")}})
 
@@ -9730,14 +9748,21 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         enrichment = (reconciliation_fingerprint(self.AMT_enrichment_request_signature())
                       if hasattr(self, 'AMT_enrichment_request_signature') else '')
         selected = included_footprints(state.get("updated_stockpile_data"), state.get("AMT_footprint_exclusions"))
+        from classes.ApprovedReconciliation import continuous_members, continuous_chunk
+        managed_members = continuous_members(state, state.get('opf_input_choice'))
         zeroed = zeroed_amt_footprints(state.get("AMT_stockpile_data"))
+        completed_sources = []
         def resolve(row, name, kind):
             prior = row.get('reconciliation') or {}
-            if kind == 'amt' and enrichment and prior.get('enrichment_signature') == enrichment:
-                return copy.deepcopy(prior)
-            row = copy.deepcopy(row)
-            self.apply_source_reconciliation(application, row, row.get("grade_streams") or {}, name, kind)
-            return row["reconciliation"]
+            if (kind == 'amt' and enrichment and prior.get('enrichment_signature') == enrichment
+                    and not state.get('_manual_grade_reconciliation')):
+                audit = copy.deepcopy(prior)
+            else:
+                row = copy.deepcopy(row)
+                self.apply_source_reconciliation(application, row, row.get("grade_streams") or {}, name, kind)
+                audit = row["reconciliation"]
+            completed_sources.append(audit)
+            return audit
         for name, row in selected.items():
             if not row.get("amt", row.get("AMT", False)):
                 audit = resolve(row, name, "inventory")
@@ -9751,8 +9776,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 audits.append(audit)
                 continue
             hexes = {str(r.get("HEX", r.get("hex", ""))): resolve(r, name, "amt")
-                     for r in (state.get("AMT_stockpile_data") or {}).get(name, [])
-                     if (numeric(r.get("FINAL_WMT", r.get("balance"))) or 0) > 0}
+                      for r in (state.get("AMT_stockpile_data") or {}).get(name, [])
+                      if (numeric(r.get("FINAL_WMT", r.get("balance"))) or 0) > 0
+                      and (str(name).upper(), str(r.get('HEX', r.get('hex')))) not in managed_members}
             chunks = [c for c in state.get("hex_sequence_table", []) or [] if c.get("footprint") == name]
             if not chunks:
                 children = list(hexes.values())
@@ -9763,6 +9789,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 audit.update(review_label=f"AMT · {name} · before chunking", review_children=children)
                 audits.append(audit)
             for chunk in chunks:
+                managed = continuous_chunk(state, state.get('opf_input_choice'), chunk)
+                if managed:
+                    audit = copy.deepcopy(managed['reconciliation'])
+                    audit.update(review_label=f"AMT chunk · {name} · {chunk.get('sequence', '')} · Continuous assays",
+                                 prediction_scope='amt_chunk', source_wmt=max(numeric(chunk.get('balance')) or 0, 0),
+                                 last_adjusted=managed.get('last_adjusted') or audit.get('last_adjusted'))
+                    audits.append(audit)
+                    continue
                 members = chunk.get("member_hexes") or []
                 if isinstance(members, str):
                     members = [v.strip() for v in members.split(",") if v.strip()]
@@ -9779,27 +9813,28 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         for resolver in application.resolvers.values():
             warnings.extend(resolver.history_warnings)
         overall = aggregate_reconciliation([(a, a.get("source_wmt", 0)) for a in audits], source_kind="overall")
+        # Retain every searched hex, including those outside the current chunks.
+        application.retain_audits(completed_sources)
         return audits, overall, list(dict.fromkeys(warnings))
 
-    def update_reconciliation_review(self):
+    def update_reconciliation_review(self, *, manual=False):
         review = vars(self).get("reconciliation_review")
         if review is None:
             return []
-        if normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))["method"] == "auto_max_confidence":
-            self.start_confidence_search_review()
+        if not manual:
+            from classes.ApprovedReconciliation import missing_sources, required_message
+            from GUI.ManualGradeReconciliation import saved_review
+            missing = missing_sources(vars(self))
+            review.set_busy(False)
+            review.set_review(*saved_review(vars(self)))
+            review.status.setText(required_message(missing) if missing else
+                              'Existing source factors are valid. Update missing sources runs only when selected here.')
+            self.data_streams_submit_button.setEnabled(not missing)
+            if not missing:
+                self._reconciliation_review_signature = self.reconciliation_review_signature()
             return []
-        review.set_busy(False)
-        try:
-            audits, overall, warnings = self.calculate_reconciliation_review()
-        except (ValueError, TypeError) as exc:
-            review.mark_stale(f"Review could not be calculated: {exc}")
-            self._reconciliation_review_signature = ""
-            self.data_streams_submit_button.setEnabled(False)
-            return [f"Reconciliation review: {exc}"]
-        review.set_review(audits, overall, warnings)
-        self._reconciliation_review_signature = self.reconciliation_review_signature()
-        self.data_streams_submit_button.setEnabled(True)
-        return warnings
+        self.start_confidence_search_review()
+        return []
 
     def start_confidence_search_review(self):
         """Compute against an isolated snapshot so the UI remains responsive."""
@@ -9809,7 +9844,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from GUI.InventoryStreamApplication import InventoryContext, FIELDS
         names = tuple(dict.fromkeys((*names, *FIELDS)))
         values = {name: vars(self).get(name) for name in names}
-        application_cache = vars(self).get('_reconciliation_application_cache')
+        values['_grade_reconciliation_refresh_sources'] = vars(self).get('_grade_reconciliation_refresh_sources') or []
         signature = self.reconciliation_review_signature()
         generation = vars(self).get("_reconciliation_review_generation", 0) + 1
         self._reconciliation_review_generation = generation
@@ -9820,10 +9855,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         def calculate():
             context = InventoryContext(UserInputs, copy.deepcopy(values))
-            context._reconciliation_application_cache = application_cache
+            context._manual_grade_reconciliation = True
+            context._reconciliation_application_cache = None
             context.reconciliation_application = lambda: UserInputs.reconciliation_application(context)
             context.apply_source_reconciliation = lambda *args, **kwargs: UserInputs.apply_source_reconciliation(context, *args, **kwargs)
-            return UserInputs.calculate_reconciliation_review(context), vars(context).get("_reconciliation_application_cache")
+            from GUI.ManualGradeReconciliation import calculate
+            return calculate(context, UserInputs)
 
         def finish(result=None, error=None):
             if generation != vars(self).get("_reconciliation_review_generation"):
@@ -9831,17 +9868,18 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self._reconciliation_review_pending = False
             self.reconciliation_review.set_busy(False)
             if signature != self.reconciliation_review_signature():
-                self.reconciliation_review.mark_stale("Sources or settings changed. Calculate review again.")
+                self.reconciliation_review.mark_stale("Sources or settings changed. Select Update missing sources again.")
                 self.data_streams_submit_button.setEnabled(False)
                 return
             if error:
                 self.reconciliation_review.mark_stale(f"Evidence match search could not be completed: {error}")
                 self.data_streams_submit_button.setEnabled(False)
                 return
-            (audits, overall, warnings), cache = result
+            (audits, overall, warnings), cache, registry = result
             self._reconciliation_application_cache = cache
+            self.grade_reconciliation_registry = registry
             self.reconciliation_review.set_review(audits, overall, warnings)
-            self._reconciliation_review_signature = signature
+            self._reconciliation_review_signature = self.reconciliation_review_signature()
             self.data_streams_submit_button.setEnabled(True)
             label = vars(self).get("data_stream_warning_label")
             if label is not None:
@@ -9850,7 +9888,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 label.setVisible(bool(text))
             self.advance_agent_after_reconciliation()
 
-        self.run_background_task("Finding the highest evidence match score within the guardrails...",
+        self.run_background_task("Updating missing Grade Reconciliation sources...",
                                  calculate, finish, lambda error: finish(error=error))
 
     def advance_agent_after_reconciliation(self):
@@ -9907,9 +9945,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def reconciliation_inventory_builds(self):
         if normalise_reconciliation_settings(vars(self).get("reconciliation_settings"))["method"] == "standard":
             return []
+        from classes.ApprovedReconciliation import opening_inventory_sources, opfs
+        inventory = {**(vars(self).get('updated_stockpile_data') or {})}
+        for opf in opfs(vars(self)):
+            inventory.update(opening_inventory_sources(vars(self), opf))
         return sorted({
             str(row.get("build") or row.get("BUILD") or "").strip().upper()
-            for row in (vars(self).get("updated_stockpile_data") or {}).values()
+            for row in inventory.values()
             if not bool(row.get("amt", row.get("AMT", False)))
             and str(row.get("build") or row.get("BUILD") or "").strip()
         })
@@ -9946,26 +9988,41 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return (
             normalise_reconciliation_settings(state.get("reconciliation_settings"))["method"] != "standard"
             and not state.get("historical_recon_factors")
+            and not (state.get('grade_reconciliation_registry') or {}).get('sources')
         )
 
     def reconciliation_application(self):
         state = vars(self)
         settings = normalise_reconciliation_settings(state.get("reconciliation_settings"))
-        if settings["method"] == "standard":
-            return None
         inputs = state.get("reconciliation_inputs") or {}
+        registry = state.get('grade_reconciliation_registry')
+        if not isinstance(registry, dict):
+            registry = state['grade_reconciliation_registry'] = {}
         arguments = dict(samples=inputs.get("samples", []),
                          standard_factors=state.get("historical_recon_factors", {}),
                          opf=state.get("opf_input_choice"), brands=state.get("product_brand_labels_choice"),
-                         scenario_start=state.get("start_time_choice"), settings=settings)
-        signature = reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **arguments})
+                         scenario_start=state.get("start_time_choice"), settings=settings,
+                         allow_search=bool(state.get('_manual_grade_reconciliation')), mine=state.get('mine_input_choice'),
+                         policy_revision=state.get('grade_reconciliation_policy_revision'))
+        signature = (reconciliation_fingerprint({"algorithm_version": RECONCILIATION_ALGORITHM_VERSION, **arguments}), id(registry))
         cache = state.get("_reconciliation_application_cache")
         if not cache or cache[0] != signature:
-            cache = (signature, ReconciliationApplication(**arguments))
+            cache = (signature, ReconciliationApplication(**arguments, registry=registry))
             self._reconciliation_application_cache = cache
         return cache[1]
 
     def apply_source_reconciliation(self, application, row, streams, source_id, source_kind):
+        from classes.ApprovedReconciliation import continuous_inventory
+        managed = continuous_inventory(vars(self), vars(self).get('opf_input_choice'), source_id, row) if source_kind == 'inventory' else None
+        if managed:
+            streams = copy.deepcopy(streams)
+            for stream in ('adjusted_rom', 'adjusted_product'):
+                streams[stream] = copy.deepcopy(managed['grade_streams'].get(stream) or {})
+            row['reconciliation'] = copy.deepcopy(managed['reconciliation'])
+            row['reconciliation'].update(source_wmt=max(numeric(row.get('balance', row.get('BALANCE'))) or 0, 0),
+                                         prediction_scope='inventory',
+                                         last_adjusted=managed.get('last_adjusted') or row['reconciliation'].get('last_adjusted'))
+            return streams
         if application is None:
             row.pop("reconciliation", None)
             return streams
@@ -9996,11 +10053,22 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     coverage = numeric(raw_fields.get(f"modelled_{source}_coverage_pct"))
                 if coverage is not None:
                     grade_coverage[stream][analyte] = coverage / 100.0
-        streams, audit = application.apply(
-            streams, source_id=source_id, source_kind=source_kind,
-            source_wmt=max(total or 0.0, 0.0), contributing_blocks=blocks, hex_id=hex_id,
-            warnings=warnings, grade_coverage=grade_coverage,
-        )
+        from classes.ApprovedReconciliation import ReconciliationRequired, source_build
+        inventory = (vars(self).get('updated_stockpile_data') or {}).get(source_id) or {}
+        try:
+            streams, audit = application.apply(
+                streams, source_id=source_id, source_kind=source_kind,
+                source_wmt=max(total or 0.0, 0.0), contributing_blocks=blocks, hex_id=hex_id,
+                warnings=warnings, grade_coverage=grade_coverage,
+                prior_audit=row.get("reconciliation"), source_instance=source_build(row, inventory),
+            )
+        except ReconciliationRequired as exc:
+            if vars(self).get('_manual_grade_reconciliation'):
+                raise
+            streams = copy.deepcopy(streams)
+            streams['adjusted_rom'], streams['adjusted_product'] = {}, {}
+            audit = dict(status='pending', source_id=source_id, source_kind=source_kind, hex_id=hex_id,
+                         opf=application.opf, source_wmt=max(total or 0, 0), by_brand={}, warnings=[str(exc)])
         row["reconciliation"] = audit
         return streams
 
@@ -10060,7 +10128,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return
         QTimer.singleShot(50, self.prepare_data_streams)
 
-    def prepare_data_streams(self):
+    def prepare_data_streams(self, *, manual=False):
+        if not manual:
+            self.update_reconciliation_review()
+            return
         if not self.stockpile_data:
             return
         # The Data Streams page is constructed before Site Configuration is
@@ -10259,7 +10330,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         )
         self.populate_recon_factor_table()
         display_warnings = list(self.historical_recon_warnings)
-        display_warnings.extend(self.update_reconciliation_review())
+        manual = bool(vars(self).pop('_manual_reconciliation_requested', False))
+        display_warnings.extend(self.update_reconciliation_review(manual=manual))
         display_warnings.extend(self.aps_grade_mapping_warnings())
         display_warnings.extend(
             f"2WP targets ({crusher}): {message}"
@@ -10932,11 +11004,16 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return messages
 
     def handle_data_streams_submit(self):
+        from classes.ApprovedReconciliation import missing_sources, required_message
+        missing = missing_sources(vars(self))
+        if missing:
+            self.show_page('grade_reconciliation', force=True)
+            self.reconciliation_review.mark_stale(required_message(missing))
+            return
         if vars(self).get("reconciliation_review") is not None:
             self.capture_recon_factor_table()
             if vars(self).get("_reconciliation_review_signature") != self.reconciliation_review_signature():
-                self.prepare_data_streams()
-                return
+                self._reconciliation_review_signature = self.reconciliation_review_signature()
         try:
             if vars(self).get('access_role') != 'planner':
                 self.capture_data_stream_configuration()
@@ -18817,6 +18894,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 "excluded_footprints": sorted(self.excluded_amt_footprints()),
                 "algorithm_version": RECONCILIATION_ALGORITHM_VERSION,
                 "settings": state.get("reconciliation_settings"),
+                "approved_sources": state.get('grade_reconciliation_registry'),
+                "policy_revision": state.get('grade_reconciliation_policy_revision'),
                 "inputs": state.get("reconciliation_inputs"),
                 "scenario_start": state.get("start_time_choice"),
             }),
@@ -19513,10 +19592,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         """Attach lineage-derived AMT streams and inventory-instance provenance."""
         application = self.reconciliation_application()
         enriched = guard_amt_snapshot(self.included_AMT_snapshot(amt_data))
+        from classes.ApprovedReconciliation import continuous_members
+        managed_members = continuous_members(vars(self), vars(self).get('opf_input_choice'))
         enrichment_signature = reconciliation_fingerprint(self.AMT_enrichment_request_signature()) if application else ""
         for footprint, rows in enriched.items():
             for row in rows or []:
                 row = row or {}
+                if (str(footprint).upper(), str(row.get('HEX', row.get('hex')))) in managed_members:
+                    continue
                 raw_amt_fields = flatten_available_source_fields(row)
                 canonical = apply_field_mappings(
                     row,
@@ -19732,6 +19815,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             for chunk in result:
                 if not isinstance(chunk, dict):
                     continue
+                from classes.ApprovedReconciliation import continuous_chunk
+                managed = continuous_chunk(vars(self), opf, chunk)
+                if managed:
+                    chunk['grade_streams'] = copy.deepcopy(managed['grade_streams'])
+                    chunk['GRADE_STREAMS'] = chunk['grade_streams']
+                    chunk['reconciliation'] = copy.deepcopy(managed['reconciliation'])
+                    chunk['reconciliation'].update(prediction_scope='amt_chunk',
+                        last_adjusted=managed.get('last_adjusted') or chunk['reconciliation'].get('last_adjusted'))
+                    continue
                 raw_streams = (
                     chunk.get("grade_streams")
                     or chunk.get("GRADE_STREAMS")
@@ -19798,13 +19890,16 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     }
 
                 if application:
-                    streams, audit = application.apply(
-                        streams, source_id=str(chunk.get("hex") or chunk.get("footprint") or ""),
-                        source_kind="amt", source_wmt=max(numeric(chunk.get("balance")) or 0.0, 0.0),
-                        contributing_blocks=[], warnings=[
-                            "Current member-hex reconciliation is unavailable; this chunk uses global factors."
-                        ],
-                    )
+                    from classes.ApprovedReconciliation import ReconciliationRequired, source_build
+                    try:
+                        streams, audit = application.apply(
+                            streams, source_id=str(chunk.get('footprint') or ''), source_kind='amt',
+                            source_wmt=max(numeric(chunk.get('balance')) or 0, 0), contributing_blocks=[],
+                            source_instance=source_build(chunk, (vars(self).get('updated_stockpile_data') or {}).get(chunk.get('footprint'))),
+                            warnings=['Current member-hex reconciliation is unavailable.'], prior_audit=chunk.get('reconciliation'))
+                    except ReconciliationRequired as exc:
+                        streams['adjusted_rom'], streams['adjusted_product'] = {}, {}
+                        audit = dict(status='pending', source_id=chunk.get('footprint'), by_brand={}, warnings=[str(exc)])
                     audit["source_kind"] = "amt_chunk"
                     chunk["reconciliation"] = audit
                 else:
@@ -21157,6 +21252,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def store_calendar_inputs(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
+        from classes.ApprovedReconciliation import missing_sources, required_message
+        missing = missing_sources(vars(self), planning=True)
+        if missing:
+            self.show_page('grade_reconciliation', force=True)
+            QMessageBox.information(self, 'Grade Reconciliation required', required_message(missing))
+            return
         self._workflow_optimisation_finished = False
         self.blend_mode_choice = 1
         controller = vars(self).get('site_workflow_controller')
@@ -25737,6 +25838,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return transactions
 
     def create_manual_blend_planner(self):
+        from classes.ApprovedReconciliation import missing_sources, required_message
+        missing = missing_sources(vars(self), planning=True)
+        if missing:
+            self.show_page('grade_reconciliation', force=True)
+            raise ManualBlendPlanningError(required_message(missing))
         from GUI.InventoryRefresh import issue
         if issue(self, include_workflow=True):
             raise ManualBlendPlanningError(issue(self, include_workflow=True))
@@ -26625,6 +26731,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # signature is checked after all restored AMT chunks are in place.
         self._combined_opf_profile_cache = loaded_state.get('_combined_opf_profile_cache')
         for name in ('site_workflow_contract', 'site_workflow_runs', 'guidance_import_audit',
+                     'grade_reconciliation_registry', 'grade_reconciliation_policy_revision',
                      'continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status',
                      'solver_presets', 'selected_solver_preset',
                      'target_refresh_changes', 'optimisation_input_revision',

@@ -229,6 +229,10 @@ class SearchApplicationTests(unittest.TestCase):
         view = window()
         view.reconciliation_settings = {"method": AUTO}
         view.reconciliation_inputs = {"samples": ConfidenceSearchTests().history()}
+        view.updated_stockpile_data = {'SP1': {'amt': True, 'balance': 100}}
+        view.AMT_stockpile_data = {'SP1': [raw_hex()]}
+        view.calculate_reconciliation_review()
+        view._manual_grade_reconciliation = False
         rows = view.enrich_AMT_grade_streams({}, {"SP1": [raw_hex()]})
         repeated = view.enrich_AMT_grade_streams({}, rows)
         self.assertEqual(rows["SP1"][0]["grade_streams"], repeated["SP1"][0]["grade_streams"])
@@ -276,7 +280,7 @@ class AutoReviewTests(unittest.TestCase):
 
     def test_background_review_uses_frozen_sources_and_completes_on_callback(self):
         view = self.view()
-        self.assertEqual(view.update_reconciliation_review(), [])
+        self.assertEqual(view.update_reconciliation_review(manual=True), [])
         _, work, success, _ = view.run_background_task.call_args.args
         self.assertFalse(view.data_streams_submit_button.isEnabled())
         self.assertFalse(self.panel.review_button.isEnabled())
@@ -287,7 +291,7 @@ class AutoReviewTests(unittest.TestCase):
         self.assertTrue(self.panel.export_button.isEnabled())
         self.assertIn("evidence match score 90.0%", self.panel.summary.text())
         self.assertEqual(view._reconciliation_review_signature, view.reconciliation_review_signature())
-        self.assertIsNotNone(view._reconciliation_application_cache)
+        self.assertTrue(view.grade_reconciliation_registry['sources'])
 
     def test_real_qt_worker_completes_review_on_the_ui_thread(self):
         view = self.view()
@@ -303,7 +307,7 @@ class AutoReviewTests(unittest.TestCase):
             ui_threads.append(QThread.currentThread() == self.app.thread())
             original(*args)
         with patch.object(self.panel, "set_review", side_effect=record_thread):
-            view.update_reconciliation_review()
+            view.update_reconciliation_review(manual=True)
             deadline = time.monotonic() + 5
             while view.background_tasks and time.monotonic() < deadline:
                 QTest.qWait(10)
@@ -314,7 +318,7 @@ class AutoReviewTests(unittest.TestCase):
 
     def test_stale_worker_cannot_restore_old_settings_or_enable_submit(self):
         view = self.view()
-        view.update_reconciliation_review()
+        view.update_reconciliation_review(manual=True)
         _, work, success, _ = view.run_background_task.call_args.args
         view.reconciliation_settings["max_lookback_days"] = 1
         view.AMT_stockpile_data["SP1"][0]["FINAL_WMT"] = 0
@@ -327,7 +331,7 @@ class AutoReviewTests(unittest.TestCase):
 
     def test_worker_error_keeps_submit_disabled_and_review_available(self):
         view = self.view()
-        view.update_reconciliation_review()
+        view.update_reconciliation_review(manual=True)
         failure = view.run_background_task.call_args.args[3]
         failure("invalid paired history")
         self.assertFalse(view.data_streams_submit_button.isEnabled())

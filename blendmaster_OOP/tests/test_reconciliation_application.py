@@ -29,7 +29,7 @@ def samples():
 
 def application(**kwargs):
     args = dict(samples=samples(), standard_factors={"SF": standard()}, opf="CB OPF", brands=["SF"],
-                scenario_start=AS_OF, settings={"method": "spatial_compositional"})
+                scenario_start=AS_OF, settings={"method": "spatial_compositional"}, allow_search=True)
     args.update(kwargs)
     return ReconciliationApplication(**args)
 
@@ -61,6 +61,8 @@ def raw_hex(hex_id="H1", *, block=GB, total=100, rom=50, product=60):
 
 def window():
     view = UserInputs.__new__(UserInputs)
+    view._manual_grade_reconciliation = True  # Algorithm fixtures represent an explicit review action.
+    view.grade_reconciliation_registry = {}
     view.product_brand_labels_choice = ["SF"]
     view.opf_input_choice = "CB OPF"
     view.start_time_choice = AS_OF
@@ -99,6 +101,56 @@ def chunk_row(hex_id, block, tonnes, rom, product, product_dmt, signature="curre
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_saved_source_factors_are_reused_with_a_fresh_application_and_new_baseline(self):
+        _, audit = apply(application(settings={'method': 'auto_max_confidence'}))
+        engine = application(settings={'method': 'auto_max_confidence'})
+        before = copy.deepcopy(audit)
+        with patch.object(engine.resolvers['SF'], 'resolve_source', side_effect=AssertionError('Repeated search')):
+            adjusted, reused = apply(engine, values=streams(rom=40), prior_audit=audit,
+                                     grade_coverage={'modelled_rom': {'fe': .5}})
+        self.assertAlmostEqual(adjusted['adjusted_rom']['SF']['fe'], 40 * (0.4 * 1.1 + 0.6 * 1.5))
+        self.assertEqual(reused['by_brand']['SF']['grade_coverage']['adjusted_rom']['fe'], .5)
+        self.assertEqual(audit, before)
+
+    def test_saved_factor_reuse_requires_identical_evidence_and_source(self):
+        _, audit = apply()
+        changed_standard = standard()
+        changed_standard['blend']['fe']['effective'] = 1.2
+        for changes in ({'samples': []}, {'settings': {'method': 'auto_max_confidence'}},
+                        {'standard_factors': {'SF': changed_standard}}, {'opf': 'SO OPF'}):
+            with self.subTest(changes=changes):
+                engine = application(**changes)
+                resolver = engine.resolvers['SF']
+                with patch.object(resolver, 'resolve_source', wraps=resolver.resolve_source) as search:
+                    apply(engine, prior_audit=audit)
+                self.assertEqual(search.call_count, 1)
+        for changes in ({'blocks': composition((GB, 100))}, {'total': 110}):
+            engine = application()
+            with patch.object(engine.resolvers['SF'], 'resolve_source', wraps=engine.resolvers['SF'].resolve_source) as search:
+                apply(engine, prior_audit=audit, **changes)
+            self.assertEqual(search.call_count, 1)
+        legacy = copy.deepcopy(audit)
+        legacy['by_brand']['SF'].pop('factor_signature')
+        engine = application()
+        with patch.object(engine.resolvers['SF'], 'resolve_source', wraps=engine.resolvers['SF'].resolve_source) as search:
+            apply(engine, prior_audit=legacy)
+        self.assertEqual(search.call_count, 1)
+
+    def test_completed_review_survives_working_cache_eviction(self):
+        view = window()
+        view.reconciliation_settings = {'method': 'auto_max_confidence'}
+        view.updated_stockpile_data = {'SP1': {'balance': 200, 'amt': True}}
+        view.AMT_stockpile_data = {'SP1': [raw_hex(), raw_hex('H2', block=REMOTE)]}
+        # H2 is searched in the review even though it is not yet in a chunk.
+        view.hex_sequence_table = [{'footprint': 'SP1', 'sequence': 1, 'member_hexes': ['H1'], 'balance': 100}]
+        view.calculate_reconciliation_review()
+        engine = view.reconciliation_application()
+        engine._resolved_sources.clear()  # Review results must outlive the bounded working cache.
+        with patch.object(engine.resolvers['SF'], 'resolve_source', side_effect=AssertionError('Repeated review search')):
+            enriched = view.enrich_AMT_grade_streams({}, view.AMT_stockpile_data)
+        self.assertEqual(len(enriched['SP1']), 2)
+        self.assertTrue(all(row['reconciliation']['by_brand']['SF']['factor_signature'] for row in enriched['SP1']))
+
     def test_review_factor_search_is_reused_but_baselines_and_lineage_stay_independent(self):
         engine = application()
         resolver = engine.resolvers['SF']
@@ -392,6 +444,8 @@ class ChunkAndIntegrationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "standard factor record"):
                         view.reconcile_saved_AMT_chunk_grade_streams(force=True)
                     view.historical_recon_factors = {"SF": standard()}
+                    view.calculate_reconciliation_review()
+                    view._manual_grade_reconciliation = False
                     self.assertTrue(view.refresh_AMT_enrichment_if_needed())
                     stored = view.draw_AMT_map.data.iloc[0]
                     self.assertAlmostEqual(stored["grade_streams"]["adjusted_product"]["SF"]["fe"], 54)
@@ -465,6 +519,10 @@ class ChunkAndIntegrationTests(unittest.TestCase):
     def test_gui_enriches_each_hex_and_repeated_refresh_is_idempotent(self):
         view = window()
         raw = {"SP1": [raw_hex(), raw_hex("H2", block=REMOTE, rom=30, product=40)]}
+        view.updated_stockpile_data = {'SP1': {'amt': True, 'balance': 200}}
+        view.AMT_stockpile_data = raw
+        view.calculate_reconciliation_review()
+        view._manual_grade_reconciliation = False
         enriched = view.enrich_AMT_grade_streams({}, raw)
         again = view.enrich_AMT_grade_streams({}, enriched)
         self.assertEqual(enriched, again)
@@ -518,12 +576,13 @@ class ChunkAndIntegrationTests(unittest.TestCase):
         service.fetch_inventory_lineage.assert_called_once_with(AS_OF, ["SP1_26001"])
         self.assertIn("Inventory lineage unavailable", result["warnings"][0])
 
-    def test_standard_mode_removes_previous_advanced_audit(self):
+    def test_standard_mode_records_its_own_manual_approval(self):
         view = window()
         enriched = view.enrich_AMT_grade_streams({}, {"SP1": [raw_hex()]})
         view.reconciliation_settings = {"method": "standard"}
         standard_rows = view.enrich_AMT_grade_streams({}, enriched)
-        self.assertNotIn("reconciliation", standard_rows["SP1"][0])
+        self.assertEqual(standard_rows['SP1'][0]['reconciliation']['method'], 'standard')
+        self.assertTrue(standard_rows['SP1'][0]['reconciliation']['last_adjusted'])
         self.assertAlmostEqual(standard_rows["SP1"][0]["grade_streams"]["adjusted_rom"]["SF"]["fe"], 53.5)
 
     def test_mapping_change_clears_stale_product_grade_and_inherits_raw_coverage(self):

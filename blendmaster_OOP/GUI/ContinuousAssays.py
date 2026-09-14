@@ -55,6 +55,9 @@ class ContinuousAssayController(QObject):
             else:
                 write_audit(database,bundle)
                 h.continuous_assay_state = bundle
+                from classes.ApprovedReconciliation import accept_continuous_update
+                cached = vars(h).get('_combined_opf_profile_cache')
+                accept_continuous_update(vars(h), bundle, cached[1] if cached else {})
                 h.continuous_assay_status = f"Assays checked {bundle.get('checked_at','')}. {bundle.get('status', '')}"
             h.continuous_assay_panel.show_status()
         h.run_background_task('Checking current product assays…',work,done)
@@ -112,6 +115,10 @@ class ContinuousAssayController(QObject):
                       scopes[site] == current_sources(current, h.scenario_database_path(site), datetime.now(ZoneInfo('Australia/Perth')))):
                     write_audit(h.scenario_database_path(site), result)
                     state['continuous_assay_state'] = result
+                    from classes.ApprovedReconciliation import accept_continuous_update
+                    cached = current.get('_combined_opf_profile_cache')
+                    accept_continuous_update(current, result, cached[1] if cached else {})
+                    state['grade_reconciliation_registry'] = current.get('grade_reconciliation_registry')
                     applied = sum(a.get('status') == 'applied' for a in result.get('audit', []))
                     state['continuous_assay_status'] = f'{applied} validated analyte updates; {len(result.get("audit", []))-applied} withheld. Checked {result.get("checked_at", "")}. {result.get("status", "")}'
                 else:

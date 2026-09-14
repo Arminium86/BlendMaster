@@ -55,6 +55,7 @@ def levels(detail):
 class ReconciliationReview(QWidget):
     settingsChanged = pyqtSignal(dict)
     reviewRequested = pyqtSignal()
+    refreshSourcesRequested = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,9 +91,12 @@ class ReconciliationReview(QWidget):
         self.help.setStyleSheet("color: #526474;")
         layout.addWidget(self.help)
         review_row = QHBoxLayout()
-        self.review_button = QPushButton("Calculate review")
+        self.review_button = QPushButton("Update missing sources")
         self.review_button.clicked.connect(self.reviewRequested)
         review_row.addWidget(self.review_button)
+        self.refresh_selected_button = QPushButton('Refresh selected sources')
+        self.refresh_selected_button.clicked.connect(self.refresh_selected_sources)
+        review_row.addWidget(self.refresh_selected_button)
         self.export_button = QPushButton("Export review CSV…")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_review)
@@ -138,13 +142,15 @@ class ReconciliationReview(QWidget):
         layout.addWidget(self.source_filter)
         self.sources = QTreeWidget()
         self.sources.setHeaderLabels(["Source / component", "Brand", "WMT / share", "Evidence match score",
-                                      "Global evidence", "Lineage", "Fallback level", "Selected window", "History selection"])
+                                      "Global evidence", "Lineage", "Fallback level", "Selected window", "History selection", "Last adjusted"])
+        self.sources.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.sources.setMinimumHeight(240)
         self.sources.setColumnWidth(0, 280)
         for column in range(1, 7):
             self.sources.setColumnWidth(column, 160 if column in (3, 6) else 100)
         self.sources.setColumnWidth(7, 210)
         self.sources.setColumnWidth(8, 155)
+        self.sources.setColumnWidth(9, 180)
         self.sources.currentItemChanged.connect(self.show_evidence)
         layout.addWidget(self.sources)
         self.evidence = QPlainTextEdit()
@@ -288,7 +294,8 @@ class ReconciliationReview(QWidget):
         self.days.setEnabled(lookback)
         self.minimum.setEnabled(advanced)
         self.maximum.setEnabled(advanced)
-        self.tabs.setVisible(advanced)
+        self.tabs.setVisible(True)
+        self.tabs.setTabEnabled(1, advanced)
         self.export_button.setVisible(advanced)
         self.summary.setVisible(advanced)
         self.sources.setColumnHidden(7, self._settings["method"] != "auto_max_confidence")
@@ -314,7 +321,7 @@ class ReconciliationReview(QWidget):
 
     def mark_stale(self, message=None):
         advanced = self._settings["method"] != "standard"
-        self.status.setText(message or ("Settings changed. Calculate review before submitting." if advanced
+        self.status.setText(message or ("Settings changed. Select Update missing sources before submitting." if advanced
                                       else "Standard global factors are active."))
         self._report_rows = []
         self.export_button.setEnabled(False)
@@ -328,8 +335,29 @@ class ReconciliationReview(QWidget):
 
     def set_busy(self, busy):
         self.review_button.setEnabled(not busy)
+        self.refresh_selected_button.setEnabled(not busy)
         if busy:
             self.mark_stale("Loading history and calculating evidence…")
+
+    def refresh_selected_sources(self):
+        identities = []
+        def collect(audit):
+            for detail in audit.get('by_brand', {}).values():
+                identity = detail.get('source_identity')
+                if identity and identity not in identities:
+                    identities.append(identity)
+            for child in audit.get('review_children') or []:
+                collect(child)
+        for item in self.sources.selectedItems():
+            index = item.data(0, Qt.UserRole)
+            if isinstance(index, int) and 0 <= index < len(self._evidence_rows):
+                audit = self._evidence_rows[index][0]
+                if audit.get('prediction_scope') not in ('amt_chunk', 'inventory'):
+                    collect(audit)
+        if identities:
+            self.refreshSourcesRequested.emit(identities)
+        else:
+            self.status.setText('Select historical source rows to refresh. Active sources are updated by Continuous Assays.')
 
     def set_review(self, audits, overall, warnings=()):
         self.sources.clear()
@@ -349,11 +377,18 @@ class ReconciliationReview(QWidget):
             self._evidence_rows.append((audit, brand, record))
         def add(parent, audit):
             for brand, detail in audit.get("by_brand", {}).items():
+                timestamp = audit.get('last_adjusted') if audit.get('prediction_scope') else detail.get('calculated_at') or audit.get('last_adjusted')
+                adjusted_text = str(timestamp).replace('T', ' ')[:19] if timestamp else (
+                    'Not adjusted' if audit.get('status') == 'pending' else 'Not recorded')
                 name = str(audit.get("review_label") or audit.get("hex_id") or audit.get("source_id") or "Source")
                 node = QTreeWidgetItem([name, brand, f"{audit.get('source_wmt', 0):,.1f}",
                     percent(detail.get("confidence_percent")),
-                    percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)), levels(detail),
-                    "; ".join(confidence_search_labels(detail)), "; ".join(history_approach_labels(detail))])
+                    percent(100 * detail.get("global_fraction", 0)), percent(100 * detail.get("lineage_coverage", 0)),
+                    'Update required' if audit.get('status') == 'pending' else levels(detail),
+                    "; ".join(confidence_search_labels(detail)), "; ".join(history_approach_labels(detail)),
+                    adjusted_text])
+                node.setToolTip(9, 'Oldest member adjustment; expand this row for individual sources.'
+                               if audit.get('review_children') else 'Last historical adjustment or accepted continuous assay update.')
                 (parent.addChild if parent else self.sources.addTopLevelItem)(node)
                 attach(node, audit, brand, None)
                 for record in detail.get("records", []):
@@ -362,7 +397,8 @@ class ReconciliationReview(QWidget):
                         "", "",
                         LEVEL_LABELS.get(record.get("resolution_level"), record.get("resolution_level", "")) +
                         (" · manual edit" if record.get("manual_override") else ""), "; ".join(confidence_search_labels(detail)),
-                        "; ".join(history_approach_labels(detail)) if record.get("resolution_level") != "global" else ""])
+                        "; ".join(history_approach_labels(detail)) if record.get("resolution_level") != "global" else "",
+                        adjusted_text])
                     attach(child, audit, brand, record)
                     node.addChild(child)
                     cell = spatial_cell(record.get("grade_block_key"))
@@ -596,7 +632,7 @@ class ReconciliationReview(QWidget):
             widget.setValue(config[name])
         self.save_cell.setEnabled(bool(self.cell.currentData()))
         self.reset_cell.setEnabled(bool(local))
-        self.local_status.setText("Save changes here, then Calculate review. Inherited settings removes this analyte's local factors and window."
+        self.local_status.setText("Save changes here, then select Update missing sources. Inherited settings removes this analyte's local factors and window."
                                   if self.cell.currentData() else "Calculate a review to discover source cells. Saved local settings remain searchable.")
         self.update_local_window()
 
@@ -628,7 +664,7 @@ class ReconciliationReview(QWidget):
         self._settings = updated
         self.mark_stale()
         self.settingsChanged.emit(self.settings())
-        self.local_status.setText("Local settings saved. Calculate review to see the resulting factors and evidence match score.")
+        self.local_status.setText("Local settings saved. Select Update missing sources to see the resulting factors and evidence match score.")
 
     def open_component(self):
         current = self.sources.currentItem()

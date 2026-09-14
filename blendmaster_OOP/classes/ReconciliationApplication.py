@@ -9,6 +9,10 @@ from collections import OrderedDict
 import hashlib
 import json
 import math
+from datetime import datetime
+from classes.ApprovedReconciliation import (
+    ReconciliationRequired, policy_signature, source_identity, source_key,
+)
 
 from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
@@ -16,6 +20,7 @@ from classes.GradeStreams import (
 )
 from classes.ReconciliationControls import (
     normalise_reconciliation_settings, resolution_levels, confidence_search_labels, history_approaches,
+    RECONCILIATION_ALGORITHM_VERSION,
 )
 from classes.ReconciliationFactorResolver import (
     CONFIDENCE_METHOD, ReconciliationFactorResolver,
@@ -58,37 +63,97 @@ def amt_reconciliation_lineage(row):
 class ReconciliationApplication:
     """One immutable-in-use OPF/configuration context shared by many sources."""
 
-    def __init__(self, *, samples, standard_factors, opf, brands, scenario_start, settings=None):
+    def __init__(self, *, samples, standard_factors, opf, brands, scenario_start, settings=None,
+                 allow_search=False, registry=None, mine=None, policy_revision=None):
         self.settings = normalise_reconciliation_settings(settings)
         self.opf = normalise_opf(opf)
         self.brands = configured_brands(brands)
         self.resolvers = {}
         self._resolved_sources = OrderedDict()
-        if self.settings["method"] != "standard":
+        self._retained_sources = {}
+        self.allow_search, self.registry, self.mine = allow_search, registry, mine
+        self.policy = policy_signature(self.settings, policy_revision)
+        self.scenario_start = scenario_start
+        # Factor selection depends on evidence and physical lineage, not on
+        # grade mappings, adjusted baselines, or subsequent chunk membership.
+        self.factor_context_signature = reconciliation_fingerprint(dict(
+            application_version=APPLICATION_VERSION, algorithm_version=RECONCILIATION_ALGORITHM_VERSION,
+            samples=samples, standard_factors=standard_factors, opf=self.opf,
+            brands=self.brands, scenario_start=scenario_start, settings=self.settings))
+        if allow_search and (self.settings["method"] != "standard" or registry is not None):
             for brand in self.brands:
                 self.resolvers[brand] = ReconciliationFactorResolver(
                     samples, opf=self.opf, brand=brand, scenario_start=scenario_start,
                     standard_factors=(standard_factors or {}).get(brand), **self.settings,
                 )
 
-    def resolved_source(self, brand, source_id, source_kind, blocks, total, hex_id):
+    def retain_audits(self, audits):
+        """Keep completed source searches available beyond the small working LRU.
+
+        These are read-only references to the existing review/profile evidence;
+        callers always receive copies before applying current grades/coverage.
+        Aggregate chunk audits have no factor signature; their member hexes do.
+        """
+        if self.registry is not None:
+            return  # Approved records already survive working-cache eviction.
+        retained = {}
+        def collect(audit):
+            if not isinstance(audit, dict):
+                return
+            for detail in (audit.get('by_brand') or {}).values():
+                if not isinstance(detail, dict):
+                    continue
+                signature = detail.get('factor_signature')
+                if signature:
+                    retained[signature] = detail
+            for child in audit.get('review_children') or []:
+                collect(child)
+        for audit in audits:
+            collect(audit)
+        self._retained_sources = retained
+
+    def resolved_source(self, brand, source_id, source_kind, blocks, total, hex_id, prior=None, source_instance=None):
         # One application owns one immutable history/settings context. Reuse
         # the review's factor search only for exactly the same physical source.
-        key = reconciliation_fingerprint([brand, source_id, source_kind, blocks, total, hex_id])
-        if key in self._resolved_sources:
+        identity = source_identity(self.mine, self.opf, source_kind, source_id, source_instance, hex_id)
+        approved_key = source_key(identity, brand)
+        if self.registry is not None:
+            approved = (self.registry.get('sources') or {}).get(approved_key) or {}
+            if approved.get('policy') == self.policy:
+                result = deepcopy(approved['detail'])
+                result['source_wmt'] = total
+                return result
+            if not self.allow_search:
+                raise ReconciliationRequired(f'{source_id}' + (f' / hex {hex_id}' if hex_id is not None else '')
+                    + ': open Grade Reconciliation and select Update missing sources.')
+        key = reconciliation_fingerprint([
+            self.factor_context_signature, brand, source_id, source_kind, blocks, total, hex_id])
+        if self.registry is None and isinstance(prior, dict) and prior.get('factor_signature') == key:
+            return deepcopy(prior)
+        if self.registry is None and key in self._retained_sources:
+            return deepcopy(self._retained_sources[key])
+        if self.registry is None and key in self._resolved_sources:
             self._resolved_sources.move_to_end(key)
             return deepcopy(self._resolved_sources[key])
+        if not self.allow_search:
+            raise ReconciliationRequired('Factor searches require a manual Grade Reconciliation update.')
         result = self.resolvers[brand].resolve_source(source_id, source_kind, blocks, total, hex_id=hex_id)
-        self._resolved_sources[key] = deepcopy(result)
-        if len(self._resolved_sources) > 4096:
-            self._resolved_sources.popitem(last=False)
+        result['factor_signature'] = key
+        if self.registry is not None and total > 0:
+            result.update(approval_policy=self.policy, source_identity=identity,
+                          calculated_at=datetime.now().isoformat(), evidence_as_of=str(self.scenario_start))
+            self.registry.setdefault('sources', {})[approved_key] = dict(policy=self.policy, detail=deepcopy(result))
+        if self.registry is None:
+            self._resolved_sources[key] = deepcopy(result)
+            if len(self._resolved_sources) > 4096:
+                self._resolved_sources.popitem(last=False)
         return result
 
     def apply(self, streams, *, source_id, source_kind, source_wmt, contributing_blocks,
-              hex_id=None, warnings=(), grade_coverage=None):
+              hex_id=None, warnings=(), grade_coverage=None, prior_audit=None, source_instance=None):
         if source_kind not in {"inventory", "amt"}:
             raise ValueError("Advanced reconciliation applies only to inventory stockpiles and AMT hexes.")
-        if self.settings["method"] == "standard":
+        if self.settings["method"] == "standard" and self.registry is None:
             return deepcopy(streams), {}
         total = finite_number(source_wmt)
         if total is None or total < 0:
@@ -98,14 +163,15 @@ class ReconciliationApplication:
                  "opf": self.opf, "source_id": clean_text(source_id), "source_kind": source_kind,
                  "hex_id": clean_text(hex_id), "source_wmt": total, "by_brand": {},
                  "warnings": list(warnings), "confidence_method": CONFIDENCE_METHOD}
-        for brand, resolver in self.resolvers.items():
+        for brand in self.brands:
             try:
-                resolved = self.resolved_source(brand, source_id, source_kind, contributing_blocks, total, hex_id)
+                prior = (prior_audit.get('by_brand') or {}).get(brand) if isinstance(prior_audit, dict) else None
+                resolved = self.resolved_source(brand, source_id, source_kind, contributing_blocks, total, hex_id, prior, source_instance)
             except (ValueError, TypeError, AttributeError) as exc:
                 # Malformed source lineage is unavailable evidence, never a reason
                 # to discard source mass or invent factors. Configuration/history
                 # validation happens in the constructor and is not caught here.
-                resolved = self.resolved_source(brand, source_id, source_kind, [], total, hex_id)
+                resolved = self.resolved_source(brand, source_id, source_kind, [], total, hex_id, source_instance=source_instance)
                 audit["warnings"].append(f"Invalid source lineage; using global factors. {exc}")
             records = resolved["records"]
             applied = {kind: {a: math.fsum(r["lineage_fraction"] * r[f"{kind}_factors"][a]
@@ -151,6 +217,8 @@ class ReconciliationApplication:
             resolved["grade_coverage"] = coverage
             audit["by_brand"][brand] = resolved
         audit["warnings"] = list(dict.fromkeys(audit["warnings"]))
+        adjusted = [detail.get('calculated_at') for detail in audit['by_brand'].values() if detail.get('calculated_at')]
+        audit['last_adjusted'] = min(adjusted) if adjusted else None
         return result, audit
 
 
@@ -173,7 +241,11 @@ def aggregate_reconciliation(sources, *, source_id="", source_kind="amt_chunk"):
     result = {"schema_version": APPLICATION_VERSION, "method": "advanced_aggregate",
               "opf": next(iter(opfs)), "source_id": source_id, "source_kind": source_kind,
               "source_wmt": total, "by_brand": {}, "confidence_method": CONFIDENCE_METHOD,
-              "warnings": list(dict.fromkeys(w for a in present for w in a.get("warnings", [])))}
+               "warnings": list(dict.fromkeys(w for a in present for w in a.get("warnings", [])))}
+    adjusted = [a.get('last_adjusted') for a, wmt in sources if (finite_number(wmt) or 0) > 0]
+    result['last_adjusted'] = min(adjusted) if adjusted and all(adjusted) else None
+    if any(a.get('status') == 'pending' for a in present):
+        result['status'] = 'pending'
     signatures = {a.get("enrichment_signature", "") for a in present}
     result["enrichment_signature"] = next(iter(signatures)) if len(signatures) == 1 else ""
     for brand in sorted({b for a in present for b in a["by_brand"]}):

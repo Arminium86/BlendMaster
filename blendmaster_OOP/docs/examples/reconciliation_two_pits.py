@@ -74,7 +74,7 @@ def history():
 
 def run(method, window="calendar_days", minimum=2, cells=(), source=None):
     engine = ReconciliationApplication(
-        samples=history(), standard_factors={"SF": GLOBAL}, opf="CB OPF", brands=["SF"],
+        samples=history(), standard_factors={"SF": GLOBAL}, opf="CB OPF", brands=["SF"], allow_search=True,
         scenario_start=START, settings=dict(method=method, window_mode=window, lookback_days=4,
                                           min_production_days=minimum, max_lookback_days=10, cells=cells))
     values, audit = engine.apply(STREAMS, source_id="Stockpile 1", source_kind="inventory",

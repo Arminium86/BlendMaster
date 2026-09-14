@@ -231,7 +231,7 @@ def estimate(catalog, evidence, config=None):
         h = np.array([observation['weights'].get(s, 0) for s in identities], dtype=float)
         if not np.isfinite(h).all() or (h < 0).any() or abs(h.sum()-1) > 1e-8:
             continue
-        accepted = {}
+        accepted, adjusted_sources = {}, set()
         for a, y in observation['grades'].items():
             if a not in ANALYTES or not math.isfinite(y) or not 0 <= y <= 100:
                 continue
@@ -261,10 +261,12 @@ def estimate(catalog, evidence, config=None):
             covariance = residual @ covariance @ residual.T + np.outer(gain, gain)*config['assay_std'][a]**2
             states[state_key] = proposed, covariance
             accepted[a] = {s: float(proposed[index[s]]) for s in identities}
+            adjusted_sources.update(s for s in identities if abs(gain[index[s]]) > 1e-12)
             audit.append(dict(id=observation['id'], analyte=a, status='applied', innovation=error,
                 posterior_std={s: math.sqrt(max(0, covariance[index[s],index[s]])) for s in observation['weights']}))
         if accepted:
-            timeline.append(dict(available_at=observation['available_at'], opf=opf, brand=brand, offsets=accepted))
+            timeline.append(dict(available_at=observation['available_at'], opf=opf, brand=brand,
+                                 offsets=accepted, adjusted_sources=sorted(adjusted_sources)))
     return dict(version=1, catalog=deepcopy(catalog), evidence=deepcopy(evidence), timeline=timeline, policy_signature=digest(config),
                 audit=audit, revision=digest(dict(catalog=catalog, timeline=timeline, config=config)))
 

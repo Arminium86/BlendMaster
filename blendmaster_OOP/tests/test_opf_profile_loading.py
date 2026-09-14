@@ -46,8 +46,10 @@ class OPFProfileLoadingTests(unittest.TestCase):
     def test_source_replacement_discards_old_profile_before_continuing(self):
         host, delivered, snapshots = self.host(), [], []
 
+        previous = []
         def build(state, *args):
             snapshots.append(state['updated_stockpile_data']['SP']['balance'])
+            previous.append(state.get('_combined_opf_profile_cache'))
             return {'balance': snapshots[-1]}
 
         with patch('GUI.OPFProfileLoading.build_profiles', side_effect=build):
@@ -57,7 +59,18 @@ class OPFProfileLoadingTests(unittest.TestCase):
             host.updated_stockpile_data = replacement
             self.drain(host)
         self.assertEqual(snapshots, [100, 200])
+        self.assertIsNone(previous[0])
+        self.assertEqual(previous[1][1], {'balance': 100})
         self.assertEqual(delivered, [{'balance': 200}])
+        host.deleteLater()
+
+    def test_stale_saved_profile_is_passed_to_worker_for_individual_source_reuse(self):
+        host = self.host()
+        host._combined_opf_profile_cache = ('old-chunk-layout', {'previous': 'source evidence'})
+        with patch('GUI.OPFProfileLoading.build_profiles', return_value={'ready': True}) as build:
+            self.assertTrue(ensure(host, lambda: None))
+            self.drain(host)
+        self.assertEqual(build.call_args.args[0]['_combined_opf_profile_cache'][1], {'previous': 'source evidence'})
         host.deleteLater()
 
     def test_plan_requested_during_profile_loading_continues_after_same_worker(self):

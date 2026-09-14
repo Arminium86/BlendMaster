@@ -4,6 +4,7 @@ import inspect
 from classes.PlanningPersistence import PLAN_FIELDS
 
 FIELDS = (
+    'grade_reconciliation_registry', 'grade_reconciliation_policy_revision', 'transport_opening_history',
     'stockpile_data', 'updated_stockpile_data', 'stockpile_data_use_column', 'stockpile_data_AMT_column',
     'AMT_stockpile_data', 'AMT_footprint_exclusions', 'AMT_data_request_signature', 'AMT_enrichment_signature',
     'field_definitions', 'field_mappings', 'field_mapping_schema_version', 'mine_input_choice', 'opf_input_choice',
@@ -37,14 +38,11 @@ def apply(host, on_complete):
     # Freeze references while controls are locked; copy the large AMT payload
     # on the worker so even the copy does not block painting/input feedback.
     values = {name: vars(host)[name] for name in FIELDS if name in vars(host)}
-    application_cache = vars(host).get('_reconciliation_application_cache')
     implementation = type(host)
     service = host.opening_stockpile_inventories
     def work():
         context = InventoryContext(implementation, deepcopy(values))
-        # The model is locked and this cache contains only plain reconciliation
-        # services. Reuse the review's history indexes in the application worker.
-        context._reconciliation_application_cache = application_cache
+        context._reconciliation_application_cache = None  # Never inherit manual-search permission.
         context.apply_canonical_field_mappings()
         context.apply_grade_streams_to_inventory()
         signature = context.AMT_enrichment_request_signature()

@@ -163,5 +163,6 @@ def reconciliation_report_rows(audits, overall):
     return [{"opf": audit.get("opf", ""), "source_kind": audit.get("source_kind", ""),
              "source_id": audit.get("source_id", ""), "source": audit.get("review_label") or audit.get("source_id") or "Overall",
              "source_wmt": audit.get("source_wmt", 0), "method": METHOD_LABELS.get(audit.get("method"), audit.get("method", "")),
+             "last_adjusted": audit.get('last_adjusted') or '',
              **reconciliation_columns(audit), "warnings": "; ".join(audit.get("warnings", []))}
             for audit in [overall, *audits] if audit.get("by_brand")]

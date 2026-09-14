@@ -6,7 +6,7 @@ from classes.CombinedOPFReconciliation import (
 )
 
 
-def ensure(host, on_complete, *, on_error=None):
+def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
     """Return True while preparing; otherwise the caller can continue now."""
     if not isinstance(host, QObject):
         return False
@@ -21,18 +21,22 @@ def ensure(host, on_complete, *, on_error=None):
     opfs = sorted({point['opf'] for point in config.get('tipping_points', [])})
     bundles = vars(host).get('opf_reconciliation_inputs') or {}
     builds = host.reconciliation_inventory_builds()
-    if not opfs or any(opf not in bundles or bundles[opf].get('signature') !=
-                      evidence_signature(vars(host), opf, builds) for opf in opfs):
+    if not opfs or (not vars(host).get('grade_reconciliation_registry') and any(opf not in bundles or bundles[opf].get('signature') !=
+                      evidence_signature(vars(host), opf, builds) for opf in opfs)):
         return False  # The existing reconciliation workflow must fetch evidence first.
     if reusable_cache(vars(host), opfs):
         return False
     values = {key: vars(host)[key] for key in (*SOURCE_FIELDS, 'active_scenario_id') if key in vars(host)}
+    previous_profiles = _previous_profiles if _previous_profiles is not None else vars(host).get('_combined_opf_profile_cache')
     implementation = type(host)
     host._opf_profile_preparation_pending = True
     host._opf_profile_waiters = [(on_complete, on_error)]
 
     def work():
         state = deepcopy(values)
+        # Read old audits without copying the entire old profile. Reuse is
+        # checked per source even when chunking invalidated the profile itself.
+        state['_combined_opf_profile_cache'] = previous_profiles
         return profile_signature(state, opfs), build_profiles(state, opfs, implementation)
 
     def done(result):
@@ -50,7 +54,7 @@ def ensure(host, on_complete, *, on_error=None):
         if result[0] != profile_signature(vars(host), opfs):
             # AMT map delivery may complete while the controls are locked.
             # Rebuild from that newer snapshot instead of publishing stale grades.
-            if not ensure(host, complete_all, on_error=fail_all):
+            if not ensure(host, complete_all, on_error=fail_all, _previous_profiles=result):
                 complete_all()
             return
         host._combined_opf_profile_cache = result

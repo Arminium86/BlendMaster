@@ -83,6 +83,8 @@ def _migrate_one(state):
     for record in (state.get('AMT_footprint_exclusions') or {}).values():
         _schema(record,1,'AMT footprint exclusion')
     result = dict(state)
+    from classes.ApprovedReconciliation import migrate_saved_approvals
+    result['grade_reconciliation_registry'] = migrate_saved_approvals(state)
     result.update(project_format_version=PROJECT_FORMAT_VERSION,
                   planning_semantics_version=PLANNING_SEMANTICS_VERSION,
                   flow_layout_schema_version=FLOW_LAYOUT_SCHEMA_VERSION)

@@ -151,7 +151,14 @@ class ContinuousAssayHistory:
         if len(ledger) > 5000:
             raise ValueError('Continuous assay ledger exceeds 5,000 windows; refresh the historical source priors.')
         result = estimate(catalog, list(ledger.values()), policy)
+        activity = set()
+        for movement in actual:
+            candidates = [name for name, row in catalog.items() if row['build'] == str(movement.get('SOURCE') or '').upper()]
+            candidates = [name for name in candidates if not catalog[name]['is_amt'] or name in
+                          active_sources(plan_rows, movement['time'], opf).get(normalise_opf(opf), [])]
+            if len(candidates) == 1:
+                activity.update(candidates)
         result['audit'] += withheld
         result.update(checked_at=end.isoformat(), status='fresh', source_request=deepcopy(snapshot['request']),
-                      active_sources=sorted(catalog), active_at=awst(now).isoformat())
+                      active_sources=sorted(catalog), activity_sources=sorted(activity), active_at=awst(now).isoformat())
         return result
