@@ -414,8 +414,12 @@ class Run:
         solver_config["selected_data_stream"] = (
             (site_context or {}).get("selected_data_stream") or "adjusted_product"
         )
-        solver_config["multi_feed_settings"] = multi_feed_settings((site_context or {}).get("multi_feed_settings"))
+        solver_config["multi_feed_settings"] = multi_feed_settings((site_context or {}).get("multi_feed_settings") or solver_config.get('multi_feed_settings'))
         if solver_config["multi_feed_settings"]["mode"] != "single":
+            from classes.MultiFeedCalendar import apply_calendar
+            labels = ['Preplan', *[f'Period_{i}' for i in range(1, periods.period_count)]]
+            solver_config['multi_feed_settings'] = multi_feed_settings(apply_calendar(
+                solver_config['multi_feed_settings'], calendar_inputs, labels))
             points = solver_config["multi_feed_settings"]["tipping_points"]
             solver_config['direct_tip_enabled'] = any(p['direct_tip_enabled'] for p in points)
             routing = {}

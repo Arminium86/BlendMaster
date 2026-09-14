@@ -122,7 +122,7 @@ class MaterialFlowResults(QWidget):
         plan_type = self.result_type.currentData()
         self.timeline = None
         self.slider.setEnabled(False)
-        self.graph.scene.clear(); self.graph.nodes={}; self.graph.edges=[]
+        self.graph.clear_graph()
         self.cos_profile.set_frame(pd.DataFrame(),{})
         for table in self.tables.values():
             old=table.model()

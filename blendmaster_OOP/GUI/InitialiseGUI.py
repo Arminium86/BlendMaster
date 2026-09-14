@@ -644,6 +644,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         # Calendar table
         self.main_table = CustomTableWidget()
+        self.main_table.itemChanged.connect(self.on_calendar_cell_changed)
         self.main_tab_layout.addWidget(self.main_table)
 
         # Add Decision Point Tab
@@ -1163,6 +1164,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             getattr(self, "calendar_expit_material_brand_rows", {})
         )
         captured["site_context"] = self.active_site_context()
+        feed = captured['site_context'].get('multi_feed_settings') or {}
+        if feed.get('mode','single') != 'single':
+            feed = multi_feed_settings(apply_calendar(feed, captured, headers))
+            captured['site_context']['multi_feed_settings'] = feed
+            captured['solver_config']['multi_feed_settings'] = copy.deepcopy(feed)
         return migrate_product_target_state(captured)
 
     def capture_stockpile_table_choices(self):
@@ -1606,6 +1612,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 QTimer.singleShot(0, self.refresh_expit_sequence_live)
 
     def refresh_manual_scenario_views(self, tab_states):
+        if (getattr(self,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
+            return
         def is_enabled(index):
             return bool(self.normalized_page_states(tab_states).get(index, False))
 
@@ -11683,8 +11691,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # Save and load button
         self.save_button = QPushButton("Save Project")
         self.save_button.setMinimumWidth(125)
-        self.save_button.clicked.connect(self.save_state)
+        self.save_button.clicked.connect(lambda: self.save_state())
         self.save_button.setEnabled(False)
+
+        self.save_as_button = QPushButton("Save Project As…")
+        self.save_as_button.setMinimumWidth(145)
+        self.save_as_button.setToolTip("Save the project with another filename or in another folder (Ctrl+Shift+S).")
+        self.save_as_button.setShortcut("Ctrl+Shift+S")
+        self.save_as_button.clicked.connect(self.save_state_as)
+        self.save_as_button.setEnabled(False)
 
         self.load_button = QPushButton("Load Project")
         self.load_button.setMinimumWidth(125)
@@ -11692,6 +11707,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         save_load_button_layout = QHBoxLayout()
         save_load_button_layout.addWidget(self.save_button)
+        save_load_button_layout.addWidget(self.save_as_button)
         save_load_button_layout.addWidget(self.load_button)
         save_load_button_layout.addStretch()
         layout.addRow(save_load_button_layout)
@@ -11821,7 +11837,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # Save is a working checkpoint, including after a selective import.
         # Readiness may gate preparation or calculation, but must not prevent
         # a Planner from preserving current edits and historical results.
-        self.save_button.setEnabled(
+        from GUI.ProjectSaving import set_enabled
+        set_enabled(self,
             bool(getattr(self, 'site_scenarios', {})) or site_fields_populated
         )
         from GUI.WorkflowViews import schedule
@@ -13654,7 +13671,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             and self.project_load_restore_in_progress
         )
         self.submit_button.setEnabled(True)
-        self.save_button.setEnabled(True)
+        from GUI.ProjectSaving import set_enabled
+        set_enabled(self, True)
         build_targets = {}
         target_errors = {}
         automatic_2wp_targets = True
@@ -17635,6 +17653,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def restore_manual_sequence_view(self):
         """Hydrate saved manual controls without requiring another submission."""
+        if (getattr(self,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
+            from classes.SavedResultViews import plan_names
+            self.set_page_enabled(self.blend_sequence_tab_index, bool(plan_names(get_database_path(),'manual')))
+            return
         if not getattr(self, "saved_blends_for_schedule", None):
             return
         previous = self.is_project_loaded
@@ -17646,11 +17668,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.is_project_loaded = previous
 
     def fetch_optimised_blend_report(self, plan_id=None):
-        plan_id = plan_id or (
-            getattr(self, "manual_plan_selector", None).currentText()
-            if getattr(self, "manual_plan_selector", None) is not None
-            else self.selected_optimisation_plan_id()
-        )
+        plan_id = plan_id or self.selected_optimisation_plan_id()
         plan_id = str(plan_id or "Primary")
         connection = sqlite3.connect(get_database_path())
         try:
@@ -17732,11 +17750,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         selector = getattr(self, "manual_plan_selector", None)
         if selector is None or not selector.currentText().strip():
             return
+        self.activate_manual_plan(selector.currentText().strip())
+
+    def activate_manual_plan(self, selected_plan):
+        """Restore the selected plan's own edits and freshness in either workspace."""
         previous_plan = str(
             getattr(self, "active_manual_plan_id", "Primary")
             or "Primary"
         )
-        selected_plan = selector.currentText().strip()
+        selected_plan = str(selected_plan).strip()
         if previous_plan == selected_plan:
             return
         self.capture_active_manual_plan_state()
@@ -17751,6 +17773,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 setattr(self, field, saved.get(field))
         else:
             self.reset_manual_blending_plan_state()
+        if (getattr(self, 'multi_feed_configuration', {}) or {}).get('mode', 'single') != 'single':
+            return
         if hasattr(self, "blend_config_table"):
             self.populate_blend_config_table()
             self.populate_blend_config_weights_and_ids()
@@ -17909,14 +17933,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return True
 
     def prepopulate_manual_from_optimised_result(
-        self, automatic=False
+        self, automatic=False, source_plan_id=None
     ):
+        if source_plan_id is None:
+            selected = getattr(self, 'selected_optimisation_plan_id', None)
+            source_plan_id = selected() if callable(selected) else getattr(self, 'active_manual_plan_id', 'Primary')
         if (getattr(self, 'multi_feed_configuration', None) or {}).get('mode','single') != 'single':
             from GUI.WorkflowDependencies import input_revision
-            if vars(self).get('optimisation_input_revision') != input_revision(self):
-                if not automatic:
-                    QMessageBox.warning(self, 'Manual plan', 'Recalculate the optimised plan for the current inputs before copying its allocations.')
-                return False
+            current = vars(self).get('optimisation_input_revision') == input_revision(self)
             from classes.SavedPlanStore import manual_copy
             from classes.SavedResultViews import read_report
             plan_id = getattr(self, 'active_manual_plan_id', 'Primary') or 'Primary'
@@ -17929,15 +17953,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                     return False
             try:
-                report = manual_copy(get_database_path(), plan_id)
+                report = manual_copy(get_database_path(), source_plan_id)
                 self.write_active_manual_plan_reports(report)
                 self.manual_blend_report = report
                 from GUI.WorkflowDependencies import manual_revision
-                self.manual_input_revision = manual_revision(self)
+                self.manual_input_revision = manual_revision(self) if current else None
                 self.capture_active_manual_plan_state()
                 if not automatic:
-                    self.show_page('blend_plan')
-                    self.blend_plan_workflow_tabs.setCurrentWidget(self.manual_operational_blend_plans)
+                    self.show_page('setup_blends')
                 return True
             except ValueError as exc:
                 if not automatic:
@@ -17967,7 +17990,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 return False
 
         optimised_report = self.fetch_optimised_blend_report(
-            getattr(self, "active_manual_plan_id", "Primary")
+            source_plan_id
         )
         if optimised_report.empty:
             if not automatic:
@@ -20052,6 +20075,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.calendar_table_refresh_pending = False
     
     def populate_calendar(self):
+        from PyQt5.QtCore import QSignalBlocker
+        calendar_signal_blocker = QSignalBlocker(self.main_table)
         # Define Parent Colors
         parent_colors = {
             "green": QColor("#e5f7ed"),
@@ -20363,6 +20388,19 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return float(value)
         except (TypeError, ValueError):
             return value
+
+    def on_calendar_cell_changed(self, item):
+        """Keep point targets when another workflow rebuilds the Calendar."""
+        if item.column() == 0:
+            return
+        caption = self.main_table.item(item.row(), 0)
+        header = self.main_table.horizontalHeaderItem(item.column())
+        key = caption.data(Qt.UserRole) if caption is not None else None
+        if not header or not isinstance(key, str) or not key.startswith('tipping_point_'):
+            return
+        if vars(self).get('calendar_inputs') is None:
+            self.calendar_inputs = {}
+        self.calendar_inputs.setdefault(key, {})[header.text().strip()] = self.normalized_calendar_input_value(key, item.text().strip())
 
     def store_calendar_inputs_no_run(self):
         """Extract and store user entries from the table into a structured format with concatenated keys and modified types. Also calls the main optimised run"""
@@ -21411,28 +21449,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # Add the frame to the parent layout
         self.results_layout.addWidget(self.top_frame)
 
-        # Top (Gantt Chart with CustomWebEngineView)
-        self.gantt_chart_view = CustomWebEngineView()
-        self.gantt_chart_view.setStyleSheet("border: 0; background-color: #ffffff;")
+        from GUI.BlendSequenceTimeline import BlendSequenceTimeline
+        self.gantt_chart_view = BlendSequenceTimeline()
+        self.gantt_chart_view.setObjectName('blendSequenceTimeline')
+        self.gantt_chart_view.setStyleSheet("QWidget#blendSequenceTimeline { border: 0; background-color: #ffffff; }")
         self.top_layout.addWidget(self.gantt_chart_view)
 
-        controls_layout = QHBoxLayout()
-        self.optimisation_snapshot_fields_button = QPushButton(
-            "Choose Snapshot Fields..."
-        )
-        self.optimisation_snapshot_fields_button.clicked.connect(
-            self.choose_optimisation_snapshot_columns
-        )
-        controls_layout.addWidget(self.optimisation_snapshot_fields_button)
-        self.optimisation_detail_fields_button = QPushButton(
-            "Configure Detail Report..."
-        )
-        self.optimisation_detail_fields_button.clicked.connect(
-            self.choose_optimisation_detail_columns
-        )
-        controls_layout.addWidget(self.optimisation_detail_fields_button)
-        controls_layout.addStretch()
-        self.results_layout.addLayout(controls_layout)
+        self.results_layout.setStretchFactor(self.top_frame, 1)
 
     def available_optimisation_plan_rows(self):
         fallback_count = int(
@@ -21898,14 +21921,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         connect_view(self, view, f'http://127.0.0.1:{chart.port}')
 
     def load_gantt_chart(self):
-        self.start_dash_optimised_charts_thread()
         plan_id = self.selected_optimisation_plan_id()
-        chart = getattr(self, "draw_gantt_chart", None)
-        if chart is not None:
-            chart.set_plan_id(plan_id)
-        self.resize_results_chart_area()
-        from GUI.ChartReadiness import connect_view
-        connect_view(self, self.gantt_chart_view, f'http://127.0.0.1:{self.draw_gantt_chart.port}/?plan={plan_id}')
+        from classes.SavedResultViews import read_report
+        database = get_database_path()
+        points = (getattr(self, 'multi_feed_configuration', {}) or {}).get('tipping_points', [])
+        def done(report):
+            if database == get_database_path() and plan_id == self.selected_optimisation_plan_id():
+                self.gantt_chart_view.set_report(report, points)
+        self.run_background_task('Loading blend sequence…',
+            lambda: read_report(database, 'optimised', plan_id), done)
 
     def resize_results_chart_area(self):
         desired_height = 520
@@ -21935,6 +21959,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.top_frame.setMaximumHeight(desired_height)
     
     def load_manual_gantt_chart(self):
+        if (getattr(self, 'multi_feed_configuration', {}) or {}).get('mode', 'single') != 'single':
+            from GUI.MultiManualWorkspace import refresh
+            refresh(self, sequence=True)
+            return
         self.start_or_update_dash_manual_chart_thread()
         from GUI.ChartReadiness import connect_view
         connect_view(self, self.manual_gantt_view, f'http://127.0.0.1:{self.draw_manual_gantt_chart.port}')
@@ -23221,21 +23249,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.draw_optimised_grade_profile_chart.plan_id = self.selected_optimisation_plan_id()
 
     def start_dash_optimised_charts_thread(self):
-        """Start the Dash app in a separate thread."""
+        """Start the remaining saved-profile service; the sequence is native Qt."""
         db_path = get_database_path()
-        if hasattr(self, "draw_gantt_chart"):
-            self.draw_gantt_chart.db_path = db_path
-        else:
-            self.draw_gantt_chart = DrawGanttChart(db_path, port=8050)
-            self.draw_gantt_chart.set_report_configuration(
-                getattr(self, "optimisation_detail_selected_columns", None),
-                getattr(self, "optimisation_detail_column_aliases", {}),
-                getattr(self, "optimisation_detail_column_widths", {}),
-                getattr(self, "optimisation_detail_wrap_text", True),
-            )
-            from GUI.ChartServer import start
-            self.dash_thread_gantt = start(self.draw_gantt_chart)
-
         if hasattr(self, "draw_stockpile_profile_chart"):
             self.draw_stockpile_profile_chart.db_path = db_path
         else:
@@ -23592,6 +23607,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 widget.blockSignals(blocked)
 
     def setup_blends_tab(self):
+        if (getattr(self, 'multi_feed_configuration', {}) or {}).get('mode', 'single') != 'single':
+            return
         
         if self.setup_blends_tab_first_call:
 
@@ -24706,7 +24723,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
         self.set_page_enabled(self.blend_sequence_tab_index, True)
         self.show_page(self.blend_sequence_tab_index)
-        self.save_button.setEnabled(True)
+        from GUI.ProjectSaving import set_enabled
+        set_enabled(self, True)
         QMessageBox.information(self, "BlendMaster", "Blend results successfully saved.")
 
     def fetch_build_report(self):
@@ -26145,7 +26163,17 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             })
         return pd.DataFrame(rows)
 
-    def save_state(self, show_success=True, *, close_after=False):
+    def save_state_as(self):
+        """Choose a new project file before capturing controls or starting I/O."""
+        if vars(self).get('_project_save_pending'):
+            return False
+        from GUI.ProjectSaving import choose_destination
+        destination = choose_destination(self)
+        if destination is None:
+            return False
+        return self.save_state(destination=destination)
+
+    def save_state(self, show_success=True, *, close_after=False, destination=None):
         """Capture the application state and begin an atomic background save."""
         if vars(self).get("_project_save_pending"):
             return False
@@ -26260,7 +26288,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "opening_stockpile_inventories")}
         legacy_state.update(agent_console_text=agent_console_text,
                             agent_proposals_table=agent_proposals_table)
-        return begin(self, legacy_state, show_success=show_success, close_after=close_after)
+        return begin(self, legacy_state, show_success=show_success, close_after=close_after,
+                     destination=destination)
 
     def load_state(self):
         """Load the application state from a user-selected file."""
@@ -26466,6 +26495,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             loaded_state = self.normalized_agent_project_state(loaded_state)
             loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
+        from GUI.ProjectSaving import restore_destination
+        restore_destination(self, source_label, loaded_state.get('shared_project_settings'))
         # Unpack loaded state into variables
         self._defer_opf_profile_preparation = True
         # ProjectLoading already detached this cache with the owning site. Its
@@ -27007,6 +27038,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.project_load_show_success = False
         self.project_load_source_label = ""
         set_database_path(initial_database_path)
+        self.current_project_path = None
+        self.last_project_save_path = None
         self.blend_mode_choice = None
         self.calendar_inputs = None
         self.calendar_table_refresh_pending = False

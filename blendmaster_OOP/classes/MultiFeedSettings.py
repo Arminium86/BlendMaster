@@ -51,6 +51,7 @@ def multi_feed_settings(value=None):
             lo, hi = (number(target.get(k, default), f"{name} {k}") for k, default in (("direct_feed_ratio_min", 0), ("direct_feed_ratio_max", 1)))
             if not 0 <= lo <= hi <= 1:
                 raise ValueError(f"{name}: direct-tip ratios must satisfy 0 ≤ min ≤ max ≤ 1.")
+            target['direct_feed_ratio_min'], target['direct_feed_ratio_max'] = lo, hi
             for analyte in ("fe", "si", "al", "p", "mn"):
                 low, high = f"target_{analyte}_min", f"target_{analyte}_max"
                 if low in target and high in target:

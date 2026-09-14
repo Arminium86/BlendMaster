@@ -29,6 +29,9 @@ def result(host, report, plan_id='Primary', plan_type='manual', *, database=None
     periods.calculate_periods(host.start_time_choice)
     errors = equipment_violations(report, host.calendar_inputs or {}, periods.get_periods(),
         mode=(getattr(host, 'multi_feed_configuration', {}) or {}).get('mode', 'single'), require_limits=True)
+    from classes.DirectTipLimits import direct_tip_violations
+    errors += direct_tip_violations(report, host.calendar_inputs or {}, periods.get_periods(),
+        mode=(getattr(host, 'multi_feed_configuration', {}) or {}).get('mode', 'single'))
     with closing(sqlite3.connect(path)) as connection:
         destination = read_table(connection, 'material_destination_plan', plan_id, plan_type)
         from classes.SavedResultViews import read_from_connection

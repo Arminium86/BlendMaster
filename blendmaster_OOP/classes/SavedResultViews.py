@@ -19,7 +19,11 @@ def read_from_connection(connection, plan_type='optimised', plan_id='Primary', k
     table, fallback = REPORT_TABLES[plan_type][kind]
     names = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if table in names:
-        return pd.read_sql_query(f'SELECT * FROM "{table}" WHERE plan_id=?', connection, params=(plan_id,))
+        columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+        # Early checkpoints created metadata-only placeholders alongside the
+        # legacy Primary report. A real named report remains authoritative.
+        if 'plan_id' in columns and columns - {'plan_id','plan_rank'}:
+            return pd.read_sql_query(f'SELECT * FROM "{table}" WHERE plan_id=?', connection, params=(plan_id,))
     if plan_id == 'Primary' and fallback in names:
         return pd.read_sql_query(f'SELECT * FROM "{fallback}"', connection)
     if kind == 'product' and plan_type == 'manual':
@@ -47,6 +51,9 @@ def plan_names(database, plan_type='optimised'):
         names = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if table in names:
             result = [r[0] for r in connection.execute(f'SELECT DISTINCT plan_id FROM "{table}"')]
+            columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+            if not columns - {'plan_id','plan_rank'} and fallback in names and connection.execute(f'SELECT 1 FROM "{fallback}" LIMIT 1').fetchone():
+                result = ['Primary']
         elif fallback in names and connection.execute(f'SELECT 1 FROM "{fallback}" LIMIT 1').fetchone():
             result = ['Primary']
         else:

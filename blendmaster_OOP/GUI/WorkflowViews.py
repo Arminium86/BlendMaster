@@ -29,9 +29,10 @@ def result_presence(database):
         return result
     with closing(sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True, timeout=.2)) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        for key, table in (('optimised', 'optimised_blend_report'), ('manual', 'manual_blend_report')):
-            if table in tables:
-                result[key] = connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+        for key, candidates in (('optimised', ('optimisation_plan_blend_report','optimised_blend_report')),
+                                ('manual', ('manual_plan_blend_report','manual_blend_report'))):
+            result[key] = any(table in tables and connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+                              for table in candidates)
     return result
 
 
@@ -144,6 +145,9 @@ class WorkflowViews(QObject):
         self.expit_inputs = inputs
 
     def apply_results(self):
+        if (vars(self.host).get('multi_feed_configuration') or {}).get('mode','single') != 'single':
+            for page in ('setup_blends','blend_sequence'):
+                self.available(page,any(self.results.values()),'Generate a plan to start from its saved allocations.')
         self.available('build_depletion_profiles', any(self.results.values()), 'Generate an optimised or manual plan to view its profiles.')
         self.available('optimised_grade_profiles', self.results['optimised'], 'Run optimisation to generate grade results for this site.')
         self.available('manual_grade_profiles', self.results['manual'], 'Submit Manual Blend Sequence to generate grade results for this site.')

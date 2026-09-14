@@ -232,6 +232,25 @@ class MultiLaneOptimizer(Optimizer):
         for point, steps, packet in models:
             packet["problem"].status = joint.status
             lane_results[point["name"]] = self._resume(steps)
+        # Validate each physical lane as well as the aggregate. In particular,
+        # a zero-feed lane cannot satisfy a positive operating minimum while
+        # another OPF supplies the shared product build.
+        for point, _, _ in models:
+            lane = lane_results[point['name']]
+            target = point['target']
+            if (lane['Linprog_result_object'].success and target['crusher_rate'] > 0
+                    and float(target.get('direct_feed_ratio_min') or 0) > 0
+                    and sum(float(t.get('actual_tonnes') or 0) for t in lane.get('transactions', [])
+                            if t.get('source_type') == 'grade_block') <= self.SOLUTION_TOLERANCE):
+                lane['Linprog_result_object'].success = False
+                lane['Linprog_result_object'].status = 'Infeasible'
+                lane.setdefault('diagnostics', {}).setdefault('likely_causes', []).append(
+                    f"{point['name']}: the positive Calendar direct-tip minimum requires direct tipping at this point.")
+            if not lane['Linprog_result_object'].success:
+                result['Linprog_result_object'].success = False
+                result['Linprog_result_object'].status = lane['Linprog_result_object'].status
+                result.setdefault('diagnostics', {}).setdefault('likely_causes', []).extend(
+                    f"{point['name']}: {cause}" for cause in lane.get('diagnostics', {}).get('likely_causes', []))
         result["tipping_point_results"] = lane_results
         result["solver_objective_value"] = value(joint.objective)
         quantity = sum(float(r.get("actual_tonnes") or 0) for r in result.get("transactions", []))

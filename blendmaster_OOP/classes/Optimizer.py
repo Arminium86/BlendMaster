@@ -1929,6 +1929,10 @@ class Optimizer:
         # Inequality constraints
         for row, rhs in zip(A_ub_total, b_ub_total):
             prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) <= rhs
+        if direct_feed_ratio_min > 0 and float(period_crusher_target.get('crusher_rate') or 0) > 0:
+            # Ratios alone accept 0/0. An explicitly positive Calendar minimum
+            # must select direct-tip material, including in a joint OPF solve.
+            prob += lpSum(x_vars[i] for i in grade_block_indices) >= max(1e-4, 10 * Optimizer.SOLUTION_TOLERANCE)
 
         # Equality constraints if applicable
         if A_eq and b_eq:

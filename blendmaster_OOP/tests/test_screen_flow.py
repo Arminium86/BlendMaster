@@ -96,11 +96,12 @@ class ScreenFlowStateTests(unittest.TestCase):
             selected_two_wp_product_crusher_names=lambda: [],
             hub_input=SimpleNamespace(currentIndex=lambda: -1),
             site_scenarios={'site': {'solver_config': {'contingency_plan_max_blend_options': 14}}},
-            submit_button=Mock(), guidance_schedules_submit_button=Mock(), save_button=Mock())
+            submit_button=Mock(), guidance_schedules_submit_button=Mock(), save_button=Mock(), save_as_button=Mock())
         with patch('GUI.WorkflowViews.schedule'):
             UserInputs.validate_form(window)
         window.submit_button.setEnabled.assert_called_once_with(False)
         window.save_button.setEnabled.assert_called_once_with(True)
+        window.save_as_button.setEnabled.assert_called_once_with(True)
 
     def test_database_view_can_open_while_advanced_factors_are_pending(self):
         window = UserInputs.__new__(UserInputs)

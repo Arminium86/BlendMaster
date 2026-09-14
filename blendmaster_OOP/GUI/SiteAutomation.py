@@ -175,6 +175,9 @@ class SiteWorkflowController(QObject):
             for key, source in contract['sources'].items():
                 if source['required'] and not paths[key]:
                     raise ValueError(f'Configure the {key} input location first.')
+            capture = getattr(h, 'capture_calendar_table_inputs', None)
+            if callable(capture):
+                h.calendar_inputs = capture()
             now = datetime.now(ZoneInfo(contract['timezone']))
             start = now.replace(tzinfo=None) if h.time_mode.currentIndex() == 0 else h.current_site_start_time()
             self.run = WorkflowRun(h.active_scenario_id, start, fingerprint(paths), endpoint)

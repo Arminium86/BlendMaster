@@ -4,6 +4,23 @@
 
 The desktop persists project state and plan-aware SQLite reports. The API below is a proposed engineering contract for the web implementation, not an existing endpoint. Final names and schemas belong in a reviewed OpenAPI specification.
 
+## Desktop project saves
+
+Site Configuration provides **Save Project** and **Save Project As…** (Ctrl+Shift+S).
+Save As selects a filename and folder, adds the `.prj` extension when needed, and
+uses the same atomic background checkpoint writer. It includes every site, saved
+database reports, prepared OPF caches and the Planner's upstream subscription.
+The active save destination changes only after a successful write. Cancelling or
+a write failure leaves existing files and the previous destination intact.
+
+Save Project subsequently updates that copy, including after it is reopened.
+Opening a published model directly from the configured shared folder retains the
+existing local working-copy save behavior; publication remains a separate action.
+New models without a chosen destination retain the generated local filename.
+
+Validation on 14 September 2026: 132 related tests passed, covering Save As,
+failed/cancelled writes, reopened filenames, shared inputs and model restoration.
+
 ## Proposed command/query surface
 
 | Operation | Proposed interface | Important contract |
@@ -58,4 +75,3 @@ The current .prj format is pickle-based and embeds database snapshots. Restrict 
 Separate application release, input schema, model schema, planning semantics, report schema and layout versions. Migrations should reject unknown future versions and preserve raw accepted evidence.
 
 **Evidence:** [database writers](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/database/SQLiteDatabase.py), [saved plan store](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/classes/SavedPlanStore.py), [result views](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/classes/SavedResultViews.py), [readiness](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/classes/PlanReadiness.py), [exporter](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/classes/SpreadsheetReportExporter.py), [migration rules](https://github.com/Arminium86/BlendMaster/blob/becfca8c84f3a5098fdf89d3880b687d80cde641/blendmaster_OOP/classes/PlanningPersistence.py).
-

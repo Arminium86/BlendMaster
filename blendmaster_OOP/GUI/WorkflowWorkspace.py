@@ -49,6 +49,8 @@ def set_row_visible(form, index, visible):
 
 
 def install(host):
+    from GUI.MultiManualWorkspace import install as install_manual
+    install_manual(host)
     site_form = host.site_config_tab.findChild(QFrame, 'siteConfigCard').layout()
     model_form = form_page(host, 'site_model', 'Site Model Settings')
     move_rows(site_form, model_form, {'Hub:', 'Mine:', 'Plan Mode:', 'OPF:',
@@ -181,6 +183,8 @@ def refresh_context(host):
               'multi_feed_configuration')}
     host.site_model_context_label.setText('Configured site: ' + host.scenario_display_name(state))
     mode = (state.get('multi_feed_configuration') or {}).get('mode', 'single')
+    from GUI.MultiManualWorkspace import set_mode
+    set_mode(host, mode != 'single')
     caption = {'single': 'Single tipping point', 'multi_tipping_point': 'Multiple tipping points',
                'combined_opf': 'Combined OPF'}.get(mode, mode)
     host.blend_plan_mode_label.setText('Blend Plan · ' + caption)
@@ -209,7 +213,10 @@ def enter_page(host, page_id):
     if controller and controller.active:
         return True
     refresh_context(host)
-    if page_id == 'blend_plan':
+    if page_id in ('setup_blends', 'blend_sequence') and (getattr(host,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
+        from GUI.MultiManualWorkspace import refresh
+        QTimer.singleShot(0, lambda: refresh(host, sequence=page_id=='blend_sequence'))
+    elif page_id == 'blend_plan':
         if host.blend_plan_workflow_tabs.currentWidget() is host.operational_blend_plans:
             QTimer.singleShot(0, host.operational_blend_plans.refresh)
         elif host.blend_plan_workflow_tabs.currentWidget() is vars(host).get('manual_operational_blend_plans'):

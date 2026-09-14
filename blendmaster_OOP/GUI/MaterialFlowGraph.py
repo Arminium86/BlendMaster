@@ -19,7 +19,7 @@ def compact_sources(graph):
     """Collapse source detail in the view only; retain every permitted route."""
     nodes = graph.get('nodes', [])
     sources = {n['node_id']: n for n in nodes if n['node_type'] == 'source'}
-    if len(sources) <= 20:
+    if len(sources) <= 1:
         return graph
     destinations = defaultdict(set)
     for edge in graph['edges']:
@@ -30,6 +30,9 @@ def compact_sources(graph):
         groups[(kind, tuple(sorted(destinations[key])))].append(node)
     rendered, mapping = [n for n in nodes if n['node_id'] not in sources], {}
     for (kind, targets), members in groups.items():
+        if len(members) == 1:
+            rendered.extend(members)
+            continue
         key = 'view:sources:' + hashlib.sha1(repr((kind, targets)).encode()).hexdigest()[:12]
         rendered.append(dict(node_id=key, node_type='source', label=f'{len(members)} {kind.replace("_", " ")} sources',
             properties=dict(members=[n['node_id'] for n in members], sources=[n.get('label', n['node_id']) for n in members])))
@@ -173,11 +176,17 @@ class MaterialFlowGraph(QWidget):
             raise ValueError('Unsupported material-flow topology version.')
         if graph != self.graph:
             self._frame_annotations, self._frame_edges = {}, ()
+            self._source_positions = {}
+        else:
+            self._source_positions = {**getattr(self, '_source_positions', {}), **self.positions()}
+        self._source_positions.update(positions or {})
+        positions = self._source_positions if positions is not None else {}
         self._building = True
         self.edges = []
         self.nodes = {}
         self.scene.clear()
         self.graph = deepcopy(graph)
+        self.show_sources.setEnabled(True)
         display = self.graph if self.show_sources.isChecked() else compact_sources(self.graph)
         grouped = defaultdict(list)
         for node in display['nodes']:
@@ -203,9 +212,21 @@ class MaterialFlowGraph(QWidget):
         self.fit_graph()
 
     def positions(self):
-        return {key:[item.pos().x(),item.pos().y()] for key,item in self.nodes.items() if not key.startswith('view:')}
+        return {**getattr(self, '_source_positions', {}),
+                **{key:[item.pos().x(),item.pos().y()] for key,item in self.nodes.items() if not key.startswith('view:')}}
+
+    def clear_graph(self):
+        self.graph = None
+        self._source_positions = {}
+        self._frame_annotations, self._frame_edges = {}, ()
+        self.scene.clear(); self.nodes = {}; self.edges = []
+        self.show_sources.setEnabled(False)
+        self.details.clear(); self.caption.clear()
 
     def auto_arrange(self):
+        if not self.graph:
+            return
+        self._source_positions = {}
         self.set_graph(self.graph)
         self.positions_changed.emit(self.positions())
 
