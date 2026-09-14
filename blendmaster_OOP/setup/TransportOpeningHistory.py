@@ -21,7 +21,7 @@ from setup.AMTGradeBlockLineage import EXPIT_FEED_PROPERTY_COLUMNS, EXPIT_PRODUC
 
 
 class TransportOpeningHistory(RecentDestinationActivity):
-    VERSION = 2
+    VERSION = 3
 
     def request(self, site, start, points, settings):
         settings = transport_settings(settings)
@@ -96,17 +96,24 @@ class TransportOpeningHistory(RecentDestinationActivity):
             return records
         # Use the same explicit Grade Control masses as AMT; never substitute
         # physical ROM tonnes for a missing modelled product quantity.
-        fields = list(dict.fromkeys(['gradeblock.GB_WET_TONNES', *DIRECT_LINEAGE_TONNE_COLUMNS.values(),
+        fields = list(dict.fromkeys(['gradeblock.RECORD_CREATED_DT', 'gradeblock.GB_WET_TONNES', *DIRECT_LINEAGE_TONNE_COLUMNS.values(),
                                      *GRADE_CONTROL_PROPERTY_COLUMNS.values()]))
         block_sql = """WITH blocks AS (SELECT
           CONCAT(MINE_CODE, '_', LOCATION_NO, '_', PHASE, '_', BLAST_RL, '_', BLAST_NO, '_',
           CASE WHEN TRY_TO_NUMBER(BLAST_NO) BETWEEN 600 AND 699 AND TRY_TO_NUMBER(FLITCH_RL) IS NOT NULL
             THEN TO_VARCHAR(TRY_TO_NUMBER(FLITCH_RL)+1) ELSE FLITCH_RL END, '_', GB_NAME) AS FULL_NAME,
           """ + ', '.join(fields) + """
-          FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS gradeblock WHERE UPPER(MINE_CODE) IN
+          FROM DA_OPERATIONS.STG_GRADECONTROL.GRADE_BLOCKS gradeblock
+          WHERE gradeblock.RECORD_ACTIVE_FLAG = 'Y' AND UPPER(MINE_CODE) IN
           (SELECT SPLIT_PART(VALUE::STRING,'_',1) FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s)))))
           SELECT * FROM blocks WHERE UPPER(FULL_NAME) IN
-          (SELECT VALUE::STRING FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s))))"""
+          (SELECT VALUE::STRING FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s))))
+          QUALIFY DENSE_RANK() OVER (PARTITION BY UPPER(FULL_NAME)
+            ORDER BY RECORD_CREATED_DT DESC NULLS LAST) = 1"""
+        # Grade Control retains inactive revisions with the same name and
+        # different tonnes. Use its latest active model, as the nominal-block
+        # lookup does. Keep ties so genuinely conflicting active rows still
+        # reach the ambiguity check rather than choosing one arbitrarily.
         with connection.cursor() as cursor:
             cursor.execute(block_sql, (json.dumps(names), json.dumps(names)))
             models = [dict(zip((c[0].upper() for c in cursor.description), row)) for row in cursor.fetchall()]

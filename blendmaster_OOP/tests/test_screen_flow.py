@@ -1109,12 +1109,15 @@ class ScreenFlowStateTests(unittest.TestCase):
 
         headers = window.amt_stockpile_headers()
 
-        self.assertIn("Inventory Match", headers)
+        self.assertEqual(len(headers), 9)
+        self.assertIn("Include footprint", headers)
         self.assertIn("AMT Total WMT", headers)
         self.assertIn("Inventory Stockpile Total WMT", headers)
         self.assertIn("Calculated Number of Chunks", headers)
-        self.assertIn("Adjusted Product Grades (FB)", headers)
-        self.assertIn("Adjusted Product Grades (SS)", headers)
+        self.assertIn("Average Reclaim Rate (t/h)", headers)
+        self.assertIn("Target Hours per Chunk", headers)
+        self.assertFalse(any("grade" in header.lower() or "lineage" in header.lower()
+                             for header in headers))
 
     def test_new_amt_chunk_inputs_default_to_2000_tph_and_72_hours(self):
         window = UserInputs.__new__(UserInputs)

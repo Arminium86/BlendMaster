@@ -128,6 +128,14 @@ def merge_inputs(local, incoming, selected):
         # Current Calendar, participation, targets and manual recipes remain
         # authoritative. Derived contexts are rebuilt by normal site activation.
         result['database_view_snapshot_signature'] = None
+    if selected:
+        from classes.CombinedOPFReconciliation import reusable_cache
+        candidate = {**result, '_combined_opf_profile_cache': incoming.get('_combined_opf_profile_cache')}
+        cache = reusable_cache(candidate)
+        if cache:
+            # Reuse Support's work only if it describes the complete merged
+            # inputs, including the Planner fields that were left untouched.
+            result['_combined_opf_profile_cache'] = deepcopy(cache)
     return result
 
 

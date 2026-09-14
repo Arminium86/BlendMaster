@@ -2,7 +2,7 @@
 from copy import deepcopy
 from PyQt5.QtCore import QObject
 from classes.CombinedOPFReconciliation import (
-    SOURCE_FIELDS, build_profiles, evidence_signature, profile_signature,
+    SOURCE_FIELDS, build_profiles, evidence_signature, profile_signature, reusable_cache,
 )
 
 
@@ -10,6 +10,8 @@ def ensure(host, on_complete, *, on_error=None):
     """Return True while preparing; otherwise the caller can continue now."""
     if not isinstance(host, QObject):
         return False
+    if vars(host).get('_defer_opf_profile_preparation'):
+        return False  # Restore sources/chunks before preparing their chemistry.
     config = vars(host).get('multi_feed_configuration') or {}
     if config.get('mode') != 'combined_opf':
         return False
@@ -21,9 +23,7 @@ def ensure(host, on_complete, *, on_error=None):
     if not opfs or any(opf not in bundles or bundles[opf].get('signature') !=
                       evidence_signature(vars(host), opf, builds) for opf in opfs):
         return False  # The existing reconciliation workflow must fetch evidence first.
-    signature = profile_signature(vars(host), opfs)
-    cached = vars(host).get('_combined_opf_profile_cache')
-    if cached and cached[0] == signature:
+    if reusable_cache(vars(host), opfs):
         return False
     values = {key: vars(host)[key] for key in (*SOURCE_FIELDS, 'active_scenario_id') if key in vars(host)}
     implementation = type(host)

@@ -181,8 +181,7 @@ import pandas as pd, sqlite3
 from numbers import Real, Integral
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-APP_TITLE = "BlendMaster PoC v0.2.0 - 2025 Fortescue - MOPP"
-APP_USER_MODEL_ID = "Fortescue.BlendMaster.PoC.v020"
+from AppVersion import APP_TITLE, APP_USER_MODEL_ID
 AMT_OPENING_CACHE_VERSION = 2
 AMT_CHUNK_RECONCILIATION_VERSION = 4
 # Older Database View caches may contain an empty frame from a failed import.
@@ -599,7 +598,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         AMT_settings_title.setObjectName("amtPanelTitle")
         self.AMT_settings_layout.addWidget(AMT_settings_title)
 
-        AMT_settings_subtitle = QLabel("Set reclaim rate and target hours for each selected AMT stockpile.")
+        AMT_settings_subtitle = QLabel("Set reclaim rate and target hours for each selected AMT stockpile. Review grades and lineage in Database View.")
         AMT_settings_subtitle.setObjectName("amtPanelSubtitle")
         AMT_settings_subtitle.setWordWrap(True)
         self.AMT_settings_layout.addWidget(AMT_settings_subtitle)
@@ -1220,7 +1219,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def active_site_context(self):
         from classes.CrossFeatureReports import input_audit_snapshot
+        from classes.ContinuousAssayScope import current_sources
         return {
+            'time_mode_choice': vars(self).get('time_mode_choice'),
+            'continuous_assay_active_sources': current_sources(vars(self), get_database_path(), datetime.now()),
             'continuous_assay_settings': copy.deepcopy(vars(self).get('continuous_assay_settings') or {}),
             'continuous_assay_state': copy.deepcopy(vars(self).get('continuous_assay_state') or {}),
             'reporting_input_audits': input_audit_snapshot(vars(self), copy_evidence=False),
@@ -1404,6 +1406,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 self.sync_destination_progress_context()
             self.destination_progress_snapshot = self.destination_progress.prepared_state(copy_evidence=False)
         fields = [
+            "_combined_opf_profile_cache",
             "continuous_assay_settings", "continuous_assay_state", "continuous_assay_status",
             "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
             "destination_progress_snapshot",
@@ -1637,6 +1640,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def restore_site_scenario(self, state):
         state = copy.deepcopy(migrate_project_state(state or {}))
+        self._combined_opf_profile_cache = state.get('_combined_opf_profile_cache')
         self.scenario_switch_in_progress = True
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
@@ -3056,7 +3060,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.setup_calendar()
 
     def current_opf_profiles(self):
-        from classes.CombinedOPFReconciliation import build_profiles, profile_signature, evidence_signature
+        from classes.CombinedOPFReconciliation import build_profiles, profile_signature, evidence_signature, reusable_cache
+        if vars(self).get('_defer_opf_profile_preparation'):
+            return {}
         config = self.current_multi_feed_configuration()
         if config['mode'] != 'combined_opf':
             return {}
@@ -3064,13 +3070,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         opfs = sorted({p['opf'] for p in config['tipping_points']})
         if any(opf not in bundles or bundles[opf].get('signature') != evidence_signature(vars(self), opf, self.reconciliation_inventory_builds()) for opf in opfs):
             return {}
-        signature = profile_signature(vars(self), opfs)
-        cached = vars(self).get('_combined_opf_profile_cache')
-        if not cached or cached[0] != signature:
-            cached = (signature, build_profiles(vars(self), opfs, UserInputs))
+        cached = reusable_cache(vars(self), opfs)
+        if not cached:
+            cached = (profile_signature(vars(self), opfs), build_profiles(vars(self), opfs, UserInputs))
             self._combined_opf_profile_cache = cached
         bundle = vars(self).get('continuous_assay_state') or {}
-        return {opf: {**profile, 'continuous_assay_settings': vars(self).get('continuous_assay_settings') or {},
+        return {opf: {**profile, 'scenario_id': self.active_scenario_id,
+                      'continuous_assay_settings': vars(self).get('continuous_assay_settings') or {},
                       'continuous_assay_state': bundle.get('profiles', {}).get(opf, {})}
                 for opf, profile in cached[1].items()}
 
@@ -10941,7 +10947,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from GUI.OPFProfileLoading import ensure
         if ensure(self, self.finish_data_stream_submission):
             return
-        if (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles():
+        if (not vars(self).get('_defer_opf_profile_preparation') and
+                (vars(self).get('multi_feed_configuration') or {}).get('mode') == 'combined_opf' and not self.current_opf_profiles()):
             self.prepare_data_streams()
             return
         if self.data_stream_pending_build_targets:
@@ -18361,20 +18368,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "Target Hours per Chunk",
             "Calculated Number of Chunks",
             "Calculated Chunk Size (WMT)",
-            "Grade-block Lineage",
-            "Modelled Product Coverage",
-            "Inventory Match",
-            "Matched Inventory Stockpile",
-            "Matched Inventory Build",
-            "Matched Inventory Time",
-            "Modelled ROM Grades",
         ]
-        for brand in configured_brands(self.product_brand_labels_choice):
-            headers.extend([
-                f"Adjusted ROM Grades ({brand})",
-                f"Modelled Product Grades ({brand})",
-                f"Adjusted Product Grades ({brand})",
-            ])
         return headers
 
     def ensure_AMT_map_panel(self, connect_table=True):
@@ -19258,83 +19252,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     self.AMT_stockpile_table.setItem(
                         row_idx, headers.index(caption), item
                     )
-
-                footprint_rows = (self.AMT_stockpile_data or {}).get(stockpile_name, []) or []
-                provenance = footprint_rows[0] if footprint_rows else {}
-                matched_name = str(
-                    provenance.get("AMT_INVENTORY_STOCKPILE")
-                    or provenance.get("INTERNAL_RECON_INVENTORY_STOCKPILE")
-                    or provenance.get("internal_recon_inventory_stockpile")
-                    or ""
-                )
-                prepared_summary = (vars(self).get('_amt_lineage_display') or {}).get(stockpile_name)
-                if prepared_summary and prepared_summary[0] == id(footprint_rows) and prepared_summary[1] == self.opf_input_choice:
-                    lineage_summary, product_coverage_summary = prepared_summary[2]
-                else:
-                    lineage_summary, product_coverage_summary = self.amt_lineage_summary(footprint_rows)
-                for caption, summary in (
-                    ("Grade-block Lineage", lineage_summary),
-                    ("Modelled Product Coverage", product_coverage_summary),
-                ):
-                    factor_item = QTableWidgetItem(summary)
-                    factor_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    factor_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    self.AMT_stockpile_table.setItem(
-                        row_idx, headers.index(caption), factor_item
-                    )
-
-                match_status = bool(
-                    provenance.get("AMT_INVENTORY_MATCHED")
-                    if "AMT_INVENTORY_MATCHED" in provenance
-                    else provenance.get(
-                        "INTERNAL_RECON_MATCHED",
-                        provenance.get("internal_recon_matched", False),
-                    )
-                )
-                provenance_cells = {
-                    "Inventory Match": "Matched" if match_status else "Not matched",
-                    "Matched Inventory Stockpile": matched_name,
-                    "Matched Inventory Build": str(
-                        provenance.get("AMT_INVENTORY_BUILD")
-                        or provenance.get("INTERNAL_RECON_INVENTORY_BUILD")
-                        or provenance.get("internal_recon_inventory_build")
-                        or ""
-                    ),
-                    "Matched Inventory Time": str(
-                        provenance.get("AMT_INVENTORY_TRANSACTION_DATETIME")
-                        or provenance.get("INTERNAL_RECON_INVENTORY_TRANSACTION_DATETIME")
-                        or provenance.get("internal_recon_inventory_transaction_datetime")
-                        or ""
-                    ),
-                }
-                streams = self.aggregate_AMT_footprint_grade_streams(
-                    footprint_rows
-                )
-                first_brand = (
-                    configured_brands(self.product_brand_labels_choice) or [None]
-                )[0]
-                provenance_cells["Modelled ROM Grades"] = format_grade_stream_vector(
-                    streams, "modelled_rom", first_brand
-                )
-                for brand in configured_brands(self.product_brand_labels_choice):
-                    provenance_cells.update({
-                        f"Adjusted ROM Grades ({brand})": format_grade_stream_vector(
-                            streams, "adjusted_rom", brand
-                        ),
-                        f"Modelled Product Grades ({brand})": format_grade_stream_vector(
-                            streams, "modelled_product", brand
-                        ),
-                        f"Adjusted Product Grades ({brand})": format_grade_stream_vector(
-                            streams, "adjusted_product", brand
-                        ),
-                    })
-                for caption, display_value in provenance_cells.items():
-                    column = headers.index(caption)
-                    item = QTableWidgetItem(display_value)
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    item.setToolTip(display_value)
-                    self.AMT_stockpile_table.setItem(row_idx, column, item)
 
         # Resize Columns
         for column in range(len(headers)):
@@ -21284,6 +21201,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def finish_project_load_ui(self, success):
         """Return project loading to Site Configuration and notify once."""
+        self._defer_opf_profile_preparation = False
         show_success = bool(
             getattr(self, "project_load_show_success", False)
         )
@@ -26549,6 +26467,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             loaded_state = self.prepare_loaded_site_scenarios(loaded_state)
 
         # Unpack loaded state into variables
+        self._defer_opf_profile_preparation = True
+        # ProjectLoading already detached this cache with the owning site. Its
+        # signature is checked after all restored AMT chunks are in place.
+        self._combined_opf_profile_cache = loaded_state.get('_combined_opf_profile_cache')
         for name in ('site_workflow_contract', 'site_workflow_runs', 'guidance_import_audit',
                      'continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status',
                      'solver_presets', 'selected_solver_preset',
@@ -26944,16 +26866,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.solver_config = self.normalized_solver_config(
             loaded_state.get("solver_config", {})
         )
-        # active_site_context needs independent OPF chemistry. Restored AMT
-        # evidence can be large, so prepare it before the remaining UI setup.
+        # Finish restoring AMT membership and sources before preparing profiles.
+        # Preparing here and again after chunk hydration repeats the full work.
         self.project_load_restore_in_progress = True
-        from GUI.OPFProfileLoading import ensure
-        if ensure(self, lambda: self.finish_loaded_state_setup(loaded_state),
-                  on_error=self.handle_loaded_profile_error):
-            return True
         return self.finish_loaded_state_setup(loaded_state)
 
     def handle_loaded_profile_error(self, error):
+        self._defer_opf_profile_preparation = False
         self.project_load_restore_in_progress = False
         self.finish_project_load_ui(success=False)
         self.show_error_popup(error)
@@ -26961,7 +26880,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def finish_loaded_state_setup(self, loaded_state):
         if self.calendar_inputs is not None:
             self.calendar_inputs["solver_config"] = copy.deepcopy(self.solver_config)
-            self.calendar_inputs["site_context"] = self.active_site_context()
 
         self.refresh_scenario_selector()
 
@@ -27014,6 +26932,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.finish_project_load_after_chunks()
 
     def finish_project_load_after_chunks(self):
+        self._defer_opf_profile_preparation = False
+        from GUI.OPFProfileLoading import ensure
+        if ensure(self, self.finish_project_load_after_chunks,
+                  on_error=self.handle_loaded_profile_error):
+            return
+        if vars(self).get('calendar_inputs') is not None:
+            self.calendar_inputs['site_context'] = self.active_site_context()
         self.project_load_restore_in_progress = False
         if self.database_has_saved_optimisation_results(get_database_path()):
             periods = PeriodManager(self.planning_period_count())

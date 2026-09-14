@@ -1,6 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
+from pathlib import Path
+from runpy import run_path
+
+release = run_path(str(Path(SPECPATH) / "AppVersion.py"))
+
 a = Analysis(
     ['C:\\BlendMaster\\blendmaster_OOP\\GUI\\InitialiseGUI.py'],
     pathex=['C:\\BlendMaster\\blendmaster_OOP'],
@@ -33,7 +38,7 @@ exe = EXE(
     splash,
     splash.binaries,
     [],
-    name='BlendMaster PoC v0.1.0',
+    name=f"BlendMaster PoC {release['APP_VERSION_LABEL']}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

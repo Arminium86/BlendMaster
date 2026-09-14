@@ -164,8 +164,12 @@ class ManualBlendPlanner:
         self.solver_config = dict(solver_config)
         for key in ('continuous_assay_settings', 'continuous_assay_state'):
             self.solver_config[key] = deepcopy(site_context.get(key) or {})
+        self.solver_config['time_mode_choice'] = site_context.get('time_mode_choice')
         from classes.ContinuousAssays import for_calculation
-        self.solver_config['continuous_assay_state'] = for_calculation(self.solver_config['continuous_assay_state'], self.stockpile_data, self.hex_sequence_table)
+        from classes.GradeStreams import normalise_opf
+        self.solver_config['continuous_assay_state'] = for_calculation(self.solver_config['continuous_assay_state'], self.stockpile_data, self.hex_sequence_table,
+            time_mode=site_context.get('time_mode_choice'),
+            active_sources=(site_context.get('continuous_assay_active_sources') or {}).get(normalise_opf(site_context.get('opf')), []))
         self.custom_constraints = normalize_custom_constraints(
             solver_config.get("custom_constraints")
         )

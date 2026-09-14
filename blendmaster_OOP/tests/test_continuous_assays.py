@@ -25,7 +25,7 @@ class ContinuousAssayTests(unittest.TestCase):
 
     def test_causal_idempotent_overlay_preserves_other_streams_and_opf(self):
         result = estimate(self.catalog, [self.observation])
-        config = dict(continuous_assay_state=result)
+        config = dict(continuous_assay_state=result, time_mode_choice=1)
         streams = {'adjusted_product':self.catalog['A']['grades'], 'adjusted_rom':{'B':{'fe':58}}}
         original = deepcopy(streams)
         self.assertEqual(corrected_streams(streams, 'A', config, '2026-09-13 08:59', 'OPF1','B'), streams)
@@ -38,7 +38,7 @@ class ContinuousAssayTests(unittest.TestCase):
         self.assertEqual(corrected_streams(streams, 'A', config, '2026-09-15 09:01', 'OPF1','B'), streams)
 
     def test_new_prior_is_not_contaminated_by_old_correction(self):
-        config = dict(continuous_assay_state=estimate(self.catalog, [self.observation]))
+        config = dict(continuous_assay_state=estimate(self.catalog, [self.observation]), time_mode_choice=1)
         streams = {'adjusted_product':{'B':{'fe':63}}}
         self.assertEqual(corrected_streams(streams, 'A', config, '2026-09-13 09:01', 'OPF1','B'), streams)
 
@@ -115,7 +115,9 @@ class ContinuousAssayTests(unittest.TestCase):
         from unittest.mock import Mock
         from setup.ContinuousAssayHistory import ContinuousAssayHistory
         assay, feed = self.evidence()
-        state = dict(mine_input_choice='MINE',opf_input_choice='OPF1',crusher_input_choice='C1',
+        state = dict(time_mode_choice=1, mine_input_choice='MINE',opf_input_choice='OPF1',crusher_input_choice='C1',
+            _continuous_plan_rows=[dict(source_id=s, opf='OPF1', start_datetime='2026-09-13 06:00',
+                end_datetime='2026-09-13 12:00', source_actual_tonnes=500) for s in self.catalog],
             stockpile_data={s:dict(build=s+'-BUILD',balance=1000,grade_streams={'adjusted_product':r['grades']},
                 defined_fields=dict(modelled_rom_wmt=1000,modelled_product_dmt=800)) for s,r in self.catalog.items()})
         snapshot = dict(status='fresh',records=[assay],request={})
@@ -135,7 +137,7 @@ class ContinuousAssayTests(unittest.TestCase):
 
     def test_tighter_policy_does_not_use_previously_accepted_wider_bounds(self):
         result = estimate(self.catalog,[self.observation])
-        config = dict(continuous_assay_state=result,continuous_assay_settings=dict(max_offset={a:.001 for a in ('fe','si','al','p','mn')}))
+        config = dict(time_mode_choice=1,continuous_assay_state=result,continuous_assay_settings=dict(max_offset={a:.001 for a in ('fe','si','al','p','mn')}))
         streams = {'adjusted_product':self.catalog['A']['grades']}
         self.assertEqual(corrected_streams(streams,'A',config,'2026-09-13 09:01','OPF1','B'),streams)
 
@@ -146,7 +148,7 @@ class ContinuousAssayTests(unittest.TestCase):
         prior={'adjusted_product':self.catalog['A']['grades']}
         properties={'adjusted_product_fe':60,'modelled_product_fe':59,'modelled_product_dmt':100}
         event=SimpleNamespace(grade_streams=prior,source_name='A',stockpile='A',source_properties=properties)
-        apply_event(event,dict(continuous_assay_state=bundle,continuous_assay_opf='OPF1',current_steady_state_datetime='2026-09-13 09:01'),'B')
+        apply_event(event,dict(time_mode_choice=1,continuous_assay_state=bundle,continuous_assay_opf='OPF1',current_steady_state_datetime='2026-09-13 09:01'),'B')
         self.assertGreater(event.source_properties['adjusted_product_fe'],60)
         self.assertEqual(properties['adjusted_product_fe'],60)
         self.assertEqual(event.source_properties['modelled_product_dmt'],100)
@@ -158,8 +160,9 @@ class ContinuousAssayTests(unittest.TestCase):
             defined_fields=dict(modelled_rom_wmt=1000,modelled_product_dmt=800))
         catalog=source_catalog(dict(stockpile_data={'A':row}))
         bundle=estimate(catalog,[{**self.observation,'weights':{'A':1},'grades':{'fe':60.2}}])
-        self.assertTrue(for_calculation(bundle,{'A':row},[]))
-        self.assertFalse(for_calculation(bundle,{'A':{**row,'build':'BUILD2'}},[]))
+        bundle['active_sources'] = ['A']
+        self.assertTrue(for_calculation(bundle,{'A':row},[],time_mode=1,active_sources=['A']))
+        self.assertFalse(for_calculation(bundle,{'A':{**row,'build':'BUILD2'}},[],time_mode=1,active_sources=['A']))
 
 
 if __name__ == '__main__':

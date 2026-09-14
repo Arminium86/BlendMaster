@@ -521,10 +521,15 @@ class Run:
         for key in ('continuous_assay_settings', 'continuous_assay_state'):
             solver_config[key] = copy.deepcopy((site_context or {}).get(key) or {})
         solver_config['continuous_assay_opf'] = (site_context or {}).get('opf')
+        solver_config['time_mode_choice'] = (site_context or {}).get('time_mode_choice')
         from classes.ContinuousAssays import for_calculation
-        solver_config['continuous_assay_state'] = for_calculation(solver_config['continuous_assay_state'], stockpile_data, hex_sequence_table)
-        for profile in (solver_config.get('opf_profiles') or {}).values():
-            profile['continuous_assay_state'] = for_calculation(profile.get('continuous_assay_state'), profile['inventory'], list(profile['chunks'].values()))
+        from classes.GradeStreams import normalise_opf
+        scope = (site_context or {}).get('continuous_assay_active_sources') or {}
+        solver_config['continuous_assay_state'] = for_calculation(solver_config['continuous_assay_state'], stockpile_data, hex_sequence_table,
+            time_mode=solver_config['time_mode_choice'], active_sources=scope.get(normalise_opf(solver_config['continuous_assay_opf']), []))
+        for opf, profile in (solver_config.get('opf_profiles') or {}).items():
+            profile['continuous_assay_state'] = for_calculation(profile.get('continuous_assay_state'), profile['inventory'], list(profile['chunks'].values()),
+                time_mode=solver_config['time_mode_choice'], active_sources=scope.get(normalise_opf(opf), []))
         # Load input data (this is combined user input and opening inventories)
         loader_calendar_inputs = dict(calendar_inputs or {})
         loader_calendar_inputs["solver_config"] = solver_config

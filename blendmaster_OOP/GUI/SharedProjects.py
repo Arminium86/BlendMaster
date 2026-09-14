@@ -142,6 +142,7 @@ class SharedProjectWatcher(QObject):
             return merged, dict(subscription, revision=token, baselines=baselines)
         def done(result):
             merged, updated_subscription = result
+            h._defer_opf_profile_preparation = True
             try:
                 h.scenario_session_directory = target_directory
                 h.site_scenarios = merged
@@ -156,7 +157,11 @@ class SharedProjectWatcher(QObject):
                 h.restore_site_scenario(local[active])
                 self.pending = False
                 raise
+            finally:
+                h._defer_opf_profile_preparation = False
             def ready():
+                if vars(h).get('calendar_inputs') is not None:
+                    h.calendar_inputs['site_context'] = h.active_site_context()
                 self.pending = False
                 self.button.setVisible(False)
                 h.preparation_status_label.setText('Selected inputs imported. Recalculate to refresh your results.')

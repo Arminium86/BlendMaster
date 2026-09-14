@@ -67,6 +67,44 @@ class OPFProfileLoadingTests(unittest.TestCase):
         self.assertEqual(host.background_tasks, [])
         host.deleteLater()
 
+    def test_saved_cache_reopens_without_rebuilding_and_assay_updates_do_not_invalidate_it(self):
+        import pickle
+        from classes.CombinedOPFReconciliation import SOURCE_FIELDS
+        host = self.host()
+        with patch('GUI.OPFProfileLoading.build_profiles', return_value={'ready': True}) as build:
+            ensure(host, lambda: None)
+            self.drain(host)
+            keys = (*SOURCE_FIELDS, 'multi_feed_configuration', '_combined_opf_profile_cache')
+            saved = pickle.loads(pickle.dumps({key: vars(host).get(key) for key in keys}))
+            restored = self.host()
+            restored.__dict__.update(saved)
+            restored.continuous_assay_state = {'revision': 'new-assay'}
+            restored.continuous_assay_settings = {'enabled': False}
+            self.assertFalse(ensure(restored, lambda: None))
+            self.assertEqual(build.call_count, 1)
+            restored.updated_stockpile_data['SP']['FE_ROM'] = 49
+            self.assertTrue(ensure(restored, lambda: None))
+            self.drain(restored)
+            self.assertEqual(build.call_count, 2)
+        host.deleteLater()
+        restored.deleteLater()
+
+    def test_restore_defers_until_chunks_are_final_then_prepares_once(self):
+        host = self.host()
+        host._defer_opf_profile_preparation = True
+        with patch('GUI.OPFProfileLoading.build_profiles', return_value={'ready': True}) as build:
+            self.assertFalse(ensure(host, lambda: None))
+            host.hex_sequence_table = [{'hex': 'restored-chunk', 'balance': 100}]
+            self.assertFalse(ensure(host, lambda: None))
+            build.assert_not_called()
+            host._defer_opf_profile_preparation = False
+            ensure(host, lambda: None)
+            self.drain(host)
+            self.assertFalse(ensure(host, lambda: None))
+            build.assert_called_once()
+            self.assertEqual(build.call_args.args[0]['hex_sequence_table'][0]['hex'], 'restored-chunk')
+        host.deleteLater()
+
     def test_failed_restore_releases_pending_state_before_reporting_error(self):
         from GUI.InitialiseGUI import UserInputs
         host = self.host()
@@ -112,6 +150,8 @@ class OPFProfileLoadingTests(unittest.TestCase):
                 project_load_saved_page_states={'calendar': True},
                 last_run_outcome={'status': status}, store_calendar_inputs=Mock(),
                 finish_project_load_ui=Mock(), show_page=Mock())
+            host.finish_project_load_after_chunks = lambda: UserInputs.finish_project_load_after_chunks(host)
+            host.handle_loaded_profile_error = Mock()
             UserInputs.finish_project_load_after_chunks(host)
             self.assertFalse(host.project_load_restore_in_progress)
             self.assertFalse(host.project_load_continuation_pending)

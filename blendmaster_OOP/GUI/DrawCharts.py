@@ -1796,7 +1796,9 @@ class DrawGanttChart:
                 ),
                 # Property Table
                 html.Div(
+                    id="blend-snapshot-panel",
                     style={
+                        'display': 'none',
                         'backgroundColor': '#ffffff',
                         'border': '1px solid #dbe4ee',
                         'borderRadius': '8px',
@@ -2140,6 +2142,14 @@ class DrawGanttChart:
                 data.to_dict("records"), table_columns,
                 cell_styles, header_style,
             )
+
+        @self.app.callback(
+            dash.dependencies.Output('blend-snapshot-panel', 'style'),
+            dash.dependencies.Input('property-table', 'data'),
+            dash.dependencies.State('blend-snapshot-panel', 'style'),
+        )
+        def show_blend_snapshot(rows, style):
+            return {**(style or {}), 'display': 'block' if any(rows or []) else 'none'}
 
     def run_app(self):
         """

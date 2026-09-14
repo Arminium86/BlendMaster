@@ -23,8 +23,22 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 
 def profile_signature(state, opfs):
-    return reconciliation_fingerprint({'version': 2, 'opfs': opfs,
+    return reconciliation_fingerprint({'version': 3, 'opfs': opfs,
         **{key: state.get(key) for key in SOURCE_FIELDS}})
+
+
+def reusable_cache(state, opfs=None):
+    """A saved profile is reusable only for the exact current source evidence."""
+    if opfs is None:
+        config = state.get('multi_feed_configuration') or {}
+        if config.get('mode') != 'combined_opf':
+            return None
+        opfs = sorted({point['opf'] for point in config.get('tipping_points', [])})
+    cached = state.get('_combined_opf_profile_cache')
+    if (opfs and isinstance(cached, (tuple, list)) and len(cached) == 2
+            and isinstance(cached[1], dict) and cached[0] == profile_signature(state, opfs)):
+        return cached
+    return None
 
 
 def evidence_signature(state, opf, builds):

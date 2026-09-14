@@ -45,9 +45,11 @@ class ContinuousAssayPollingTests(unittest.TestCase):
     def host(self):
         host = background.Host()
         host.mine_input_choice = 'CC'
+        host.time_mode_choice = 1
         host.stockpile_data = {'SP': source()}
         host.continuous_assay_settings = dict(enabled=True)
         host.site_scenarios = {'test': dict(stockpile_data=host.stockpile_data,
+            time_mode_choice=1,
             continuous_assay_settings=host.continuous_assay_settings, mine_input_choice='CC')}
         host.site_workflow_controller = SimpleNamespace(active=False, batch=None)
         host.current_opf_profiles = Mock(return_value={})
@@ -76,7 +78,7 @@ class ContinuousAssayPollingTests(unittest.TestCase):
         self.assertFalse(controller.running)
         host.deleteLater()
 
-    def test_scheduled_preparation_uses_the_same_compact_detached_request(self):
+    def test_scheduled_preparation_uses_detached_request_and_discards_changed_inputs(self):
         host = self.host()
         controller = ContinuousAssayController(host)
         controller.timer.stop()
@@ -88,5 +90,73 @@ class ContinuousAssayPollingTests(unittest.TestCase):
         self.assertEqual(source_catalog(controller.service.refresh.call_args.args[0])['SP']['grades']['SS']['fe'], 60)
         with patch('GUI.ContinuousAssays.write_audit') as write:
             done(value)
-        write.assert_called_once()
+        write.assert_not_called()
+        self.assertIn('discarded', host.continuous_assay_status)
+        host.deleteLater()
+
+    def test_poll_uses_current_inputs_without_capturing_the_full_model(self):
+        host = self.host()
+        host.stockpile_data = {'SP': source(63)}
+        host.save_active_scenario_state.side_effect = AssertionError('Whole-model capture can rebuild OPF profiles on the UI thread')
+        controller = ContinuousAssayController(host)
+        controller.timer.stop()
+        controller.service.refresh = Mock(return_value=dict(audit=[], checked_at='now'))
+        controller.refresh_due()
+        _, work, _, _ = host.run_background_task.call_args.args
+        work()
+        self.assertEqual(source_catalog(controller.service.refresh.call_args.args[0])['SP']['grades']['SS']['fe'], 63)
+        host.current_opf_profiles.assert_not_called()  # No active plan feeds.
+        host.deleteLater()
+
+    def test_active_feed_waits_for_background_profiles_before_snapshotting(self):
+        host = self.host()
+        controller = ContinuousAssayController(host)
+        controller.timer.stop()
+        with patch('GUI.ContinuousAssays.current_sources', return_value={'OPF1': ['SP']}), patch('GUI.OPFProfileLoading.ensure', return_value=True) as ensure:
+            controller.refresh_due()
+        ensure.assert_called_once()
+        host.save_active_scenario_state.assert_not_called()
+        host.current_opf_profiles.assert_not_called()
+        host.run_background_task.assert_not_called()
+        self.assertFalse(controller.running)
+        host.deleteLater()
+
+    def test_disabled_and_set_time_skip_profiles_saves_and_jobs_even_when_forced(self):
+        for mode, enabled in ((1, False), (2, True), (None, True)):
+            host = self.host()
+            host.time_mode_choice = mode
+            host.continuous_assay_settings = dict(enabled=enabled)
+            controller = ContinuousAssayController(host)
+            controller.timer.stop()
+            controller.refresh_due(force=True)
+            controller.prepare_current()
+            host.save_active_scenario_state.assert_not_called()
+            host.current_opf_profiles.assert_not_called()
+            host.run_background_task.assert_not_called()
+            host.deleteLater()
+
+    def test_not_due_skips_profile_lookup_and_model_capture(self):
+        import time
+        host = self.host()
+        controller = ContinuousAssayController(host)
+        controller.timer.stop()
+        controller.last[host.active_scenario_id] = time.monotonic()
+        controller.refresh_due()
+        host.save_active_scenario_state.assert_not_called()
+        host.current_opf_profiles.assert_not_called()
+        host.run_background_task.assert_not_called()
+        host.deleteLater()
+
+    def test_mode_change_while_polling_discards_response(self):
+        host = self.host()
+        controller = ContinuousAssayController(host)
+        controller.timer.stop()
+        controller.service.refresh = Mock(return_value=dict(audit=[], checked_at='now'))
+        controller.refresh_due()
+        _, work, done, _ = host.run_background_task.call_args.args
+        result = work()
+        host.time_mode_choice = 2
+        with patch('GUI.ContinuousAssays.write_audit') as write, patch('GUI.WorkflowWorkspace.refresh_context'):
+            done(result)
+        write.assert_not_called()
         host.deleteLater()

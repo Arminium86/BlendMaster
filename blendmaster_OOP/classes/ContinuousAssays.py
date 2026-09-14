@@ -13,6 +13,7 @@ import math
 import numpy as np
 from classes.GradeStreams import ANALYTES, normalise_grade_streams, normalise_opf, numeric
 from setup.ProductAssayHistory import awst
+from classes.ContinuousAssayScope import live_mode
 
 
 DEFAULTS = dict(enabled=True, interval_minutes=5, lookback_hours=48,
@@ -48,6 +49,16 @@ def settings(value=None):
     if any(not math.isfinite(v) or not 0 <= v <= 1440 for v in result['lag_minutes'].values()):
         raise ValueError('Assay alignment lag must be between 0 and 1,440 minutes per OPF.')
     return result
+
+
+def live_enabled(state):
+    return live_mode(state) and settings(state.get('continuous_assay_settings'))['enabled']
+
+
+def request_basis(state):
+    return digest([source_catalog(state), settings(state.get('continuous_assay_settings')),
+                   state.get('time_mode_choice'), state.get('selected_optimisation_plan_id'),
+                   state.get('optimisation_input_revision')])
 
 
 def source_catalog(state):
@@ -259,6 +270,8 @@ def estimate(catalog, evidence, config=None):
 
 
 def corrected_streams(streams, source, config, when, opf, brand):
+    if not live_mode(config or {}):
+        return streams
     bundle = (config or {}).get('continuous_assay_state') or {}
     bundle = bundle.get('profiles', {}).get(opf, {}) if 'profiles' in bundle else bundle
     policy = settings((config or {}).get('continuous_assay_settings'))
@@ -287,7 +300,7 @@ def corrected_streams(streams, source, config, when, opf, brand):
 
 
 def boundaries(config):
-    if not settings(config.get('continuous_assay_settings'))['enabled']:
+    if not live_enabled(config):
         return []
     bundles = [config.get('continuous_assay_state') or {}]
     bundles += [p.get('continuous_assay_state') or {} for p in (config.get('opf_profiles') or {}).values()]
@@ -297,6 +310,8 @@ def boundaries(config):
 
 
 def apply_event(event, config, brand):
+    if getattr(event, 'is_grade_block', False) or not getattr(event, 'is_stockpile', True):
+        return
     if not getattr(event, '_continuous_assay_eligible', True):
         return
     opf = getattr(event, '_multi_opf', None) or config.get('continuous_assay_opf')
@@ -319,12 +334,17 @@ def corrected_properties(properties, streams, brand):
     return result
 
 
-def for_calculation(bundle, inventory, chunks):
-    """Reject a correction registry from a different physical build or prior."""
-    if not bundle:
+def for_calculation(bundle, inventory, chunks, *, time_mode=None, active_sources=()):
+    """Use only verified current feeds with the same physical build and prior."""
+    if not bundle or not live_mode({'time_mode_choice': time_mode}):
         return {}
     current = source_catalog(dict(stockpile_data=inventory, hex_sequence_table=chunks))
-    return deepcopy(bundle) if bundle.get('catalog') == current else {}
+    catalog = bundle.get('catalog') or {}
+    active = {str(source).upper() for source in active_sources}
+    # Never apply a pre-scope legacy registry or an inactive source's offset.
+    if not catalog or set(catalog) != set(bundle.get('active_sources') or ()) or not set(catalog) <= active:
+        return {}
+    return deepcopy(bundle) if all(current.get(source) == row for source, row in catalog.items()) else {}
 
 
 def write_audit(database, bundle):

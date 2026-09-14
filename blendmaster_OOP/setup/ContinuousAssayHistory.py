@@ -1,9 +1,9 @@
 """Use the OPF Production Report assay source and exact actual crusher feeds."""
 from datetime import timedelta
 from copy import deepcopy
-from classes.ContinuousAssays import settings, source_catalog, observations, estimate
+from classes.ContinuousAssays import settings, source_catalog, observations, estimate, live_enabled
+from classes.ContinuousAssayScope import active_sources, plan_rows as read_plan_rows
 from classes.ExpitDataHandler import ExpitDataHandler
-from classes.SavedResultViews import read_report
 from classes.TransportSettings import transport_enabled
 from setup.ProductAssayHistory import ProductAssayHistory, awst
 from setup.RecentDestinationActivity import RecentDestinationActivity
@@ -19,6 +19,7 @@ def request_snapshot(state, profiles=None):
     Keep the same inputs consumed by source_catalog, including chunk build fallback.
     """
     keys = ('continuous_assay_settings', 'continuous_assay_state', 'multi_feed_configuration',
+            'time_mode_choice', 'optimisation_input_revision',
             'mine_input_choice', 'opf_input_choice', 'crusher_input_choice',
             'transport_settings', 'selected_optimisation_plan_id')
     snapshot = deepcopy({key: state.get(key) for key in keys})
@@ -83,6 +84,17 @@ class ContinuousAssayHistory:
             connection.close()
 
     def refresh(self, state, now, database=None):
+        if not live_enabled(state):
+            return dict(version=1, catalog={}, evidence=[], timeline=[], audit=[], revision='',
+                        status='Continuous assays require Now mode and an enabled policy.')
+        # Establish the active blend before accessing either warehouse service.
+        plan_rows = state.get('_continuous_plan_rows')
+        if plan_rows is None:
+            plan_rows = read_plan_rows(database, state.get('selected_optimisation_plan_id') or 'Primary')
+        scope = active_sources(plan_rows, now, state.get('opf_input_choice'))
+        if not scope:
+            return dict(version=1, catalog={}, evidence=[], timeline=[], audit=[], revision='',
+                        status='No active saved-plan inventory stockpile or AMT chunk feeds at the current time.')
         if (state.get('multi_feed_configuration') or {}).get('mode') == 'combined_opf':
             from classes.ContinuousAssays import digest
             profiles = state.get('_continuous_opf_profiles') or {}
@@ -92,6 +104,7 @@ class ContinuousAssayHistory:
             results = {}
             for opf in sorted(required):
                 context = {**state, 'opf_input_choice': opf, 'stockpile_data': profiles[opf]['inventory'],
+                    '_continuous_plan_rows': plan_rows,
                     'updated_stockpile_data': {}, 'hex_sequence_table': list(profiles[opf]['chunks'].values()),
                     'multi_feed_configuration': {**state['multi_feed_configuration'], 'mode': 'multi_tipping_point'},
                     'continuous_assay_state': (state.get('continuous_assay_state') or {}).get('profiles', {}).get(opf, {})}
@@ -101,6 +114,9 @@ class ContinuousAssayHistory:
                 audit=[{**a, 'opf':opf} for opf,v in results.items() for a in v.get('audit', [])])
         policy = settings(state.get('continuous_assay_settings'))
         catalog = source_catalog(state)
+        from classes.GradeStreams import normalise_opf
+        active = set(scope.get(normalise_opf(state.get('opf_input_choice')), []))
+        catalog = {source: row for source, row in catalog.items() if source in active}
         if not policy['enabled'] or not catalog:
             return dict(version=1, catalog=catalog, evidence=[], timeline=[], audit=[], revision='',
                 status='disabled' if not policy['enabled'] else 'No current builds with mapped dry-product quantities.')
@@ -115,9 +131,6 @@ class ContinuousAssayHistory:
         if snapshot.get('status') not in ('fresh', 'cached'):
             raise ConnectionError('New assays are unavailable; accepted corrections have been retained.')
         actual = self.actual_feed(state['mine_input_choice'], start-timedelta(days=1), end, points)
-        plan_rows = []
-        if database:
-            plan_rows = read_report(database, 'optimised', state.get('selected_optimisation_plan_id') or 'Primary').to_dict('records')
         available_now = max(awst(now), awst(snapshot.get('fetched_at') or now))
         evidence, withheld = observations(snapshot['records'], actual, catalog, plan_rows, policy, available_now,
             transport=transport_enabled(state.get('transport_settings')))
@@ -139,5 +152,6 @@ class ContinuousAssayHistory:
             raise ValueError('Continuous assay ledger exceeds 5,000 windows; refresh the historical source priors.')
         result = estimate(catalog, list(ledger.values()), policy)
         result['audit'] += withheld
-        result.update(checked_at=end.isoformat(), status='fresh', source_request=deepcopy(snapshot['request']))
+        result.update(checked_at=end.isoformat(), status='fresh', source_request=deepcopy(snapshot['request']),
+                      active_sources=sorted(catalog), active_at=awst(now).isoformat())
         return result

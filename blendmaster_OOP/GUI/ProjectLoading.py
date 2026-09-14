@@ -66,6 +66,7 @@ def prepare(context, state):
                 included_footprints(row['AMT_stockpile_data'], row.get('AMT_footprint_exclusions')),
                 copy_unchanged=False)
         if row.get('stockpile_data') and not row.get('project_load_refresh_current_time'):
+            from classes.CombinedOPFReconciliation import reusable_cache
             from GUI.InventoryStreamApplication import InventoryContext
             model = InventoryContext(context._host_type, row)
             for name, default in (('field_definitions', None), ('field_mappings', []),
@@ -73,19 +74,15 @@ def prepare(context, state):
                                   ('updated_stockpile_data', {})):
                 if vars(model).get(name) is None:
                     setattr(model, name, default)
-            model.apply_canonical_field_mappings()
-            model.apply_grade_streams_to_inventory(allow_pending=True)
+            if not reusable_cache(row):
+                model.apply_canonical_field_mappings()
+                model.apply_grade_streams_to_inventory(allow_pending=True)
             row.update({key: value for key, value in vars(model).items() if key != '_implementation'})
             row['_project_load_fields_prepared'] = True
         if row.get('AMT_stockpile_data'):
             with database_scope(row['database_path']):
                 OpeningStockpileInventories().save_AMT_to_database(row['AMT_stockpile_data'])
             row['_prepared_amt_database_path'] = row['database_path']
-            from types import SimpleNamespace
-            display = SimpleNamespace(opf_input_choice=row.get('opf_input_choice'))
-            summary = context._host_type.amt_lineage_summary
-            row['_amt_lineage_display'] = {name: (id(rows), display.opf_input_choice, summary(display, rows))
-                                           for name, rows in row['AMT_stockpile_data'].items()}
     result = {k: v for k, v in state.items()
               if k not in ('site_scenarios', 'database_snapshot')}
     result.update(restored[active])

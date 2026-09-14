@@ -14,5 +14,8 @@ def copy_active_state(host, value):
     shared.append(context)
     shared.append(context.get('aps_destination_guidance'))
     shared.append((context.get('destination_rules') or {}).get('guidance'))
-    memo = {id(item): item for item in shared if isinstance(item, (dict, list))}
+    # Profile caches are replaced as a whole; share their detached evidence just
+    # like the calendar context instead of copying it again at every UI save.
+    shared.append(vars(host).get('_combined_opf_profile_cache'))
+    memo = {id(item): item for item in shared if isinstance(item, (dict, list, tuple))}
     return deepcopy(value, memo)
