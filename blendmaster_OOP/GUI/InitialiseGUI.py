@@ -1,4 +1,5 @@
 import sys, threading, requests, os, pickle, copy, traceback, json, subprocess, tempfile, uuid, shutil, math, csv, re, base64
+from contextlib import closing
 import plotly.graph_objects as go
 import plotly.io as pio
 from PyQt5.QtWidgets import (
@@ -1054,9 +1055,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     @staticmethod
     def restore_database_snapshot(database_path, database_bytes):
+        os.makedirs(os.path.dirname(os.path.abspath(database_path)), exist_ok=True)
         if not database_bytes:
+            # Older/input-only projects may have no SQLite snapshot. Establish
+            # their local database during restore, before any task submits.
+            with closing(sqlite3.connect(database_path)):
+                pass
             return
-        os.makedirs(os.path.dirname(database_path), exist_ok=True)
         with open(database_path, "wb") as database_file:
             database_file.write(database_bytes)
 
@@ -14118,7 +14123,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             closing_stocks_path = vars(self).get(
                 "two_wp_closing_stocks_path_choice", ""
             )
-            self.two_wp_closing_stock_balances = (
+            closing_stock_balances = (
                 ClosingROMStocksCompliance.read_workbook(
                     closing_stocks_path
                 )
@@ -14132,9 +14137,27 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 self, "Guidance Schedules", str(error)
             )
             return
-        DatabaseManager().write_two_wp_closing_rom_stocks(
-            self.two_wp_closing_stock_balances
-        )
+        # A project owns a database per site. Resolve it from this window's
+        # session, independently of relocated input files or a stale global DB.
+        state = vars(self)
+        site = state.get('active_scenario_id')
+        directory = state.get('scenario_session_directory')
+        database_path = (self.scenario_database_path(site) if directory and site else
+            ((state.get('site_scenarios') or {}).get(site) or {}).get('database_path') or get_database_path())
+        try:
+            DatabaseManager().write_two_wp_closing_rom_stocks(
+                closing_stock_balances, database_name=database_path, require_existing=True,
+            )
+        except (OSError, sqlite3.Error) as error:
+            QMessageBox.warning(self, 'Guidance Schedules',
+                'Guidance was not submitted because the scenario database could not be written. '
+                'Check database access and retry. If the session file is missing, reopen the saved project first.\n\n'
+                f'Database: {database_path}\nDetails: {error}')
+            return False
+        self.two_wp_closing_stock_balances = closing_stock_balances
+        # Keep later tasks, saves and background deliveries on the same site.
+        if get_database_path() != os.path.abspath(database_path):
+            set_database_path(database_path)
 
         self.refresh_aps_stockpile_brand_map()
         self.apply_aps_brand_guidance_to_stockpile_data()

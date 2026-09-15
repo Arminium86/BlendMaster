@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 from contextlib import closing
 import json
 import pickle
@@ -225,7 +226,7 @@ class DatabaseManager:
             connection.close()
 
     def write_two_wp_closing_rom_stocks(
-        self, rows, database_name=None
+        self, rows, database_name=None, *, require_existing=False
     ):
         """Persist the normalized four-column 2WP closing-stock input."""
         database_name = database_name or get_database_path()
@@ -235,7 +236,10 @@ class DatabaseManager:
                 frame[column] = pd.to_datetime(
                     frame[column], errors="coerce"
                 ).dt.strftime("%Y-%m-%d %H:%M:%S")
-        connection = sqlite3.connect(database_name)
+        # A loaded scenario must not silently become an empty database if its
+        # session file disappeared. URI mode=rw opens without creating a file.
+        connection = (sqlite3.connect(Path(database_name).absolute().as_uri() + '?mode=rw', uri=True)
+                      if require_existing else sqlite3.connect(database_name))
         try:
             frame.to_sql(
                 "two_wp_closing_rom_stocks",
