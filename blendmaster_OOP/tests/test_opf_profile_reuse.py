@@ -7,6 +7,27 @@ from tests.test_combined_opf_reconciliation import source_state, OPFS
 
 
 class ProfileReuseTests(unittest.TestCase):
+    def test_calendar_targets_and_observation_time_do_not_rebuild_source_grades(self):
+        state = self.state()
+        before = profile_signature(state, OPFS)
+        state['multi_feed_configuration']['tipping_points'][0]['targets_by_period'] = {'period_1': {'crusher_rate': 123}}
+        state['updated_stockpile_data']['SP']['snapshot_datetime'] = 'later'
+        self.assertEqual(before, profile_signature(state, OPFS))
+        for field in ('balance', 'FE_ROM', 'build', 'subset'):
+            changed = deepcopy(state)
+            changed['updated_stockpile_data']['SP'][field] = 'changed'
+            self.assertNotEqual(before, profile_signature(changed, OPFS), field)
+
+    def test_cached_publication_keeps_current_observation_timestamp(self):
+        from types import SimpleNamespace
+        from GUI.OPFProfilePublication import publish
+        host = SimpleNamespace(opf_input_choice='OPF', updated_stockpile_data={
+            'A': {'balance': 100, 'snapshot_datetime': 'new'}})
+        publish(host, {'OPF': {'inventory': {'A': {
+            'balance': 100, 'snapshot_datetime': 'old', 'grade_streams': {'rom': {'fe': 60}}}}}})
+        self.assertEqual(host.updated_stockpile_data['A']['snapshot_datetime'], 'new')
+        self.assertEqual(host.updated_stockpile_data['A']['grade_streams']['rom']['fe'], 60)
+
     def state(self):
         state = source_state()
         state['multi_feed_configuration'] = dict(mode='combined_opf', tipping_points=[dict(name=opf + '_PC', opf=opf) for opf in OPFS])

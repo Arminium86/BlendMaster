@@ -18,7 +18,8 @@ class OptimisedToManualPlan:
     TOLERANCE = 1e-7
     GRADES = ("fe", "si", "al", "p", "mn")
 
-    def __init__(self, optimised_report, stockpile_data=None):
+    def __init__(self, optimised_report, stockpile_data=None, *, preserve_blend_ids=False):
+        self.preserve_blend_ids = preserve_blend_ids
         self.report = (
             optimised_report.copy()
             if isinstance(optimised_report, pd.DataFrame)
@@ -244,6 +245,11 @@ class OptimisedToManualPlan:
             for value in data["blend_ID"].tolist():
                 key = raw_blend_key(value)
                 if not key or key in optimised_blend_ids:
+                    continue
+                if self.preserve_blend_ids:
+                    manual_id = key.split(':', 1)[1]
+                    optimised_blend_ids[key] = manual_id
+                    used_manual_ids.add(manual_id)
                     continue
                 if key.startswith("numeric:"):
                     numeric_value = int(key.split(":", 1)[1])

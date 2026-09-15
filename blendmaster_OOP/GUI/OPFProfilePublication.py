@@ -18,6 +18,12 @@ def publish(host, profiles):
                 row = (profiles.get(opf) or {}).get(section, {}).get(identity)
                 if row is not None:
                     row = {**row, 'prepared_grade_opf': opf}
+                    # Observation time does not invalidate chemistry. Keep the
+                    # latest source observation when hydrating a cached profile.
+                    from classes.SourceSnapshots import OBSERVATION_FIELDS
+                    row = {key: value for key, value in row.items() if str(key).lower() not in OBSERVATION_FIELDS}
+                    row.update({key: value for key, value in original.items()
+                                if str(key).lower() in OBSERVATION_FIELDS})
                     if section == 'chunks':
                         row['GRADE_STREAMS'] = row.get('grade_streams') or {}
                     # Cache hits still hydrate restored/missing rows, but leave

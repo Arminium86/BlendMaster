@@ -40,8 +40,17 @@ def result(host, report, plan_id='Primary', plan_type='manual', *, database=None
         product_report=product, equipment_errors=errors,
         run_status='complete' if plan_type == 'manual' else (getattr(host, 'last_run_outcome', {}) or {}).get('status', 'complete'))
     from GUI.WorkflowDependencies import input_revision, manual_revision
-    recorded = vars(host).get('manual_input_revision' if plan_type == 'manual' else 'optimisation_input_revision')
-    current = manual_revision(host) if plan_type == 'manual' else input_revision(host)
+    revision_host = host
+    if plan_type == 'manual' and plan_id != getattr(host, 'active_manual_plan_id', 'Primary'):
+        # The report selector is independent of the currently edited manual
+        # recipe. Validate the selected plan's saved inputs without switching it.
+        from types import SimpleNamespace
+        selected = (vars(host).get('manual_plan_states') or {}).get(plan_id) or {}
+        values = {**vars(host), **selected, 'blend_config_table': None}
+        values['manual_input_revision'] = selected.get('manual_input_revision')
+        revision_host = SimpleNamespace(**values)
+    recorded = vars(revision_host).get('manual_input_revision' if plan_type == 'manual' else 'optimisation_input_revision')
+    current = manual_revision(revision_host) if plan_type == 'manual' else input_revision(host)
     status = 'pass' if recorded == current else 'blocked'
     detail = ('Input version matches the generated plan.' if status == 'pass' else
               'Inputs changed after this plan was generated. Regenerate the plan before export.' if recorded else

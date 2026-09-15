@@ -777,7 +777,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.blend_sequence_tab_layout.addLayout(self.blend_sequence_table_layout, stretch=1)
 
         self.setup_grade_profile_tab()
-        self.setup_agent_instructions_tab()
+        # The retired Legacy Agent Bridge is no longer constructed or started.
         self.update_tab_tooltips()
 
         # Workflow controls
@@ -830,10 +830,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.grade_profile_tab_index,
         ):
             self.set_page_enabled(page_id, False)
-        self.set_page_enabled(
-            self.agent_tab_index,
-            bool(getattr(self, "agent_enabled_choice", False)),
-        )
 
         # Initialise main optimisation program
         self.run_program = Run(self)
@@ -1432,7 +1428,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "workflow_submission_state",
             "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
             "continuous_assay_settings", "continuous_assay_state", "continuous_assay_status",
-            "optimisation_input_revision", "manual_input_revision", "last_run_outcome",
+            "optimisation_input_revision", "optimisation_reuse_receipt", "manual_input_revision", "last_run_outcome",
             "destination_progress_snapshot",
             "site_workflow_contract", "site_workflow_runs", "guidance_import_audit",
             "target_refresh_changes", "reconciliation_applied_revision",
@@ -1501,7 +1497,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "manual_blend_plan_column_widths",
             "manual_blend_plan_wrap_text",
             "solver_config", "solver_presets", "selected_solver_preset", "min_stockpiles", "max_stockpiles",
-            "min_stockpile_contribution_ratio", "saved_blends_for_schedule",
+            "min_stockpile_contribution_ratio", "saved_blends_for_schedule", "manual_point_drafts",
             "stored_blend_sequence_table_for_gantt",
             "stored_blend_sequence_table_for_gantt_default",
             "manual_direct_tip_allocations", "manual_steady_states",
@@ -1608,7 +1604,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         if (
             tab_index == self.database_view_tab_index
-            and getattr(self, "database_view_refresh_pending", False)
+            and (getattr(self, "database_view_refresh_pending", False) or not vars(self).get("database_view_rows"))
         ):
             QTimer.singleShot(0, self.refresh_database_view)
 
@@ -1677,7 +1673,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             for name in ("site_workflow_contract", "site_workflow_runs", "guidance_import_audit", "target_refresh_changes",
                          "workflow_submission_state",
                          "grade_reconciliation_registry", "grade_reconciliation_policy_revision",
-                         "optimisation_input_revision", "manual_input_revision", "last_run_outcome", "reconciliation_applied_revision",
+                         "optimisation_input_revision", "optimisation_reuse_receipt", "manual_input_revision", "last_run_outcome", "reconciliation_applied_revision",
                          "_haul_cycle_routes_revision", "destination_progress_snapshot"):
                 setattr(self, name, copy.deepcopy(state.get(name)))
             self._destination_restore_pending = True
@@ -2070,6 +2066,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.manual_plan_states = copy.deepcopy(
                 state.get("manual_plan_states") or {}
             )
+            self.manual_point_drafts = copy.deepcopy(state.get('manual_point_drafts') or {})
             self.active_manual_plan_id = str(
                 state.get("active_manual_plan_id") or "Primary"
             )
@@ -11864,11 +11861,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         layout.addRow(blend_label, self.blend_mode)
 
-        agent_label = QLabel("PoC Agent:")
-        agent_label.setStyleSheet("font-weight: bold;")
-        self.agent_enabled_checkbox = QCheckBox("Enable BlendMaster agent bridge")
-        self.agent_enabled_checkbox.setChecked(bool(getattr(self, "agent_enabled_choice", False)))
-        layout.addRow(agent_label, self.agent_enabled_checkbox)
 
         # Save and load button
         self.save_button = QPushButton("Save Project")
@@ -11945,7 +11937,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         )
         self.product_brand_labels_input.textChanged.connect(self.validate_form)
         self.blend_mode.currentIndexChanged.connect(self.validate_form)
-        self.agent_enabled_checkbox.toggled.connect(self.toggle_agent_enabled)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.toggle_aps_direct_tip_controls)
         self.reevaluate_aps_direct_tip_checkbox.toggled.connect(self.validate_form)
         self.aps_crusher_input.itemSelectionChanged.connect(self.validate_form)
@@ -13429,7 +13420,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.auto_load_2wp_targets_choice = (
             self.auto_load_2wp_targets_checkbox.isChecked()
         )
-        self.agent_enabled_choice = self.agent_enabled_checkbox.isChecked()
+        self.agent_enabled_choice = False
         self.hub_input_choice = self.hub_input.currentText().strip()
         self.mine_input_choice = self.mine_input.currentText().strip()
         self.capture_site_ratio_and_movement_controls()
@@ -13595,9 +13586,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.set_aps_crusher_items(saved_crushers, saved_crushers)
         self.toggle_aps_direct_tip_controls(self.reevaluate_aps_direct_tip_choice)
         self.blend_mode.setCurrentIndex(max(int(self.blend_mode_choice or 1) - 1, 0))
-        self.agent_enabled_checkbox.setChecked(
-            bool(getattr(self, "agent_enabled_choice", False))
-        )
         self.product_brand_labels_input.setText(", ".join(
             self.parse_product_brand_labels(
                 getattr(self, "product_brand_labels_choice", [])
@@ -14364,13 +14352,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.update_agent_bridge_status()
 
     def toggle_agent_enabled(self, enabled):
-        self.agent_enabled_choice = bool(enabled)
-        if hasattr(self, "agent_tab_index"):
-            self.set_page_enabled(self.agent_tab_index, self.agent_enabled_choice)
-        if self.agent_enabled_choice:
-            self.start_agent_bridge()
-        else:
-            self.stop_agent_bridge(silent=True)
+        # Compatibility with saved projects: the retired bridge stays disabled.
+        self.agent_enabled_choice = False
 
     def agent_app_root_dir(self):
         if getattr(sys, "frozen", False):
@@ -17971,7 +17954,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         """Hydrate saved manual controls without requiring another submission."""
         if (getattr(self,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
             from classes.SavedResultViews import plan_names
-            self.set_page_enabled(self.blend_sequence_tab_index, bool(plan_names(get_database_path(),'manual')))
+            self.set_page_enabled(self.blend_sequence_tab_index, bool(plan_names(get_database_path(),'manual')) or
+                any(draft.get('recipes') for draft in (getattr(self, 'manual_point_drafts', {}) or {}).values()))
             return
         if not getattr(self, "saved_blends_for_schedule", None):
             return
@@ -18033,6 +18017,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             connection.close()
 
     MANUAL_PLAN_STATE_FIELDS = (
+        "manual_point_drafts",
         "manual_input_revision",
         "blend_plan_backup_destinations",
         "blend_config_table_inputs",
@@ -18148,6 +18133,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         )
 
     def reset_manual_blending_plan_state(self):
+        self.manual_point_drafts = {}
         self.manual_input_revision = None
         self.blend_config_table_inputs = {}
         self.blend_data_from_config_table_inputs = {}
@@ -18279,6 +18265,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     return False
             try:
                 report = manual_copy(get_database_path(), source_plan_id)
+                from classes.MultiManualPlan import from_report
+                self.manual_point_drafts = from_report(report, getattr(self, 'updated_stockpile_data', {}))
                 self.write_active_manual_plan_reports(report)
                 self.manual_blend_report = report
                 from GUI.WorkflowDependencies import manual_revision
@@ -21399,7 +21387,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         previous_calendar = copy.deepcopy(self.calendar_inputs or {})
         self.submit_calendar_first_call = False
-        self.clear_decision_point_output()
         
         self.calendar_inputs = {}
 
@@ -21481,6 +21468,17 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if ensure_opening_actuals(self):
             return
         self.calendar_inputs["site_context"] = self.active_site_context()
+        from GUI.OptimisationReuse import signature, reusable, begin
+        current_signature = signature(self)
+        if reusable(self, current_signature):
+            from GUI.WorkflowDependencies import input_revision
+            self.optimisation_input_revision = input_revision(self)
+            self._workflow_optimisation_finished = True
+            self.save_active_scenario_state()
+            self.advance_workspace('calendar')
+            return
+        begin(self, current_signature)
+        self.clear_decision_point_output()
         self.save_active_scenario_state()
 
         self.update_decision_point_tab_state()
@@ -21615,6 +21613,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             refresh(self)
         self.refresh_optimisation_plan_selectors()
         self.start_dash_optimised_charts_thread()
+        from GUI.OptimisationReuse import completed
+        completed(self, self.last_run_outcome)
         self.save_active_scenario_state()
         self.advance_workspace('calendar')
 
@@ -26600,7 +26600,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         if hasattr(self, "blend_mode"):
             self.blend_mode_choice = 1
         if hasattr(self, "agent_enabled_checkbox"):
-            self.agent_enabled_choice = self.agent_enabled_checkbox.isChecked()
+            self.agent_enabled_choice = False
         if hasattr(self, "agent_story_input"):
             self.agent_story_text = self.agent_story_input.toPlainText()
         if hasattr(self, "agent_run_instructions_input"):
@@ -26855,7 +26855,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                      'grade_reconciliation_registry', 'grade_reconciliation_policy_revision',
                      'continuous_assay_settings', 'continuous_assay_state', 'continuous_assay_status',
                      'solver_presets', 'selected_solver_preset',
-                     'target_refresh_changes', 'optimisation_input_revision',
+                     'target_refresh_changes', 'optimisation_input_revision', 'optimisation_reuse_receipt',
                      'manual_input_revision', 'last_run_outcome', 'reconciliation_applied_revision', '_haul_cycle_routes_revision',
                      '_prepared_amt_database_path', '_amt_lineage_display',
                      '_calendar_destination_stockpiles', '_project_load_fields_prepared', 'destination_progress_snapshot'):
@@ -27144,6 +27144,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.manual_plan_states = copy.deepcopy(
             loaded_state.get("manual_plan_states") or {}
         )
+        self.manual_point_drafts = copy.deepcopy(loaded_state.get('manual_point_drafts') or {})
         self.active_manual_plan_id = str(
             loaded_state.get("active_manual_plan_id") or "Primary"
         )

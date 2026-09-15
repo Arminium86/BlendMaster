@@ -135,28 +135,9 @@ def install_results(gui):
 
 def install_operational_reports(gui):
     from GUI.OperationalBlendPlanView import OperationalBlendPlanView
-    from classes.BlendPlanBackups import backup_choices
-    from classes.DestinationBuildOrder import inventory_areas
-    from classes.ExpitDataHandler import ExpitDataHandler
+    from GUI.OperationalPlanBackups import callbacks
     gui.operational_plan_backups = getattr(gui,'operational_plan_backups',{})
-    def context(data,sheets):
-        graph = data.get('graph') or topology_for_gui(gui)
-        points = [n['properties'].get('crusher') or n['label'] for n in graph['nodes'] if n['node_type']=='tipping_point']
-        feed = gui.current_multi_feed_configuration()
-        areas = inventory_areas(getattr(gui,'stockpile_data',{}) or {})
-        evidence = next((frame for name,frame in sheets if name=='Material Destination Plan'),None)
-        rows = evidence.to_dict('records') if evidence is not None else []
-        def matches(area,point):
-            configured = next((p for p in feed['tipping_points'] if p['name']==point),None)
-            if configured:
-                return area.casefold()==configured['rom_area'].casefold()
-            return area.upper()==point.upper() or ExpitDataHandler.crusher_destination_matches(
-                area,getattr(gui,'mine_input_choice',''),point,getattr(gui,'opf_input_choice',''))
-        choices = backup_choices(points,rows,areas,matches)
-        selections = gui.operational_plan_backups.get(data.get('plan_id','Primary'),getattr(gui,'blend_plan_backup_destinations',{}) or {})
-        return choices,selections
-    def save(plan,selections):
-        gui.operational_plan_backups[plan] = deepcopy(selections)
+    context, save = callbacks(gui, 'optimised')
     gui.operational_blend_plans = OperationalBlendPlanView(gui,
         run_async=lambda work,success,failure:gui.run_background_task('Preparing tipping-point Blend Plans',work,success,failure,show_progress=False),
         backup_context=context,save_backups=save)

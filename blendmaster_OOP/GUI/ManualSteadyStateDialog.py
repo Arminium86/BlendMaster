@@ -203,7 +203,7 @@ class ManualSteadyStateDialog(QDialog):
                     candidate,
                 )
                 values = [
-                    state["steady_state_number"],
+                    (f"{state['tipping_point']} · {state['steady_state_number']}" if state.get('tipping_point') else state["steady_state_number"]),
                     state["blend_ID"],
                     state["start_datetime"].strftime("%Y-%m-%d %H:%M"),
                     state["end_datetime"].strftime("%Y-%m-%d %H:%M"),

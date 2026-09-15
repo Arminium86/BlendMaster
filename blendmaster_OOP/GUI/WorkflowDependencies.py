@@ -101,12 +101,16 @@ def manual_recipe_inputs(host):
 
 def manual_revision(host):
     state = vars(host)
+    from classes.MultiManualPlan import has_drafts
+    if has_drafts(state.get('manual_point_drafts')) and (state.get('multi_feed_configuration') or {}).get('mode', 'single') != 'single':
+        return fingerprint(dict(inputs=input_revision(host), points=state['manual_point_drafts']))
     sequence = [{key: value for key, value in row.items() if key != 'Blend Summary'}
                 for row in state.get('stored_blend_sequence_table_for_gantt') or []]
-    return fingerprint(dict(inputs=input_revision(host), sequence=sequence,
+    values = dict(inputs=input_revision(host), sequence=sequence,
         blends=state.get('saved_blends_for_schedule'), allocations=state.get('manual_direct_tip_allocations'),
         recipes=manual_recipe_inputs(host), rates=state.get('crusher_rate_input_values'),
-        rounding=state.get('manual_ratio_rounding')))
+        rounding=state.get('manual_ratio_rounding'))
+    return fingerprint(values)
 
 
 def manual_rate_issues(host):

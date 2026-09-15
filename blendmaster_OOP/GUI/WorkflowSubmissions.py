@@ -12,6 +12,7 @@ SUPPORT_OWNER = {
     'define_fields': 'grade_reconciliation', 'map_fields': 'grade_reconciliation',
     'data_streams': 'grade_reconciliation', 'solver_configuration': 'decision_levers',
     'multi_feed_setup': 'decision_levers', 'material_flow': 'grade_reconciliation',
+    'continuous_assays': 'grade_reconciliation',
 }
 OPERATIONS = {
     'handle_site_config_submit': 'site_configuration',

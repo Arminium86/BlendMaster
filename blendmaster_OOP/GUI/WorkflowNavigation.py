@@ -11,9 +11,9 @@ WORKSPACE = ('site_configuration', 'guidance_schedules', 'stockpile_inventories'
              'setup_blends', 'blend_sequence', 'blend_plan', 'material_destination_plan')
 VIEWS = ('database_view', 'expit_sequence', 'opf_production_report', 'grade_profiles', 'material_flow_results',
          'build_depletion_profiles', 'closing_rom_stocks_compliance')
-SUPPORT = ('site_model', 'guidance_settings', 'define_fields', 'map_fields', 'data_streams',
+SUPPORT = ('site_model', 'guidance_settings', 'define_fields', 'map_fields', 'data_streams', 'continuous_assays',
            'solver_configuration', 'multi_feed_setup', 'material_flow', 'database_reports',
-           'site_automation', 'decision_point', 'agent', 'reports')
+           'site_automation', 'decision_point', 'reports')
 CAPTIONS = {'setup_blends': 'Manual Blending Dashboard', 'blend_sequence': 'Manual Blend Sequence',
             'material_flow': 'Conveyors & COS', 'decision_point': 'Decision Diagnostics',
             'agent': 'Legacy Agent Bridge'}
@@ -22,6 +22,8 @@ DEPENDENT_PAGES = {'data_streams': ('grade_reconciliation',),
 
 
 def page_allowed(host, page_id):
+    if page_id == 'agent':
+        return False
     # Test harnesses/legacy adapters without a session retain their old behavior.
     return vars(host).get('access_role', 'support') != 'planner' or page_id not in SUPPORT
 

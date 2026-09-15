@@ -2,7 +2,7 @@
 import pandas as pd
 from PyQt5 import sip
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QComboBox,QPushButton,QLabel,QTabWidget,QTableView,QFileDialog
+from PyQt5.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QComboBox,QPushButton,QLabel,QTabWidget,QTableView,QFileDialog,QMessageBox
 from GUI.MaterialFlowResults import FrameModel
 from GUI.BlendPlanBackupControls import BlendPlanBackupControls
 from classes.MaterialFlowReview import saved_flow_plans,saved_flow_data
@@ -33,8 +33,9 @@ class OperationalBlendPlanView(QWidget):
         self.points=QComboBox(); self.points.currentIndexChanged.connect(self.show_point); bar.addWidget(self.points)
         refresh=QPushButton('Refresh'); refresh.clicked.connect(self.refresh); bar.addWidget(refresh)
         if plan_type == 'manual':
-            copy_button=QPushButton('Copy optimised allocations')
-            copy_button.clicked.connect(lambda: parent.prepopulate_manual_from_optimised_result())
+            copy_button=QPushButton('Edit manual recipes and sequence…')
+            copy_button.setToolTip('Open the Manual Blending Dashboard to create or edit a manual plan, or start one from an optimised plan.')
+            copy_button.clicked.connect(self.edit_manual)
             bar.addWidget(copy_button)
         pdf=QPushButton('Export point PDF...'); pdf.clicked.connect(self.export_pdf); bar.addWidget(pdf)
         xlsx=QPushButton('Export all XLSX...'); xlsx.clicked.connect(self.export_xlsx); bar.addWidget(xlsx)
@@ -99,7 +100,7 @@ class OperationalBlendPlanView(QWidget):
             points = [n.get('properties', {}).get('crusher') or n.get('label')
                       for n in (data.get('graph') or {}).get('nodes', []) if n.get('node_type') == 'tipping_point']
             point = points[0] if len(points) == 1 else default_point if not points else None
-            return data,split_blend_plans(data['frames']['feed'], default_point=point),(cross_feature_sheets(name,database,data['frames']['product']) if self.plan_type == 'optimised' else [])
+            return data,split_blend_plans(data['frames']['feed'], default_point=point),cross_feature_sheets(name,database,data['frames']['product'],plan_type=self.plan_type)
         def done(result):
             if sip.isdeleted(self) or generation!=self.generation or database!=get_database_path():
                 return
@@ -175,6 +176,7 @@ class OperationalBlendPlanView(QWidget):
 
     def export_xlsx(self):
         if not self.plans_data:
+            self.export_error('No saved plan is available. Generate or select a Blend Plan first.')
             return
         try:
             readiness = self.readiness()
@@ -187,12 +189,13 @@ class OperationalBlendPlanView(QWidget):
             title = f"BlendMaster - {self.data.get('plan_id','Primary')} - Blend Plans - {readiness['status']}"
             self.write_export(path, lambda: SpreadsheetReportExporter.export_xlsx(path, sheets, report_title=title))
         except Exception as exc:
-            self.status.setText(str(exc))
+            self.export_error(str(exc))
 
     def export_pdf(self):
         point=self.points.currentText()
         plan=self.plans_data.get(point)
         if not plan:
+            self.export_error('Select a tipping point with a saved Blend Plan first.')
             return
         try:
             readiness = self.readiness()
@@ -213,11 +216,20 @@ class OperationalBlendPlanView(QWidget):
                 rounding_audit=plan['ratios'].loc[pd.to_numeric(plan['ratios'].get('Increment (%)'),errors='coerce').fillna(0)>0]
                     .rename(columns={'Operational ratio (%)':'Rounded ratio (%)'}).to_dict('records')))
         except Exception as exc:
-            self.status.setText(str(exc))
+            self.export_error(str(exc))
+
+    def export_error(self, message):
+        self.status.setText(str(message))
+        QMessageBox.warning(self, 'Blend Plan export', str(message))
+
+    def edit_manual(self):
+        if self.plans.currentText():
+            self.site_host.activate_manual_plan(self.plans.currentText())
+        self.site_host.show_page('setup_blends')
 
     def write_export(self, path, work):
         from GUI.ReportExport import run
         self.status.setText('Exporting '+path)
         run(self.site_host, 'Export Blend Plan', path, work,
             completed=lambda _: self.status.setText('Exported '+path),
-            failed=lambda error: self.status.setText(error['message']))
+            failed=lambda error: self.export_error(error['message']))

@@ -155,8 +155,11 @@ class WorkflowViews(QObject):
         for page in ('blend_plan', 'material_destination_plan', 'material_flow_results', 'closing_rom_stocks_compliance'):
             self.available(page, any(self.results.values()), 'Generate a plan to view its saved results.')
         if (vars(self.host).get('multi_feed_configuration') or {}).get('mode','single') != 'single':
-            for page in ('setup_blends','blend_sequence'):
-                self.available(page,any(self.results.values()),'Generate a plan to start from its saved allocations.')
+            state = vars(self.host)
+            prepared = bool(state.get('calendar_inputs') and state.get('start_time_choice'))
+            recipes = any(draft.get('recipes') for draft in (state.get('manual_point_drafts') or {}).values())
+            self.available('setup_blends', prepared or any(self.results.values()), 'Prepare inventory and Calendar inputs to create manual recipes.')
+            self.available('blend_sequence', recipes or any(self.results.values()), 'Create and submit a manual recipe first.')
         self.available('build_depletion_profiles', any(self.results.values()), 'Generate an optimised or manual plan to view its profiles.')
         self.available('optimised_grade_profiles', self.results['optimised'], 'Run optimisation to generate grade results for this site.')
         self.available('manual_grade_profiles', self.results['manual'], 'Submit Manual Blend Sequence to generate grade results for this site.')
@@ -164,17 +167,20 @@ class WorkflowViews(QObject):
 
     def apply_input_results(self):
         state = vars(self.host)
-        self.available('database_view', bool(state.get('database_view_rows')),
-                       'Use Load views → Database View to prepare the source rows.')
+        configured = bool(state.get('mine_input_choice') and state.get('start_time_choice'))
+        self.available('database_view', bool(state.get('database_view_rows')) or
+                       (configured and bool(state.get('updated_stockpile_data') or state.get('stockpile_data'))),
+                       'Submit the site and Stockpile Inventories to inspect source rows.')
         report = state.get('opf_production_report')
         snapshot = vars(report).get('snapshot') if report is not None else None
-        self.available('opf_production_report', bool(snapshot and snapshot.get('records')),
-                       'Use Load views → OPF Production Report to load production history.')
+        self.available('opf_production_report', bool(snapshot and snapshot.get('records')) or
+                       (configured and bool(state.get('opf_input_choice'))),
+                       'Submit the site with an OPF and model start time to load production history.')
         snapshot = state.get('expit_sequence_snapshot') or {}
         present = any(value is not None and len(value) > 0 for value in
                       (snapshot.get(key) for key in ('transactions', 'planned_transactions', 'actual_movements', 'geometry')))
-        self.available('expit_sequence', present,
-                       'Use Load views → Expit Sequence to prepare movements and geometry.')
+        ready, reason = input_readiness(self.host)['expit_sequence']
+        self.available('expit_sequence', present or ready, reason)
 
     def current_page(self):
         tabs = self.host.tabs

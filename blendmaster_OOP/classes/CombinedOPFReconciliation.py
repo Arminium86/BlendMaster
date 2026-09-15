@@ -25,8 +25,22 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 def profile_signature(state, opfs):
     from classes.AcceptedEvidence import fingerprint_fields
-    return fingerprint_fields({'version': 5, 'opfs': opfs,
-        **{key: state.get(key) for key in SOURCE_FIELDS if key != 'start_time_choice'}}, state,
+    from classes.SourceSnapshots import source_content, CONTROL_FIELDS
+    values = {key: state.get(key) for key in SOURCE_FIELDS if key != 'start_time_choice'}
+    def physical(row):
+        return {**source_content(row), **{key: value for key, value in row.items()
+                                         if str(key).lower() in CONTROL_FIELDS}}
+    for field in ('stockpile_data', 'updated_stockpile_data'):
+        values[field] = {name: physical(row) for name, row in (state.get(field) or {}).items()}
+    values['AMT_stockpile_data'] = {name: [physical(row) for row in rows]
+                                  for name, rows in (state.get('AMT_stockpile_data') or {}).items()}
+    for field in ('hex_sequence_table', 'hex_sequence_table_argument'):
+        values[field] = [physical(row) for row in state.get(field) or []]
+    config = state.get('multi_feed_configuration') or {}
+    values['multi_feed_configuration'] = {**config, 'tipping_points': [
+        {key: value for key, value in point.items() if key != 'targets_by_period'}
+        for point in config.get('tipping_points', [])]}
+    return fingerprint_fields({'version': 6, 'opfs': opfs, **values}, state,
         accepted=('grade_reconciliation_registry',))
 
 

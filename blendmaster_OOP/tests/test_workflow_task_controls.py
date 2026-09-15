@@ -14,6 +14,51 @@ from tests import test_workflow_navigation as navigation
 
 
 class TaskControlsTests(unittest.TestCase):
+    def test_input_backed_views_can_open_before_their_first_load(self):
+        from tempfile import NamedTemporaryFile
+        host, controls = self.host()
+        host.mine_input_choice = 'CC'
+        host.opf_input_choice = 'OPF'
+        host.start_time_choice = '2026-09-15'
+        host.updated_stockpile_data = {'A': {'balance': 100}}
+        host.expit_mode_choice = 2
+        host.selected_24hr_expit_agents = ['dig circuit']
+        with NamedTemporaryFile() as schedule:
+            host.file_path_24hr_choice = schedule.name
+            host._workflow_views.apply_input_results()
+        for page in ('database_view', 'opf_production_report', 'expit_sequence'):
+            self.assertTrue(host.is_page_enabled(page), page)
+
+    def test_assay_policy_save_turns_green_and_invalid_json_does_not_submit(self):
+        from GUI.ContinuousAssays import ContinuousAssayPanel
+        host, controls = self.host()
+        panel = ContinuousAssayPanel(host)
+        self.addCleanup(panel.deleteLater)
+        panel.editor.setPlainText('{')
+        panel.save()
+        self.assertEqual(task_status(host, 'continuous_assays'), 'resubmit')
+        panel.editor.setPlainText('{}')
+        panel.save()
+        self.assertEqual(task_status(host, 'continuous_assays'), 'ready')
+        self.assertIn('grade_reconciliation', pending(host))
+
+    def test_retired_bridge_is_absent_from_support_and_cannot_be_restored(self):
+        from GUI.WorkflowNavigation import SUPPORT, page_allowed
+        host, controls = self.host()
+        self.assertNotIn('agent', SUPPORT)
+        self.assertNotIn('agent', host.page_widgets)
+        self.assertFalse(page_allowed(host, 'agent'))
+
+    def test_global_run_recognises_assay_policy_save(self):
+        host, controls = self.host()
+        action = Mock()
+        button = self.button(host, 'continuous_assays', action)
+        button.setText('Save assay policy')
+        host.show_page('continuous_assays')
+        controls.execute()
+        action.assert_called_once()
+        self.assertEqual(controls.current_page(), 'continuous_assays')
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

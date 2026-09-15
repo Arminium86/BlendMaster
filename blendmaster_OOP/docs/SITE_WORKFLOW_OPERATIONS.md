@@ -170,6 +170,32 @@ Freshness and saving use the current recipe inputs, including edits awaiting
 submission. Display formatting retains the exact stored ratios. Saved manual
 sequence controls and their Gantt are restored without another dashboard Submit.
 
+For multiple tipping points and combined OPFs, **Manual Blending Dashboard →
+Recipes and rates** provides a separate recipe set for every configured tipping
+point. Add a Blend ID, enter source weights and optional reclaim rates, review
+the opening/projected stock and grade estimates, and set manual crusher rates
+by period. Zero weight excludes a source. Submit recipes, then use **Manual
+Blend Sequence → Sequence editor** to add, remove or reorder blend rows and edit
+their start and duration. **Join times in row order** makes the rows contiguous.
+The chart shows the last calculated sequence; edits remain drafts until submitted.
+
+**Steady States & Direct Tip** reviews the joint plan and accepts direct-tip
+payloads by tipping point. The calculation uses a shared physical inventory with
+each OPF's prepared chemistry, checks Calendar and recipe reclaim limits, and
+uses the existing Conveyor/COS replay. A stockpile cannot reclaim to two points
+at once, projected stock cannot be used before its receipt time, and a payload
+cannot be used twice. Recipe and sequence drafts persist with their named manual
+plan. Older saved manual allocations are converted into editable recipes when
+first opened; clearing a tipping point does not reimport its old rows.
+
+**Create manual plan from optimised…** belongs on the manual authoring pages.
+Choose a saved optimised starting plan and a new manual plan name, then edit and
+calculate that independent manual plan. **Blend Plan → Manual per tipping point**
+contains **Edit manual recipes and sequence…**, point-specific backup selections,
+**Export point PDF…**, and **Export all XLSX…**. Backup choices use that manual
+plan's resolved destination evidence, and export validates the selected plan's
+own saved inputs. A blocked or failed export opens an explanatory dialog.
+
 Save Project and normal save-on-close write unique project files atomically in a
 worker. The application remains open if a save fails. XLSX/PDF blend-plan exports
 also generate their files in a worker and retain review warnings. Build and

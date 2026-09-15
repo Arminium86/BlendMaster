@@ -140,7 +140,10 @@ def install(host):
     plan_layout.addWidget(plan_tabs)
     host.blend_plan_workflow_tabs = plan_tabs
     from GUI.OperationalBlendPlanView import OperationalBlendPlanView
+    from GUI.OperationalPlanBackups import callbacks
+    backup_context, save_backups = callbacks(host, 'manual')
     host.manual_operational_blend_plans = OperationalBlendPlanView(host, plan_type='manual',
+        backup_context=backup_context, save_backups=save_backups,
         run_async=lambda work, done, failed: host.run_background_task('Loading manual tipping-point plans…', work, done, failed, show_progress=False))
     plan_tabs.addTab(host.manual_operational_blend_plans, 'Manual per tipping point')
     host.register_page('blend_plan', host.workspace_tabs, plan_page, 'Blend Plan')

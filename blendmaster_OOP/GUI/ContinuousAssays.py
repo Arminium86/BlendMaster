@@ -182,6 +182,8 @@ class ContinuousAssayPanel(QWidget):
         require_action(self.host.access_role, 'solver_configuration')
         try:
             self.host.continuous_assay_settings = settings(json.loads(self.editor.toPlainText()))
+            from GUI.WorkflowSubmissions import support_submitted
+            support_submitted(self.host, 'continuous_assays')
             self.host.save_active_scenario_state()
             self.status.setPlainText('Policy saved. Accepted updates apply automatically within these bounds.')
         except (ValueError, KeyError, TypeError) as exc:

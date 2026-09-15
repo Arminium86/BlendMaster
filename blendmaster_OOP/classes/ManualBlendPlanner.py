@@ -1220,11 +1220,10 @@ class ManualBlendPlanner:
             ])
         return columns
 
-    def build_report(self, states, allocations=None):
+    def build_report(self, states, allocations=None, *, inventory=None, finalize=True, produced_tonnes=0.0):
         self.validate_allocations(states, allocations or {})
-        inventory = deepcopy(self._inventory_template)
+        inventory = deepcopy(self._inventory_template) if inventory is None else inventory
         report_rows = []
-        produced_tonnes = 0.0
         self.physical_balance_history = []
         if states:
             self.physical_balance_history.append(dict(snapshot_datetime=states[0]['start_datetime'], steady_state_number=0,
@@ -1604,6 +1603,11 @@ class ManualBlendPlanner:
                 *custom_columns,
             ],
         )
+        if not finalize:
+            # A simultaneous manual coordinator owns the physical ledger and
+            # applies shared product/transport checks once all points are built.
+            report.attrs['physical_balance_history'] = deepcopy(self.physical_balance_history)
+            return report
         report = ProductBuildProgress.annotate(
             report,
             self.product_build_settings,

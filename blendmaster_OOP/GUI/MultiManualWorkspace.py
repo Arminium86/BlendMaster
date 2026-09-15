@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QPushButton,
-    QTableWidget,QTableWidgetItem,QDateTimeEdit,QDoubleSpinBox)
+    QTableWidget,QTableWidgetItem,QDateTimeEdit,QDoubleSpinBox,QTabWidget)
 from GUI.BlendSequenceTimeline import BlendSequenceTimeline
 from classes.SavedResultViews import plan_names
 from classes.MaterialFlowReview import saved_flow_data
@@ -18,12 +18,18 @@ class MultiManualWorkspace(QWidget):
         self.data={}; self.report=pd.DataFrame(); self.database=None
         self._loaded_token = self._pending_token = None
         self._load_generation = 0
-        layout=QVBoxLayout(self)
+        from GUI.MultiManualAuthoring import MultiManualAuthoring
+        outer=QVBoxLayout(self)
+        self.workspace_tabs=QTabWidget(); outer.addWidget(self.workspace_tabs)
+        self.authoring=MultiManualAuthoring(host,sequence)
+        self.workspace_tabs.addTab(self.authoring,'Sequence editor' if sequence else 'Recipes and rates')
+        allocation_page=QWidget(); self.workspace_tabs.addTab(allocation_page,'Saved allocation adjustments')
+        layout=QVBoxLayout(allocation_page)
+        self.workspace_tabs.currentChanged.connect(self.workspace_tab_changed)
         bar=QHBoxLayout(); bar.addWidget(QLabel('Manual plan'))
         self.plans=QComboBox(); self.plans.currentIndexChanged.connect(self.load_plan); bar.addWidget(self.plans)
-        bar.addWidget(QLabel('Optimised starting plan'))
-        self.starting=QComboBox(); bar.addWidget(self.starting)
-        copy_button=QPushButton('Copy optimised allocations'); copy_button.clicked.connect(self.copy_plan); bar.addWidget(copy_button)
+        self.starting=QComboBox(self); self.starting.hide()
+        copy_button=QPushButton('Create manual plan from optimised…'); copy_button.clicked.connect(self.copy_plan); bar.addWidget(copy_button)
         reload=QPushButton('Refresh'); reload.clicked.connect(lambda: self.refresh(force=True)); bar.addWidget(reload)
         bar.addStretch(); layout.addLayout(bar)
         self.status=QLabel(''); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True); layout.addWidget(self.status)
@@ -51,8 +57,16 @@ class MultiManualWorkspace(QWidget):
         continue_button.clicked.connect(lambda: host.advance_workspace('blend_sequence' if sequence else 'setup_blends'))
         layout.addWidget(continue_button)
 
+    def workspace_tab_changed(self, index):
+        if index == 0:
+            self.authoring.refresh()
+        elif getattr(self, 'kind', None) == 'manual':
+            activate = getattr(self.host, 'activate_manual_plan', None)
+            if callable(activate): activate(self.plans.currentText())
+
     def refresh(self, *, force=False):
-        selected=self.plans.currentText() or getattr(self.host,'active_manual_plan_id','Primary') or 'Primary'
+        self.authoring.refresh()
+        selected=getattr(self.host,'active_manual_plan_id',None) or self.plans.currentText() or 'Primary'
         database=get_database_path()
         try:
             manual,optimised=plan_names(database,'manual'),plan_names(database,'optimised')
@@ -104,12 +118,16 @@ class MultiManualWorkspace(QWidget):
             self._loaded_token = token
             self.kind,self.data=value
             activate = getattr(self.host, 'activate_manual_plan', None)
-            if self.kind == 'manual' and callable(activate):
+            if self.kind == 'manual' and callable(activate) and self.workspace_tabs.currentIndex() == 1:
                 activate(name)
+                self.authoring.refresh()
             self.report=self.data['frames']['feed'].copy().reset_index(drop=True)
             self.report.attrs={}
             from classes.ReportTiming import restore_report_timing
             self.report=restore_report_timing(self.report)
+            self.authoring.set_projections(self.data['frames'].get('build',pd.DataFrame()))
+            if name == getattr(self.host,'active_manual_plan_id','Primary'):
+                self.authoring.hydrate_report(self.report,kind=self.kind)
             self.timeline.set_report(self.report,(self.host.multi_feed_configuration or {}).get('tipping_points',[]))
             if self.report.empty:
                 self.status.setText(f'{name} has no saved feed allocations.'); return
@@ -165,11 +183,8 @@ class MultiManualWorkspace(QWidget):
                 self.intervals.setCurrentIndex(index); break
 
     def copy_plan(self):
-        name=self.starting.currentText()
-        if not name: return
-        self.host.activate_manual_plan(self.plans.currentText() or name)
-        self.host.prepopulate_manual_from_optimised_result(source_plan_id=name)
-        self.refresh()
+        self.authoring.copy_plan()
+        self.workspace_tabs.setCurrentIndex(0)
 
     def apply_edits(self):
         indices=self.intervals.currentData() or []
@@ -180,7 +195,7 @@ class MultiManualWorkspace(QWidget):
             if issue(self.host, include_workflow=True): raise ValueError(issue(self.host, include_workflow=True))
             from GUI.WorkflowDependencies import input_revision, manual_revision
             if vars(self.host).get('manual_input_revision') != manual_revision(self.host):
-                raise ValueError('The saved allocations use an earlier input version. Recalculate and copy the optimised plan for the current inputs before editing.')
+                raise ValueError('The saved allocations use an earlier input version. Submit the manual recipes and sequence for the current inputs before adjusting saved allocation rows.')
             for index,row in enumerate(indices): edited.loc[row,'source_actual_tonnes']=float(self.sources.item(index,2).text())
             edited['start_datetime']=pd.to_datetime(edited.start_datetime)
             edited['end_datetime']=pd.to_datetime(edited.end_datetime)
@@ -202,6 +217,8 @@ class MultiManualWorkspace(QWidget):
                 if database!=get_database_path() or revision!=input_revision(self.host):
                     self.status.setText('Inputs changed during calculation. Apply the edits again.'); return
                 self.host.active_manual_plan_id=name; self.host.manual_blend_report=report
+                from classes.MultiManualPlan import from_report
+                self.host.manual_point_drafts=from_report(report,getattr(self.host,'updated_stockpile_data',{}))
                 from GUI.WorkflowDependencies import manual_revision
                 self.host.manual_input_revision=manual_revision(self.host)
                 self.host.write_active_manual_plan_reports(report)

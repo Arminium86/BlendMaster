@@ -30,7 +30,7 @@ def split_blend_plans(report,stockpile_data=None,default_point=None):
         rows = rows[pd.to_numeric(rows.source_actual_tonnes,errors='coerce').fillna(0)>0].copy()
         if rows.empty:
             continue
-        transfer = OptimisedToManualPlan(rows,stockpile_data).build()
+        transfer = OptimisedToManualPlan(rows,stockpile_data,preserve_blend_ids=True).build()
         summaries = ManualBlendSummary.build(transfer['sequence_rows'],rows,transfer['blend_definitions'])
         for summary in summaries:
             summary['Tipping point'] = str(point)

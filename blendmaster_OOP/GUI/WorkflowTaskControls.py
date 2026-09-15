@@ -97,7 +97,7 @@ class WorkflowTaskControls(QObject):
         result = []
         for button in widget.findChildren(QPushButton):
             text = button.text().replace('&', '').strip().lower()
-            primary = text == 'submit' or text.startswith(('submit ', 'continue ')) or (page == 'site_automation' and text == 'save contract')
+            primary = text == 'submit' or text.startswith(('submit ', 'continue ')) or (page == 'site_automation' and text == 'save contract') or (page == 'continuous_assays' and text == 'save assay policy')
             if primary and page_for(self.host, button) == page:
                 # Ignore controls inside an inactive nested mode tab.
                 if button.parentWidget() is widget or button.parentWidget().isVisibleTo(widget):
