@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
     QTableWidget, QTableWidgetItem, QInputDialog, QMessageBox, QDateTimeEdit, QDoubleSpinBox, QCheckBox)
 from GUI.BlendSequenceTimeline import BlendSequenceTimeline
-from classes.MultiManualPlan import definitions, from_report, has_drafts, MultiManualPlanner
+from classes.MultiManualPlan import definitions, from_report, has_drafts, MultiManualPlanner, reset_imported_timing
 from classes.MultiFeedSettings import route_allowed, source_routing
 from classes.MultiFeedCalendar import apply_calendar
 from classes.SavedResultViews import plan_names, read_report
@@ -82,8 +82,10 @@ class MultiManualAuthoring(QWidget):
         bar.addStretch(); layout.addLayout(bar)
         self.status = QLabel(); self.status.setWordWrap(True); self.status.setTextFormat(Qt.PlainText); layout.addWidget(self.status)
         if sequence:
-            self.timeline_caption = QLabel('Last calculated sequence'); layout.addWidget(self.timeline_caption)
+            self.timeline_caption = QLabel('Editable sequence draft'); layout.addWidget(self.timeline_caption)
             self.timeline = BlendSequenceTimeline(self); layout.addWidget(self.timeline, 1)
+            self.timeline.interval_resized.connect(self.resize_draft_interval)
+            self.timeline.interval_selected.connect(self.select_draft_interval)
             self.rows = QTableWidget(0, 7)
             self.rows.setHorizontalHeaderLabels(['Blend ID', 'Origin', 'Start datetime', 'Duration (hours)',
                 'End datetime', 'Early start', 'Remaining hours'])
@@ -168,7 +170,7 @@ class MultiManualAuthoring(QWidget):
             self.host.capture_active_manual_plan_state() if hasattr(self.host, 'capture_active_manual_plan_state') else None
             self.show_point()
         if self.sequence:
-            self.timeline.set_report(report, self.feed.get('tipping_points', []))
+            self.refresh_draft_timeline()
 
     def set_projections(self, frame):
         self.projections = {}
@@ -318,6 +320,7 @@ class MultiManualAuthoring(QWidget):
     def save_point(self, *_args, recipe_edit=False):
         if self._loading or not self.point or self.plan_id != getattr(self.host, 'active_manual_plan_id', 'Primary'): return
         draft = self.draft()
+        before = deepcopy(draft)
         if not self.sequence:
             recipe = next((r for r in draft['recipes'] if r['id'] == self.recipe), None)
             if recipe:
@@ -340,6 +343,15 @@ class MultiManualAuthoring(QWidget):
             draft['rates'] = rates
         else:
             draft['sequence'] = self.sequence_values()
+        if draft != before:
+            had_selections = reset_imported_timing(draft)
+            if had_selections:
+                self.status.setText(f'{self.point}: timing or recipe changed. Previous direct-tip selections were reset; review Steady States & Direct Tip for the new schedule.')
+            if self.sequence:
+                for i, row in enumerate(draft['sequence']):
+                    self.rows.item(i, 1).setData(Qt.UserRole, deepcopy(row))
+                    self.rows.item(i, 1).setData(Qt.UserRole+1, (self.rows.cellWidget(i, 0).currentText(),
+                        self.rows.cellWidget(i, 2).dateTime().toPyDateTime(), self.rows.cellWidget(i, 3).value()))
         self.changed()
         if not self.sequence: self.update_recipe_preview()
 
@@ -414,6 +426,41 @@ class MultiManualAuthoring(QWidget):
             self.rows.setItem(i, 6, item())
             for signal in (combo.activated, start.dateTimeChanged, duration.valueChanged): signal.connect(lambda *_: self.sequence_changed())
         self.update_sequence_preview(); self.rows.resizeColumnsToContents()
+        self.refresh_draft_timeline()
+
+    def refresh_draft_timeline(self):
+        self.timeline.set_drafts(self.drafts(), self.feed.get('tipping_points', []))
+
+    def select_draft_interval(self, record):
+        point = record['tipping_point']
+        if point != self.point:
+            self.points.setCurrentIndex(self.points.findData(point))
+            self.point = point
+            previous = self._loading; self._loading = True
+            try: self.populate_rows()
+            finally: self._loading = previous
+        self.rows.selectRow(record['draft_index'])
+
+    def resize_draft_interval(self, record, start, end):
+        point, index = record['tipping_point'], record['draft_index']
+        # Keep edits inside the planning horizon and neighbouring sequence rows.
+        rows = self.drafts()[point]['sequence']
+        lower, upper = pd.Timestamp(min(self.periods.values())), pd.Timestamp(max(self.periods.values()))
+        if index: lower = max(lower, pd.Timestamp(rows[index-1].get('_exact_end') or rows[index-1]['End Datetime']))
+        if index+1 < len(rows): upper = min(upper, pd.Timestamp(rows[index+1].get('_exact_start') or rows[index+1]['Start Datetime']))
+        start, end = max(start, lower), min(end, upper)
+        if end <= start:
+            self.status.setText('The bar must have positive duration inside the planning horizon and neighbouring rows.')
+            self.refresh_draft_timeline(); return
+        if start == record['start_datetime'] and end == record['end_datetime']:
+            self.status.setText('The bar has reached its neighbouring row or planning boundary.')
+            self.refresh_draft_timeline(); return
+        reset_imported_timing(self.drafts()[point])
+        rows[index].update({'Start Datetime': start.to_pydatetime(), 'End Datetime': end.to_pydatetime(),
+                            'Duration (hrs)': (end-start).total_seconds()/3600})
+        self.points.setCurrentIndex(self.points.findData(point)); self.point = point
+        self.changed(); self.show_point(); self.rows.selectRow(index)
+        self.status.setText(f'{point}: draft timing updated. Review direct-tip selections and submit to recalculate.')
 
     def sequence_values(self):
         rows = []
@@ -458,6 +505,7 @@ class MultiManualAuthoring(QWidget):
     def sequence_changed(self):
         if self._loading: return
         self.update_sequence_preview(); self.save_point()
+        self.refresh_draft_timeline()
 
     def add_row(self):
         if not self.draft()['recipes']:
@@ -466,21 +514,25 @@ class MultiManualAuthoring(QWidget):
         begin = pd.Timestamp(rows[-1]['End Datetime']).to_pydatetime() if rows else min(self.periods.values())
         rows.append({'Blend ID': self.draft()['recipes'][0]['id'], 'Start Datetime': begin, 'Duration (hrs)': 1,
                      'End Datetime': begin+timedelta(hours=1), 'Origin': 'Manual'})
+        reset_imported_timing(self.draft())
         self.changed(); self.show_point()
 
     def remove_rows(self):
         selected = {i.row() for i in self.rows.selectedIndexes()}
         self.draft()['sequence'] = [r for i, r in enumerate(self.draft()['sequence']) if i not in selected]
+        if selected: reset_imported_timing(self.draft())
         self.changed(); self.show_point()
 
     def move_row(self, delta):
         index = self.rows.currentRow(); rows = self.draft()['sequence']
         if not 0 <= index+delta < len(rows): return
         rows[index], rows[index+delta] = rows[index+delta], rows[index]
+        reset_imported_timing(self.draft())
         self.changed(); self.show_point(); self.rows.selectRow(index+delta)
 
     def join_times(self):
         rows = self.draft()['sequence']
+        reset_imported_timing(self.draft())
         for previous, row in zip(rows, rows[1:]):
             start = pd.Timestamp(previous['End Datetime']).to_pydatetime()
             hours = float(row.get('Duration (hrs)') or (pd.Timestamp(row.get('_exact_end') or row['End Datetime'])-
@@ -529,6 +581,8 @@ class MultiManualAuthoring(QWidget):
                     dialog = ManualSteadyStateDialog(planner, states, allocations, self)
                     if dialog.exec_() != QDialog.Accepted: return
                     allocations, report = dialog.allocations, dialog.report
+                for point in planner.reset_direct_tip_points:
+                    self.drafts()[point] = deepcopy(planner.drafts[point])
                 for point, draft in self.drafts().items():
                     keys = {s['state_key'] for s in states if s['tipping_point'] == point}
                     draft['allocations'] = {k: v for k, v in allocations.items() if k in keys}
@@ -539,7 +593,7 @@ class MultiManualAuthoring(QWidget):
                 self.host.capture_active_manual_plan_state(); self.host.save_active_scenario_state()
                 from GUI.WorkflowSubmissions import submitted
                 submitted(self.host, 'blend_sequence')
-                self.timeline.set_report(report, self.feed['tipping_points'])
+                self.show_point()
                 self.status.setText(f'{plan_id}: calculated {len(states)} steady states across {len(planner.planners)} tipping points. Blend Plan is ready to review.')
                 self.host.set_page_enabled('blend_plan', True)
             def failed(error):

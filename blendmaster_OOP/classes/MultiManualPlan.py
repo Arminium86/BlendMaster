@@ -57,6 +57,23 @@ def has_drafts(drafts):
                for d in (drafts or {}).values())
 
 
+def reset_imported_timing(draft):
+    """Release the copied solution when its point's authored schedule changes."""
+    had_selections = bool(draft.get('direct_tip_rows') or draft.get('allocations'))
+    draft['direct_tip_rows'] = []
+    draft['allocations'] = {}
+    for row in draft.get('sequence', []):
+        if row.get('_exact_start') and row.get('_exact_end'):
+            start, end = pd.Timestamp(row['_exact_start']), pd.Timestamp(row['_exact_end'])
+            row.update({'Start Datetime': start.to_pydatetime(), 'End Datetime': end.to_pydatetime(),
+                        'Duration (hrs)': (end-start).total_seconds()/3600})
+        for key in list(row):
+            if key.startswith('_'):
+                row.pop(key)
+        row['Origin'] = 'Manual'
+    return had_selections
+
+
 def definitions(draft):
     result = []
     seen = set()
@@ -80,6 +97,14 @@ class MultiManualPlanner:
 
     def __init__(self, drafts, stockpiles, chunks, payloads, periods, targets, calendar, topology):
         self.drafts = deepcopy(drafts)
+        self.reset_direct_tip_points = []
+        # Older saved drafts retained copied direct-tip tonnes after timing or
+        # recipe edits. They must be reviewed against the new state windows.
+        for point, draft in self.drafts.items():
+            if draft.get('direct_tip_rows') and any(
+                    not row.get('_fixed_steady_state') for row in draft.get('sequence', [])):
+                reset_imported_timing(draft)
+                self.reset_direct_tip_points.append(point)
         self.periods = {k: v for k, v in periods.items() if k.endswith(('_start', '_end'))}
         self.targets, self.calendar, self.topology = targets, deepcopy(calendar), topology
         context = self.calendar.get('site_context') or {}

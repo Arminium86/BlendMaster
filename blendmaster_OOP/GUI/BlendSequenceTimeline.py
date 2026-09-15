@@ -45,25 +45,79 @@ class IntervalItem(QGraphicsRectItem):
     def __init__(self, rect, index, record, owner):
         super().__init__(rect)
         self.index, self.owner = index, owner
+        self.drag_edge = None
+        self.setAcceptHoverEvents(True)
         color = QColor.fromHsv(int(hashlib.sha1(str(record['blend_ID']).encode()).hexdigest()[:4], 16) % 360, 135, 190)
         self.setBrush(QBrush(color)); self.setPen(QPen(color.darker(115)))
         self.setFlag(self.ItemIsSelectable)
         self.setToolTip(html.escape(f"{record['opf']} / {record['tipping_point']}\nBlend {record['blend_ID']} · state {record['steady_state_number']}\n"
             f"{record['start_datetime']} → {record['end_datetime']}\n{record['tonnes']:,.1f} t · {record['rate']:,.1f} t/h\n"
             f"Direct tip: {record['direct_tip_ratio']:.2%}\n{record['sources']}").replace('\n','<br>'))
+        if owner.editable:
+            self.setToolTip(html.escape(f"{record['opf']} / {record['tipping_point']}\nBlend {record['blend_ID']}\n"
+                f"{record['start_datetime']} → {record['end_datetime']}\nDrag either edge to resize draft timing.").replace('\n', '<br>'))
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        if self.owner.editable and self.rect().width() >= 12:
+            painter.setPen(QPen(QColor('#ffffff'), 2))
+            for x in (self.rect().left()+4, self.rect().right()-4):
+                painter.drawLine(int(x), int(self.rect().top()+8), int(x), int(self.rect().bottom()-8))
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
-        self.owner.select_interval(self.index)
+        if not self.owner.editable:
+            self.owner.select_interval(self.index)
+        if self.owner.editable and event.button() == Qt.LeftButton:
+            self.drag_edge = self.edge_at(event.pos().x())
+            if self.drag_edge:
+                self.original_rect = QRectF(self.rect())
+                self.press_x = event.scenePos().x()
+                event.accept()
+
+    def edge_at(self, x):
+        distances = [(abs(x-self.rect().left()), 'start'), (abs(x-self.rect().right()), 'end')]
+        distance, edge = min(distances)
+        return edge if distance <= 8 else None
+
+    def hoverMoveEvent(self, event):
+        self.setCursor(Qt.SizeHorCursor if self.owner.editable and self.edge_at(event.pos().x()) else Qt.ArrowCursor)
+        super().hoverMoveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.drag_edge:
+            super().mouseMoveEvent(event); return
+        rect = QRectF(self.original_rect)
+        delta = event.scenePos().x()-self.press_x
+        if self.drag_edge == 'start': rect.setLeft(min(rect.right()-1, rect.left()+delta))
+        else: rect.setRight(max(rect.left()+1, rect.right()+delta))
+        self.setRect(rect); event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if not self.drag_edge:
+            super().mouseReleaseEvent(event)
+            if self.owner.editable:
+                owner, index = self.owner, self.index
+                QTimer.singleShot(0, lambda: owner.select_interval(index))
+            return
+        edge, self.drag_edge = self.drag_edge, None
+        delta = ((self.rect().left()-self.original_rect.left()) if edge == 'start'
+                 else (self.rect().right()-self.original_rect.right()))
+        index, seconds = self.index, delta*self.owner.seconds_per_pixel
+        event.accept()
+        # Redrawing destroys scene items; wait until this mouse handler exits.
+        QTimer.singleShot(0, lambda: self.owner.resize_interval(index, edge, seconds))
 
 
 class BlendSequenceTimeline(QWidget):
     interval_selected = pyqtSignal(object)
+    interval_resized = pyqtSignal(object, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.report, self.intervals, self.configured_points = pd.DataFrame(), [], []
         self.zoom = 1.0
+        self.editable = False
         layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         bar = QHBoxLayout(); bar.addWidget(QLabel('Tipping point'))
         self.points = QComboBox(); self.points.addItem('All tipping points', None)
@@ -74,7 +128,7 @@ class BlendSequenceTimeline(QWidget):
             button = QPushButton(caption); button.clicked.connect(action); bar.addWidget(button)
         bar.addStretch(); self.status = QLabel('No saved sequence is available.'); self.status.setWordWrap(True)
         bar.addWidget(self.status); layout.addLayout(bar)
-        note = QLabel('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
+        note = self.note = QLabel('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
         note.setWordWrap(True); layout.addWidget(note)
         splitter = QSplitter(Qt.Vertical)
         self.scene = QGraphicsScene(self); self.view = QGraphicsView(self.scene)
@@ -90,6 +144,8 @@ class BlendSequenceTimeline(QWidget):
         layout.addWidget(splitter,1)
 
     def set_report(self, report, points=()):
+        self.editable = False
+        self.note.setText('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
         selected = self.points.currentData()
         self.report, self.intervals = sequence_data(report)
         self.configured_points = [(str(p.get('opf') or ''), str(p['name'])) for p in points]
@@ -100,6 +156,30 @@ class BlendSequenceTimeline(QWidget):
         found = self.points.findData(selected)
         self.points.setCurrentIndex(max(0,found)); self.points.blockSignals(False)
         self.details.hide(); self.draw()
+
+    def set_drafts(self, drafts, points):
+        self.set_report(pd.DataFrame(), points)
+        self.editable = True
+        self.note.setText('Editable draft timing, coloured by Blend ID. Drag either bar edge to expand or shrink it, then review direct tip and submit to recalculate.')
+        opfs = {p['name']: p.get('opf', '') for p in points}
+        for point, draft in drafts.items():
+            for index, row in enumerate(draft.get('sequence', [])):
+                start = pd.to_datetime(row.get('_exact_start') or row.get('Start Datetime'))
+                end = pd.to_datetime(row.get('_exact_end') or row.get('End Datetime'))
+                if pd.isna(start) or pd.isna(end) or end <= start: continue
+                self.intervals.append(dict(opf=opfs.get(point, ''), tipping_point=point,
+                    blend_ID=row.get('Blend ID', ''), steady_state_number=index+1,
+                    start_datetime=start, end_datetime=end, draft_index=index,
+                    tonnes=0, rate=0, direct_tip_ratio=0, sources='Draft timing — submit to calculate tonnes and grades'))
+        self.draw()
+
+    def resize_interval(self, index, edge, seconds):
+        if not self.editable or not seconds: return
+        record = self.intervals[index]
+        start, end = record['start_datetime'], record['end_datetime']
+        if edge == 'start': start = min(start+pd.Timedelta(seconds=seconds), end-pd.Timedelta(seconds=1))
+        else: end = max(end+pd.Timedelta(seconds=seconds), start+pd.Timedelta(seconds=1))
+        self.interval_resized.emit(record, start, end)
 
     def set_zoom(self, zoom):
         self.zoom = max(1, min(zoom, 32)); self.draw()
@@ -116,6 +196,7 @@ class BlendSequenceTimeline(QWidget):
         end = max(r['end_datetime'] for r in self.intervals)
         duration = max(1, (end-start).total_seconds())
         left, width = 205, max(480, self.view.viewport().width()-235)*self.zoom
+        self.seconds_per_pixel = duration/width
         bottom = 65+len(lanes)*68
         for tick in range(7):
             at = start + (end-start)*tick/6
@@ -144,6 +225,9 @@ class BlendSequenceTimeline(QWidget):
 
     def select_interval(self, index):
         record = self.intervals[index]
+        if self.editable:
+            self.interval_selected.emit(record)
+            return
         columns = [c for c in ['tipping_point','opf','blend_ID','steady_state_number','source','source_type',
             'source_actual_tonnes','crusher_rate_output','source_grade_fe','source_grade_si',
             'source_grade_al','source_grade_p','source_grade_mn'] if c in self.report]

@@ -55,6 +55,11 @@ class ManualSteadyStateDialog(QDialog):
         )
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
+        reset_points = getattr(planner, 'reset_direct_tip_points', [])
+        if reset_points:
+            notice = QLabel('Timing or recipe edits invalidated copied direct-tip selections for '
+                            + ', '.join(reset_points) + '. Review and select direct tip for the new states below.')
+            notice.setWordWrap(True); layout.addWidget(notice)
 
         self.table = QTableWidget()
         self.table.setColumnCount(len(self.HEADERS))

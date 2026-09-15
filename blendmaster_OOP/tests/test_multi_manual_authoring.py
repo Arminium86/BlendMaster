@@ -33,6 +33,26 @@ def inputs():
 
 
 class MultiManualCalculationTests(unittest.TestCase):
+    def test_edited_legacy_draft_does_not_restore_stale_optimised_direct_tip(self):
+        args = list(inputs())
+        args[0]['A']['direct_tip_rows'] = [dict(source='OLD_BLOCK', selected_tonnes=617.8,
+            start_datetime=START, end_datetime=START+timedelta(hours=1), optimised_steady_state=2)]
+        planner = MultiManualPlanner(*args)
+        states = planner.build_steady_states()
+        self.assertEqual(planner.imported_allocations(states), {})
+        self.assertEqual(planner.reset_direct_tip_points, ['A'])
+        self.assertFalse(planner.build_report(states).empty)
+        self.assertTrue(args[0]['A']['direct_tip_rows'])  # worker owns a copy
+
+    def test_unchanged_import_still_reports_missing_direct_tip_evidence(self):
+        args = list(inputs())
+        args[0]['A']['sequence'][0]['_fixed_steady_state'] = True
+        args[0]['A']['direct_tip_rows'] = [dict(source='MISSING_BLOCK', selected_tonnes=617.8,
+            start_datetime=START, end_datetime=START+timedelta(hours=1), optimised_steady_state=2)]
+        planner = MultiManualPlanner(*args)
+        with self.assertRaisesRegex(ValueError, 'Could not transfer'):
+            planner.imported_allocations(planner.build_steady_states())
+
     def test_new_recipes_work_without_any_optimisation_result(self):
         planner = MultiManualPlanner(*inputs())
         states = planner.build_steady_states(); report = planner.build_report(states)
@@ -200,6 +220,67 @@ class MultiManualWidgetTests(unittest.TestCase):
         widget.join_times()
         self.assertEqual(widget.draft()['sequence'][1]['Start Datetime'], widget.draft()['sequence'][0]['End Datetime'])
         widget.rows.selectRow(1); widget.remove_rows(); self.assertEqual(widget.rows.rowCount(), 1)
+
+    def test_bar_edges_resize_draft_and_preserve_other_point(self):
+        from GUI.BlendSequenceTimeline import IntervalItem
+        host = self.host(); other = deepcopy(host.manual_point_drafts['B'])
+        widget = MultiManualAuthoring(host, sequence=True); widget.refresh()
+        host.manual_point_drafts['A']['direct_tip_rows'] = [{'selected_tonnes': 617.8}]
+        host.manual_point_drafts['A']['allocations'] = {'old state': {'block': 617.8}}
+        index = next(i for i, r in enumerate(widget.timeline.intervals) if r['tipping_point'] == 'A')
+        bars = [item for item in widget.timeline.scene.items() if isinstance(item, IntervalItem)]
+        self.assertEqual(bars[0].edge_at(bars[0].rect().right()), 'end')
+        widget.timeline.resize_interval(index, 'end', 1800)
+        self.assertEqual(widget.rows.cellWidget(0, 3).value(), 1.5)
+        self.assertEqual(host.manual_point_drafts['A']['sequence'][0]['Duration (hrs)'], 1.5)
+        self.assertEqual(host.manual_point_drafts['A']['direct_tip_rows'], [])
+        self.assertEqual(host.manual_point_drafts['A']['allocations'], {})
+        self.assertEqual(host.manual_point_drafts['B'], other)
+        widget.timeline.resize_interval(index, 'start', 900)
+        self.assertEqual(host.manual_point_drafts['A']['sequence'][0]['Start Datetime'], START+timedelta(minutes=15))
+        self.assertEqual(widget.rows.cellWidget(0, 3).value(), 1.25)
+        widget.refresh()
+        self.assertEqual(widget.rows.cellWidget(0, 3).value(), 1.25)
+
+    def test_resize_cannot_overlap_next_bar(self):
+        widget = MultiManualAuthoring(self.host(), sequence=True); widget.refresh(); widget.add_row()
+        index = next(i for i, r in enumerate(widget.timeline.intervals) if r['tipping_point'] == 'A' and r['draft_index'] == 0)
+        widget.timeline.resize_interval(index, 'end', 1800)
+        rows = widget.draft()['sequence']
+        self.assertEqual(rows[0]['End Datetime'], rows[1]['Start Datetime'])
+
+    def test_mouse_drag_on_bar_edge_updates_sequence(self):
+        from PyQt5.QtCore import QPoint, QEvent
+        from PyQt5.QtGui import QMouseEvent
+        from PyQt5.QtTest import QTest
+        from GUI.BlendSequenceTimeline import IntervalItem
+        widget = MultiManualAuthoring(self.host(), sequence=True)
+        widget.resize(1100, 800); widget.refresh(); widget.show(); self.app.processEvents()
+        timeline = widget.timeline
+        bar = next(item for item in timeline.scene.items() if isinstance(item, IntervalItem)
+                   and timeline.intervals[item.index]['tipping_point'] == 'A')
+        pos = timeline.view.mapFromScene(bar.rect().topRight()) + QPoint(-2, 17)
+        destination = pos-QPoint(80, 0)
+        QTest.mousePress(timeline.view.viewport(), Qt.LeftButton, Qt.NoModifier, pos)
+        self.app.sendEvent(timeline.view.viewport(), QMouseEvent(QEvent.MouseMove, destination,
+            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+        QTest.mouseRelease(timeline.view.viewport(), Qt.LeftButton, Qt.NoModifier, destination)
+        self.app.processEvents()
+        self.assertLess(widget.draft()['sequence'][0]['Duration (hrs)'], 1)
+        self.assertGreater(widget.draft()['sequence'][0]['Duration (hrs)'], 0)
+        self.assertAlmostEqual(widget.rows.cellWidget(0, 3).value(),
+                               widget.draft()['sequence'][0]['Duration (hrs)'], places=6)
+        widget.close()
+
+    def test_table_edit_does_not_resurrect_old_transfer_on_next_save(self):
+        host = self.host(); planner = MultiManualPlanner(*inputs())
+        host.manual_point_drafts = from_report(planner.build_report(planner.build_steady_states()))
+        widget = MultiManualAuthoring(host, sequence=True); widget.refresh()
+        widget.draft()['direct_tip_rows'] = [{'selected_tonnes': 617.8}]
+        widget.rows.cellWidget(0, 3).setValue(2)
+        widget.save_point()
+        self.assertEqual(widget.draft()['direct_tip_rows'], [])
+        self.assertNotIn('_fixed_steady_state', widget.draft()['sequence'][0])
 
     def test_imported_subsecond_timing_is_unchanged_until_a_control_is_edited(self):
         host = self.host(); planner = MultiManualPlanner(*inputs()); report = planner.build_report(planner.build_steady_states())
