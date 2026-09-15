@@ -1,5 +1,5 @@
 """Apply grade mappings/reconciliation to a worker-owned inventory snapshot."""
-from copy import deepcopy
+from classes.AcceptedEvidence import copy_preparation_state
 import inspect
 from classes.PlanningPersistence import PLAN_FIELDS
 
@@ -40,7 +40,7 @@ def apply(host, on_complete):
     values = {name: vars(host)[name] for name in FIELDS if name in vars(host)}
     implementation = type(host)
     def work():
-        context = InventoryContext(implementation, deepcopy(values))
+        context = InventoryContext(implementation, copy_preparation_state(values))
         context._reconciliation_application_cache = None  # Never inherit manual-search permission.
         context.apply_canonical_field_mappings()
         if (vars(context).get('multi_feed_configuration') or {}).get('mode') != 'combined_opf':

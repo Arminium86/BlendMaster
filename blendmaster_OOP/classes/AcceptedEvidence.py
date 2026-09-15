@@ -16,6 +16,25 @@ def copy_preparation_state(values):
     return deepcopy(values, {id(value): value for value in shared if isinstance(value, (dict, list, tuple))})
 
 
+def copy_factor_detail(detail):
+    """Detach application/factor edits without cloning accepted search history.
+
+    Resolvers finish constructing history and provenance before publication.
+    Consumers may replace those fields, but must not edit their contents. Factor
+    maps, coverage and source metadata remain private to each application.
+    """
+    shared = [detail.get('auto_selection')]
+    for record in detail.get('records') or []:
+        shared.extend(record.get(key) for key in ('source_history', 'provenance'))
+    return deepcopy(detail, {id(value): value for value in shared if isinstance(value, (dict, list, tuple))})
+
+
+def copy_prepared_source(row):
+    """Detach editable source values; published reconciliation audits are read-only."""
+    audit = row.get('reconciliation')
+    return deepcopy(row, {id(audit): audit} if isinstance(audit, dict) else {})
+
+
 def fork_registry(registry):
     result = dict(registry or {})
     result['sources'] = dict(result.get('sources') or {})

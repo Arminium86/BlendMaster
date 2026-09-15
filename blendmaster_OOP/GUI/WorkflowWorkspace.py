@@ -167,6 +167,8 @@ def install(host):
     host.product_build_layout.insertWidget(1, review)
     from GUI.WorkflowViews import WorkflowViews
     host._workflow_views = WorkflowViews(host)
+    from GUI.WorkflowTaskControls import WorkflowTaskControls
+    host._workflow_task_controls = WorkflowTaskControls(host)
     refresh_context(host)
 
 

@@ -15,6 +15,7 @@ from classes.ApprovedReconciliation import (
 )
 
 from classes.SourceSnapshots import digest, evidence_signature, approval_valid
+from classes.AcceptedEvidence import copy_factor_detail
 
 from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
@@ -95,7 +96,7 @@ class ReconciliationApplication:
         """Keep completed source searches available beyond the small working LRU.
 
         These are read-only references to the existing review/profile evidence;
-        callers always receive copies before applying current grades/coverage.
+        callers receive private factors/coverage with shared read-only history.
         Aggregate chunk audits have no factor signature; their member hexes do.
         """
         if self.registry is not None:
@@ -127,7 +128,7 @@ class ReconciliationApplication:
             if ((self.accepted_movement and approved.get('policy') == self.policy) or
                     approval_valid(approved, self.policy, content, self.evidence, self.scenario_start,
                                    self.settings['lookback_refresh_tolerance_minutes'])):
-                result = deepcopy(approved['detail'])
+                result = copy_factor_detail(approved['detail'])
                 result['source_wmt'] = total
                 return result
             if not self.allow_search:
@@ -136,12 +137,12 @@ class ReconciliationApplication:
         key = reconciliation_fingerprint([
             self.factor_context_signature, brand, source_id, source_kind, blocks, total, hex_id])
         if self.registry is None and isinstance(prior, dict) and prior.get('factor_signature') == key:
-            return deepcopy(prior)
+            return copy_factor_detail(prior)
         if self.registry is None and key in self._retained_sources:
-            return deepcopy(self._retained_sources[key])
+            return copy_factor_detail(self._retained_sources[key])
         if self.registry is None and key in self._resolved_sources:
             self._resolved_sources.move_to_end(key)
-            return deepcopy(self._resolved_sources[key])
+            return copy_factor_detail(self._resolved_sources[key])
         if not self.allow_search:
             raise ReconciliationRequired('Factor searches require a manual Grade Reconciliation update.')
         result = self.resolvers[brand].resolve_source(source_id, source_kind, blocks, total, hex_id=hex_id)
@@ -149,10 +150,10 @@ class ReconciliationApplication:
         if self.registry is not None and total > 0:
             result.update(approval_policy=self.policy, source_identity=identity,
                           calculated_at=datetime.now().isoformat(), evidence_as_of=str(self.scenario_start))
-            self.registry.setdefault('sources', {})[approved_key] = dict(policy=self.policy, detail=deepcopy(result),
+            self.registry.setdefault('sources', {})[approved_key] = dict(policy=self.policy, detail=copy_factor_detail(result),
                 source_content=content, historical_evidence=self.evidence, lookback_anchor=str(self.scenario_start))
         if self.registry is None:
-            self._resolved_sources[key] = deepcopy(result)
+            self._resolved_sources[key] = copy_factor_detail(result)
             if len(self._resolved_sources) > 4096:
                 self._resolved_sources.popitem(last=False)
         return result

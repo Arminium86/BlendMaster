@@ -1,5 +1,5 @@
 """Publish prepared chemistry to source records and the AMT view without searches."""
-from copy import deepcopy
+from classes.AcceptedEvidence import copy_prepared_source
 
 
 def publish(host, profiles):
@@ -17,11 +17,12 @@ def publish(host, profiles):
             for opf in ordered:
                 row = (profiles.get(opf) or {}).get(section, {}).get(identity)
                 if row is not None:
-                    row = deepcopy(row)
-                    row['prepared_grade_opf'] = opf
+                    row = {**row, 'prepared_grade_opf': opf}
                     if section == 'chunks':
                         row['GRADE_STREAMS'] = row.get('grade_streams') or {}
-                    return row
+                    # Cache hits still hydrate restored/missing rows, but leave
+                    # unchanged rows in place without copying their evidence.
+                    return original if original == row else copy_prepared_source(row)
             return original
         if section == 'inventory':
             for identity in values:
@@ -50,7 +51,7 @@ def sync_map(host):
         row = prepared.get(identity(original))
         updates = {key: value for key, value in row.items() if key not in controls} if row else {}
         if any(original.get(key) != value for key, value in updates.items()):
-            original = {**original, **deepcopy(updates)}
+            original = {**original, **copy_prepared_source(updates)}
             changed = True
         rows.append(original)
     if changed:

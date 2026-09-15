@@ -114,6 +114,58 @@ forced warehouse verification, per-source reconciliation, evidence changes,
 anchored tolerance boundaries and UI/default validation. Existing cancellation,
 atomic publication, multi-OPF, approval and workflow tests also apply.
 
+## Task submissions and role-safe dependencies
+
+The Run button above the navigation submits or continues the active task using
+its existing validation. Workspace progresses from top to bottom for both roles;
+Support submissions stay on their page, including background completions.
+Grade Reconciliation Run updates missing evidence when submission is unavailable;
+review the resulting factors and Run again to submit. Secondary actions such as
+exports and explicit refreshes remain on their pages.
+
+Task receipts are saved with the site: green means submitted, red means a
+dependent task needs resubmission, and the next required task is neutral.
+Editing submitted inputs invalidates downstream receipts without discarding
+cached evidence or navigating away. Support configuration submissions invalidate
+their dependent Workspace tasks. Views with no rows are disabled; the Load views
+menu provides access to load Database, Expit and production history while those
+tabs are unavailable.
+
+Calendar checks conveyor/COS actuals after capturing the submitted opening rates.
+Missing or stale actuals refresh automatically from saved Support settings for
+either role. A successful refresh returns to Grade Reconciliation and waits for
+user review, invalidating the later Workspace submissions. Failure retains the
+previous actuals; results from a different site, database or request are rejected.
+Planners do not gain permission to edit Support settings. Tests cover global Run,
+asynchronous Support navigation, receipts, empty views, reuse and failed refreshes.
+
+## Reconciliation copy ownership
+
+Factor application now copies editable factor maps, coverage and source metadata
+while retaining read-only search history, provenance and automatic-selection
+evidence. Opening transport movements reuse the same evidence with their own
+movement tonnes. A factor edit cannot alter the accepted factors for another
+application. Changes to evidence still require replacement and normal approval
+validation; sharing does not bypass invalidation or enable background searches.
+
+Manual reconciliation, inventory application and OPF preparation workers use the
+accepted-evidence snapshot boundary. Editable source records remain detached;
+manual reconciliation forks the registry before replacing approvals. Completed
+OPF profiles share their read-only audits with published inventory/chunk rows.
+Unchanged publication leaves rows in place; missing or changed grades still
+hydrate from the profile. AMT chunk builders use temporary member row shells and
+transfer completed member audits, without copying their nested history again.
+
+History delivery copies the cache and editable fields once each, without an
+intermediate whole-result copy. Effective overrides cannot mutate cached history.
+Scenario restoration detaches each required mutable field without first copying
+the whole scenario. Restored caches and selected crushers remain isolated from
+the saved scenario, as do the editable inventory and chunk collections.
+
+`tests/test_reconciliation_copy_cost.py` enforces these copy budgets and checks
+failed-worker isolation, repeated application, cache hydration and saved-state
+isolation. These are bounded fixtures, not a production-scale timing benchmark.
+
 ## Remaining work
 
 Cold project hydration still copies restored site models and computes complete

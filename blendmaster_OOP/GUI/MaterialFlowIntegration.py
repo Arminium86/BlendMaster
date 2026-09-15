@@ -44,7 +44,12 @@ def submit_setup(gui):
         settings = gui.transport_setup.settings()
         gui.transport_settings = settings
         gui.setup_flow_graph.set_graph(topology_for_gui(gui),gui.flow_node_positions)
-        gui.transport_setup.status.setText('Transport settings submitted. Refresh opening actual movements after changing capacities, opening rates or scenario start.')
+        gui.transport_setup.status.setText('Transport settings submitted. Workspace Run will refresh opening actuals when required.')
+        from GUI.WorkflowSubmissions import support_submitted
+        support_submitted(gui, 'material_flow')
+        save = getattr(gui, 'save_active_scenario_state', None)
+        if callable(save):
+            save()
         return True
     except (ValueError,TypeError) as exc:
         gui.transport_setup.status.setText(str(exc))

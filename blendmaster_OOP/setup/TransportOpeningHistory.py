@@ -239,7 +239,7 @@ def opening_history_events(bundle, context, config):
             matches = [identity for identity in identities if len(identity) == 6 and identity[0] == str(context.get('mine') or '').strip().upper() and identity[1] == normalise_opf(opf)
                        and identity[2] == 'inventory' and identity[4] == str(row.get('SOURCE') or '').strip().upper()]
             if not matches:
-                raise ReconciliationRequired(f"{row.get('SOURCE')}: opening transport requires approved source factors. Refresh opening actual movements in Transport Settings, then open Grade Reconciliation and select Update missing sources.")
+                raise ReconciliationRequired(f"{row.get('SOURCE')}: opening transport requires approved source factors. Opening actuals must be current before reviewing Grade Reconciliation.", workflow_page='material_flow')
             identity = max(matches, key=lambda key: identities[key])
             managed = continuous_inventory(opening_state, opf, identity[3], {'build': identity[4]})
             if managed:

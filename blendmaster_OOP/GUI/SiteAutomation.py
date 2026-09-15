@@ -79,6 +79,8 @@ class SiteAutomationPanel(QWidget):
                 raise ValueError('The contract site ID must match the selected site model.')
             self.host.site_workflow_contract = value
             self.host.shared_project_settings = shared
+            from GUI.WorkflowSubmissions import submitted
+            submitted(self.host, 'site_automation')
             self.host.save_active_scenario_state()
             self.status.setPlainText('Contract saved in this project session. Save Project to retain it between sessions.')
             return True

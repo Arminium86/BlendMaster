@@ -1,5 +1,5 @@
 """Prepare independent OPF source chemistry without blocking the Qt event loop."""
-from copy import deepcopy
+from classes.AcceptedEvidence import copy_preparation_state
 from PyQt5.QtCore import QObject
 from classes.CombinedOPFReconciliation import (
     SOURCE_FIELDS, build_profiles, evidence_signature, profile_signature, reusable_cache,
@@ -39,7 +39,7 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
     host._opf_profile_waiters = [(on_complete, on_error)]
 
     def work():
-        state = deepcopy(values)
+        state = copy_preparation_state(values)
         # Read old audits without copying the entire old profile. Reuse is
         # checked per source even when chunking invalidated the profile itself.
         state['_combined_opf_profile_cache'] = previous_profiles

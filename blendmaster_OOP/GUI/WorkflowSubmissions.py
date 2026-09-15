@@ -11,7 +11,7 @@ SUPPORT_OWNER = {
     'site_model': 'site_configuration', 'guidance_settings': 'guidance_schedules',
     'define_fields': 'grade_reconciliation', 'map_fields': 'grade_reconciliation',
     'data_streams': 'grade_reconciliation', 'solver_configuration': 'decision_levers',
-    'multi_feed_setup': 'decision_levers', 'material_flow': 'decision_levers',
+    'multi_feed_setup': 'decision_levers', 'material_flow': 'grade_reconciliation',
 }
 OPERATIONS = {
     'handle_site_config_submit': 'site_configuration',
@@ -64,7 +64,12 @@ def persist(host):
         site['workflow_submission_state'] = deepcopy(state.get('workflow_submission_state'))
 
 
-def return_to(host, page, reason):
+def return_to(host, page, reason, *, navigate=True):
+    if page == 'material_flow':
+        from GUI.WorkflowActuals import ensure
+        if ensure(host):
+            return True
+        page = 'grade_reconciliation'
     page = SUPPORT_OWNER.get(page, page)
     pages = order(host, include_optional=True)
     if page not in pages:
@@ -74,27 +79,84 @@ def return_to(host, page, reason):
     required = pages[first:]
     previous = vars(host).get('workflow_submission_state') or {}
     revision = int(previous.get('revision') or 0) + (previous.get('required') != required)
-    host.workflow_submission_state = dict(required=required, reason=str(reason), return_to=page, revision=revision)
+    host.workflow_submission_state = {**previous, 'required': required, 'reason': str(reason),
+        'return_to': page, 'revision': revision,
+        'completed': [p for p in previous.get('completed', []) if p not in required]}
     host._workflow_optimisation_finished = False
-    for target in required:
-        host.set_page_enabled(target, target == required[0])
+    enable = getattr(host, 'set_page_enabled', None)
+    if callable(enable):
+        for target in required:
+            enable(target, target == required[0])
     label = vars(host).get('calendar_workflow_status')
     if label is not None:
         label.setText(str(reason) + '\nSubmit the remaining Workspace tasks in order; saved inputs are retained.')
     persist(host)
-    host.show_page(required[0], force=True)
+    if navigate:
+        host.show_page(required[0], force=True)
     return True
 
 
 def submitted(host, page):
+    state = vars(host).get('workflow_submission_state') or {}
+    host.workflow_submission_state = {**state, 'completed': list(dict.fromkeys([*state.get('completed', []), page]))}
+    host.workflow_submission_state['dirty'] = [p for p in state.get('dirty', []) if p != page]
     required = pending(host)
     if required and required[0] == page:
         host.workflow_submission_state = {**(vars(host).get('workflow_submission_state') or {}),
             'required': [p for p in host.workflow_submission_state['required'] if p != page]}
+    persist(host)
+
+
+def support_submitted(host, page):
+    owner = SUPPORT_OWNER.get(page)
+    if owner:
+        return_to(host, owner, 'Support settings submitted. Resubmit the dependent Workspace tasks.', navigate=False)
+    submitted(host, page)
+
+
+def edited(host, page):
+    from GUI.WorkflowNavigation import SUPPORT
+    state = vars(host).get('workflow_submission_state') or {}
+    if page not in state.get('completed', []):
+        return
+    if page in SUPPORT:
+        host.workflow_submission_state = {**state, 'dirty': list(dict.fromkeys([*state.get('dirty', []), page]))}
         persist(host)
+    return_to(host, SUPPORT_OWNER.get(page, page), 'Inputs changed. Resubmit this task and the following Workspace tasks.', navigate=False)
+
+
+def task_status(host, page):
+    """Receipts describe submissions, independently of retained result caches."""
+    required = pending(host)
+    if page in required:
+        return 'next' if page == required[0] else 'resubmit'
+    state = vars(host).get('workflow_submission_state') or {}
+    if page in state.get('dirty', []):
+        return 'resubmit'
+    if page in state.get('completed', []):
+        return 'ready'
+    return 'next'
+
+
+def actuals_required(host, target):
+    from GUI.WorkflowNavigation import SUPPORT
+    if vars(host).get('_workflow_run_origin') in SUPPORT:
+        return False
+    if target in ('grade_reconciliation', 'blend_sequence'):
+        # Calendar captures edited opening rates before checking this dependency.
+        # On a new single-feed model those rates do not exist at grade review yet.
+        if target == 'grade_reconciliation' and not vars(host).get('calendar_inputs'):
+            return False
+        from GUI.WorkflowActuals import ensure
+        return ensure(host)
+    return False
 
 
 def can_submit(host, page):
+    from GUI.WorkflowNavigation import SUPPORT, page_allowed
+    origin = vars(host).get('_workflow_run_origin')
+    if origin in SUPPORT and page_allowed(host, origin):
+        return True
     required = pending(host)
     if not required:
         return True
@@ -120,6 +182,8 @@ def guard_submissions(cls):
                     if can_submit(self, target):
                         from GUI.SupportSubmission import prepare
                         prepare(self, target)
+                        if actuals_required(self, target):
+                            return False
                         return fn(self)
                     return False
             else:
@@ -128,6 +192,8 @@ def guard_submissions(cls):
                     if can_submit(self, target):
                         from GUI.SupportSubmission import prepare
                         prepare(self, target)
+                        if actuals_required(self, target):
+                            return False
                         return fn(self, *args, **kwargs)
                     return False
             return wrapped

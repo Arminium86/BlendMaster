@@ -1662,8 +1662,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.is_project_loaded = previous_project_loaded
 
     def restore_site_scenario(self, state):
-        state = copy.deepcopy(migrate_project_state(state or {}))
-        self._combined_opf_profile_cache = state.get('_combined_opf_profile_cache')
+        # Migration owns its outer mapping; each restored mutable field is
+        # detached below. Avoid copying the entire scenario before those copies.
+        state = migrate_project_state(state or {})
+        self._combined_opf_profile_cache = copy.deepcopy(state.get('_combined_opf_profile_cache'))
         self.scenario_switch_in_progress = True
         try:
             set_database_path(state.get("database_path") or self.scenario_database_path(self.active_scenario_id))
@@ -1687,9 +1689,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 state.get("crusher_input_choice"),
             )
             self.crusher_input_choice = state.get("crusher_input_choice")
-            self.selected_site_crushers = state.get("selected_site_crushers") or (
+            self.selected_site_crushers = list(state.get("selected_site_crushers") or (
                 [self.crusher_input_choice] if self.crusher_input_choice else []
-            )
+            ))
             self.time_mode_choice = state.get("time_mode_choice") or 1
             self.start_time_choice = state.get("start_time_choice") or datetime.now()
             self.planning_period_count_choice = PeriodManager.normalize_period_count(
@@ -1903,7 +1905,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.AMT_chunk_reconciliation_signature = str(
                 state.get("AMT_chunk_reconciliation_signature") or ""
             )
-            self.inventory_source_cache = state.get("inventory_source_cache") or {}
+            self.inventory_source_cache = copy.deepcopy(state.get("inventory_source_cache") or {})
             self.AMT_last_refresh_datetime = state.get(
                 "AMT_last_refresh_datetime"
             )
@@ -2039,12 +2041,12 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             from classes.SolverPresets import preset_library
             self.solver_presets = preset_library(state.get("solver_presets"))
             self.selected_solver_preset = state.get("selected_solver_preset") or ''
-            self.min_stockpiles = state.get("min_stockpiles")
-            self.max_stockpiles = state.get("max_stockpiles")
-            self.min_stockpile_contribution_ratio = state.get(
+            self.min_stockpiles = copy.deepcopy(state.get("min_stockpiles"))
+            self.max_stockpiles = copy.deepcopy(state.get("max_stockpiles"))
+            self.min_stockpile_contribution_ratio = copy.deepcopy(state.get(
                 "min_stockpile_contribution_ratio",
                 Optimizer.MIN_SELECTED_STOCKPILE_BLEND_RATIO,
-            )
+            ))
             self.saved_blends_for_schedule = copy.deepcopy(
                 state.get("saved_blends_for_schedule") or []
             )
@@ -3093,6 +3095,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.save_active_scenario_state()
         if hasattr(self, 'calendar_headers'):
             self.setup_calendar()
+        from GUI.WorkflowSubmissions import support_submitted
+        support_submitted(self, 'multi_feed_setup')
 
     def current_opf_profiles(self):
         from classes.CombinedOPFReconciliation import evidence_signature, reusable_cache
@@ -8168,6 +8172,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         ]
         self.populate_map_fields_table()
         self.refresh_map_available_fields()
+        from GUI.WorkflowSubmissions import support_submitted
+        support_submitted(self, 'define_fields')
         self.set_page_enabled(self.map_fields_tab_index, True)
         self.save_active_scenario_state()
         self.show_page(self.map_fields_tab_index, force=True)
@@ -8867,6 +8873,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.capture_map_fields_table()
         self.apply_canonical_field_mappings()
         self.apply_grade_streams_to_inventory(allow_pending=True)
+        from GUI.WorkflowSubmissions import support_submitted
+        support_submitted(self, 'map_fields')
         # AMT mappings are held in memory here. Data Streams owns the next
         # reconciliation-dependent enrichment and persists the completed hex
         # snapshot once, avoiding an intermediate full-table rewrite.
@@ -9924,7 +9932,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.reconciliation_review.set_busy(True)
 
         def calculate():
-            context = InventoryContext(UserInputs, copy.deepcopy(values))
+            from classes.AcceptedEvidence import copy_preparation_state
+            context = InventoryContext(UserInputs, copy_preparation_state(values))
             context._manual_grade_reconciliation = True
             context._reconciliation_application_cache = None
             # Source methods must bind to each OPF view, not this primary-OPF snapshot.
@@ -10250,7 +10259,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             and isinstance(cached_result, dict)
             and cached_result
         ):
-            self.finish_data_stream_inputs(copy.deepcopy(cached_result))
+            self.finish_data_stream_inputs(cached_result)
             return
         if (
             str(getattr(self, "data_stream_input_request_inflight", "") or "")
@@ -10386,7 +10395,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             return
         self.data_stream_input_cache_signature = str(request_signature or "")
         self.data_stream_input_cache_result = copy.deepcopy(result or {})
-        self.finish_data_stream_inputs(copy.deepcopy(result or {}))
+        # Delivery detaches its editable fields, including effective overrides.
+        self.finish_data_stream_inputs(result or {})
 
     def finish_data_stream_inputs(self, result):
         self.data_stream_refresh_errors = list(result.get('refresh_errors') or [])
@@ -18455,6 +18465,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def handle_solver_configuration_submit(self):
         if not self.store_solver_config_inputs():
             return
+        from GUI.WorkflowSubmissions import support_submitted
+        support_submitted(self, 'solver_configuration')
         self.save_active_scenario_state()
         self.navigate_to_product_targets()
 
@@ -21442,6 +21454,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.calendar_inputs["expit_material_brand_pairs"] = copy.deepcopy(
             getattr(self, "calendar_expit_material_brand_rows", {})
         )
+        from GUI.WorkflowActuals import ensure as ensure_opening_actuals
+        if ensure_opening_actuals(self):
+            return
         self.calendar_inputs["site_context"] = self.active_site_context()
         self.save_active_scenario_state()
 

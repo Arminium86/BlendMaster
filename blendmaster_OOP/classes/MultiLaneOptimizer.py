@@ -200,9 +200,7 @@ class MultiLaneOptimizer(Optimizer):
                     # Reserve that outlet rate before admitting new uniform feed,
                     # preserving FIFO and the conveyor's physical throughput.
                     if cfg['conveyor_capacity_wmt'] > 0 and rates[point['name']] > 0:
-                        aligned = flow.fork(audit=False)
-                        aligned.prepare_rates(rates)
-                        queued = aligned.points[point['name']]['conveyor']
+                        queued = flow.conveyor_schedule(point['name'], rates[point['name']])
                         lag = timedelta(hours=cfg['conveyor_capacity_wmt']/rates[point['name']])
                         outlet_end = end+lag
                         boundaries = {begin+lag for _,_,begin in available if begin < end}

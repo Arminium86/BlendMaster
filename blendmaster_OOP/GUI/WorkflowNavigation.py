@@ -1,6 +1,6 @@
 """Planner task order and role-aware navigation, independent of calculations."""
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QPainter
+from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QTabWidget, QTabBar, QStyle,
                              QStyleOptionTab, QStylePainter)
 from classes.ProductTargets import product_targets_identifier, migrate_product_target_state
@@ -37,6 +37,10 @@ class TaskTabBar(QTabBar):
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
             painter.drawControl(QStyle.CE_TabBarTabShape, option)
+            status = self.tabData(index)
+            colour = {'ready': '#dff1e4', 'resubmit': '#fde5e3'}.get(status)
+            if colour:
+                painter.fillRect(option.rect.adjusted(2, 2, -2, -2), QColor(colour))
             painter.setPen(option.palette.color(option.palette.WindowText)
                            if self.isTabEnabled(index) else option.palette.color(option.palette.Disabled, option.palette.WindowText))
             painter.drawText(option.rect.adjusted(12, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter,
@@ -151,6 +155,11 @@ class WorkflowNavigation:
     def advance_workspace(self, submitted_page):
         """Advance after successful submission; background preparation owns no navigation."""
         from GUI.WorkflowSubmissions import submitted
+        origin = vars(self).get('_workflow_run_origin')
+        if origin in SUPPORT:
+            from GUI.WorkflowSubmissions import support_submitted
+            support_submitted(self, origin)
+            return None
         submitted(self, submitted_page)
         state = vars(self)
         controller = state.get('site_workflow_controller')
@@ -191,6 +200,9 @@ class WorkflowNavigation:
         return target
 
     def show_page(self, page_id, force=False):
+        origin = vars(self).get('_workflow_run_origin')
+        if origin in SUPPORT and page_id != origin:
+            return
         page_id = product_targets_identifier(page_id)
         from GUI.WorkflowSubmissions import blocked
         if blocked(self, page_id):

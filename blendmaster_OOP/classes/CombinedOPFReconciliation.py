@@ -174,7 +174,9 @@ def build_profiles(state, opfs, ui_class):
             if rows and all(row is not None for row in rows):
                 prepared = []
                 for row in rows:
-                    row = deepcopy(row)
+                    # Enriched members already belong to this OPF context.
+                    # The builder reads nested values; only these scalars change.
+                    row = dict(row)
                     row['hex'] = row.get('HEX', row.get('hex'))
                     row['_positive_balance'] = max(float(row.get('FINAL_WMT', row.get('balance', 0)) or 0), 0)
                     row['balance'] = row['_positive_balance']
@@ -218,5 +220,7 @@ def build_profiles(state, opfs, ui_class):
         context.hex_sequence_table = chunks
         context.apply_cb_split_to_amt_chunks(chunks)
         result[opf] = profile_from_state(vars(context), str(state.get('active_scenario_id') or 'active'))
-        result[opf]['reconciliation_audits'] = [deepcopy(r['reconciliation']) for r in members.values() if r.get('reconciliation')]
+        # Transfer completed member evidence from the temporary context. Profile
+        # consumers retain these read-only audits for later factor reuse.
+        result[opf]['reconciliation_audits'] = [r['reconciliation'] for r in members.values() if r.get('reconciliation')]
     return result

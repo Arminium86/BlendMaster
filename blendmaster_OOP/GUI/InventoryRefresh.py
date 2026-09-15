@@ -466,6 +466,8 @@ class InventoryRefresh:
                 self.remember()
                 return
             h.database_view_rows = []; h.database_view_snapshot_signature = None; h.database_view_refresh_pending = True
+            from GUI.WorkflowSubmissions import return_to
+            return_to(h, 'stockpile_inventories', 'Opening inventory content changed. Resubmit the dependent Workspace tasks.', navigate=False)
             h.total_AMT_stockpile_balances = {}
             self.status(message + ' Saved results remain available; prepare/review reconciliation before recalculating.', 'ready')
             self.unlock()

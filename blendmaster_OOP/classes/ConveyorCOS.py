@@ -52,6 +52,19 @@ def material(event, *, point, opf, provenance='modelled', payload_id=''):
                 tipping_point=point, opf=opf, provenance=provenance, payload_id=str(payload_id))
 
 
+def copy_material(mat, memo=None):
+    """Detach mutable chemistry; accepted reconciliation evidence is read-only.
+
+    A historical source audit can contain all of its contributing evidence.
+    Splitting a payload or trying a FIFO candidate must not copy that archive.
+    """
+    memo = {} if memo is None else memo
+    audit = mat.get('reconciliation')
+    if isinstance(audit, dict):
+        memo[id(audit)] = audit
+    return deepcopy(mat, memo)
+
+
 class ConveyorCOS:
     def __init__(self, settings, start, opening_rates, history=()):
         self.settings = transport_settings(settings)
@@ -60,7 +73,7 @@ class ConveyorCOS:
         self.movements = []
         self.snapshots = []
         self.warnings = []
-        self.opening_reconciliation_audits = [deepcopy(row['material']['reconciliation'])
+        self.opening_reconciliation_audits = [row['material']['reconciliation']
             for row in history if row['material'].get('reconciliation')]
         self._serial = 0
         for name, cfg in self.settings['tipping_points'].items():
@@ -125,7 +138,7 @@ class ConveyorCOS:
         self._serial += 1
         if end <= start:
             end = start + timedelta(microseconds=1)
-        self.points[point]['conveyor'].append(dict(id=self._serial, material=deepcopy(mat),
+        self.points[point]['conveyor'].append(dict(id=self._serial, material=copy_material(mat),
             wmt=wmt, remaining=wmt, start=start, end=end, rate=wmt / ((end-start).total_seconds()/3600)))
 
     def _fill(self, point, mat, quantity, at):
@@ -141,7 +154,7 @@ class ConveyorCOS:
             if take <= EPS:
                 chunk['sealed'] = True
                 continue
-            chunk['components'].append(dict(material=deepcopy(mat), wmt=take))
+            chunk['components'].append(dict(material=copy_material(mat), wmt=take))
             chunk['wmt'] += take
             chunk['filled_wmt'] += take
             chunk['sealed'] = chunk['filled_wmt'] >= capacity - FILL_EPS
@@ -199,14 +212,51 @@ class ConveyorCOS:
                 conveyor_arrival_start=begin+timedelta(hours=delay),
                 conveyor_arrival_end=finish+timedelta(hours=delay)))
 
+    def _retain_evidence(self, memo):
+        for evidence in self.opening_reconciliation_audits:
+            memo[id(evidence)] = evidence
+        for state in self.points.values():
+            materials = [row['material'] for row in state['conveyor']]
+            materials.extend(c['material'] for chunk in state['chunks'] for c in chunk['components'])
+            for mat in materials:
+                evidence = mat.get('reconciliation')
+                if isinstance(evidence, dict):
+                    memo[id(evidence)] = evidence
+
+    def __deepcopy__(self, memo):
+        # Partial-result/repair checkpoints need detached queues and events,
+        # while keeping the same accepted historical evidence.
+        trial = copy(self)
+        memo[id(self)] = trial
+        self._retain_evidence(memo)
+        trial.__dict__ = deepcopy(self.__dict__, memo)
+        return trial
+
     def fork(self, *, audit=True):
         trial = copy(self)
-        trial.points = deepcopy(self.points)
+        memo = {}
+        self._retain_evidence(memo)
+        trial.points = deepcopy(self.points, memo)
         # Audit rows are append-only. Avoid copying the whole plan at every solve.
         trial.movements = list(self.movements) if audit else []
         trial.snapshots = list(self.snapshots) if audit else []
         trial.warnings = list(self.warnings)
         return trial
+
+    def conveyor_schedule(self, point, rate):
+        """Preview one outlet's timing without copying chemistry or COS contents."""
+        state = self.points[point]
+        previous = state['conveyor_rate']
+        changing = rate > EPS and abs(rate-previous) > EPS
+        schedule = []
+        for row in state['conveyor']:
+            start, end = row['start'], row['end']
+            if changing:
+                start = self.now + (max(start, self.now)-self.now) * (previous/rate)
+                end = self.now + (end-self.now) * (previous/rate)
+            schedule.append(dict(start=start, end=end,
+                rate=row['remaining'] / ((end-start).total_seconds()/3600) if changing else row['rate']))
+        return schedule
 
     def prepare_rates(self, rates):
         """Change belt speed with Calendar capacity; an off crusher pauses it."""
@@ -264,7 +314,7 @@ class ConveyorCOS:
                     for component in ready['components']:
                         amount = component['wmt']*proportion
                         if amount > EPS:
-                            outputs.append(dict(material=deepcopy(component['material']), wmt=amount,
+                            outputs.append(dict(material=copy_material(component['material']), wmt=amount,
                                                 start=at, end=boundary, chunk_id=ready['id']))
                         component['wmt'] -= amount
                     ready['wmt'] -= take
@@ -283,7 +333,7 @@ class ConveyorCOS:
                             physical_rom_wmt=amount))
                         self._fill(point, row['material'], amount, at)
                     elif amount > EPS:
-                        outputs.append(dict(material=deepcopy(row['material']), wmt=amount,
+                        outputs.append(dict(material=copy_material(row['material']), wmt=amount,
                                             start=at, end=boundary, chunk_id=None))
                 state['conveyor'] = deque(r for r in intervals if r['remaining'] > MASS_EPS)
                 if sum(c['wmt'] for c in state['chunks']) > capacity + 1e-4:

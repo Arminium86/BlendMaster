@@ -10,7 +10,7 @@ from classes.DestinationBuildOrder import inventory_areas
 from database.DatabaseContext import get_database_path
 
 
-READY_PAGES = {'expit_sequence', 'destination_progress', 'grade_profiles',
+READY_PAGES = {'database_view', 'opf_production_report', 'expit_sequence', 'destination_progress', 'grade_profiles',
                'optimised_grade_profiles', 'manual_grade_profiles'}
 CHART_LOADERS = {
     'optimised_blend_sequence': 'load_gantt_chart',
@@ -125,6 +125,7 @@ class WorkflowViews(QObject):
             self.available(page, enabled, reason)
         self.sync_expit_inputs()
         self.apply_results()
+        self.apply_input_results()
         if self.results_dirty:
             self.results_dirty = False
             self.generation += 1
@@ -158,6 +159,20 @@ class WorkflowViews(QObject):
         self.available('optimised_grade_profiles', self.results['optimised'], 'Run optimisation to generate grade results for this site.')
         self.available('manual_grade_profiles', self.results['manual'], 'Submit Manual Blend Sequence to generate grade results for this site.')
         self.available('grade_profiles', any(self.results.values()), 'Generate an optimised or manual plan to view its grade profiles.')
+
+    def apply_input_results(self):
+        state = vars(self.host)
+        self.available('database_view', bool(state.get('database_view_rows')),
+                       'Use Load views → Database View to prepare the source rows.')
+        report = state.get('opf_production_report')
+        snapshot = vars(report).get('snapshot') if report is not None else None
+        self.available('opf_production_report', bool(snapshot and snapshot.get('records')),
+                       'Use Load views → OPF Production Report to load production history.')
+        snapshot = state.get('expit_sequence_snapshot') or {}
+        present = any(value is not None and len(value) > 0 for value in
+                      (snapshot.get(key) for key in ('transactions', 'planned_transactions', 'actual_movements', 'geometry')))
+        self.available('expit_sequence', present,
+                       'Use Load views → Expit Sequence to prepare movements and geometry.')
 
     def current_page(self):
         tabs = self.host.tabs
