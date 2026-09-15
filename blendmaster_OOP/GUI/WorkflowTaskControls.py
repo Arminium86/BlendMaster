@@ -114,11 +114,13 @@ class WorkflowTaskControls(QObject):
                 continue
             tabs, index = location
             status = task_status(host, page)
-            if page in ('database_reports', 'decision_point', 'reports'):
-                status = 'ready' if host.is_page_enabled(page) else 'next'
+            if page in ('amt_stockpiles', 'destination_progress'):
+                tabs.setTabVisible(index, status != 'not_required')
             tabs.tabBar().setTabData(index, status)
-            tabs.setTabToolTip(index, {'ready': 'Ready — submitted', 'resubmit': 'Needs resubmission',
-                                      'next': 'Run this task when its inputs are ready'}[status])
+            tabs.setTabToolTip(index, {'ready': 'Ready — valid submission or prerequisite of a submitted task',
+                                      'resubmit': 'Needs submission or resubmission',
+                                      'not_required': 'Not required for the current inventory and guidance selections',
+                                      'next': 'Next required task — Run when its inputs are ready'}[status])
             tabs.tabBar().update()
         page = self.current_page()
         buttons = self.buttons(page) if page in (*WORKSPACE, *SUPPORT) else []

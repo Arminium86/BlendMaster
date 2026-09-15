@@ -117,7 +117,7 @@ def support_submitted(host, page):
 def edited(host, page):
     from GUI.WorkflowNavigation import SUPPORT
     state = vars(host).get('workflow_submission_state') or {}
-    if page not in state.get('completed', []):
+    if task_status(host, page) != 'ready':
         return
     if page in SUPPORT:
         host.workflow_submission_state = {**state, 'dirty': list(dict.fromkeys([*state.get('dirty', []), page]))}
@@ -126,7 +126,16 @@ def edited(host, page):
 
 
 def task_status(host, page):
-    """Receipts describe submissions, independently of retained result caches."""
+    """Only the next applicable Workspace task is neutral.
+
+    A later submission proves its prerequisites were submitted, including in
+    projects saved before individual completion receipts were introduced.
+    Explicit invalidations always take precedence over that evidence.
+    """
+    from GUI.WorkflowNavigation import WORKSPACE, SUPPORT
+    pages = order(host)
+    if page in WORKSPACE and page not in pages:
+        return 'not_required'
     required = pending(host)
     if page in required:
         return 'next' if page == required[0] else 'resubmit'
@@ -135,7 +144,33 @@ def task_status(host, page):
         return 'resubmit'
     if page in state.get('completed', []):
         return 'ready'
-    return 'next'
+    completed = [pages.index(p) for p in state.get('completed', []) if p in pages]
+    frontier = max(completed, default=-1)
+    if required:
+        frontier = max(frontier, pages.index(required[0]) - 1)
+    elif not completed:
+        # Use saved task gates, not current UI flags (views can enable themselves).
+        values = vars(host)
+        saved = (values.get('site_scenarios') or {}).get(values.get('active_scenario_id')) or {}
+        gates = saved.get('tab_states') or {}
+        for task in pages[:pages.index('calendar') + 1]:
+            if gates.get(task) is True:
+                frontier = max(frontier, pages.index(task) - 1)
+        if values.get('updated_stockpile_data'):
+            frontier = max(frontier, pages.index('stockpile_inventories'))
+    if page in pages:
+        index = pages.index(page)
+        if index <= frontier:
+            return 'ready'
+        return 'next' if index == frontier + 1 else 'resubmit'
+    if page in SUPPORT:
+        owner = SUPPORT_OWNER.get(page)
+        if owner and task_status(host, owner) == 'ready':
+            return 'ready'
+        if page in ('database_reports', 'decision_point', 'reports'):
+            return 'ready' if (vars(host).get('_page_enabled_state') or {}).get(page) else 'resubmit'
+        return 'resubmit'
+    return 'resubmit'
 
 
 def actuals_required(host, target):

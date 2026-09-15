@@ -119,6 +119,22 @@ class TaskControlsTests(unittest.TestCase):
         for page in ('database_view', 'expit_sequence', 'opf_production_report'):
             self.assertTrue(host.is_page_enabled(page))
 
+    def test_optional_tasks_hide_and_return_when_their_inputs_are_selected(self):
+        host, controls = self.host()
+        host.stockpile_data_AMT_column = {}
+        host.updated_stockpile_data = {}
+        host.file_path_choice = ''
+        controls.refresh()
+        for page in ('amt_stockpiles', 'destination_progress'):
+            tabs, index = host.page_locations[page]
+            self.assertFalse(tabs.isTabVisible(index))
+        host.updated_stockpile_data = {'A': {'amt': True, 'balance': 100}}
+        host.file_path_choice = '2wp.csv'
+        controls.refresh()
+        for page in ('amt_stockpiles', 'destination_progress'):
+            tabs, index = host.page_locations[page]
+            self.assertTrue(tabs.isTabVisible(index))
+
 
 class ActualDependencyTests(unittest.TestCase):
     def host(self):

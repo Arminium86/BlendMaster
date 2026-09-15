@@ -123,8 +123,13 @@ Grade Reconciliation Run updates missing evidence when submission is unavailable
 review the resulting factors and Run again to submit. Secondary actions such as
 exports and explicit refreshes remain on their pages.
 
-Task receipts are saved with the site: green means submitted, red means a
-dependent task needs resubmission, and the next required task is neutral.
+Task receipts are saved with the site: green means a valid submission, red means
+a task needs submission or resubmission, and only the next required Workspace
+task is neutral. Later submissions also establish their earlier prerequisites
+as ready. For legacy projects without receipts, saved input-task gates and
+submitted inventory establish the prior progress; explicit invalidations take
+precedence. AMT and Destination Reconciliation tabs are hidden while their
+required selections are absent and return when applicable.
 Editing submitted inputs invalidates downstream receipts without discarding
 cached evidence or navigating away. Support configuration submissions invalidate
 their dependent Workspace tasks. Views with no rows are disabled; the Load views
