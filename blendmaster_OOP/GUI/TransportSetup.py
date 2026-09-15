@@ -14,7 +14,8 @@ class TransportSetup(QWidget):
         title = QLabel('Conveyors & COS')
         title.setStyleSheet('font-size:20px;font-weight:700;color:#17324d')
         layout.addWidget(title)
-        note = QLabel('Optional FIFO conveyor and coarse ore stockpile (COS) modelling. Capacities are physical ROM WMT. '
+        note = QLabel('Conveyor and COS WMT specify opening physical ROM tonnes. COS WMT divided by COS chunks sets the chunk size; '
+            'additional chunks are created as needed, with no COS storage limit. '
             'Crusher targets apply at tipping; Product Targets apply when material reaches the OPF. '
             'Opening contents come from actual movements before the scenario start, using the first operating Calendar rate. '
             'Conveyors and COS pause when that crusher is stopped.')
@@ -99,4 +100,5 @@ class TransportSetup(QWidget):
         self.history.resizeColumnsToContents()
         if bundle:
             self.status.setText(f'{len(records):,} actual movements loaded. Grades use the configured source fields and OPF reconciliation. '
-                'Unobserved opening capacity stays empty; no missing grades or tonnes are invented.')
+                'Opening history is extended to find the requested tonnes. Missing evidence is reported; grades and tonnes are not invented. '
+                + ' '.join(bundle.get('warnings') or []))

@@ -15,7 +15,7 @@ import math
 import pandas as pd
 
 from classes.CustomConstraints import compiled_property_kinds, source_property_kind
-from classes.TransportSettings import transport_settings, history_lookback_hours
+from classes.TransportSettings import transport_settings
 
 EPS = 1e-8
 MASS_EPS = 1e-6  # Match the solver and queue-removal precision (one gram).
@@ -80,56 +80,47 @@ class ConveyorCOS:
             if not cfg['enabled']:
                 continue
             rate = float(opening_rates.get(name, 0))
-            lookback = history_lookback_hours(cfg, rate)
             self.points[name] = dict(config=cfg, conveyor=deque(), chunks=deque(),
                 opening_wmt=0.0, tipped_wmt=0.0, arrived_wmt=0.0, opening_rate=rate,
                 delay_hours=cfg['conveyor_capacity_wmt'] / rate, conveyor_rate=rate, next_chunk=1)
             eligible = sorted((r for r in history if r['material']['tipping_point'] == name
-                               and self.start - timedelta(hours=lookback) <= moment(r['time']) < self.start),
+                               and moment(r['time']) < self.start),
                               key=lambda r: (moment(r['time']), str(r['material'].get('payload_id', ''))))
-            cos_rows, belt_rows = [], []
-            for row in eligible:
+            # Latest tipped tonnes occupy the belt. The preceding tonnes
+            # populate opening COS. Actual timestamps establish material order,
+            # not future truck service slots for material already on the belt.
+            belt_remaining, cos_remaining = cfg['conveyor_capacity_wmt'], cfg['cos_capacity_wmt']
+            belt_rows, cos_rows = [], []
+            for row in reversed(eligible):
                 quantity = float(row['wmt'])
                 if not math.isfinite(quantity) or quantity <= 0:
                     continue
-                arrival = moment(row['time']) + timedelta(hours=self.points[name]['delay_hours'])
-                delivered = quantity if cfg['conveyor_capacity_wmt'] <= EPS else min(
-                    quantity, max(0.0, (self.start-arrival).total_seconds()/3600*rate))
-                if delivered > EPS:
-                    cos_rows.append((row, delivered))
-                if quantity-delivered > EPS:
-                    belt_rows.append((row, quantity-delivered, max(arrival,self.start)))
-            # Recent evidence identifies the surviving FIFO tail. Excess older
-            # history departed before the horizon and is never opening inventory.
-            remaining = cfg['cos_capacity_wmt']
-            retained = []
-            for row, quantity in reversed(cos_rows):
-                take = min(remaining, quantity)
-                if take > EPS:
-                    retained.append((row, take))
-                    remaining -= take
-            for row, take in reversed(retained):
+                belt_take = min(belt_remaining, quantity)
+                if belt_take > EPS:
+                    belt_rows.append((row, belt_take))
+                    belt_remaining -= belt_take
+                    quantity -= belt_take
+                cos_take = min(cos_remaining, quantity)
+                if cos_take > EPS:
+                    cos_rows.append((row, cos_take))
+                    cos_remaining -= cos_take
+                if belt_remaining <= EPS and cos_remaining <= EPS:
+                    break
+            for row, take in reversed(cos_rows):
                 self._fill(name, row['material'], take, self.start)
             for chunk in self.points[name]['chunks']:
-                chunk['sealed'] = True  # A partial measured opening chunk is usable.
-            remaining = cfg['conveyor_capacity_wmt']
-            retained = []
-            for row, quantity, arrival in reversed(belt_rows):
-                take = min(remaining, quantity)
-                if take > EPS:
-                    retained.append((row, take, arrival))
-                    remaining -= take
-            for row, take, arrival in reversed(retained):
-                # A payload starts arriving after its recorded tip plus the belt delay.
-                queue = self.points[name]['conveyor']
-                begin = max(self.start, arrival, queue[-1]['end'] if queue else self.start)
-                self._interval(name, row['material'], take, begin, begin+timedelta(hours=take/rate))
+                chunk['sealed'] = True
+            cursor = self.start
+            for row, take in reversed(belt_rows):
+                end = cursor + timedelta(hours=take/rate)
+                self._interval(name, row['material'], take, cursor, end)
+                cursor = end
             state = self.points[name]
             state['opening_wmt'] = self.balance(name)
             capacity = cfg['cos_capacity_wmt'] + cfg['conveyor_capacity_wmt']
             if state['opening_wmt'] < capacity - EPS:
                 self.warnings.append(f'{name}: actual movements reconstruct {state["opening_wmt"]:,.1f} of '
-                                     f'{capacity:,.1f} ROM WMT capacity. Unobserved contents remain empty; no grades are inferred.')
+                                     f'{capacity:,.1f} ROM WMT opening target. Missing evidence remains unfilled; no grades are inferred.')
         self.snapshot(self.start, 'opening')
 
     def _interval(self, point, mat, wmt, start, end):
@@ -336,8 +327,6 @@ class ConveyorCOS:
                         outputs.append(dict(material=copy_material(row['material']), wmt=amount,
                                             start=at, end=boundary, chunk_id=None))
                 state['conveyor'] = deque(r for r in intervals if r['remaining'] > MASS_EPS)
-                if sum(c['wmt'] for c in state['chunks']) > capacity + 1e-4:
-                    raise ValueError(f'{point}: COS capacity would be exceeded; reduce tipping or correct opening evidence.')
                 at = boundary
         self.now = end
         for row in outputs:

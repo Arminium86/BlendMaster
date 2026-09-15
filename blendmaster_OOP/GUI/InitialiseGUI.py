@@ -186,7 +186,7 @@ from AppVersion import APP_TITLE, APP_USER_MODEL_ID
 AMT_OPENING_CACHE_VERSION = 2
 AMT_CHUNK_RECONCILIATION_VERSION = 4
 # Older Database View caches may contain an empty frame from a failed import.
-EXPIT_INPUT_CACHE_VERSION = 4
+EXPIT_INPUT_CACHE_VERSION = 5
 APS_GUIDANCE_CACHE_VERSION = 2
 
 SITE_OPF_OPTIONS = {
@@ -4934,11 +4934,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         cache_metadata = self.expit_sequence_snapshot.get(
             "cache_metadata", {}
         ) or {}
-        if cache_metadata.get("cache_match") == "fresh_current_time":
+        if cache_metadata.get("cache_match") == "within_sequence_tolerance":
             refresh_caption = (
-                "Reused Expit sequence reconciliation refreshed "
-                f"{float(cache_metadata.get('cache_age_minutes') or 0):.1f} "
-                "minutes ago"
+                "Reused Expit sequence reconciliation; model time shifted "
+                f"{float(cache_metadata.get('cache_time_shift_minutes') or 0):.1f} "
+                "minutes from its saved anchor"
             )
         elif self.expit_sequence_snapshot.get("cache_hit", False):
             refresh_caption = "Restored saved Expit sequence reconciliation"
@@ -5720,11 +5720,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         definitions = normalize_field_definitions(
             context.get("field_definitions")
         )
+        from classes.ExpitPreparationCache import feed_identity
         signature = {
-            "multi_feed": context.get("multi_feed_settings"),
+            "multi_feed": feed_identity(context.get("multi_feed_settings")),
             "opf_mappings": {opf: {k: profile.get(k) for k in ('scenario_id', 'fields', 'aps_grade_field_mappings', 'aps_source_property_field_mappings', 'brands')} for opf, profile in (context.get('opf_profiles') or {}).items()},
             "cache_version": EXPIT_INPUT_CACHE_VERSION,
-            "planning_settings": settings_signature(vars(self)),
+            "destination_rules": context.get("destination_rules"),
+            "destination_guidance": context.get("aps_destination_guidance"),
             "destination_rule_version": DESTINATION_RULE_VERSION,
             "destination_guidance_version": (
                 ExpitDataHandler.DESTINATION_GUIDANCE_VERSION
@@ -5775,28 +5777,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return json.dumps(signature, sort_keys=True, default=str)
 
     def expit_input_cache_allowed(self, time_mode=None, expit_mode=None):
-        """Return whether an Expit snapshot may be reused for this run."""
-        try:
-            time_mode = int(
-                time_mode
-                if time_mode is not None
-                else getattr(self, "time_mode_choice", 1)
-            )
-        except (TypeError, ValueError):
-            time_mode = 1
-        try:
-            expit_mode = int(
-                expit_mode
-                if expit_mode is not None
-                else getattr(self, "expit_mode_choice", 1)
-            )
-        except (TypeError, ValueError):
-            expit_mode = 1
-        if not (time_mode == 1 and expit_mode == 2):
-            return True
-        return max(int(getattr(
-            self, "expit_refresh_tolerance_minutes", 0
-        ) or 0), 0) > 0
+        """Sequence refresh tolerance applies to fixed and current model time."""
+        mode = int(expit_mode if expit_mode is not None else getattr(self, 'expit_mode_choice', 1) or 1)
+        return mode != 2 or max(int(getattr(self, 'expit_refresh_tolerance_minutes', 30) or 0), 0) > 0
 
     @staticmethod
     def expit_signatures_match_except_start_time(left, right):
@@ -5814,73 +5797,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return left_payload == right_payload
 
     def read_reusable_expit_input_cache(self, signature):
-        """Read an exact cache hit or a fresh current-time equivalent."""
-        manager = DatabaseManager()
-        transactions, metadata = manager.read_expit_input_cache(signature)
-        current_time_reconciliation = (
-            int(getattr(self, "time_mode_choice", 1) or 1) == 1
-            and int(getattr(self, "expit_mode_choice", 1) or 1) == 2
-        )
-        tolerance = max(int(getattr(
-            self, "expit_refresh_tolerance_minutes", 0
-        ) or 0), 0)
-        if transactions is not None and not current_time_reconciliation:
-            metadata = dict(metadata or {})
-            metadata["cache_match"] = "exact"
-            return transactions, metadata
-        if transactions is not None and current_time_reconciliation:
-            created_at = pd.to_datetime(
-                (metadata or {}).get("cache_created_at"),
-                errors="coerce", utc=True,
-            )
-            age_minutes = (
-                max(
-                    (
-                        pd.Timestamp.now(tz="UTC") - created_at
-                    ).total_seconds() / 60.0,
-                    0.0,
-                )
-                if not pd.isna(created_at) else float("inf")
-            )
-            if tolerance > 0 and age_minutes <= tolerance:
-                metadata = dict(metadata or {})
-                metadata.update({
-                    "cache_match": "fresh_current_time",
-                    "cache_age_minutes": age_minutes,
-                    "cache_tolerance_minutes": tolerance,
-                })
-                return transactions, metadata
-        if not current_time_reconciliation or tolerance <= 0:
-            return None, {}
-
-        latest, latest_signature, metadata = (
-            manager.read_latest_expit_input_cache()
-        )
-        if latest is None or not self.expit_signatures_match_except_start_time(
-            latest_signature, signature
-        ):
-            return None, {}
-        created_at = pd.to_datetime(
-            (metadata or {}).get("cache_created_at"), errors="coerce",
-            utc=True,
-        )
-        if pd.isna(created_at):
-            return None, {}
-        age_minutes = max(
-            (
-                pd.Timestamp.now(tz="UTC") - created_at
-            ).total_seconds() / 60.0,
-            0.0,
-        )
-        if age_minutes > tolerance:
-            return None, {}
-        metadata = dict(metadata or {})
-        metadata.update({
-            "cache_match": "fresh_current_time",
-            "cache_age_minutes": age_minutes,
-            "cache_tolerance_minutes": tolerance,
-        })
-        return latest, metadata
+        from classes.ExpitPreparationCache import reusable_sequence
+        return reusable_sequence(self, signature)
 
     def database_view_is_current(self):
         if getattr(self, "database_view_refresh_in_progress", False):
@@ -8873,17 +8791,15 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
     def handle_map_fields_submit(self):
         self.capture_map_fields_table()
-        self.apply_canonical_field_mappings()
-        self.apply_grade_streams_to_inventory(allow_pending=True)
+        if vars(self).get('stockpile_data'):
+            self.apply_canonical_field_mappings()
+            self.apply_grade_streams_to_inventory(allow_pending=True)
         from GUI.WorkflowSubmissions import support_submitted
         support_submitted(self, 'map_fields')
-        # AMT mappings are held in memory here. Data Streams owns the next
-        # reconciliation-dependent enrichment and persists the completed hex
-        # snapshot once, avoiding an intermediate full-table rewrite.
-        self.set_page_enabled(self.data_streams_tab_index, True)
+        # Configuration can be saved before inventory exists. Historical
+        # preparation belongs to Grade Reconciliation, not this settings editor.
         self.save_active_scenario_state()
         self.show_page(self.data_streams_tab_index, force=True)
-        QTimer.singleShot(100, self.prepare_data_streams)
 
     def setup_data_streams(self):
         """Set up grade stream selection and OPF factors."""
@@ -11635,9 +11551,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             getattr(self, "expit_refresh_tolerance_minutes", 30) or 0
         )))
         self.expit_refresh_tolerance_input.setToolTip(
-            "For current-time scenarios, reuse the most recently reconciled "
-            "Expit sequence while it is this fresh. Set 0 to recalculate on "
-            "every preparation step."
+            "Reuse sequence reconciliation while model start time stays within this "
+            "many minutes of its original anchor, in fixed or current-time mode. "
+            "Changed payload inputs invalidate reuse. Set 0 to refresh actuals on every preparation; parsed payloads remain cached."
         )
         guidance_layout.addRow(
             QLabel("Expit Sequence Refresh Tolerance:"),
@@ -13433,7 +13349,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             else []
         )
 
-    def capture_guidance_schedule_controls(self):
+    def capture_guidance_schedule_controls(self, *, refresh_routes=True):
         """Capture controls owned by the Guidance Schedules workflow step."""
         # Crusher contribution is configured on this step because it may be
         # derived from the selected 2WP Mining.csv.
@@ -13501,7 +13417,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             if self.reevaluate_aps_direct_tip_choice
             else []
         )
-        self.refresh_haul_cycle_routes(show_errors=False)
+        if refresh_routes:
+            self.refresh_haul_cycle_routes(show_errors=False)
 
     def restore_site_configuration_controls(self):
         """Restore Site Configuration widgets without discarding legacy project defaults."""
@@ -21522,19 +21439,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         expit_cache_signature = self.expit_input_cache_signature()
         expit_cache_allowed = self.expit_input_cache_allowed()
         prepared_transactions = None
-        if (
-            expit_cache_allowed
-            and
-            getattr(self, "database_view_snapshot_signature", None)
-            == self.database_view_input_signature()
-            and getattr(
-                self, "database_view_expit_payload_transactions", None
-            ) is not None
-        ):
-            prepared_transactions = copy.deepcopy(
-                self.database_view_expit_payload_transactions
-            )
-        elif expit_cache_allowed and self.file_path_24hr_choice:
+        # Use the same anchored reconciliation policy for all callers. A
+        # Database View in-memory frame must not bypass tolerance expiry.
+        if expit_cache_allowed and self.file_path_24hr_choice:
             prepared_transactions, _cache_metadata = (
                 self.read_reusable_expit_input_cache(
                     expit_cache_signature
@@ -21595,6 +21502,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from GUI.WorkflowViews import schedule
         schedule(self, results=True, charts=True)
         self.last_run_outcome = getattr(periods, 'run_outcome', {}) or {}
+        if self.last_run_outcome.get('result_row_count') == 0:
+            from GUI.OptimisationOutcome import no_plan
+            no_plan(self)
+            return
         self.set_start_and_end_datetime(periods=periods)
         # Re-write the derived schedule in the active scenario database on
         # the UI thread.  The optimisation worker writes this too, but this

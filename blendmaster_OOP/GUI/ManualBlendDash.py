@@ -488,7 +488,7 @@ function setStatus(text) {
 }
 
 function colorForRow(row) {
-    const key = String(row["_stockpile_mix_key"] || "NO_STOCKPILE_SOURCE");
+    const key = String(row["Blend ID"] ?? "NO_BLEND_ID");
     if (!state.colorByMix[key]) {
         const index = Object.keys(state.colorByMix).length;
         state.colorByMix[key] = state.colors[index % state.colors.length] || "#A8D5BA";

@@ -15,7 +15,7 @@ OBSERVATION_FIELDS = frozenset(('transaction_datetime', 'snapshot_datetime',
 DERIVED_FIELDS = frozenset(('reconciliation', 'grade_streams', 'grade_streams_json',
     'grade_stream_warnings', 'grade_stream_warnings_json', 'defined_fields',
     'source_properties', 'modelled_properties', '_source_snapshot', '_source_derived_fields',
-    'prepared_grade_opf', 'data_quality'))
+    'prepared_grade_opf', 'data_quality', 'is_ready', 'auto_turnover_datetime'))
 CONTROL_FIELDS = frozenset(('amt', 'subset', 'max_reclaim_rate', 'reclaim_threshold'))
 
 

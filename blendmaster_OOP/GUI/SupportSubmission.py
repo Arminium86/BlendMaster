@@ -7,6 +7,30 @@ FIELDS = ('active_scenario_id', 'mine_input_choice', 'opf_input_choice',
           'reclaimer_tonnes_stream', 'product_build_tonnes_stream', 'data_stream_planning_categories')
 
 
+def submit_settings(host, page):
+    """Save Support choices without importing inventory or requiring grade approvals."""
+    from classes.SiteWorkflow import require_action
+    from GUI.WorkflowSubmissions import support_submitted
+    from PyQt5.QtWidgets import QMessageBox
+    require_action(vars(host).get('access_role', 'support'), 'support_settings')
+    try:
+        if page == 'data_streams':
+            host.capture_data_stream_configuration()
+        elif page == 'guidance_settings':
+            host.capture_guidance_schedule_controls(refresh_routes=False)
+            valid, reason = host.validate_active_ratio_group_for_run()
+            if not valid:
+                raise ValueError(reason)
+        else:
+            raise ValueError('Unknown Support settings page: ' + str(page))
+    except ValueError as exc:
+        QMessageBox.warning(host, 'Support Settings', str(exc))
+        return False
+    support_submitted(host, page)
+    host.save_active_scenario_state()
+    return True
+
+
 def prepare(host, task):
     state = vars(host)
     if state.get('access_role') != 'planner' or task not in ('grade_reconciliation', 'amt_stockpiles', 'calendar', 'blend_sequence'):

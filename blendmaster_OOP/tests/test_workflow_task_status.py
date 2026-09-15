@@ -65,6 +65,8 @@ class TaskStatusTests(unittest.TestCase):
     def test_dirty_support_does_not_inherit_ready_owner(self):
         host = self.host(workflow_submission_state={'completed': ['calendar'], 'dirty': ['site_model']})
         self.assertEqual(task_status(host, 'site_model'), 'resubmit')
+        self.assertEqual(task_status(host, 'guidance_settings'), 'resubmit')
+        submitted(host, 'guidance_settings')
         self.assertEqual(task_status(host, 'guidance_settings'), 'ready')
 
 

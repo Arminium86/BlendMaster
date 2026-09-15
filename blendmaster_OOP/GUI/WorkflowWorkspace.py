@@ -91,7 +91,8 @@ def install(host):
         'Select Planned Tipping Point Crusher(s) in this Scenario:'})
     host._guidance_support_form = guidance_support
     submit = QPushButton('Submit Guidance Settings')
-    submit.clicked.connect(host.handle_guidance_schedules_submit)
+    from GUI.SupportSubmission import submit_settings
+    submit.clicked.connect(lambda: submit_settings(host, 'guidance_settings'))
     guidance_support.addRow(submit)
     host.guidance_change_label = QLabel('Imports retain matching selections and movement rules.')
     host.guidance_change_label.setWordWrap(True)
@@ -114,7 +115,7 @@ def install(host):
     page.setWidget(content)
     host.register_page('grade_reconciliation', host.workspace_tabs, page, 'Grade Reconciliation')
     technical_submit = QPushButton('Submit Data Stream Settings')
-    technical_submit.clicked.connect(host.handle_data_streams_submit)
+    technical_submit.clicked.connect(lambda: submit_settings(host, 'data_streams'))
     host.data_streams_tab.layout().addWidget(technical_submit)
 
     # Split the former Reports tab into its actual workflow destinations.

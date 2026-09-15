@@ -133,10 +133,18 @@ class ScheduledSiteBatch(QObject):
 
 def start_due_batch(controller):
     h = controller.host
-    h.save_active_scenario_state()
-    contracts = enabled_contracts(h.site_scenarios)
+    # Timer checks only need the small scheduling contract, not a full model
+    # capture (which prepares Calendar context and scans source evidence).
+    scenarios = dict(h.site_scenarios)
+    current = vars(h)
+    site = current.get('active_scenario_id')
+    if site and 'site_workflow_contract' in current:
+        scenarios[site] = {**scenarios.get(site, {}),
+                           'site_workflow_contract': current['site_workflow_contract']}
+    contracts = enabled_contracts(scenarios)
     now = time.monotonic()
     if contracts and any(now - controller.last_attempt.get(site, 0) >= value['refresh_minutes'] * 60
                          for site, value in contracts.items()):
+        h.save_active_scenario_state()
         controller.batch = ScheduledSiteBatch(controller, contracts)
         controller.status(f'Updating {len(contracts)} enabled site models…')

@@ -594,7 +594,14 @@ class DataLoader:
             site = (self.calendar_inputs or {}).get('site_context') or {}
             points = [MaterialDestinationPlan._crusher_destination(payload, site.get('crusher'),
                       MaterialDestinationPlan._normalized_rules(site.get('direct_tip_movement_rules')))]
-        arrivals = {point: arrival(payload, point)['delivered_datetime'] for point in points if point}
+        from classes.ExpitDataHandler import ExpitDataHandler
+        site = (self.calendar_inputs or {}).get('site_context') or {}
+        routes = payload_context(payload).get('routes') or {}
+        # Use the same RCH/OPF02 identity for travel times as for permissions.
+        # Otherwise an eligible route silently falls back to stockpile travel.
+        arrivals = {point: arrival(payload, next((route for route in routes
+            if ExpitDataHandler.crusher_destination_matches_point(route, site.get('mine'), point, site.get('opf'))), point))['delivered_datetime']
+            for point in points if point}
         return dict(payload, direct_tip_arrivals=arrivals, rom_arrival=payload.get('delivered_datetime'),
                     delivered_datetime=min(arrivals.values()) if arrivals else payload.get('delivered_datetime'))
 

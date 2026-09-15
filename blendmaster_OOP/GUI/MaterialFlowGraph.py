@@ -84,7 +84,7 @@ class FlowNode(QGraphicsItem):
             if props.get('placeholder'):
                 return 'Pass-through · no storage'
             value = f"{props.get('capacity_wmt',0):,.0f} ROM WMT"
-            return value + (f" · {props.get('chunks',1)} chunks" if kind=='cos' else f" · {props.get('latency_hours',0):g} h at reference rate")
+            return value + (f" opening · {props.get('chunks',1)} initial chunks · expandable" if kind=='cos' else f" · {props.get('latency_hours',0):g} h at reference rate")
         return kind.replace('_',' ').title()
 
     def itemChange(self, change, value):

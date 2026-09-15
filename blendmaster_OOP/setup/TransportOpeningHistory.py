@@ -21,14 +21,13 @@ from setup.AMTGradeBlockLineage import EXPIT_FEED_PROPERTY_COLUMNS, EXPIT_PRODUC
 
 
 class TransportOpeningHistory(RecentDestinationActivity):
-    VERSION = 3
+    VERSION = 4
 
     def request(self, site, start, points, settings):
         settings = transport_settings(settings)
         selected = [p for p in points if settings['tipping_points'].get(p['name'], {}).get('enabled')]
-        hours = {p['name']: history_lookback_hours(settings['tipping_points'][p['name']], p['opening_rate']) for p in selected}
-        if any(h > self.MAX_HOURS for h in hours.values()):
-            raise ValueError('Conveyor/COS opening history exceeds 744 hours. Review capacities and opening rates.')
+        hours = {p['name']: min(self.MAX_HOURS, history_lookback_hours(
+            settings['tipping_points'][p['name']], p['opening_rate'])) for p in selected}
         return dict(version=self.VERSION, site=site, operation=self.warehouse_operation(site),
                     end=moment(start).isoformat(), points=selected, hours=hours, settings=settings)
 
@@ -42,7 +41,27 @@ class TransportOpeningHistory(RecentDestinationActivity):
         if connection is None:
             raise ConnectionError('Opening transport history is unavailable. Refresh with a warehouse connection before enabling transport.')
         try:
-            raw = self.query(connection, request)
+            query_request = deepcopy(request)
+            targets = {p['name']: sum(request['settings']['tipping_points'][p['name']][key]
+                for key in ('conveyor_capacity_wmt', 'cos_capacity_wmt')) for p in request['points']}
+            while True:
+                raw = self.query(connection, query_request)
+                totals, seen_ids = dict.fromkeys(targets, 0.0), set()
+                for row in raw:
+                    identity = str(row['INTERNAL_ID'])
+                    if identity in seen_ids or moment(row['OBSERVED_AT']) >= moment(start):
+                        continue
+                    seen_ids.add(identity)
+                    for point in request['points']:
+                        if (destination_matches(row, site, point) and moment(row['OBSERVED_AT']) >=
+                                moment(start)-timedelta(hours=query_request['hours'][point['name']])):
+                            totals[point['name']] += max(0.0, finite_number(row.get('WMT_REPORTING')) or 0.0)
+                expand = [name for name, target in targets.items()
+                          if totals[name] < target and query_request['hours'][name] < self.MAX_HOURS]
+                if not expand:
+                    break
+                for name in expand:
+                    query_request['hours'][name] = min(self.MAX_HOURS, max(1.0, query_request['hours'][name]*2))
         finally:
             connection.close()
         records, warnings, seen = [], [], set()
@@ -58,7 +77,7 @@ class TransportOpeningHistory(RecentDestinationActivity):
                 continue
             point = matches[0]
             time = moment(row['OBSERVED_AT'])
-            if not moment(start)-timedelta(hours=request['hours'][point['name']]) <= time < moment(start):
+            if not moment(start)-timedelta(hours=query_request['hours'][point['name']]) <= time < moment(start):
                 continue
             wmt = finite_number(row.get('WMT_REPORTING'))
             if wmt is None or wmt <= 0:
@@ -67,7 +86,20 @@ class TransportOpeningHistory(RecentDestinationActivity):
                       for k, v in row.items()}
             record.update(tipping_point=point['name'], opf=point['opf'], time=time.isoformat(), wmt=wmt)
             records.append(record)
-        return dict(request=request, records=records, warnings=warnings, data_signature=digest(records), status='fresh')
+        # Retain the boundary movement intact: the conveyor/COS initializer
+        # splits its physical tonnes without changing its source-grade basis.
+        selected, amounts = [], dict.fromkeys(targets, 0.0)
+        for row in sorted(records, key=lambda r:(r['time'], str(r['INTERNAL_ID'])), reverse=True):
+            name = row['tipping_point']
+            if amounts[name] < targets[name]:
+                selected.append(row)
+                amounts[name] += row['wmt']
+        records = list(reversed(selected))
+        for name, target in targets.items():
+            if amounts[name] < target:
+                warnings.append(f'{name}: only {amounts[name]:,.1f} of {target:,.1f} opening WMT found within {self.MAX_HOURS} hours.')
+        return dict(request=request, records=records, warnings=warnings, queried_hours=query_request['hours'],
+                    data_signature=digest(records), status='fresh')
 
     def query(self, connection, request):
         columns = list(dict.fromkeys(['expit.INTERNAL_ID', 'expit.SOURCE', 'expit.SOURCE_FMS',

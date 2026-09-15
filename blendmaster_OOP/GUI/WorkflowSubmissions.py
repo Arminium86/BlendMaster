@@ -165,9 +165,6 @@ def task_status(host, page):
             return 'ready'
         return 'next' if index == frontier + 1 else 'resubmit'
     if page in SUPPORT:
-        owner = SUPPORT_OWNER.get(page)
-        if owner and task_status(host, owner) == 'ready':
-            return 'ready'
         if page in ('database_reports', 'decision_point', 'reports'):
             return 'ready' if (vars(host).get('_page_enabled_state') or {}).get(page) else 'resubmit'
         return 'resubmit'

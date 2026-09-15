@@ -1677,14 +1677,19 @@ class Optimizer:
             b_ub_max_feed_ratio = [0]          
 
         # Minimum ratio of grade block to stockpile feed (use first value below. 0 means no constraint. 0.1 means min 0.1 grade block / stockpile feed)
-        direct_feed_ratio_min = period_crusher_target["direct_feed_ratio_min"]
+        # A point with no active product build (or zero Calendar rate) cannot
+        # tip. Its operating minimum must not make other OPFs infeasible.
+        direct_feed_ratio_min = (period_crusher_target["direct_feed_ratio_min"]
+            if float(period_crusher_target.get('crusher_rate') or 0) > 0 else 0)
         if not grade_block_indices:
-            A_ub_min_feed_ratio = [[0 for _ in range(len(event_pool))]]
-            # A positive minimum cannot be met when no direct-tip source is
-            # available. Make the model explicitly infeasible instead of
-            # silently accepting an all-zero constraint row.
+            can_idle = bool(solver_config.get('_transport_lane_can_idle'))
+            A_ub_min_feed_ratio = [[direct_feed_ratio_min if can_idle and i in stockpile_indices else 0
+                                    for i in range(len(event_pool))]]
+            # With transport, absent direct-tip material forces zero new
+            # stockpile tipping while opening contents can keep discharging.
+            # Other operating lanes retain the explicit infeasibility check.
             b_ub_min_feed_ratio = [
-                -1 if direct_feed_ratio_min > 0 else 0
+                -1 if direct_feed_ratio_min > 0 and not can_idle else 0
             ]
 
         elif direct_feed_ratio_min <= 0 or direct_feed_ratio_min > 1:
@@ -1929,7 +1934,8 @@ class Optimizer:
         # Inequality constraints
         for row, rhs in zip(A_ub_total, b_ub_total):
             prob += lpSum(row[i] * x_vars[i] for i in range(len(event_pool))) <= rhs
-        if direct_feed_ratio_min > 0 and float(period_crusher_target.get('crusher_rate') or 0) > 0:
+        if (direct_feed_ratio_min > 0 and float(period_crusher_target.get('crusher_rate') or 0) > 0
+                and not solver_config.get('_transport_lane_can_idle')):
             # Ratios alone accept 0/0. An explicitly positive Calendar minimum
             # must select direct-tip material, including in a joint OPF solve.
             prob += lpSum(x_vars[i] for i in grade_block_indices) >= max(1e-4, 10 * Optimizer.SOLUTION_TOLERANCE)

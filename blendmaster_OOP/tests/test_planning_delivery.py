@@ -178,11 +178,11 @@ class CrossFeatureIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(flow.next_chunk_boundary_hours({'A':100},1),.25)
         self.assertEqual(flow.feed_fraction('A',.25,100),0)
 
-    def test_opening_payload_straddles_belt_arrival_without_inventing_mass(self):
+    def test_opening_payload_splits_at_requested_belt_tonnes_without_inventing_mass(self):
         flow=ConveyorCOS(configuration(100,100),START,{'A':100},
-            [dict(time=START-timedelta(hours=1.5),wmt=100,material=mat())])
-        self.assertAlmostEqual(flow.balance('A'),100)
-        self.assertAlmostEqual(sum(r['remaining'] for r in flow.points['A']['conveyor']),50)
+            [dict(time=START-timedelta(hours=1.5),wmt=150,material=mat())])
+        self.assertAlmostEqual(flow.balance('A'),150)
+        self.assertAlmostEqual(sum(r['remaining'] for r in flow.points['A']['conveyor']),100)
         self.assertAlmostEqual(sum(r['wmt'] for r in flow.points['A']['chunks']),50)
         flow.assert_balance()
 
@@ -253,9 +253,12 @@ class CrossFeatureIntegrationTests(unittest.TestCase):
         result=MultiLaneOptimizer(settings()).run_blending_optimization(
             [fixtures.DecisionLeverOptimizerTests.event('SP1')],fixtures.DecisionLeverOptimizerTests.target(),
             1,None,None,periods,'preplan',solver_config=dict(_transport_engine=flow,current_steady_state_datetime=START))
-        # Opening service lasts until 01:15. New interval 01:00-02:00
-        # cannot overtake it; the next decision may start new feed at 01:00.
-        self.assertAlmostEqual(sum(t['wmt'] for t in result['transport_tips']),0)
+        # Opening belt exits over 00:00-01:00. New tipping starts at 00:00
+        # and reaches the outlet at 01:00, immediately behind the opening tail.
+        self.assertEqual(queued[0]['start'],START)
+        self.assertEqual(queued[-1]['end'],START+timedelta(hours=1))
+        self.assertAlmostEqual(sum(t['wmt'] for t in result['transport_tips']),100)
+        self.assertTrue(all(t['start']==START for t in result['transport_tips']))
 
     def test_native_export_buttons_write_both_plans_and_their_audits(self):
         from openpyxl import load_workbook

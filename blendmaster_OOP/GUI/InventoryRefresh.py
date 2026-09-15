@@ -167,20 +167,24 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
         source = context.selected_AMT_data_source()
         signature = context.AMT_opening_request_signature(source)
         cached_signature = vars(context).get('AMT_data_request_signature', '')
-        retained, needed = {}, {}
+        retained, needed, fetch_reasons = {}, {}, {}
         for name, row in source.items():
             subset = {name: row}
             reusable, _ = context.AMT_cached_snapshot_is_reusable(
                 cached_signature, context.AMT_opening_request_signature(subset))
-            from classes.InventorySourceCache import inputs as source_inputs
+            from classes.InventorySourceCache import inputs as source_inputs, matches_inputs
             entry = ((vars(context).get('inventory_source_cache') or {}).get('sources') or {}).get(name)
             current = source_inputs(vars(context), name)
-            inventory_changed = bool(entry and any(value not in (raw, prepared) for value, raw, prepared in
-                zip(current[:2], entry['raw'][:2], entry['prepared'][:2])))
+            inventory_changed = bool(entry and not matches_inputs(current[:2], entry))
             if not force and reusable and not inventory_changed and not context.AMT_data_compatibility_issue(subset):
                 retained[name] = context.AMT_stockpile_data[name]
             else:
                 needed[name] = row
+                reason = ('explicit refresh' if force else
+                          'new source or changed request context' if not reusable else
+                          'changed source content' if inventory_changed else
+                          'missing or incompatible cached AMT data')
+                fetch_reasons[reason] = fetch_reasons.get(reason, 0) + 1
         check_cancel(cancel)
         with database_scope(stage.database):
             if needed:
@@ -222,7 +226,10 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
             stage.changed = {TABLES[0]: sorted(dirty), TABLES[1]: sorted(dirty)}
             stage.active = {TABLES[0]: sorted(context.included_AMT_snapshot(context.stockpile_data)),
                             TABLES[1]: sorted(context.AMT_stockpile_data)}
-            stage.message = f'Opening inputs: {len(dirty)} sources processed, {len(reused)} unchanged sources reused.'
+            stage.message = (f'Opening inputs: {len(dirty)} sources processed, {len(reused)} unchanged sources reused. '
+                             f'AMT warehouse fetch: {len(needed)} footprints; {len(retained)} cached footprints reused.')
+            if fetch_reasons:
+                stage.message += ' Fetch reasons: ' + ', '.join(f'{reason} ({count})' for reason, count in fetch_reasons.items()) + '.'
             stage.changed = {table: sorted(set(stage.changed[table]) | (set(stage.active[table]) - published[table])) for table in TABLES}
             if not dirty and all(set(stage.active[table]) == published[table] for table in TABLES):
                 stage.unchanged = True
@@ -430,7 +437,7 @@ class InventoryRefresh:
         revision, database = input_revision(h), get_database_path()
         values = self.inputs()
         self.held = acquire(h, readable_results=True)
-        self.status('Preparing opening stockpiles and AMT. You can continue viewing the previous plan.', 'running')
+        self.status('Checking opening source changes and cached AMT data. You can continue viewing the previous plan.', 'running')
         def failed(error):
             self.unlock()
             message = error.get('message', str(error)) if isinstance(error, dict) else str(error)

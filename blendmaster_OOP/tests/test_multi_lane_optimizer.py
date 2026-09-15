@@ -1,5 +1,6 @@
 from datetime import datetime
 import unittest
+from unittest.mock import patch
 
 from classes.MultiLaneOptimizer import MultiLaneOptimizer
 from classes.PeriodManager import PeriodManager
@@ -15,6 +16,39 @@ def settings(**changes):
 
 
 class MultiLaneOptimizerTests(unittest.TestCase):
+    def test_inactive_opf_does_not_enforce_a_direct_tip_minimum(self):
+        cfg = settings()
+        cfg['mode'] = 'combined_opf'
+        cfg['tipping_points'][1]['opf'] = 'OPF2'
+        cfg['tipping_points'][1]['targets_by_period']['preplan']['direct_feed_ratio_min'] = .1
+        with patch('classes.OPFSourceProfiles.apply_opf_profile'):
+            result = self.solve(cfg, [Fixtures.event('SP1')], product_builds_configured=True,
+                target_product_builds={'product':build(target_mode='soft', contributing_opfs=['OPF1'])})
+        self.assertTrue(result['Linprog_result_object'].success, result.get('diagnostics'))
+        self.assertGreater(result['crusher_actual_tonnes'], 0)
+        self.assertFalse(any(r['tipping_point'] == 'B' and r['actual_tonnes'] > 0 for r in result['transactions']))
+
+    def test_near_zero_negative_solver_value_keeps_transaction_identity(self):
+        from classes.Optimizer import RetryingCBCSolver, Optimizer
+        original = RetryingCBCSolver.actualSolve
+        adjusted = []
+        def solve(solver, problem, **kwargs):
+            result = original(solver, problem, **kwargs)
+            for variable in problem.variables():
+                if variable.name.startswith('sharedx_') and variable.value() == 0:
+                    variable.varValue = -Optimizer.SOLUTION_TOLERANCE / 10
+                    adjusted.append(variable.name)
+            return result
+        cfg = settings()
+        cfg['source_subsets']['SP3'] = 'A'
+        with patch.object(RetryingCBCSolver, 'actualSolve', solve):
+            result = self.solve(cfg, [Fixtures.event('SP1'), Fixtures.event('SP2'), Fixtures.event('SP3')])
+        self.assertTrue(adjusted, 'test must exercise a rounded negative quantity')
+        self.assertTrue(result['Linprog_result_object'].success)
+        self.assertEqual({r['source']: r['tipping_point'] for r in result['transactions']},
+                         {'SP1': 'A', 'SP2': 'B', 'SP3': 'A'})
+        self.assertTrue(all(r['actual_tonnes'] >= 0 for r in result['transactions']))
+
     def solve(self, configuration, events=None, **config):
         periods = PeriodManager()
         periods.calculate_periods(datetime(2026, 1, 1))

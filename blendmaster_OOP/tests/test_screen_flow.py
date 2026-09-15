@@ -174,13 +174,13 @@ class ScreenFlowStateTests(unittest.TestCase):
                 set_database_path(previous_database)
 
     def test_expit_cache_policy_only_bypasses_live_updated_sequences(self):
-        window = SimpleNamespace(time_mode_choice=1, expit_mode_choice=2)
+        window = SimpleNamespace(time_mode_choice=1, expit_mode_choice=2, expit_refresh_tolerance_minutes=0)
         self.assertFalse(UserInputs.expit_input_cache_allowed(window))
         window.expit_refresh_tolerance_minutes = 30
         self.assertTrue(UserInputs.expit_input_cache_allowed(window))
         window.expit_refresh_tolerance_minutes = 0
         window.time_mode_choice = 2
-        self.assertTrue(UserInputs.expit_input_cache_allowed(window))
+        self.assertFalse(UserInputs.expit_input_cache_allowed(window))
         window.time_mode_choice = 1
         window.expit_mode_choice = 1
         self.assertTrue(UserInputs.expit_input_cache_allowed(window))
@@ -220,7 +220,7 @@ class ScreenFlowStateTests(unittest.TestCase):
             )
 
             self.assertEqual(restored.iloc[0]["source"], "GB1")
-            self.assertEqual(metadata["cache_match"], "fresh_current_time")
+            self.assertEqual(metadata["cache_match"], "within_sequence_tolerance")
             connection = sqlite3.connect(database_path)
             try:
                 connection.execute(
@@ -230,9 +230,13 @@ class ScreenFlowStateTests(unittest.TestCase):
                 connection.commit()
             finally:
                 connection.close()
-            stale, _ = UserInputs.read_reusable_expit_input_cache(
+            unchanged, _ = UserInputs.read_reusable_expit_input_cache(
                 window, old_signature
             )
+            self.assertIsNotNone(unchanged)  # Wall-clock age cannot expire a fixed model-time anchor.
+            shifted = json.loads(old_signature)
+            shifted['start_time'] = '2026-08-17T10:31:00'
+            stale, _ = UserInputs.read_reusable_expit_input_cache(window, json.dumps(shifted))
             self.assertIsNone(stale)
         finally:
             set_database_path(previous_database)

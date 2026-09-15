@@ -16,7 +16,7 @@ from classes.ReconciliationControls import normalise_reconciliation_settings
 from classes.AMTFootprintExclusions import normalize_amt_exclusions
 
 PROJECT_FORMAT_VERSION = 16
-PLANNING_SEMANTICS_VERSION = 1
+PLANNING_SEMANTICS_VERSION = 2
 FLOW_LAYOUT_SCHEMA_VERSION = 1
 CACHE_SIGNATURE_FIELDS = (
     'inventory_data_request_signature', 'AMT_data_request_signature',

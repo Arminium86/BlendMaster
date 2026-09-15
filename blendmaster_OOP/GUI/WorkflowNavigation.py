@@ -14,6 +14,8 @@ VIEWS = ('database_view', 'expit_sequence', 'opf_production_report', 'grade_prof
 SUPPORT = ('site_model', 'guidance_settings', 'define_fields', 'map_fields', 'data_streams', 'continuous_assays',
            'solver_configuration', 'multi_feed_setup', 'material_flow', 'database_reports',
            'site_automation', 'decision_point', 'reports')
+# Editors need no Workspace submission. Reports/diagnostics still need data.
+SUPPORT_CONFIGURATION = frozenset(SUPPORT) - {'database_reports', 'decision_point', 'reports'}
 CAPTIONS = {'setup_blends': 'Manual Blending Dashboard', 'blend_sequence': 'Manual Blend Sequence',
             'material_flow': 'Conveyors & COS', 'decision_point': 'Decision Diagnostics',
             'agent': 'Legacy Agent Bridge'}
@@ -98,7 +100,8 @@ class WorkflowNavigation:
     def set_page_enabled(self, page_id, enabled):
         page_id = product_targets_identifier(page_id)
         from GUI.WorkflowSubmissions import blocked
-        enabled = bool(enabled) and not blocked(self, page_id)
+        requested = bool(enabled)
+        enabled = (requested or page_id in SUPPORT_CONFIGURATION) and not blocked(self, page_id)
         location = self.page_locations.get(page_id)
         if location is not None:
             vars(self).setdefault('_page_enabled_state', {})[page_id] = bool(enabled)
@@ -109,7 +112,7 @@ class WorkflowNavigation:
             tabs.setTabVisible(index, page_id != 'reports' and page_allowed(self, page_id))
         for child in DEPENDENT_PAGES.get(page_id, ()):
             if child in self.page_locations:
-                self.set_page_enabled(child, enabled)
+                self.set_page_enabled(child, requested)
         from GUI.WorkflowViews import schedule
         schedule(self, results=page_id in ('optimised_grade_profiles', 'manual_grade_profiles'))
 

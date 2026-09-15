@@ -162,6 +162,8 @@ def one_lane_topology(
     def storage(stage, capacity):
         return dict(placeholder=not enabled or capacity<=0, latency_enabled=enabled and capacity>0,
                     tipping_point=site['crusher'], opf=site['opf'], capacity_wmt=capacity,
+                    opening_wmt=capacity, storage_limit_wmt=None if stage=='cos' else capacity,
+                    chunk_size_wmt=capacity/transport.get('cos_chunks',10) if stage=='cos' else None,
                     chunks=transport.get('cos_chunks',10) if stage=='cos' else None,
                     reference_rate=rate, latency_hours=delay if stage=='conveyor' else None)
     nodes = [
@@ -206,7 +208,7 @@ def one_lane_topology(
     connect(tip_id, conveyor_id, edge_type=TOPOLOGY_EDGE_CONVEYOR)
     edges[-1].update(latency_hours=delay, capacity_wmt=conveyor_capacity if enabled else None)
     connect(conveyor_id, cos_id, edge_type=TOPOLOGY_EDGE_COS)
-    edges[-1]["capacity_wmt"] = cos_capacity if enabled else None
+    edges[-1]["capacity_wmt"] = None  # COS opening tonnes are not a throughput/storage limit.
     connect(cos_id, opf_id)
 
     grouped = {}

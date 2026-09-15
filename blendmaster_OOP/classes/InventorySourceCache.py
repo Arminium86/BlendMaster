@@ -46,6 +46,16 @@ def inputs(state, name):
             snapshot_signature((state.get('AMT_stockpile_data') or {}).get(name, []))]
 
 
+def matches_inputs(identity, entry):
+    """Accept raw/prepared identities and re-normalise saved rows from older caches."""
+    if not entry or len(entry.get('raw', [])) != 3 or len(entry.get('prepared', [])) != 3:
+        return False
+    fields = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data')
+    return all(value in (entry['raw'][index], entry['prepared'][index])
+        or (fields[index] in entry and value == snapshot_signature(entry[fields[index]]))
+        for index, value in enumerate(identity))
+
+
 def partition(state, force=False):
     cache = state.get('inventory_source_cache') or {}
     entries = cache.get('sources') or {}
@@ -57,8 +67,7 @@ def partition(state, force=False):
         identity = inputs(state, name)
         dependency = dependencies(state, name, (state.get('updated_stockpile_data') or {}).get(name) or row, common)
         identities[name] = (identity, dependency)
-        matches = len(entry.get('raw', [])) == 3 and len(entry.get('prepared', [])) == 3 and all(value in {old, prepared} for value, old, prepared in
-                      zip(identity, entry.get('raw', []), entry.get('prepared', []))) if entry else False
+        matches = matches_inputs(identity, entry)
         if not force and matches and dependency == entry.get('dependencies') and within_tolerance(
                 entry.get('anchor'), state.get('start_time_choice'), tolerance):
             reused.add(name)

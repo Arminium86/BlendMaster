@@ -210,13 +210,9 @@ class MultiLaneOptimizer(Optimizer):
                             occupied = sum(row['rate'] for row in queued if row['start'] <= boundary < row['end'])
                             joint += lpSum(v/((end-begin).total_seconds()/3600) for _,v,begin in available
                                            if begin+lag <= boundary < outlet_end) <= max(0,rates[point['name']]-occupied)
-                    # Total storage cannot exceed measured capacity, even at a rate transition.
-                    cfg = flow.points[point['name']]['config']
-                    departing = sum(r['wmt'] for r in known_arrivals if r['material']['tipping_point'] == point['name'])
-                    free = cfg['conveyor_capacity_wmt'] + cfg['cos_capacity_wmt'] - flow.balance(point['name'])
-                    retained = [v*(1-getattr(e, '_transport_fraction', 0)) for e, v in zip(aggregate['events'], aggregate['variables'])
-                                if e._multi_point == point['name'] and not getattr(e, '_transport_arrival', False)]
-                    joint += lpSum(retained) <= max(0, free+departing)
+                    # COS WMT defines opening contents and fixed chunk size,
+                    # not a maximum balance. Additional receiving chunks are
+                    # created as required; throughput constraints remain above.
                     service = cfg['spot_seconds'] + cfg['dump_seconds']
                     if cfg['conveyor_capacity_wmt'] > 0 and service > 0:
                         joint += lpSum(v for e, v in zip(packet['events'], packet['variables']) if e.is_stockpile) <= (
@@ -230,14 +226,16 @@ class MultiLaneOptimizer(Optimizer):
         for point, steps, packet in models:
             packet["problem"].status = joint.status
             lane_results[point["name"]] = self._resume(steps)
-        # Validate each physical lane as well as the aggregate. In particular,
-        # a zero-feed lane cannot satisfy a positive operating minimum while
-        # another OPF supplies the shared product build.
+        # Validate each physical lane as well as the aggregate. A transport
+        # lane can wait while opening conveyor/COS inventory supplies the OPF;
+        # any positive new tipping must still satisfy its operating minimum.
         for point, _, _ in models:
             lane = lane_results[point['name']]
             target = point['target']
             if (lane['Linprog_result_object'].success and target['crusher_rate'] > 0
                     and float(target.get('direct_feed_ratio_min') or 0) > 0
+                    and (not flow or point['name'] not in flow.points
+                         or sum(float(t.get('actual_tonnes') or 0) for t in lane.get('transactions', [])) > self.SOLUTION_TOLERANCE)
                     and sum(float(t.get('actual_tonnes') or 0) for t in lane.get('transactions', [])
                             if t.get('source_type') == 'grade_block') <= self.SOLUTION_TOLERANCE):
                 lane['Linprog_result_object'].success = False
@@ -257,7 +255,7 @@ class MultiLaneOptimizer(Optimizer):
             # Aggregate reporting keeps shared product-build contributions;
             # each transaction also carries its physical tipping-point identity.
             reported = [(e, v) for e, v in zip(aggregate["events"], aggregate["variables"])
-                        if float(v.value() or 0) >= 0]
+                        if (0.0 if abs(v.value() or 0.0) < self.SOLUTION_TOLERANCE else v.value()) >= 0]
             if len(reported) != len(result["transactions"]):
                 raise RuntimeError("Joint solve transaction identity mismatch.")
             for transaction, (event, _) in zip(result["transactions"], reported):

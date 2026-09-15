@@ -1660,12 +1660,10 @@ class CaseModeller:
         return frozenset(signature)
 
     def chemical_blend_signature_from_dataframe(self, data):
-        """Return the source-and-ratio signature that defines a Blend ID.
+        """Blend IDs track parent stockpiles and their relative reclaim mix.
 
-        The contingency signature intentionally records only source identity.
-        Blend IDs are more specific: a stockpile-ratio change or a direct-tip
-        grade-block/rate change represents a different chemical blend even if
-        the set of source IDs is unchanged.
+        Direct-tip block changes and AMT chunk turnover retain the same ID
+        when the parent-stockpile proportions remain unchanged.
         """
         if data is None or data.empty:
             return tuple()
@@ -1685,8 +1683,10 @@ class CaseModeller:
         contributions = {}
         for _, row in active.iterrows():
             source_type = self.contingency_source_type(row) or "unknown"
+            if source_type != 'stockpile':
+                continue
             source_id = str(
-                row.get("source_id") or row.get("source") or ""
+                row.get("parent_stockpile") or row.get("source_id") or row.get("source") or ""
             ).strip().upper()
             if not source_id:
                 continue
@@ -1697,7 +1697,7 @@ class CaseModeller:
 
         total_tonnes = sum(contributions.values())
         if total_tonnes <= Optimizer.SOLUTION_TOLERANCE:
-            return tuple()
+            return (('stockpile_mix', '<none>', 1.0),)
         # Eight decimal places prevents insignificant solver tolerance noise
         # from producing a new blend while retaining meaningful mix changes.
         return tuple(sorted(

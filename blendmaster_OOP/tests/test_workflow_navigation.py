@@ -53,6 +53,24 @@ class WorkflowNavigationTests(unittest.TestCase):
         self.assertIs(h.workspace_tabs.currentWidget(), h.page_widgets['grade_reconciliation'])
         h.deleteLater()
 
+    def test_support_editors_survive_empty_workspace_and_legacy_disabled_gates(self):
+        from GUI.WorkflowNavigation import SUPPORT_CONFIGURATION
+        from GUI.InputPreparationLocks import acquire, release
+        for role in ('support', 'planner'):
+            h = self.host(role)
+            h.workflow_submission_state = {'required': list(WORKSPACE)}
+            h.restore_page_states({page: False for page in SUPPORT_CONFIGURATION})
+            for page in SUPPORT_CONFIGURATION:
+                self.assertEqual(h.is_page_enabled(page), role == 'support', page)
+            self.assertFalse(h.is_page_enabled('grade_reconciliation'))
+            if role == 'support':
+                held = acquire(h, readable_results=True)
+                h.set_page_enabled('data_streams', False)
+                self.assertFalse(h.page_widgets['data_streams'].isEnabled())
+                release(h, held)
+                self.assertTrue(h.page_widgets['data_streams'].isEnabled())
+            h.deleteLater()
+
     def test_returning_to_a_navigation_group_enters_its_selected_page(self):
         h = self.host('support')
         h.show_page('material_flow')

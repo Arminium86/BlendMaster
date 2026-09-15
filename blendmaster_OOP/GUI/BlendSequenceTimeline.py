@@ -74,6 +74,8 @@ class BlendSequenceTimeline(QWidget):
             button = QPushButton(caption); button.clicked.connect(action); bar.addWidget(button)
         bar.addStretch(); self.status = QLabel('No saved sequence is available.'); self.status.setWordWrap(True)
         bar.addWidget(self.status); layout.addLayout(bar)
+        note = QLabel('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
+        note.setWordWrap(True); layout.addWidget(note)
         splitter = QSplitter(Qt.Vertical)
         self.scene = QGraphicsScene(self); self.view = QGraphicsView(self.scene)
         self.view.setAlignment(Qt.AlignLeft | Qt.AlignTop)

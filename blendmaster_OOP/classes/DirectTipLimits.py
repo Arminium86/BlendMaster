@@ -4,6 +4,51 @@ import pandas as pd
 from classes.EquipmentLimits import period_limit
 
 
+def validate_direct_tip_sources(config, blocks, targets, calendar=None, payload_count=0):
+    """Reject positive minima with no eligible source at the physical point."""
+    from classes.MultiFeedSettings import multi_feed_settings, period_lanes, build_opfs
+    from classes.ProductTargets import product_targets_value
+    from classes.PlanningPrerequisites import PlanningPrerequisiteError
+    settings = multi_feed_settings(config.get('multi_feed_settings'))
+    routing = config.get('direct_tip_point_by_payload') or {}
+    usable = [block for block in blocks if float(block.balance or 0) > 0]
+    missing = {}
+    # Future periods may never be reached (a build can finish earlier). The
+    # solver owns their hard limits when it reaches them; preflight checks only
+    # the opening period and OPFs with work to do.
+    opening = 'preplan' if 'preplan' in targets else next(iter(targets), None)
+    for period, target in targets.items():
+        if period != opening:
+            continue
+        if settings['mode'] == 'single':
+            required = period_limit(calendar or {}, 'crusher_direct_tip_ratio_min', period)
+            target = {**target, 'direct_feed_ratio_min': target.get('direct_feed_ratio_min', 0) if required is None else required}
+            points = [dict(name='Crusher', target=target, direct_tip_enabled=config.get('direct_tip_enabled', True))]
+        else:
+            points = period_lanes(settings, period, target)
+        for point in points:
+            if config.get('product_builds_configured') and settings['mode'] == 'combined_opf':
+                builds = product_targets_value(calendar or {}, [])
+                if not any(not build_opfs(build) or point['opf'] in build_opfs(build) for build in builds):
+                    continue
+            minimum = float(point['target'].get('direct_feed_ratio_min') or 0)
+            if minimum <= 0 or float(point['target'].get('crusher_rate') or 0) <= 0:
+                continue
+            eligible = point['direct_tip_enabled'] and any(settings['mode'] == 'single'
+                or point['name'] in routing.get(str(block.name), []) for block in usable)
+            if not eligible:
+                missing.setdefault(point['name'], []).append(f'{period}: {minimum:.1%}')
+    if missing:
+        details = '; '.join(f'{point} ({", ".join(values)})' for point, values in missing.items())
+        raise PlanningPrerequisiteError(
+            f'Calendar requires a hard direct-tip minimum at {details}, but no eligible direct-tip '
+            f'grade-block payload is routed there. {payload_count} payloads were prepared; '
+            f'{len(usable)} became eligible direct-tip sources. Database View also includes stockpile-bound '
+            'payloads, which are not automatically permitted to direct tip. Review Direct Tip Movement Rules '
+            'and selected crushers in Guidance Schedules, then resubmit. The minimum has not been relaxed.',
+            'guidance_schedules')
+
+
 def direct_tip_violations(report, calendar, periods, mode='single'):
     if report is None or report.empty:
         return []

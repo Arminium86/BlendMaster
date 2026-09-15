@@ -51,6 +51,15 @@ class FrameModelTests(unittest.TestCase):
         self.assertEqual(model.data(model.index(0, 0)), 'SP1')
 
 class MaterialFlowViewTests(unittest.TestCase):
+    def test_opening_state_only_disables_slider_and_explains_empty_timeline(self):
+        view = MaterialFlowResults()
+        self.addCleanup(view.deleteLater)
+        view.set_data(dict(graph=planning_topology(multi_feed=settings()), warnings=[], frames={
+            'feed': pd.DataFrame(), 'transport_contents': pd.DataFrame([{'datetime': '2026-01-01'}])}))
+        self.assertFalse(view.slider.isEnabled())
+        self.assertEqual(view.slider.maximum(), 0)
+        self.assertIn('Opening state only', view.time_label.text())
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

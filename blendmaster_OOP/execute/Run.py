@@ -126,8 +126,7 @@ class Run:
         except (TypeError, ValueError):
             interaction_mode = 1
 
-        handler = ExpitDataHandler(
-            file_path,
+        handler_inputs = dict(
             include_crusher_destinations=reevaluate_aps_direct_tip,
             selected_crusher_name=selected_aps_crusher,
             operational_mine=site_context.get("mine"),
@@ -153,8 +152,25 @@ class Run:
                 interaction_mode == 2
             ),
         )
-        transactions = handler.process_transactions()
-        transactions = self._ensure_direct_tip_ids(transactions)
+        from classes.ExpitPreparationCache import ParsedPayloadCache, file_identity
+        from classes.SourceSnapshots import digest
+        # Parsing/route preparation does not depend on the model start or
+        # conveyor/solver settings. Sequence actuals are applied to a copy below.
+        parsed_signature = digest(dict(version=1, schedule=file_identity(file_path),
+            reference=file_identity(reference_path), inputs=handler_inputs))
+        parsed_cache = ParsedPayloadCache()
+        transactions, _ = parsed_cache.read_expit_input_cache(parsed_signature)
+        handler = ExpitDataHandler(file_path, **handler_inputs)
+        if transactions is None:
+            transactions = self._ensure_direct_tip_ids(handler.process_transactions())
+            transactions.attrs['source_property_warnings'] = list(getattr(handler, 'property_warnings', []) or [])
+            parsed_cache.write_expit_input_cache(transactions, parsed_signature)
+        else:
+            bridge = getattr(self, 'case_bridge', None)
+            if bridge:
+                bridge.print('Reusing parsed Expit payloads; refreshing sequence actuals only.' if interaction_mode == 2
+                             else 'Reusing parsed Expit payloads.')
+        transactions = copy.deepcopy(transactions)
         if interaction_mode == 2:
             transactions = handler.update_transactions(
                 transactions,
@@ -173,9 +189,8 @@ class Run:
         if transactions is not None:
             # DataFrame operations may drop attrs, so merge rather than
             # replacing the reconciliation audit attached above.
-            transactions.attrs["source_property_warnings"] = list(
-                getattr(handler, "property_warnings", []) or []
-            )
+            transactions.attrs.setdefault("source_property_warnings", list(
+                getattr(handler, "property_warnings", []) or []))
         return transactions if transactions is not None else DataFrame()
 
     def _run_case_modeller(self, case_modeller):
@@ -427,16 +442,8 @@ class Run:
                 solver_config['multi_feed_settings'], calendar_inputs, labels))
             points = solver_config["multi_feed_settings"]["tipping_points"]
             solver_config['direct_tip_enabled'] = any(p['direct_tip_enabled'] for p in points)
-            routing = {}
-            for row in expit_payload_transactions.to_dict("records"):
-                destination = row.get("destination", "")
-                routing[str(row.get("direct_tip_id", ""))] = [point["name"] for point in points
-                    if ExpitDataHandler.crusher_destination_names_match(destination, point["name"])
-                    or ExpitDataHandler.crusher_destination_matches(destination, (site_context or {}).get("mine"), point["name"], point["opf"])
-                    or any(str(rule.get("grade_block_source") or "").strip().upper() in str(row.get("source") or "").upper()
-                           and str(rule.get("grade_block_source") or "").strip()
-                           and ExpitDataHandler.crusher_destination_names_match(rule.get("crusher_destination"), point["name"])
-                           for rule in (site_context or {}).get("direct_tip_movement_rules", []))]
+            routing = ExpitDataHandler.direct_tip_routes(expit_payload_transactions.to_dict('records'), points,
+                (site_context or {}).get('mine'), (site_context or {}).get('direct_tip_movement_rules', []))
             solver_config["direct_tip_point_by_payload"] = routing
         for key, default in {
             "crusher_tonnes_stream": "modelled_rom_wmt",
@@ -553,6 +560,9 @@ class Run:
         )
 
         stockpile_data_objects, grade_block_data_objects, equipment_data_objects, crusher_target_data = input_data.load_data()
+        from classes.DirectTipLimits import validate_direct_tip_sources
+        validate_direct_tip_sources(solver_config, grade_block_data_objects, crusher_target_data,
+                                    calendar_inputs, len(expit_payload_transactions))
         from classes.TransportSettings import transport_settings, transport_enabled
         solver_config['transport_settings'] = transport_settings((site_context or {}).get('transport_settings'))
         if transport_enabled(solver_config['transport_settings']):
@@ -828,6 +838,10 @@ class Run:
                 " The last internally consistent solved checkpoint before "
                 "repair has been retained for Results and Reports."
             )
+
+        if primary_blend_report.empty:
+            primary_status = 'failed'
+            primary_message = 'No optimised plan was generated. ' + primary_message
 
         plan_status_rows = [{
             "plan_id": "Primary",

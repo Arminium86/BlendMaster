@@ -19,7 +19,9 @@ def transport_settings(value=None, *, tipping_points=None):
         if not isinstance(enabled,bool):
             raise ValueError(f'{name}: Enable conveyor/COS must be true or false.')
         conveyor = number(row.get('conveyor_capacity_wmt', 0), f'{name}: Conveyor capacity')
-        cos = number(row.get('cos_capacity_wmt', 0), f'{name}: COS capacity')
+        # Keep the saved field name for project compatibility; this is an
+        # opening inventory target and chunk-size basis, never a storage cap.
+        cos = number(row.get('cos_capacity_wmt', 0), f'{name}: Opening COS tonnes')
         chunks = number(row.get('cos_chunks', 10), f'{name}: COS chunks', positive=True)
         if chunks != int(chunks) or chunks > 1000:
             raise ValueError(f'{name}: COS chunks must be a whole number between 1 and 1000.')
@@ -27,7 +29,7 @@ def transport_settings(value=None, *, tipping_points=None):
         spot = number(row.get('spot_seconds', 30), f'{name}: Spot time')
         dump = number(row.get('dump_seconds', 30), f'{name}: Dump time')
         if enabled and conveyor + cos <= 0:
-            raise ValueError(f'{name}: enter a positive conveyor or COS capacity, or disable transport.')
+            raise ValueError(f'{name}: enter positive opening conveyor or COS tonnes, or disable transport.')
         points[str(name)] = dict(enabled=enabled, conveyor_capacity_wmt=conveyor,
             cos_capacity_wmt=cos, cos_chunks=int(chunks), rehandle_payload_wmt=payload,
             spot_seconds=spot, dump_seconds=dump)

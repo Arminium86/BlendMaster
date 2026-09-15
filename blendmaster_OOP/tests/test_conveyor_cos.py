@@ -115,6 +115,7 @@ class ConveyorCOSTests(unittest.TestCase):
         cfg = settings()
         cfg['tipping_points'][0]['min_stockpiles'] = 1
         cfg['tipping_points'][0]['max_stockpiles'] = 4
+        cfg['tipping_points'][0]['targets_by_period']['preplan']['direct_feed_ratio_min'] = .1
         for point in cfg['tipping_points']:
             point['targets_by_period']['preplan']['brand'] = 'SS'
         result = MultiLaneOptimizer(cfg).run_blending_optimization(
@@ -131,6 +132,36 @@ class ConveyorCOSTests(unittest.TestCase):
         self.assertAlmostEqual(result['tipping_point_results']['B']['crusher_actual_tonnes'], 10)
         self.assertEqual(result['transport_tips'], [])
         self.assertAlmostEqual(flow.balance('A'), 100)  # A solve only previews the queue.
+
+    def test_opening_belt_is_positioned_to_allow_tipping_from_start(self):
+        history = [dict(time=START-timedelta(minutes=1), wmt=100, material=mat(56))]
+        flow = ConveyorCOS(configuration(100, 200), START, {'A':100}, history)
+        boundary = flow.next_chunk_boundary_hours({'A':100}, 2)
+        self.assertAlmostEqual(boundary, 1)
+        flow.advance(START+timedelta(hours=boundary), {'A':100})
+        self.assertGreater(flow.next_chunk_boundary_hours({'A':100}, 2), .99)
+
+    def test_cos_can_discharge_and_accept_new_feed_with_hard_ten_percent_direct_tip(self):
+        periods = PeriodManager(); periods.calculate_periods(START)
+        history = [dict(time=START-timedelta(hours=1), wmt=100, material=mat(56))]
+        flow = ConveyorCOS(configuration(0,200), START, {'A':100}, history)
+        cfg = settings()
+        cfg['tipping_points'][0]['targets_by_period']['preplan']['direct_feed_ratio_min'] = .1
+        block = fixture_module.DecisionLeverOptimizerTests.event('GB',balance=20)
+        block._type, block._stockpile, block._grade_block = 'grade_block', None, 'GB'
+        block._delivered_datetime = START
+        result = MultiLaneOptimizer(cfg).run_blending_optimization(
+            [fixture_module.DecisionLeverOptimizerTests.event('SP1'), block],
+            fixture_module.DecisionLeverOptimizerTests.target(), 1, None,None,periods,'preplan',
+            solver_config=dict(_transport_engine=flow, current_steady_state_datetime=START,
+                               direct_tip_point_by_payload={'GB':['A']}, direct_tip_cash_incentive=1000))
+        self.assertTrue(result['Linprog_result_object'].success)
+        lane = result['tipping_point_results']['A']
+        direct = sum(r['actual_tonnes'] for r in lane['transactions'] if r['source_type']=='grade_block')
+        total = sum(r['actual_tonnes'] for r in lane['transactions'])
+        self.assertGreater(total,0)
+        self.assertGreaterEqual(direct/total, .1-1e-7)
+        self.assertAlmostEqual(sum(r['actual_tonnes'] for r in result['transport_arrivals']),100)
 
     def test_feeding_transport_lane_still_requires_minimum_stockpile_contributions(self):
         periods = PeriodManager()

@@ -10,6 +10,22 @@ from GUI.ScheduledSiteBatch import ScheduledSiteBatch
 
 
 class ScheduledBatchTests(unittest.TestCase):
+    def test_idle_scheduler_does_not_capture_model_until_a_contract_is_due(self):
+        from GUI.ScheduledSiteBatch import start_due_batch
+        host = SimpleNamespace(active_scenario_id='A', site_scenarios={'A': {}}, save_active_scenario_state=Mock())
+        controller = SimpleNamespace(host=host, last_attempt={'A': 100}, status=Mock())
+        with patch('GUI.ScheduledSiteBatch.time.monotonic', return_value=101), patch('GUI.ScheduledSiteBatch.ScheduledSiteBatch') as batch:
+            start_due_batch(controller)
+            host.save_active_scenario_state.assert_not_called()
+            host.site_workflow_contract = {**default_contract('A'), 'enabled': True}
+            start_due_batch(controller)
+            host.save_active_scenario_state.assert_not_called()
+            controller.last_attempt = {}
+            with patch('GUI.ScheduledSiteBatch.time.monotonic', return_value=100000):
+                start_due_batch(controller)
+            host.save_active_scenario_state.assert_called_once()
+            batch.assert_called_once()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

@@ -86,13 +86,33 @@ class TransportOpeningModelTests(unittest.TestCase):
         points = [dict(name='OPF02_PC', opf='CC OPF02', opening_rate=100)]
         settings = dict(tipping_points={'OPF02_PC': configuration()['tipping_points']['A']})
         current = service.fetch('CC', START, points, settings)
+        first_calls = service.query.call_count
         old = deepcopy(current)
         old['request']['version'] = 2
         refreshed = service.fetch('CC', START, points, settings, cached=old)
         self.assertEqual(refreshed['status'], 'fresh')
-        self.assertEqual(service.query.call_count, 2)
+        self.assertEqual(service.query.call_count, first_calls * 2)
         self.assertEqual(service.fetch('CC', START, points, settings, cached=refreshed)['status'], 'cached')
-        self.assertEqual(service.query.call_count, 2)
+        self.assertEqual(service.query.call_count, first_calls * 2)
+
+    def test_history_expands_until_opening_tonnes_are_covered(self):
+        service = TransportOpeningHistory(inventory_loader=Mock())
+        points = [dict(name='OPF02_PC', opf='CC OPF02', opening_rate=100)]
+        settings = dict(tipping_points={'OPF02_PC': configuration(100,200)['tipping_points']['A']})
+        requests = []
+        def query(connection, request):
+            requests.append(deepcopy(request))
+            rows = [dict(INTERNAL_ID=1,DESTINATION_FMS='OP2_HOP01',OBSERVED_AT=START-timedelta(hours=1),WMT_REPORTING=100)]
+            if request['hours']['OPF02_PC'] >= 6:
+                rows.append(dict(INTERNAL_ID=2,DESTINATION_FMS='OP2_HOP01',OBSERVED_AT=START-timedelta(hours=5),WMT_REPORTING=250))
+            return rows
+        service.query = query
+        result = service.fetch('CC',START,points,settings)
+        self.assertEqual([r['hours']['OPF02_PC'] for r in requests],[3,6])
+        self.assertEqual(sum(r['wmt'] for r in result['records']),350)
+        self.assertFalse(result['warnings'])
+        self.assertEqual(service.fetch('CC',START,points,settings,cached=result)['status'],'cached')
+        self.assertEqual(len(requests),2)
 
 
 if __name__ == '__main__':

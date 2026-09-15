@@ -163,13 +163,20 @@ class MaterialFlowResults(QWidget):
         self.slider.setRange(0,max(0,len(self.timeline.times)-1))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
-        self.slider.setEnabled(bool(self.timeline.times))
+        self.slider.setEnabled(len(self.timeline.times) > 1)
+        self.slider.setToolTip('Move through the saved plan.' if len(self.timeline.times) > 1 else
+                               'Only the opening state is saved; no time progression is available.')
         enabled = data['graph'].get('properties',{}).get('latency_enabled')
         caveat = ('Arrivals drive Product Targets. Source depletion is recorded at tipping. Closing contents are retained at the plan stop; no drain extension. '
                   'Actual movement tonnes use modelled, reconciled chemistry. Inferred opening feed: 0 WMT.'
                   if enabled else 'Transport is disabled. Tipping and OPF arrival occur in the same steady state.')
         self.note.setText(caveat+'\n'+'\n'.join(data.get('warnings',[])))
         self.show_time(0)
+        if len(self.timeline.times) <= 1:
+            self.time_label.setText('Opening state only — no solved timeline to advance.')
+            self.note.setText('No optimised/manual time progression is saved for this plan. '
+                             'Review its calculation status and resolve the planning inputs before rerunning.\n' +
+                             self.note.text())
 
     def show_time(self,index):
         if self.timeline is None:

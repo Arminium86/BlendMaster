@@ -50,6 +50,41 @@ class SourceSnapshotTests(unittest.TestCase):
         values['start_time_choice'] = anchor
         self.assertFalse(missing_sources(values))
 
+    def test_solver_readiness_does_not_refresh_amt_or_reprocess_sources(self):
+        for amt in (False, True):
+            with self.subTest(amt=amt), tempfile.TemporaryDirectory() as directory, database_scope(str(Path(directory)/'active.db')):
+                database = str(Path(directory)/'active.db')
+                values, service = self.fixture(amt)
+                first = prepare(UserInputs, values, {}, service, Event())
+                result, _, _ = publish(first, database, Event())
+                values.update(result)
+                service.call_opening_AMT_stockpile_inventories.reset_mock()
+                for field in ('stockpile_data', 'updated_stockpile_data'):
+                    values[field]['SP1'].update(is_ready=True, auto_turnover_datetime='2026-09-16')
+                with patch.object(UserInputs, 'apply_canonical_field_mappings', side_effect=AssertionError('unchanged source processed')):
+                    stage = prepare(UserInputs, values, {}, service, Event())
+                self.assertTrue(stage.unchanged)
+                self.assertIn('AMT warehouse fetch: 0 footprints', stage.message)
+                service.call_opening_AMT_stockpile_inventories.assert_not_called()
+                publish(stage, database, Event())
+                if amt:
+                    values['stockpile_data']['SP1']['BALANCE'] = 101
+                    stage = prepare(UserInputs, values, {}, service, Event())
+                    service.call_opening_AMT_stockpile_inventories.assert_called_once_with(['SP1_1'], values['start_time_choice'])
+                    self.assertIn('changed source content (1)', stage.message)
+                    stage.close()
+
+    def test_old_cache_rows_are_renormalised_without_hiding_material_changes(self):
+        from classes.InventorySourceCache import matches_inputs
+        from classes.SourceSnapshots import snapshot_signature
+        row = dict(NAME='A', BALANCE=100, FE_ROM=55, is_ready=False, auto_turnover_datetime=None)
+        entry = dict(raw=['old']*3, prepared=['old']*3, stockpile_data=row,
+                     updated_stockpile_data=row, AMT_stockpile_data=[])
+        changed = {**row, 'is_ready': True, 'auto_turnover_datetime': '2026-09-16'}
+        self.assertTrue(matches_inputs([snapshot_signature(changed)]*2, entry))
+        for key, value in (('BALANCE', 101), ('FE_ROM', 56), ('lineage', ['new'])):
+            self.assertFalse(matches_inputs([snapshot_signature({**changed, key:value})]*2, entry))
+
     def test_reconciliation_only_changed_source_is_searched(self):
         values = state()
         manual(values)

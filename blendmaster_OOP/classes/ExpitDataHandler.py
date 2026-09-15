@@ -393,6 +393,22 @@ class ExpitDataHandler:
         right_parts = normalized_parts(right)
         return bool(left_parts and right_parts and left_parts.intersection(right_parts))
 
+    @classmethod
+    def crusher_destination_matches_point(cls, destination, mine, crusher, opf=None):
+        """Match explicit node names or a known site's operational alias."""
+        return cls.crusher_destination_names_match(destination, crusher) or bool(
+            mine and crusher and cls.crusher_destination_matches(destination, mine, crusher, opf))
+
+    @classmethod
+    def direct_tip_routes(cls, payloads, points, mine, rules):
+        rules = cls._normalize_movement_rules(rules)
+        return {str(row.get('direct_tip_id', '')): [point['name'] for point in points
+            if point.get('direct_tip_enabled', True) and (
+                cls.crusher_destination_matches_point(row.get('destination'), mine, point['name'], point['opf'])
+                or any(rule['grade_block_source'].upper() in str(row.get('source') or '').upper()
+                       and cls.crusher_destination_matches_point(rule['crusher_destination'], mine, point['name'], point['opf'])
+                       for rule in rules))] for row in payloads}
+
     @staticmethod
     def _planning_window(start_time, planning_period_count=3):
         if hasattr(start_time, "toPyDateTime"):
@@ -1587,8 +1603,12 @@ class ExpitDataHandler:
             crusher_destination_mask = (
                 (destination_type == "Crusher")
                 & (
-                    destination_name.isin(self.selected_crusher_names)
-                    | destination_full_name.isin(self.selected_crusher_names)
+                    destination_name.map(lambda destination: any(self.crusher_destination_matches_point(
+                        destination, self.operational_mine, selected, self.operational_opf)
+                        for selected in self.selected_crusher_names))
+                    | destination_full_name.map(lambda destination: any(self.crusher_destination_matches_point(
+                        destination, self.operational_mine, selected, self.operational_opf)
+                        for selected in self.selected_crusher_names))
                 )
             )
             if self.operational_mine and self.operational_crusher:
@@ -1781,7 +1801,8 @@ class ExpitDataHandler:
             if source_pattern not in source_key:
                 continue
             if selected_destinations and not any(
-                self.crusher_destination_names_match(destination, selected)
+                self.crusher_destination_matches_point(destination, getattr(self, 'operational_mine', None),
+                                                       selected, getattr(self, 'operational_opf', None))
                 for selected in selected_destinations
             ):
                 continue
