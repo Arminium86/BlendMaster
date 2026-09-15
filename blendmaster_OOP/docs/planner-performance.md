@@ -144,6 +144,11 @@ previous actuals; results from a different site, database or request are rejecte
 Planners do not gain permission to edit Support settings. Tests cover global Run,
 asynchronous Support navigation, receipts, empty views, reuse and failed refreshes.
 
+Preparation locks track the latest task-enabled state during a refresh. A task
+made ready by completion (such as Grade Reconciliation) becomes editable on the
+final lock release; newly invalidated tasks stay disabled. Navigation and view
+readiness updates cannot enable inputs while another preparation job holds them.
+
 ## Reconciliation copy ownership
 
 Factor application now copies editable factor maps, coverage and source metadata

@@ -110,6 +110,8 @@ class WorkflowViews(QObject):
         self.host._page_enabled_state[page] = bool(enabled)
         if tabs.isTabEnabled(index) != bool(enabled):
             tabs.setTabEnabled(index, bool(enabled))
+        from GUI.InputPreparationLocks import page_state_changed
+        page_state_changed(self.host, page, enabled)
 
     def refresh(self):
         host = self.host

@@ -32,6 +32,20 @@ def acquire(host, readable_results=False):
     return held
 
 
+def page_state_changed(host, page, enabled):
+    """Track navigation's latest intent without unlocking an active worker.
+
+    QTabWidget.setTabEnabled also enables/disables its page widget. Override
+    that side effect while locked, and restore the new intent on final release.
+    """
+    widget = (vars(host).get('page_widgets') or {}).get(page)
+    record = (vars(host).get('_preparation_widget_locks') or {}).get(widget)
+    if record is not None:
+        record[1] = bool(enabled)
+        if widget is not None and not sip.isdeleted(widget):
+            widget.setEnabled(False)
+
+
 def release(host, held):
     records = vars(host).get('_preparation_widget_locks', {})
     for widget in held:

@@ -102,6 +102,8 @@ class WorkflowNavigation:
             vars(self).setdefault('_page_enabled_state', {})[page_id] = bool(enabled)
             tabs, index = location
             tabs.setTabEnabled(index, bool(enabled) and page_allowed(self, page_id))
+            from GUI.InputPreparationLocks import page_state_changed
+            page_state_changed(self, page_id, bool(enabled) and page_allowed(self, page_id))
             tabs.setTabVisible(index, page_id != 'reports' and page_allowed(self, page_id))
         for child in DEPENDENT_PAGES.get(page_id, ()):
             if child in self.page_locations:
