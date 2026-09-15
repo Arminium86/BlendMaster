@@ -24,8 +24,10 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 
 def profile_signature(state, opfs):
-    return reconciliation_fingerprint({'version': 4, 'opfs': opfs,
-        **{key: state.get(key) for key in SOURCE_FIELDS}})
+    from classes.AcceptedEvidence import fingerprint_fields
+    return fingerprint_fields({'version': 4, 'opfs': opfs,
+        **{key: state.get(key) for key in SOURCE_FIELDS}}, state,
+        accepted=('grade_reconciliation_registry',))
 
 
 def reusable_cache(state, opfs=None):

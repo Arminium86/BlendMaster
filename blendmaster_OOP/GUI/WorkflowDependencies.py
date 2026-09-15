@@ -2,6 +2,7 @@
 from classes.PlanningPersistence import settings_signature
 from classes.SiteWorkflow import fingerprint
 from classes.GuidanceImport import current_import_revisions
+from classes.AcceptedEvidence import fingerprint_fields
 
 
 def input_revision(host):
@@ -14,7 +15,7 @@ def input_revision(host):
     # Manual rounding belongs to the independently generated manual plan.
     # Editing that policy must not invalidate a completed optimised plan.
     planning_settings = {**state, 'manual_ratio_rounding': None}
-    revision = fingerprint(dict(schema=4, settings=settings_signature(planning_settings),
+    revision = fingerprint_fields(dict(schema=4, settings=settings_signature(planning_settings),
         site=state.get('active_scenario_id'), start=state.get('start_time_choice'),
         site_model={key: state.get(key) for key in ('hub_input_choice', 'mine_input_choice',
             'opf_input_choice', 'crusher_input_choice', 'selected_site_crushers')},
@@ -30,7 +31,8 @@ def input_revision(host):
         expit={key: state.get(key) for key in ('expit_mode_choice', 'expit_completion_tolerance_pct',
             'expit_refresh_tolerance_minutes', 'reevaluate_aps_direct_tip_choice', 'aps_direct_tip_crusher_choice',
             'selected_two_wp_product_crushers', 'selected_haul_cycle_crushers', 'haul_cycle_crusher_mapping_choice')},
-        imports=current_import_revisions(state.get('guidance_import_audit'))))
+        imports=current_import_revisions(state.get('guidance_import_audit'))), state,
+        accepted=('approved_factors',))
     if state.get('opening_inputs_revision'):
         revision = fingerprint(dict(inputs=revision, opening=state['opening_inputs_revision']))
     submission_revision = (state.get('workflow_submission_state') or {}).get('revision')

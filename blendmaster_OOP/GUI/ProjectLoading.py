@@ -47,8 +47,9 @@ def prepare(context, state):
         path = row.get('haul_cycle_file_path_choice')
         selected = row.get('selected_haul_cycle_crushers') or []
         if path and Path(path).is_file():
-            row['haul_cycle_routes'] = HaulCycleDataHandler.build_nearest_crusher_routes(path, selected)
-            row['destination_haul_routes'] = HaulCycleDataHandler.build_destination_routes(path)
+            cycles = HaulCycleDataHandler._read_cycles(path)
+            row['haul_cycle_routes'] = HaulCycleDataHandler.build_nearest_crusher_routes(cycles, selected)
+            row['destination_haul_routes'] = HaulCycleDataHandler.build_destination_routes(cycles)
             row['_haul_cycle_routes_revision'] = (file_revision(path), tuple(sorted(selected)))
         restored[site] = row
     context.normalize_loaded_scenario_ratio_groups(restored)
@@ -83,6 +84,8 @@ def prepare(context, state):
             with database_scope(row['database_path']):
                 OpeningStockpileInventories().save_AMT_to_database(row['AMT_stockpile_data'])
             row['_prepared_amt_database_path'] = row['database_path']
+        # Runtime encodings are disposable accelerators, never project evidence.
+        row.pop('_accepted_evidence_encodings', None)
     result = {k: v for k, v in state.items()
               if k not in ('site_scenarios', 'database_snapshot')}
     result.update(restored[active])

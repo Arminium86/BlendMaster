@@ -232,7 +232,8 @@ def continuous_members(state, opf):
 
 def record_active_sources(state, scope, profiles=None):
     """Freeze approved build/chunk priors after actual activity; never adjust hexes."""
-    registry = state.get('grade_reconciliation_registry') or {}
+    from classes.AcceptedEvidence import fork_registry
+    registry = fork_registry(state.get('grade_reconciliation_registry'))
     state['grade_reconciliation_registry'] = registry
     active = registry.setdefault('active_chunks', {})
     policy = policy_signature(state.get('reconciliation_settings'), state.get('grade_reconciliation_policy_revision'))

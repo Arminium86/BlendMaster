@@ -1,6 +1,5 @@
 """Prepare opening inputs privately, preserving the last published plan on failure."""
 from contextlib import closing
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from database.DatabaseContext import database_scope, get_database_path
 from GUI.InventoryStreamApplication import InventoryContext, FIELDS
 from GUI.InputPreparationLocks import acquire, release
 from classes.CombinedOPFReconciliation import SOURCE_FIELDS
+from classes.AcceptedEvidence import copy_preparation_state
 
 
 TABLES = ('opening_stockpile_inventories', 'opening_AMT_stockpile_inventories')
@@ -29,6 +29,41 @@ RESULT_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'stockpile_data_use
     'AMT_data_request_signature', 'AMT_enrichment_signature', 'AMT_chunk_reconciliation_signature',
     'AMT_last_refresh_datetime', 'historical_recon_warnings', '_combined_opf_profile_cache',
     'opening_inputs_revision')
+
+
+def database_version(database):
+    """Conservatively invalidate reuse after any local database/WAL write."""
+    result = []
+    for path in (database, database + '-wal'):
+        try:
+            stat = Path(path).stat()
+            result.append((stat.st_size, stat.st_mtime_ns, stat.st_ino))
+        except OSError:
+            result.append(None)
+    return tuple(result)
+
+
+def reuse_signature(values, selection, cache):
+    """Check actual dependencies; mutable inputs are never cached by identity."""
+    from classes.AcceptedEvidence import fingerprint_fields
+    from classes.GuidanceImport import file_revision
+    fields = {key: value for key, value in values.items() if key != '_combined_opf_profile_cache'}
+    fields['calendar_inputs'] = {key: value for key, value in (values.get('calendar_inputs') or {}).items()
+                                 if key != 'site_context'}
+    fields['selection'] = {
+        'use': selection['stockpile_data_use_column'], 'amt': selection['stockpile_data_AMT_column'],
+        'controls': {name: {key: row.get(key) for key in ('subset', 'max_reclaim_rate', 'reclaim_threshold')}
+                     for name, row in selection['stockpile_data'].items()},
+    }
+    fields['files'] = {}
+    for key in ('file_path_choice', 'file_path_24hr_choice', 'haul_cycle_file_path_choice'):
+        path = values.get(key)
+        try:
+            fields['files'][key] = file_revision(path) if path else None
+        except OSError:
+            fields['files'][key] = (str(path), 'missing')
+    fields['preparation_schema'] = 1
+    return fingerprint_fields(fields, cache, accepted=('grade_reconciliation_registry',))
 
 
 def issue(host, *, include_workflow=False):
@@ -116,7 +151,7 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
     """No Qt access or active-database writes are allowed inside this worker."""
     stage = Prepared(tempfile.TemporaryDirectory(prefix='blendmaster-opening-'), {}, {}, '')
     try:
-        context = InventoryContext(implementation, deepcopy({**values, **selection}))
+        context = InventoryContext(implementation, copy_preparation_state({**values, **selection}))
         context.opening_stockpile_inventories = service
         footprints = {name for name, row in context.updated_stockpile_data.items() if row.get('amt')}
         context.prune_unselected_amt_state(footprints)
@@ -223,6 +258,9 @@ class InventoryRefresh:
         self.label = QLabel(); self.label.setWordWrap(True); self.label.setTextFormat(Qt.PlainText)
         layout.addWidget(self.label, 1)
         self.force = False
+        self.accepted = None
+        self.remember_pending = False
+        self.signature_cache = {}
         self.retry = QPushButton('Retry refresh'); self.retry.clicked.connect(lambda: self.start(force=self.force))
         self.keep = QPushButton('Keep previous inputs'); self.keep.clicked.connect(self.discard)
         self.cancel = QPushButton('Cancel refresh'); self.cancel.clicked.connect(self.request_cancel)
@@ -240,6 +278,38 @@ class InventoryRefresh:
 
     def unlock(self):
         release(self.host, self.held); self.held = []
+
+    def inputs(self):
+        state = vars(self.host)
+        return {name: state[name] for name in (*FIELDS, *EXTRA_FIELDS,
+            'active_scenario_id', 'opening_inputs_revision', 'inventory_data_request_signature',
+            'file_path_choice', 'haul_cycle_file_path_choice', 'continuous_assay_state') if name in state}
+
+    def remember(self):
+        """Record a successful, fully delivered model in a worker, under input locks."""
+        h = self.host
+        if (not self.remember_pending or self.held or vars(h).get('_amt_map_pending')
+                or (vars(h).get('_inventory_refresh_request') or {}).get('status') != 'ready'):
+            return
+        try:
+            selection = collect(h)
+        except ValueError:
+            return
+        values, database = self.inputs(), get_database_path()
+        site = vars(h).get('active_scenario_id')
+        self.remember_pending = False
+        self.held = acquire(h, readable_results=True)
+        def work():
+            before = database_version(database)
+            signature = reuse_signature(values, selection, self.signature_cache)
+            return (database, site, before, signature) if before == database_version(database) else None
+        def done(receipt):
+            self.accepted = receipt
+            self.unlock()
+        def failed(error):
+            self.accepted = None
+            self.unlock()
+        h.run_background_task('Recording prepared input revision…', work, done, failed, show_progress=False)
 
     def request_cancel(self):
         self.cancelled.set()
@@ -280,7 +350,7 @@ class InventoryRefresh:
 
     def start(self, *, force=False):
         h = self.host
-        if (self.held or vars(h).get('_data_stream_application_pending') or vars(h).get('_project_save_pending')
+        if (self.held or vars(h).get('_amt_map_pending') or vars(h).get('_data_stream_application_pending') or vars(h).get('_project_save_pending')
                 or vars(h).get('_background_input_locks')):
             return False
         try:
@@ -291,10 +361,11 @@ class InventoryRefresh:
             return False
         from GUI.WorkflowDependencies import input_revision
         self.cancelled = Event()
+        self.remember_pending = False
         self.force = force
         h._inventory_refresh_request = {'token': uuid.uuid4().hex, 'status': 'running'}
         revision, database = input_revision(h), get_database_path()
-        values = {name: vars(h)[name] for name in (*FIELDS, *EXTRA_FIELDS) if name in vars(h)}
+        values = self.inputs()
         self.held = acquire(h, readable_results=True)
         self.status('Preparing opening stockpiles and AMT. You can continue viewing the previous plan.', 'running')
         def failed(error):
@@ -304,6 +375,15 @@ class InventoryRefresh:
             self.status('Opening refresh was not applied. Previous inputs and plan retained. ' + detail, 'failed')
             self.label.setToolTip(message)
         def prepared(stage):
+            if stage is None:
+                if (self.cancelled.is_set() or database != get_database_path() or input_revision(h) != revision
+                        or self.accepted is None or database_version(database) != self.accepted[2]):
+                    failed('The request was cancelled or its inputs changed. Submit the current selection again.')
+                    return
+                self.status('Opening inputs are unchanged; the prepared inventories and views were reused.', 'ready')
+                self.unlock()
+                h.advance_workspace('stockpile_inventories')
+                return
             if self.cancelled.is_set() or database != get_database_path() or input_revision(h) != revision:
                 stage.close(); failed('The request was cancelled or its inputs changed. Submit the current selection again.')
                 return
@@ -333,10 +413,22 @@ class InventoryRefresh:
                 schedule(h, results=True, charts=True)
             except Exception as exc:
                 self.status(message + ' Opening data was applied, but a view needs refreshing: ' + str(exc), 'ready')
+                return
             finally:
                 h._defer_opf_profile_preparation = deferred
+            self.remember_pending = True
+            self.remember()
+        def work():
+            receipt = self.accepted
+            if not force and receipt and receipt[:3] == (database, values.get('active_scenario_id'), database_version(database)):
+                if (reuse_signature(values, selection, self.signature_cache) == receipt[3]
+                        and database_version(database) == receipt[2]):
+                    check_cancel(self.cancelled)
+                    return None
+            self.accepted = None
+            return prepare(type(h), values, selection, h.opening_stockpile_inventories, self.cancelled, force=force)
         h.run_background_task('Preparing opening inputs…',
-            lambda: prepare(type(h), values, selection, h.opening_stockpile_inventories, self.cancelled, force=force),
+            work,
             prepared, failed, show_progress=False)
         return True
 

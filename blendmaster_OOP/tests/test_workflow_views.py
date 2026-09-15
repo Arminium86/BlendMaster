@@ -165,6 +165,30 @@ class WorkflowViewTests(unittest.TestCase):
         self.assertEqual(chart.create_layout().children[0].data, [{'grade': 58}])
         self.assertEqual(chart.create_layout().children[0].data, [{'grade': 59}])
 
+    def test_successful_chart_survives_page_reentry(self):
+        h, views, pending = self.host()
+        views.refresh()
+        pending.pop()[1]({'optimised': True, 'manual': False})
+        h.show_page('optimised_grade_profiles')
+        views.ensure_current_chart()
+        views.enter()
+        views.timer.stop()
+        views.ensure_current_chart()
+        h.load_optimised_grade_profiles.assert_called_once()
+
+    def test_synchronous_chart_failure_releases_token_for_retry(self):
+        h, views, pending = self.host()
+        views.refresh()
+        pending.pop()[1]({'optimised': True, 'manual': False})
+        h.load_optimised_grade_profiles.side_effect = RuntimeError('connection failed')
+        h.show_page('optimised_grade_profiles')
+        with self.assertRaises(RuntimeError):
+            views.ensure_current_chart()
+        self.assertNotIn('optimised_grade_profiles', views.loaded)
+        h.load_optimised_grade_profiles.side_effect = None
+        views.ensure_current_chart()
+        self.assertEqual(h.load_optimised_grade_profiles.call_count, 2)
+
     def test_dash_http_load_and_callbacks_see_current_committed_results(self):
         from contextlib import closing
         with tempfile.TemporaryDirectory() as directory:

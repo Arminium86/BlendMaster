@@ -17,8 +17,10 @@ def prepare(implementation, values):
     path = values.get('file_path_choice')
     result = {key: vars(context).get(key) for key in OUTPUTS}
     if path:
-        result['_calendar_destination_stockpiles'] = (
-            file_revision(path), ExpitDataHandler.get_distinct_stockpile_destinations(path))
+        result['_calendar_destination_stockpiles'] = vars(context).get('_calendar_destination_stockpiles')
+        if result['_calendar_destination_stockpiles'] is None:
+            result['_calendar_destination_stockpiles'] = (
+                file_revision(path), ExpitDataHandler.get_distinct_stockpile_destinations(path))
     return result
 
 

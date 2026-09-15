@@ -8,7 +8,8 @@ def calculate(context, implementation):
     from classes.MultiFeedSettings import source_opfs, source_routing
     from classes.GradeStreams import normalise_opf
     state = vars(context)
-    registry = state.get('grade_reconciliation_registry') or {}
+    from classes.AcceptedEvidence import fork_registry
+    registry = fork_registry(state.get('grade_reconciliation_registry'))
     state['grade_reconciliation_registry'] = registry
     refresh = state.get('_grade_reconciliation_refresh_sources') or []
     if refresh:

@@ -406,10 +406,7 @@ class ExpitDataHandler:
     @classmethod
     def _read_planning_window_rows(cls, input_data, columns, start_time=None, planning_period_count=3):
         requested_columns = set(columns) | {"Time.StartTime", "Time.EndTime"}
-        data = pd.read_csv(
-            input_data,
-            usecols=lambda column: column in requested_columns,
-        )
+        data = cls._read_guidance_columns(input_data, requested_columns)
         if data.empty or start_time is None:
             return data
         if not {"Time.StartTime", "Time.EndTime"}.issubset(data.columns):
@@ -756,10 +753,7 @@ class ExpitDataHandler:
             "OriginalSource.Name",
             "MutexParcel.ORETYPE",
         }
-        data = pd.read_csv(
-            input_data,
-            usecols=lambda column: column in read_columns,
-        )
+        data = cls._read_guidance_columns(input_data, read_columns)
         if data.empty:
             return {
                 "matching_version": cls.DESTINATION_GUIDANCE_VERSION,
@@ -1036,10 +1030,7 @@ class ExpitDataHandler:
             "Mining.wetTonnes",
         }
         read_columns = required_columns | {"Destination.FullName"}
-        data = pd.read_csv(
-            input_data,
-            usecols=lambda column: column in read_columns,
-        )
+        data = cls._read_guidance_columns(input_data, read_columns)
         if data.empty or not required_columns.issubset(set(data.columns)):
             return pd.DataFrame()
         if "Destination.FullName" not in data.columns:
@@ -1317,6 +1308,22 @@ class ExpitDataHandler:
                 "total_tonnes": total_tonnes,
             }
         return guidance
+
+    @staticmethod
+    def _read_guidance_columns(input_data, columns):
+        if isinstance(input_data, pd.DataFrame):
+            return input_data.loc[:, [c for c in input_data.columns if c in columns]].copy()
+        return pd.read_csv(input_data, usecols=lambda column: column in columns)
+
+    @classmethod
+    def read_2wp_guidance(cls, input_data):
+        """One file read supplies feed, destination and Calendar guidance."""
+        return cls._read_guidance_columns(input_data, {
+            'Source.Type', 'Source.FullName', 'Source.Pit', 'Destination.Type',
+            'Destination.Name', 'Destination.FullName', 'Time.StartTime',
+            'Time.EndTime', 'Mining.wetTonnes', 'Agent.Name',
+            'OriginalSource.Name', 'MutexParcel.ORETYPE',
+        })
 
     @classmethod
     def get_2wp_schedule_guidance(

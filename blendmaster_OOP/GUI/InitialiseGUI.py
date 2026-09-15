@@ -1035,6 +1035,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             source = sqlite3.connect(database_path)
             destination = sqlite3.connect(snapshot_path)
             source.backup(destination)
+            # Compact the detached checkpoint, never the live planning database.
+            if destination.execute('PRAGMA freelist_count').fetchone()[0]:
+                destination.execute('VACUUM')
             destination.close()
             destination = None
             with open(snapshot_path, "rb") as snapshot_file:
@@ -1528,9 +1531,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         return state
 
     def save_active_scenario_state(self):
+        if vars(self).get('project_load_restore_in_progress'):
+            self._scenario_capture_deferred = True
+            return
         if not self.active_scenario_id:
             return
         self.site_scenarios[self.active_scenario_id] = self.capture_scenario_state()
+        self._scenario_capture_deferred = False
         self.refresh_scenario_selector()
 
     def reset_workflow_tabs_for_scenario(self):
@@ -12291,13 +12298,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             if revision == vars(self).get('_haul_cycle_routes_revision'):
                 self.apply_haul_cycle_routes_to_stockpile_data()
                 return True
+            cycles = HaulCycleDataHandler._read_cycles(file_path)
             self.haul_cycle_routes = (
                 HaulCycleDataHandler.build_nearest_crusher_routes(
-                    file_path,
+                    cycles,
                     selected,
                 )
             )
-            self.destination_haul_routes = HaulCycleDataHandler.build_destination_routes(file_path)
+            self.destination_haul_routes = HaulCycleDataHandler.build_destination_routes(cycles)
             self._haul_cycle_routes_revision = revision
         except Exception as exc:
             self.haul_cycle_routes = {}
@@ -12987,8 +12995,9 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.aps_guidance_request_signature = request_signature
             return
         try:
+            guidance_rows = ExpitDataHandler.read_2wp_guidance(file_path)
             guidance = ExpitDataHandler.get_2wp_schedule_guidance(
-                file_path,
+                guidance_rows,
                 self.product_brand_options(),
                 operational_mine=getattr(
                     self, "mine_input_choice", None
@@ -13004,8 +13013,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 ),
             )
             guidance["destination_guidance"] = (
-                ExpitDataHandler.build_2wp_destination_guidance(file_path)
+                ExpitDataHandler.build_2wp_destination_guidance(guidance_rows)
             )
+            from classes.GuidanceImport import file_revision
+            self._calendar_destination_stockpiles = (
+                file_revision(file_path), ExpitDataHandler.get_distinct_stockpile_destinations(guidance_rows))
             self.aps_stockpile_brand_map = guidance["brand_guidance"]
             self.aps_stockpile_timing_guidance = guidance[
                 "stockpile_timing_guidance"
@@ -20355,8 +20367,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_state" : (f"    State", [True] * period_count, "red", [default_state] * period_count)})
             self.calendar_rows.append({f"stockpiles_{stockpile.lower()}_maximum_quantity": (f"    Maximum Quantity", [True] * period_count, "red", ["100000"] * period_count)})
 
-        self.populate_calendar()
-       
         if self.setup_calendar_first_call:
             # Add Submit Button at bottom-Right
             submit_button = QPushButton("Submit")
@@ -20670,6 +20680,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     
             self.populate_calendar()
             self.store_calendar_inputs_no_run()
+        else:
+            self.populate_calendar()
 
     def get_main_table_cell_text(self, row_idx, col_idx):
         widget = self.main_table.cellWidget(row_idx, col_idx)
@@ -21554,6 +21566,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def finish_project_load_ui(self, success):
         """Return project loading to Site Configuration and notify once."""
         self._defer_opf_profile_preparation = False
+        if success and vars(self).get('_scenario_capture_deferred'):
+            self.save_active_scenario_state()
         show_success = bool(
             getattr(self, "project_load_show_success", False)
         )

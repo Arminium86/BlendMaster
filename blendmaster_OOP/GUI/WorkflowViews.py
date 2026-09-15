@@ -188,9 +188,13 @@ class WorkflowViews(QObject):
         if self.loaded.get(page) == token:
             return
         self.loaded[page] = token
-        getattr(host, CHART_LOADERS[page])()
+        try:
+            getattr(host, CHART_LOADERS[page])()
+        except Exception:
+            self.loaded.pop(page, None)
+            raise
 
     def enter(self):
-        # Re-entering a page also allows a failed local connection to retry.
-        self.loaded.pop(self.current_page(), None)
+        # Successful loads survive navigation. Failed asynchronous loaders
+        # explicitly release their page token so the next entry can retry.
         self.schedule()

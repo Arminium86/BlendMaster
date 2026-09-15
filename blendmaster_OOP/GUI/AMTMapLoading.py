@@ -1,6 +1,7 @@
 """Decode AMT map evidence outside the Qt thread, then publish one snapshot."""
 from copy import copy, deepcopy
 from database.DatabaseContext import get_database_path
+from classes.AcceptedEvidence import copy_preparation_state
 
 
 def refresh(host):
@@ -23,7 +24,7 @@ def refresh(host):
         shadow.data = shadow.fetch_data()
         prepared = {}
         if hasattr(implementation, 'reconcile_saved_AMT_chunk_grade_streams'):
-            context = InventoryContext(implementation, deepcopy(values))
+            context = InventoryContext(implementation, copy_preparation_state(values))
             context.draw_AMT_map = shadow
             shadow.selected_points = deepcopy(vars(context).get('hex_sequence_table') or [])
             shadow.update_chunk_settings(deepcopy(vars(context).get('AMT_chunk_settings') or {}))
@@ -52,10 +53,16 @@ def refresh(host):
         chart.init_layout()
         from GUI.WorkflowViews import schedule
         schedule(host, charts=True)
+        controller = vars(host).get('_inventory_refresh_controller')
+        if controller is not None:
+            controller.remember()
 
     def failed(error):
         if generation == host._amt_map_generation:
             host._amt_map_pending = False
+            controller = vars(host).get('_inventory_refresh_controller')
+            if controller is not None:
+                controller.remember_pending = False
             host.handle_AMT_stockpile_fetch_error(error)
 
     host.run_background_task('Preparing the AMT map…', work, done, failed, readable_results=True)

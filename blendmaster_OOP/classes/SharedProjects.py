@@ -91,7 +91,21 @@ def value_hash(value):
         elif hasattr(item, 'tolist'):
             add(item.tolist())
         else:
-            digest.update(json.dumps(item, default=str, ensure_ascii=False, allow_nan=True).encode('utf-8'))
+            # Match the existing wire representation without constructing a
+            # JSONEncoder for every scalar in a large approval registry.
+            if isinstance(item, str):
+                encoded = json.encoder.encode_basestring(item)
+            elif item is None:
+                encoded = 'null'
+            elif item is True:
+                encoded = 'true'
+            elif item is False:
+                encoded = 'false'
+            elif type(item) is int:
+                encoded = str(item)
+            else:
+                encoded = json.dumps(item, default=str, ensure_ascii=False, allow_nan=True)
+            digest.update(encoded.encode('utf-8'))
             digest.update(b'\0')
     add(value)
     return digest.hexdigest()

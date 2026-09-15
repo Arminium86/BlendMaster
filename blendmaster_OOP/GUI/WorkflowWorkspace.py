@@ -235,7 +235,7 @@ def enter_page(host, page_id):
     if controller and controller.active and page_id not in RESULT_PAGES:
         return True
     refresh_context(host)
-    if page_id in ('setup_blends', 'blend_sequence') and (getattr(host,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
+    if page_id == 'setup_blends' and (getattr(host,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
         from GUI.MultiManualWorkspace import refresh
         QTimer.singleShot(0, lambda: refresh(host, sequence=page_id=='blend_sequence'))
     elif page_id == 'blend_plan':

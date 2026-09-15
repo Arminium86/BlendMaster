@@ -1,5 +1,6 @@
 """Manual allocations and sequence for simultaneous physical tipping points."""
 from copy import deepcopy
+from pathlib import Path
 import pandas as pd
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QPushButton,
@@ -15,13 +16,15 @@ class MultiManualWorkspace(QWidget):
         super().__init__(host)
         self.host,self.sequence=host,sequence
         self.data={}; self.report=pd.DataFrame(); self.database=None
+        self._loaded_token = self._pending_token = None
+        self._load_generation = 0
         layout=QVBoxLayout(self)
         bar=QHBoxLayout(); bar.addWidget(QLabel('Manual plan'))
         self.plans=QComboBox(); self.plans.currentIndexChanged.connect(self.load_plan); bar.addWidget(self.plans)
         bar.addWidget(QLabel('Optimised starting plan'))
         self.starting=QComboBox(); bar.addWidget(self.starting)
         copy_button=QPushButton('Copy optimised allocations'); copy_button.clicked.connect(self.copy_plan); bar.addWidget(copy_button)
-        reload=QPushButton('Refresh'); reload.clicked.connect(self.refresh); bar.addWidget(reload)
+        reload=QPushButton('Refresh'); reload.clicked.connect(lambda: self.refresh(force=True)); bar.addWidget(reload)
         bar.addStretch(); layout.addLayout(bar)
         self.status=QLabel(''); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True); layout.addWidget(self.status)
         self.timeline=BlendSequenceTimeline(self); self.timeline.interval_selected.connect(self.choose_interval)
@@ -48,7 +51,7 @@ class MultiManualWorkspace(QWidget):
         continue_button.clicked.connect(lambda: host.advance_workspace('blend_sequence' if sequence else 'setup_blends'))
         layout.addWidget(continue_button)
 
-    def refresh(self):
+    def refresh(self, *, force=False):
         selected=self.plans.currentText() or getattr(self.host,'active_manual_plan_id','Primary') or 'Primary'
         database=get_database_path()
         try:
@@ -61,22 +64,44 @@ class MultiManualWorkspace(QWidget):
         selected_opt=self.starting.currentText() or self.host.selected_optimisation_plan_id()
         self.starting.clear(); self.starting.addItems(optimised)
         if selected_opt in optimised: self.starting.setCurrentText(selected_opt)
-        self.load_plan()
+        self.load_plan(force=force)
 
-    def load_plan(self):
+    def load_plan(self, *_args, force=False):
         name=self.plans.currentText(); database=get_database_path()
+        versions = []
+        for path in (database, database + '-wal'):
+            try:
+                info = Path(path).stat()
+                versions.append((info.st_size, info.st_mtime_ns))
+            except OSError:
+                versions.append(None)
+        views = vars(self.host).get('_workflow_views')
+        token = (database, vars(self.host).get('active_scenario_id'), name,
+                 tuple(versions), views.revision if views is not None else 0,
+                 repr(vars(self.host).get('multi_feed_configuration')))
+        if self._pending_token == token or (not force and self._loaded_token == token):
+            return
+        self._load_generation += 1
+        generation = self._load_generation
+        self._pending_token, self._loaded_token = token, None
         selected_point=self.points.currentData()
         self.report=pd.DataFrame(); self.data={}; self.points.clear(); self.intervals.clear(); self.sources.setRowCount(0)
         self.timeline.set_report(pd.DataFrame()); self.update_button.setEnabled(False)
         self.database=database; self.plan_id=name
         if not name:
+            self._pending_token = None
             self.status.setText('No saved optimised or manual plan exists for this site.'); return
         self.status.setText('Loading saved allocations…')
         def work():
             kind='manual' if name in plan_names(database,'manual') else 'optimised'
             return kind,saved_flow_data(name,database,plan_type=kind)
         def done(value):
-            if database!=get_database_path() or name!=self.plans.currentText(): return
+            if generation != self._load_generation:
+                return
+            self._pending_token = None
+            if (database!=get_database_path() or name!=self.plans.currentText()
+                    or token[1] != vars(self.host).get('active_scenario_id')): return
+            self._loaded_token = token
             self.kind,self.data=value
             activate = getattr(self.host, 'activate_manual_plan', None)
             if self.kind == 'manual' and callable(activate):
@@ -95,8 +120,14 @@ class MultiManualWorkspace(QWidget):
             self.update_button.setEnabled(self.kind=='manual')
             self.status.setText(f'{name}: {len(self.report):,} saved {self.kind} allocation rows across {len(points)} tipping points.'+
                 (' Copy the optimised allocations to start editing a manual plan.' if self.kind=='optimised' else ''))
-        self.host.run_background_task('Loading manual allocations…',work,done,
-            lambda error:self.status.setText(str(error)),show_progress=False)
+        def failed(error):
+            if generation != self._load_generation:
+                return
+            self._pending_token = self._loaded_token = None
+            self.status.setText(str(error))
+            if views is not None:
+                views.loaded.pop('blend_sequence' if self.sequence else 'setup_blends', None)
+        self.host.run_background_task('Loading manual allocations…',work,done,failed,show_progress=False)
 
     def show_point(self):
         self.intervals.blockSignals(True); self.intervals.clear()

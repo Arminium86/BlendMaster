@@ -8,6 +8,9 @@ from database.DatabaseContext import get_database_path
 
 
 def connect_view(host, view, url, timeout_seconds=30):
+    controller = vars(host).get('_workflow_views')
+    page = controller.current_page() if controller is not None else None
+    page_token = controller.loaded.get(page) if controller is not None else None
     token = (url, get_database_path(), getattr(host, 'active_scenario_id', None))
     if getattr(view, '_chart_connection_pending', None) == token:
         return
@@ -34,6 +37,8 @@ def connect_view(host, view, url, timeout_seconds=30):
                 target.setQuery(query)
                 view.setUrl(target)
             else:
+                if controller is not None and controller.loaded.get(page) == page_token:
+                    controller.loaded.pop(page, None)
                 view.setHtml('<p style="font:16px Segoe UI;padding:24px">The chart service is still unavailable. '
                              'Reopen this page to try again.</p>')
     host.run_background_task('Connecting chart…', probe, done, show_progress=False)

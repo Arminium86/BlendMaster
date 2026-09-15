@@ -40,7 +40,7 @@ class HaulCycleDataHandler:
 
     @classmethod
     def _read_cycles(cls, input_data):
-        data = pd.read_csv(
+        data = input_data.copy() if isinstance(input_data, pd.DataFrame) else pd.read_csv(
             input_data,
             usecols=lambda column: column in cls.REQUIRED_COLUMNS,
         )
