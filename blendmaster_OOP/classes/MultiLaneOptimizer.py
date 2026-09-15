@@ -149,9 +149,8 @@ class MultiLaneOptimizer(Optimizer):
         for point, steps, packet in models:
             joint.extend(packet["problem"], use_objective=False)
             objective += packet["problem"].objective
-            if point['target'].get('max_reclaim_rate') is not None:
-                joint += lpSum(v * c for e, v, c in zip(packet['events'], packet['variables'], packet['reclaimer_coefficients'])
-                               if e.is_stockpile) <= point['target']['max_reclaim_rate'] * steady_state_duration
+            # Calendar reclaim capacity is per feed source, enforced by each
+            # event's rate bound. The lane crusher caps combined feed.
             for event, variable in zip(packet["events"], packet["variables"]):
                 joint += variable == aggregate_vars[event._multi_key]
 

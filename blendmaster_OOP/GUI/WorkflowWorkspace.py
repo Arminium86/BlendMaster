@@ -191,7 +191,7 @@ def show_refresh_changes(host):
     dialog.exec_()
 
 
-def refresh_context(host):
+def refresh_context(host, *, page=None):
     from classes.AMTReconciliation import after_chunking
     host.sync_workspace_order()
     checkbox = vars(host).get('amt_reconcile_after_chunking_checkbox')
@@ -202,7 +202,7 @@ def refresh_context(host):
     from GUI.WorkflowViews import schedule
     schedule(host)
     from GUI.PlannerPresentation import refresh as refresh_presentation
-    refresh_presentation(host)
+    refresh_presentation(host, page=page)
     host.blend_mode.setCurrentIndex(0)
     host.blend_mode_choice = 1
     state = {key: getattr(host, key, '') for key in
@@ -240,7 +240,7 @@ def enter_page(host, page_id):
     from GUI.InputPreparationLocks import RESULT_PAGES
     if controller and controller.active and page_id not in RESULT_PAGES:
         return True
-    refresh_context(host)
+    refresh_context(host, page=page_id)
     if page_id == 'setup_blends' and (getattr(host,'multi_feed_configuration',{}) or {}).get('mode','single') != 'single':
         from GUI.MultiManualWorkspace import refresh
         QTimer.singleShot(0, lambda: refresh(host, sequence=page_id=='blend_sequence'))

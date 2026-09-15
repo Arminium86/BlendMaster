@@ -45,19 +45,30 @@ def apply_table(table):
     table._noise_hidden_columns = hidden
 
 
-def refresh(host):
-    for table in host.findChildren(QTableView):
+def refresh(host, page=None):
+    # Explicit context changes still refresh all pages. Navigation needs only
+    # its destination; hidden pages are refreshed when they are entered.
+    root = (vars(host).get('page_widgets') or {}).get(page) if page is not None else host
+    if root is None:
+        return
+    tables = root.findChildren(QTableView)
+    if isinstance(root, QTableView):
+        tables.insert(0, root)
+    for table in tables:
         if not vars(table).get('_noise_connected'):
             table._noise_connected = True
             table.horizontalHeader().sectionCountChanged.connect(lambda _a, _b, t=table: queue_table(t))
         apply_table(table)
-    for tabs in host.findChildren(QTabWidget):
+    tab_widgets = root.findChildren(QTabWidget)
+    if isinstance(root, QTabWidget):
+        tab_widgets.insert(0, root)
+    for tabs in tab_widgets:
         if page_for(host, tabs) in RICH_PAGES:
             continue
         for i in range(tabs.count()):
             if tabs.tabText(i) in AUDIT_TABS:
                 tabs.setTabVisible(i, False)
-    for button in host.findChildren(QPushButton):
+    for button in root.findChildren(QPushButton):
         if page_for(host, button) not in RICH_PAGES and button.text() in ENRICH_BUTTONS:
             button.hide()
 

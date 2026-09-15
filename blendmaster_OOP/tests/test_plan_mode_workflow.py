@@ -74,14 +74,22 @@ class PlanModeWorkflowTests(unittest.TestCase):
         self.assertEqual(saved['crusher_rate']['Preplan'], 140)
         self.assertEqual(apply_calendar(config, saved, labels), config)
 
-    def test_reclaim_capacity_is_total_per_point_not_per_source(self):
+    def test_reclaim_capacity_is_per_source_and_crusher_caps_total(self):
         from tests.test_multi_lane_optimizer import MultiLaneOptimizerTests
         from tests.test_decision_levers import DecisionLeverOptimizerTests
         cfg = settings(rehandle_rules=[dict(subset='B', tipping_point='A', allowed=True)])
         cfg['tipping_points'][0]['targets_by_period']['preplan']['max_reclaim_rate'] = 50
         cfg['tipping_points'][1]['targets_by_period']['preplan']['crusher_rate'] = 0
         result = MultiLaneOptimizerTests().solve(cfg, [DecisionLeverOptimizerTests.event('SP1'), DecisionLeverOptimizerTests.event('SP2')])
-        self.assertAlmostEqual(result['crusher_actual_tonnes'], 50)
+        self.assertAlmostEqual(result['crusher_actual_tonnes'], 100)
+        self.assertEqual(sorted(r['actual_tonnes'] for r in result['transactions'] if r['actual_tonnes'] > 0), [50, 50])
+        amt = DecisionLeverOptimizerTests.event('SP2', is_amt=True)
+        result = MultiLaneOptimizerTests().solve(cfg, [DecisionLeverOptimizerTests.event('SP1'), amt])
+        self.assertAlmostEqual(result['crusher_actual_tonnes'], 100)
+        cfg['tipping_points'][0]['targets_by_period']['preplan']['crusher_rate'] = 75
+        result = MultiLaneOptimizerTests().solve(cfg, [DecisionLeverOptimizerTests.event('SP1'), DecisionLeverOptimizerTests.event('SP2')])
+        self.assertAlmostEqual(result['crusher_actual_tonnes'], 75)
+        self.assertTrue(all(r['actual_tonnes'] <= 50.000001 for r in result['transactions']))
 
     def test_calendar_reaches_loader_solver_and_shared_inventory(self):
         import io

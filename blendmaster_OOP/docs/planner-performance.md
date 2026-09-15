@@ -1,5 +1,36 @@
 # Planner performance changes
 
+## Conservative UI updates (15 September 2026, evening)
+
+- Task-control refresh computes all task statuses from one fresh applicability
+  scan, then updates tab status/tooltip only when the status changed. No result
+  survives the refresh, so in-place AMT edits still affect the next check.
+- Manual table item changes perform reclaim-rate calculation once, followed by
+  the existing blend-summary calculation.
+- Saved reconciliation review computes source/history dependencies once per
+  source and OPF, outside its product-brand loop. Approval rules are unchanged.
+- Report SQL runs through BackgroundTasks using a read-only connection. Results
+  and errors from superseded queries, changed sites/databases or edited query
+  text are discarded. Widget population remains on the UI thread.
+- Navigation applies presentation rules to its destination page. Explicit
+  context changes still refresh all pages.
+- Table rendering reuses up to 2,048 repeated string/column formatting results
+  within one render only, retaining existing cell text and formatting behavior.
+
+Validation: 1,579 unittest tests passed, including the new responsiveness
+regressions. Separate before/after fixtures matched task statuses, all rendered
+table cell text, and reconciliation reviews with approved and invalidated inputs.
+Synthetic status work at 30,000 AMT rows fell from about 235 ms to 4.3 ms
+(53 full scans to one); a 10,000-row, 20-column table with repeated date strings
+fell from 4.88 s to 2.06 s. These are component timings on this workstation,
+not production end-to-end guarantees.
+
+The larger changes remain separate: asynchronous reconciliation approval gating,
+site-state copy ownership, virtual tables, report readiness, and evidence caches.
+Reconciliation review is still synchronous; this pass reduces its repeated
+brand work without changing its completion/gating contract. Restart the desktop
+application to load these source changes.
+
 Implemented from the 14 September 2026 validation-project diagnosis.
 
 ## Behavior

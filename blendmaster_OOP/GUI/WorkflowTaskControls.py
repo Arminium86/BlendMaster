@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QPushButton, QWidget, QHBoxLayout, QLabel, QToolBut
                             QLineEdit, QComboBox, QAbstractSpinBox, QCheckBox, QTableWidget, QPlainTextEdit)
 
 from GUI.WorkflowNavigation import WORKSPACE, SUPPORT, page_allowed
-from GUI.WorkflowSubmissions import task_status
+from GUI.WorkflowSubmissions import task_statuses
 
 
 class WorkflowTaskControls(QObject):
@@ -108,14 +108,17 @@ class WorkflowTaskControls(QObject):
 
     def refresh(self):
         host = self.host
+        statuses = task_statuses(host, (*WORKSPACE, *SUPPORT))
         for page in (*WORKSPACE, *SUPPORT):
             location = host.page_locations.get(page)
             if location is None:
                 continue
             tabs, index = location
-            status = task_status(host, page)
+            status = statuses[page]
             if page in ('amt_stockpiles', 'destination_progress'):
                 tabs.setTabVisible(index, status != 'not_required')
+            if tabs.tabBar().tabData(index) == status:
+                continue
             tabs.tabBar().setTabData(index, status)
             tabs.setTabToolTip(index, {'ready': 'Ready — valid submission or prerequisite of a submitted task',
                                       'resubmit': 'Needs submission or resubmission',

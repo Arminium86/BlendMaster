@@ -86,14 +86,18 @@ def equipment_violations(report, calendar, periods, *, mode='single', require_li
         if not stock.empty:
             names = stock.get('parent_stockpile', pd.Series('', index=stock.index)).fillna('').astype(str)
             names = names.mask(names.eq(''), stock.get('source', pd.Series('source', index=stock.index)))
+            if mode != 'single':
+                # Each inventory stockpile or AMT chunk is an independent feed
+                # source; report fragments of that source still share a limit.
+                names = stock.get('source_id', stock.get('source', names)).fillna('')
+                names = names.mask(names.eq(''), stock.get('source', pd.Series('source', index=stock.index)))
             reclaim = quantity(stock, 'reclaimer_source_tonnes')
             source_rates = (reclaim.groupby(names).sum(min_count=1) / duration).to_dict()
         else:
             source_rates = {}
         crusher_tonnes = quantity(state, 'crusher_source_tonnes')
         checks = [('crusher_rate', 'crusher', crusher_tonnes.sum(min_count=1) / duration)]
-        checks += ([('max_reclaim_rate', source, rate) for source, rate in source_rates.items()]
-                   if mode == 'single' else [('max_reclaim_rate', 'aggregate reclaim', sum(source_rates.values()))])
+        checks += [('max_reclaim_rate', source, rate) for source, rate in source_rates.items()]
         if require_limits and 'crusher_rate_input' in state:
             rate = pd.to_numeric(state.crusher_rate_input, errors='coerce').max()
             if pd.notna(rate):

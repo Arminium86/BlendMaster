@@ -13,7 +13,7 @@ The optimiser minimizes source/haulage costs and enabled penalties, less through
 | Rule family | Behaviour to preserve |
 | --- | --- |
 | Physical supply | Non-negative quantities, available balance, source eligibility and timing |
-| Equipment | Calendar crusher and aggregate reclaim limits; per-source limits where applicable |
+| Equipment | Calendar total crusher capacity and per-feed-source reclaim limits |
 | Direct tip | Enabled routes/equipment, payload availability and ratio bounds |
 | Calendar | Period-specific rates, source states, allowances and custom limits |
 | Chemistry | Exact configured grade stream and declared mass weights |

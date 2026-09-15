@@ -133,11 +133,23 @@ def task_status(host, page):
     projects saved before individual completion receipts were introduced.
     Explicit invalidations always take precedence over that evidence.
     """
-    from GUI.WorkflowNavigation import WORKSPACE, SUPPORT
     pages = order(host)
+    required = (vars(host).get('workflow_submission_state') or {}).get('required') or []
+    return _task_status(host, page, pages, [p for p in pages if p in required])
+
+
+def task_statuses(host, requested):
+    """One fresh applicability scan for a single UI refresh, never a saved cache."""
+    pages = order(host)
+    required = (vars(host).get('workflow_submission_state') or {}).get('required') or []
+    required = [p for p in pages if p in required]
+    return {page: _task_status(host, page, pages, required) for page in requested}
+
+
+def _task_status(host, page, pages, required):
+    from GUI.WorkflowNavigation import WORKSPACE, SUPPORT
     if page in WORKSPACE and page not in pages:
         return 'not_required'
-    required = pending(host)
     if page in required:
         return 'next' if page == required[0] else 'resubmit'
     state = vars(host).get('workflow_submission_state') or {}

@@ -46,12 +46,17 @@ class EquipmentLimitsTests(unittest.TestCase):
         errors = equipment_violations(self.report({'A': 1500}, hours=2), self.calendar, self.periods)
         self.assertIn('period_1', errors[0])
 
-    def test_multi_point_reclaim_is_aggregate(self):
+    def test_multi_point_reclaim_is_per_source(self):
         report = self.report({'A': 1500, 'B': 1500}); report['tipping_point'] = 'PC2'
         calendar = {calendar_key('PC2', 'crusher_rate'): {'Preplan': 6000},
                     calendar_key('PC2', 'max_reclaim_rate'): {'Preplan': 2000}}
         errors = equipment_violations(report, calendar, self.periods, mode='multi_tipping_point')
-        self.assertIn('aggregate reclaim', errors[0])
+        self.assertEqual(errors, [])
+        report.loc[0, 'source_actual_tonnes'] = 2100
+        self.assertTrue(equipment_violations(report, calendar, self.periods, mode='multi_tipping_point'))
+        report['source_actual_tonnes'] = 2000
+        calendar[calendar_key('PC2', 'crusher_rate')]['Preplan'] = 3500
+        self.assertTrue(equipment_violations(report, calendar, self.periods, mode='multi_tipping_point'))
 
     def test_missing_calendar_is_not_publication_ready(self):
         errors = equipment_violations(self.report({'A': 1000}), {}, self.periods, require_limits=True)
@@ -60,3 +65,13 @@ class EquipmentLimitsTests(unittest.TestCase):
     def test_chunk_rows_for_one_reclaimer_are_combined(self):
         report = self.report({'chunk1': 1200, 'chunk2': 1200}); report['parent_stockpile'] = 'A'
         self.assertTrue(equipment_violations(report, self.calendar, self.periods))
+
+    def test_multi_amt_chunks_have_independent_limits_but_fragments_share_one(self):
+        report = self.report({'chunk1': 1500, 'chunk2': 1500})
+        report['parent_stockpile'] = 'AMT parent'
+        report['tipping_point'] = 'PC2'
+        calendar = {calendar_key('PC2', 'crusher_rate'): {'Preplan': 6000},
+                    calendar_key('PC2', 'max_reclaim_rate'): {'Preplan': 2000}}
+        self.assertEqual(equipment_violations(report, calendar, self.periods, mode='multi_tipping_point'), [])
+        report['source'] = 'chunk1'
+        self.assertTrue(equipment_violations(report, calendar, self.periods, mode='multi_tipping_point'))

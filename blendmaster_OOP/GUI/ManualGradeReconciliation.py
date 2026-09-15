@@ -76,14 +76,18 @@ def saved_review(state):
                 audit.update(prediction_scope=kind, last_adjusted=managed.get('last_adjusted') or audit.get('last_adjusted'))
             else:
                 details, stale = {}, False
+                from classes.SourceSnapshots import source_dependencies, approval_valid
+                from classes.ReconciliationControls import normalise_reconciliation_settings
+                # Content and history are independent of product brand. Keep
+                # this local to this review so in-place edits still invalidate.
+                if brands:
+                    content, evidence = source_dependencies(state, opf, kind, row, evidence_cache=evidence_cache)
+                    tolerance = normalise_reconciliation_settings(state.get('reconciliation_settings'))['lookback_refresh_tolerance_minutes']
                 for brand in brands:
                     approved = records.get(source_key(identity, brand)) or {}
                     detail = dict(approved.get('detail') or {})
-                    from classes.SourceSnapshots import source_dependencies, approval_valid
-                    from classes.ReconciliationControls import normalise_reconciliation_settings
-                    content, evidence = source_dependencies(state, opf, kind, row, evidence_cache=evidence_cache)
                     stale |= not approval_valid(approved, policy, content, evidence, state.get('start_time_choice'),
-                        normalise_reconciliation_settings(state.get('reconciliation_settings'))['lookback_refresh_tolerance_minutes'])
+                        tolerance)
                     detail.setdefault('source_identity', identity)
                     detail.setdefault('confidence_percent', None)
                     detail.setdefault('lineage_coverage', 0)

@@ -1,4 +1,4 @@
-"""Calendar owns per-tipping-point targets and total reclaim capacity."""
+"""Calendar owns per-tipping-point targets and per-source reclaim capacity."""
 from copy import deepcopy
 from urllib.parse import quote
 

@@ -73,7 +73,7 @@ handoffs use the site workflow. Best-result selection is automatic.
 Crusher Contribution remains relevant to single-point target scaling. It is
 visible under Guidance Settings for that mode; multiple-point modes use their
 physical-point Calendar configuration. The retired route-capacity editor remains
-retired: Calendar owns the point's total Max Reclaim Rate.
+retired: Calendar owns the point's per-source Max Reclaim Rate.
 
 ## Configure a site
 

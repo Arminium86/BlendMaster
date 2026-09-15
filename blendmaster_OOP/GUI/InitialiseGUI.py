@@ -23176,23 +23176,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             )
             return
 
-        try:
-            conn = sqlite3.connect(get_database_path())
-            try:
-                self.configure_read_only_sqlite_connection(conn)
-                df = pd.read_sql_query(query, conn)
-            finally:
-                conn.close()
-        except Exception as e:
-            self.sqlite_report_status.setText(f"Query failed: {e}")
-            QMessageBox.warning(self, "Reports", f"Unable to run query: {e}")
-            return
-
-        self.sqlite_report_status.setText(
-            f"Query returned {len(df):,} row{'s' if len(df) != 1 else ''}."
-        )
-        self.current_sqlite_report_df = df.copy()
-        self.populate_dataframe_table(self.sqlite_report_table, df)
+        from GUI.ReportQuery import begin
+        begin(self, query)
 
     def current_sqlite_report_frame(self):
         query = self.sqlite_report_query.text().strip()
@@ -23397,12 +23382,20 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         header_font.setBold(True)
         table_widget.horizontalHeader().setFont(header_font)
 
+        # Repeated date/source strings need formatting only once per column.
+        # Bound the cache and discard it after this render: no stale values or
+        # formatting policy can survive a refresh.
+        formatted_strings = {}
         for row_idx, row in enumerate(df.itertuples(index=False)):
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem(self.format_table_display_value(
-                    value,
-                    df.columns[col_idx],
-                ))
+                key = (col_idx, value) if isinstance(value, str) else None
+                if key is not None and key in formatted_strings:
+                    displayed = formatted_strings[key]
+                else:
+                    displayed = self.format_table_display_value(value, df.columns[col_idx])
+                    if key is not None and len(formatted_strings) < 2048:
+                        formatted_strings[key] = displayed
+                item = QTableWidgetItem(displayed)
                 item.setTextAlignment(Qt.AlignCenter)
                 table_widget.setItem(row_idx, col_idx, item)
 
@@ -24007,7 +24000,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.format_blend_config_table()
 
         # Connect cell changes to trigger updates
-        self.blend_config_table.cellChanged.connect(self.update_reclaim_rate)
+        # itemChanged below updates both reclaim rates and results once.
         
         # Connect edits to update results
         self.blend_config_table.itemChanged.connect(self.on_blend_data_change)     
