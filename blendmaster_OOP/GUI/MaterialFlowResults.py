@@ -26,6 +26,12 @@ class FrameModel(QAbstractTableModel):
             return json.dumps(value,default=str)
         if pd.isna(value):
             return ''
+        column = str(self.frame.columns[index.column()]).lower()
+        from GUI.BlendDisplay import number
+        if 'grade' in column or column in ('fe', 'si', 'al', 'p', 'mn'):
+            return number(value, 2)
+        if any(word in column for word in ('tonnes', 'wmt', 'balance')):
+            return number(value, 0)
         if isinstance(value,float):
             return f'{value:,.4f}'.rstrip('0').rstrip('.')
         return str(value)

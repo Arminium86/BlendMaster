@@ -71,7 +71,7 @@ class MultiManualAuthoring(QWidget):
             button = QPushButton(label); button.clicked.connect(action); bar.addWidget(button)
         bar.addStretch(); layout.addLayout(bar)
         self.description = QLabel('Choose a tipping point, create a Blend ID, and give its sources positive weights. '
-            'Weights are normalised to 100%; zero excludes a source. Each tipping point has its own recipes and sequence.')
+            'Weights are normalised to 100%; zero excludes a source. Each tipping point has its own blends and sequence.')
         self.description.setWordWrap(True); layout.addWidget(self.description)
         if sequence:
             self.description.setText('Add blend rows, choose a Blend ID, and set its start and duration. '
@@ -101,9 +101,9 @@ class MultiManualAuthoring(QWidget):
         else:
             bar = QHBoxLayout(); bar.addWidget(QLabel('Blend ID'))
             self.recipes = QComboBox(); self.recipes.activated.connect(self.change_recipe); bar.addWidget(self.recipes)
-            for label, action in [('New recipe…', self.new_recipe), ('Delete recipe', self.delete_recipe)]:
+            for label, action in [('New recipe…', self.new_recipe), ('Delete blend', self.delete_recipe)]:
                 button = QPushButton(label); button.clicked.connect(action); bar.addWidget(button)
-            bar.addStretch(); bar.addWidget(QLabel('Round recipe ratios to'))
+            bar.addStretch(); bar.addWidget(QLabel('Round blend ratios to'))
             self.rounding = QComboBox(); self.rounding.addItems(['1%', '2%', '5%', '10%', '20%', '25%', '50%']); self.rounding.setCurrentText('5%'); bar.addWidget(self.rounding)
             rounding = QPushButton('Apply rounding'); rounding.clicked.connect(self.round_recipe); bar.addWidget(rounding)
             layout.addLayout(bar)
@@ -118,7 +118,7 @@ class MultiManualAuthoring(QWidget):
             layout.addWidget(QLabel('Manual crusher rates by period (t/h) — capped by this tipping point’s Calendar limits'))
             self.rates = QTableWidget(0, 3); self.rates.setHorizontalHeaderLabels(['Period', 'Manual rate', 'Calendar limit'])
             self.rates.setMaximumHeight(180); self.rates.cellChanged.connect(lambda *_: self.save_point()); layout.addWidget(self.rates)
-            self.submit_button = QPushButton('Submit recipes'); self.submit_button.clicked.connect(self.submit_recipes); layout.addWidget(self.submit_button)
+            self.submit_button = QPushButton('Submit blends'); self.submit_button.clicked.connect(self.submit_recipes); layout.addWidget(self.submit_button)
 
     def drafts(self):
         self.host.manual_point_drafts = getattr(self.host, 'manual_point_drafts', None) or {}
@@ -133,6 +133,7 @@ class MultiManualAuthoring(QWidget):
         if getattr(self, '_context', None) != context:
             self._context = context
             self.projections = {}
+            self._legend_report = pd.DataFrame()
             if self.sequence: self.timeline.set_report(pd.DataFrame())
         # Controls persist directly into the active draft; refreshing never
         # replaces entered recipes with saved result rows.
@@ -162,6 +163,7 @@ class MultiManualAuthoring(QWidget):
             self._loading = False
 
     def hydrate_report(self, report, *, kind='manual'):
+        self._legend_report = report.copy()
         if kind == 'manual' and not has_drafts(self.drafts()) and not report.empty:
             from GUI.WorkflowDependencies import manual_revision
             was_current = getattr(self.host, 'manual_input_revision', None) == manual_revision(self.host)
@@ -222,7 +224,7 @@ class MultiManualAuthoring(QWidget):
         self.host.activate_manual_plan(name.strip())
         if self.host.prepopulate_manual_from_optimised_result(source_plan_id=source):
             self.refresh()
-            self.status.setText(f'Created {name.strip()} from {source}. Edit recipes and timing, then submit the manual sequence to recalculate.')
+            self.status.setText(f'Created {name.strip()} from {source}. Edit blends and timing, then submit the manual sequence to recalculate.')
 
     def change_point(self):
         self.point = self.points.currentData(); self.recipe = None; self.show_point()
@@ -249,7 +251,7 @@ class MultiManualAuthoring(QWidget):
                         self.rates.setItem(i, col, item(value, col == 1))
                 self.rates.resizeColumnsToContents()
                 self.update_recipe_preview()
-            self.status.setText(f'{self.point}: {len(draft["recipes"])} recipes · {len(draft["sequence"])} scheduled blends. '
+            self.status.setText(f'{self.point}: {len(draft["recipes"])} blends · {len(draft["sequence"])} scheduled blends. '
                                 'Edits are drafts until the manual sequence is calculated.')
         finally: self._loading = previous
 
@@ -257,7 +259,7 @@ class MultiManualAuthoring(QWidget):
         self.recipe = self.recipes.currentText(); self.show_recipe()
 
     def new_recipe(self):
-        name, ok = QInputDialog.getText(self, 'New blend recipe', 'Blend ID:')
+        name, ok = QInputDialog.getText(self, 'New blend', 'Blend ID:')
         if not ok or not name.strip(): return
         if any(r['id'] == name.strip() for r in self.draft()['recipes']):
             self.status.setText('This tipping point already has that Blend ID.'); return
@@ -271,7 +273,7 @@ class MultiManualAuthoring(QWidget):
         self.recipe = None; self.changed(); self.show_point()
 
     def clear_point(self):
-        if QMessageBox.question(self, 'Clear tipping point', f'Clear all manual recipes and sequence rows for {self.point}?',
+        if QMessageBox.question(self, 'Clear tipping point', f'Clear all manual blends and sequence rows for {self.point}?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
         self.drafts()[self.point] = dict(recipes=[], sequence=[], rates={}, allocations={})
         self.recipe = None; self.changed(); self.show_point()
@@ -294,7 +296,10 @@ class MultiManualAuthoring(QWidget):
                 values = [name, saved.get('weight', 0), '', saved.get('reclaim_rate') if saved.get('reclaim_rate') is not None else '',
                     source.get('balance', 0), projected.get('balance', ''), projected.get('available', ''), '',
                     *[source.get('grade_'+g, 'AMT' if source.get('amt') else '') for g in ('fe', 'si', 'al', 'p', 'mn')]]
-                for col, value in enumerate(values): self.sources.setItem(i, col, item(value, col in (1, 3)))
+                for col, value in enumerate(values):
+                    from GUI.BlendDisplay import number
+                    shown = number(value, 0) if col in (4, 5) else number(value, 2) if col >= 8 else value
+                    self.sources.setItem(i, col, item(shown, col in (1, 3)))
                 self.sources.item(i, 0).setData(Qt.UserRole, deepcopy(projected))
                 check = QCheckBox(); check.setChecked(bool(saved.get('projected')))
                 check.setEnabled(bool(projected) and not source.get('amt')); check.toggled.connect(lambda *_: self.recipe_changed())
@@ -368,7 +373,7 @@ class MultiManualAuthoring(QWidget):
             grades = []
             for grade in ('fe', 'si', 'al', 'p', 'mn'):
                 if materials and all(m and m.get('grade_'+grade) is not None and not m.get('amt') for _, _, m in materials):
-                    grades.append(f'{sum(ratio*preview_number(m["grade_"+grade]) for _, ratio, m in materials):.4f}')
+                    grades.append(f'{sum(ratio*preview_number(m["grade_"+grade]) for _, ratio, m in materials):.2f}')
                 else: grades.append('AMT / calculate' if materials else '')
             available = [str(s['projection']['available']) for s, _ in shares if s.get('projected') and s.get('projection')]
             durations = []
@@ -429,7 +434,7 @@ class MultiManualAuthoring(QWidget):
         self.refresh_draft_timeline()
 
     def refresh_draft_timeline(self):
-        self.timeline.set_drafts(self.drafts(), self.feed.get('tipping_points', []))
+        self.timeline.set_drafts(self.drafts(), self.feed.get('tipping_points', []), getattr(self, '_legend_report', None))
 
     def select_draft_interval(self, record):
         point = record['tipping_point']
@@ -448,7 +453,13 @@ class MultiManualAuthoring(QWidget):
         lower, upper = pd.Timestamp(min(self.periods.values())), pd.Timestamp(max(self.periods.values()))
         if index: lower = max(lower, pd.Timestamp(rows[index-1].get('_exact_end') or rows[index-1]['End Datetime']))
         if index+1 < len(rows): upper = min(upper, pd.Timestamp(rows[index+1].get('_exact_start') or rows[index+1]['Start Datetime']))
-        start, end = max(start, lower), min(end, upper)
+        if record.get('edit_mode') == 'move':
+            duration = end-start
+            start = max(lower, min(start, upper-duration)); end = start+duration
+            if end > upper:
+                self.status.setText('There is not enough room between the neighbouring bars to move this interval.')
+                self.refresh_draft_timeline(); return
+        else: start, end = max(start, lower), min(end, upper)
         if end <= start:
             self.status.setText('The bar must have positive duration inside the planning horizon and neighbouring rows.')
             self.refresh_draft_timeline(); return
@@ -509,7 +520,7 @@ class MultiManualAuthoring(QWidget):
 
     def add_row(self):
         if not self.draft()['recipes']:
-            self.status.setText('Create and submit a recipe on the Manual Blending Dashboard first.'); return
+            self.status.setText('Create and submit a blend on the Manual Blending Dashboard first.'); return
         rows = self.draft()['sequence']
         begin = pd.Timestamp(rows[-1]['End Datetime']).to_pydatetime() if rows else min(self.periods.values())
         rows.append({'Blend ID': self.draft()['recipes'][0]['id'], 'Start Datetime': begin, 'Duration (hrs)': 1,
@@ -588,6 +599,7 @@ class MultiManualAuthoring(QWidget):
                     draft['allocations'] = {k: v for k, v in allocations.items() if k in keys}
                     draft['direct_tip_rows'] = []
                 self.host.manual_steady_states = states; self.host.manual_blend_report = report
+                self._legend_report = report.copy()
                 self.host.manual_input_revision = manual_revision(self.host)
                 self.host.write_active_manual_plan_reports(report)
                 self.host.capture_active_manual_plan_state(); self.host.save_active_scenario_state()
@@ -598,5 +610,5 @@ class MultiManualAuthoring(QWidget):
                 self.host.set_page_enabled('blend_plan', True)
             def failed(error):
                 self.status.setText('Manual plan was not generated: '+str(error.get('message', error) if isinstance(error, dict) else error))
-            self.host.run_background_task('Calculating manual recipes and sequence…', work, done, failed)
+            self.host.run_background_task('Calculating manual blends and sequence…', work, done, failed)
         except ValueError as exc: self.status.setText(str(exc))

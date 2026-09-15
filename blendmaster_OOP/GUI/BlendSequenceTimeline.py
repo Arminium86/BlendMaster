@@ -1,5 +1,4 @@
 """Native, point-scoped schedule shared by optimised and manual result views."""
-import hashlib
 import html
 import pandas as pd
 from PyQt5.QtCore import Qt, QRectF, pyqtSignal, QTimer
@@ -7,6 +6,19 @@ from PyQt5.QtGui import QColor, QBrush, QPen, QPainter, QFont
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSplitter, QTableView, QGraphicsView, QGraphicsScene, QGraphicsRectItem)
 from GUI.MaterialFlowResults import FrameModel
+from GUI.BlendDisplay import blend_color, blend_id, number
+
+
+class BlendLegendModel(FrameModel):
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole and 0 <= section < len(self.frame.columns):
+            return str(self.frame.columns[section])
+        return super().headerData(section, orientation, role)
+    def data(self, index, role=Qt.DisplayRole):
+        if index.isValid() and index.column() == 1:
+            if role == Qt.BackgroundRole: return QBrush(blend_color(self.frame.iloc[index.row(), 1]))
+            if role == Qt.ForegroundRole: return QBrush(QColor('white'))
+        return super().data(index, role)
 
 
 def sequence_data(report, points=()):
@@ -36,7 +48,7 @@ def sequence_data(report, points=()):
         amounts = rows.groupby('source', sort=False).source_actual_tonnes.sum()
         record.update(tonnes=tonnes, rate=tonnes/hours, row_indices=rows.index.tolist(),
                       direct_tip_ratio=float(rows.loc[rows.source_type.eq('grade_block'), 'source_actual_tonnes'].sum())/tonnes,
-                      sources='\n'.join(f'{name}: {amount:,.1f} t · {amount/tonnes:.2%}' for name, amount in amounts.items()))
+                      sources='\n'.join(f'{name}: {amount:,.0f} t · {amount/tonnes:.2%}' for name, amount in amounts.items()))
         intervals.append(record)
     return frame, intervals
 
@@ -47,11 +59,11 @@ class IntervalItem(QGraphicsRectItem):
         self.index, self.owner = index, owner
         self.drag_edge = None
         self.setAcceptHoverEvents(True)
-        color = QColor.fromHsv(int(hashlib.sha1(str(record['blend_ID']).encode()).hexdigest()[:4], 16) % 360, 135, 190)
+        color = blend_color(record['blend_ID'])
         self.setBrush(QBrush(color)); self.setPen(QPen(color.darker(115)))
         self.setFlag(self.ItemIsSelectable)
         self.setToolTip(html.escape(f"{record['opf']} / {record['tipping_point']}\nBlend {record['blend_ID']} · state {record['steady_state_number']}\n"
-            f"{record['start_datetime']} → {record['end_datetime']}\n{record['tonnes']:,.1f} t · {record['rate']:,.1f} t/h\n"
+            f"{record['start_datetime']} → {record['end_datetime']}\n{record['tonnes']:,.0f} t · {record['rate']:,.0f} t/h\n"
             f"Direct tip: {record['direct_tip_ratio']:.2%}\n{record['sources']}").replace('\n','<br>'))
         if owner.editable:
             self.setToolTip(html.escape(f"{record['opf']} / {record['tipping_point']}\nBlend {record['blend_ID']}\n"
@@ -69,7 +81,7 @@ class IntervalItem(QGraphicsRectItem):
         if not self.owner.editable:
             self.owner.select_interval(self.index)
         if self.owner.editable and event.button() == Qt.LeftButton:
-            self.drag_edge = self.edge_at(event.pos().x())
+            self.drag_edge = self.edge_at(event.pos().x()) or 'move'
             if self.drag_edge:
                 self.original_rect = QRectF(self.rect())
                 self.press_x = event.scenePos().x()
@@ -81,7 +93,7 @@ class IntervalItem(QGraphicsRectItem):
         return edge if distance <= 8 else None
 
     def hoverMoveEvent(self, event):
-        self.setCursor(Qt.SizeHorCursor if self.owner.editable and self.edge_at(event.pos().x()) else Qt.ArrowCursor)
+        self.setCursor((Qt.SizeHorCursor if self.edge_at(event.pos().x()) else Qt.OpenHandCursor) if self.owner.editable else Qt.ArrowCursor)
         super().hoverMoveEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -90,7 +102,8 @@ class IntervalItem(QGraphicsRectItem):
         rect = QRectF(self.original_rect)
         delta = event.scenePos().x()-self.press_x
         if self.drag_edge == 'start': rect.setLeft(min(rect.right()-1, rect.left()+delta))
-        else: rect.setRight(max(rect.left()+1, rect.right()+delta))
+        elif self.drag_edge == 'end': rect.setRight(max(rect.left()+1, rect.right()+delta))
+        else: rect.translate(delta, 0)
         self.setRect(rect); event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -106,7 +119,8 @@ class IntervalItem(QGraphicsRectItem):
         index, seconds = self.index, delta*self.owner.seconds_per_pixel
         event.accept()
         # Redrawing destroys scene items; wait until this mouse handler exits.
-        QTimer.singleShot(0, lambda: self.owner.resize_interval(index, edge, seconds))
+        owner = self.owner
+        QTimer.singleShot(0, lambda: owner.resize_interval(index, edge, seconds) if seconds else owner.select_interval(index))
 
 
 class BlendSequenceTimeline(QWidget):
@@ -130,6 +144,10 @@ class BlendSequenceTimeline(QWidget):
         bar.addWidget(self.status); layout.addLayout(bar)
         note = self.note = QLabel('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
         note.setWordWrap(True); layout.addWidget(note)
+        self.legend_caption = QLabel('Blend legend · calculated crusher grades'); layout.addWidget(self.legend_caption)
+        self.legend = QTableView(); self.legend.setMaximumHeight(155)
+        self.legend.setAlternatingRowColors(True); layout.addWidget(self.legend)
+        self.legend_report = pd.DataFrame()
         splitter = QSplitter(Qt.Vertical)
         self.scene = QGraphicsScene(self); self.view = QGraphicsView(self.scene)
         self.view.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -148,6 +166,8 @@ class BlendSequenceTimeline(QWidget):
         self.note.setText('Bars show new crusher feed, coloured by Blend ID. Opening conveyor/COS discharge is shown in Material Flow and OPF Production.')
         selected = self.points.currentData()
         self.report, self.intervals = sequence_data(report)
+        self.legend_report = self.report
+        self.legend_caption.setText('Blend legend · calculated crusher grades')
         self.configured_points = [(str(p.get('opf') or ''), str(p['name'])) for p in points]
         lanes = sorted(set(self.configured_points) | {(r['opf'],r['tipping_point']) for r in self.intervals})
         self.points.blockSignals(True); self.points.clear(); self.points.addItem('All tipping points', None)
@@ -157,10 +177,12 @@ class BlendSequenceTimeline(QWidget):
         self.points.setCurrentIndex(max(0,found)); self.points.blockSignals(False)
         self.details.hide(); self.draw()
 
-    def set_drafts(self, drafts, points):
+    def set_drafts(self, drafts, points, report=None):
         self.set_report(pd.DataFrame(), points)
         self.editable = True
-        self.note.setText('Editable draft timing, coloured by Blend ID. Drag either bar edge to expand or shrink it, then review direct tip and submit to recalculate.')
+        self.note.setText('Drag a bar to move it, or either edge to resize. Review direct tip and submit to recalculate.')
+        self.legend_report = pd.DataFrame(report) if report is not None else pd.DataFrame()
+        self.legend_caption.setText('Blend legend · last calculated tonnes and crusher grades; submit draft edits to refresh')
         opfs = {p['name']: p.get('opf', '') for p in points}
         for point, draft in drafts.items():
             for index, row in enumerate(draft.get('sequence', [])):
@@ -178,14 +200,51 @@ class BlendSequenceTimeline(QWidget):
         record = self.intervals[index]
         start, end = record['start_datetime'], record['end_datetime']
         if edge == 'start': start = min(start+pd.Timedelta(seconds=seconds), end-pd.Timedelta(seconds=1))
-        else: end = max(end+pd.Timedelta(seconds=seconds), start+pd.Timedelta(seconds=1))
+        elif edge == 'end': end = max(end+pd.Timedelta(seconds=seconds), start+pd.Timedelta(seconds=1))
+        else:
+            start += pd.Timedelta(seconds=seconds); end += pd.Timedelta(seconds=seconds)
+        record = dict(record, edit_mode=edge)
         self.interval_resized.emit(record, start, end)
 
     def set_zoom(self, zoom):
         self.zoom = max(1, min(zoom, 32)); self.draw()
 
+    def draw_legend(self):
+        chosen = self.points.currentData()
+        records = {}
+        for interval in self.intervals:
+            if chosen and tuple(chosen) != (interval['opf'], interval['tipping_point']): continue
+            key = (interval['opf'], interval['tipping_point'], blend_id(interval['blend_ID']))
+            records.setdefault(key, {'Tipping point / OPF': key[1]+' / '+key[0], 'Blend ID': key[2],
+                                    'Tonnes': '—', **{g: '—' for g in ('Fe', 'Si', 'Al', 'P', 'Mn')}})
+        data = self.legend_report.copy()
+        if not data.empty and {'opf', 'tipping_point', 'blend_ID', 'source_actual_tonnes'}.issubset(data):
+            data['_blend'] = data.blend_ID.map(blend_id)
+            data['_tonnes'] = pd.to_numeric(data.source_actual_tonnes, errors='coerce').fillna(0)
+            if 'source_type' in data: data = data.loc[data.source_type.ne('transport')]
+            data = data.loc[data._tonnes.gt(0)]
+            for key, rows in data.groupby(['opf', 'tipping_point', '_blend'], sort=False):
+                if key not in records: continue
+                result = records[key]; result['Tonnes'] = number(rows._tonnes.sum())
+                for grade in ('Fe', 'Si', 'Al', 'P', 'Mn'):
+                    column = 'crusher_actual_grade_'+grade.lower()
+                    # Use the solver's reported output chemistry. Raw source
+                    # assays can have different weighting/mapping semantics.
+                    if column not in rows: continue
+                    values = pd.to_numeric(rows[column], errors='coerce')
+                    weights = rows._tonnes.loc[values.notna()]
+                    if weights.sum() > 0:
+                        result[grade] = number((values.loc[values.notna()]*weights).sum()/weights.sum(), 2)
+        old = self.legend.model()
+        self.legend.setModel(BlendLegendModel(pd.DataFrame(list(records.values()), columns=[
+            'Tipping point / OPF', 'Blend ID', 'Tonnes', 'Fe', 'Si', 'Al', 'P', 'Mn']), self.legend))
+        if old is not None: old.deleteLater()
+        self.legend.resizeColumnsToContents()
+        self.legend.setMaximumHeight(min(175, 30+len(records)*31))
+
     def draw(self):
         self.scene.clear()
+        self.draw_legend()
         chosen = self.points.currentData()
         lanes = sorted(set(self.configured_points) | {(r['opf'],r['tipping_point']) for r in self.intervals})
         if chosen:

@@ -33,7 +33,7 @@ class OperationalBlendPlanView(QWidget):
         self.points=QComboBox(); self.points.currentIndexChanged.connect(self.show_point); bar.addWidget(self.points)
         refresh=QPushButton('Refresh'); refresh.clicked.connect(self.refresh); bar.addWidget(refresh)
         if plan_type == 'manual':
-            copy_button=QPushButton('Edit manual recipes and sequence…')
+            copy_button=QPushButton('Edit manual blends and sequence…')
             copy_button.setToolTip('Open the Manual Blending Dashboard to create or edit a manual plan, or start one from an optimised plan.')
             copy_button.clicked.connect(self.edit_manual)
             bar.addWidget(copy_button)

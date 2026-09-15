@@ -249,6 +249,19 @@ class MultiManualWidgetTests(unittest.TestCase):
         rows = widget.draft()['sequence']
         self.assertEqual(rows[0]['End Datetime'], rows[1]['Start Datetime'])
 
+    def test_dragging_bar_moves_it_without_changing_duration(self):
+        widget = MultiManualAuthoring(self.host(), sequence=True); widget.refresh()
+        index = next(i for i, r in enumerate(widget.timeline.intervals) if r['tipping_point'] == 'A')
+        widget.timeline.resize_interval(index, 'move', 1800)
+        row = widget.draft()['sequence'][0]
+        self.assertEqual(row['Start Datetime'], START+timedelta(minutes=30))
+        self.assertEqual(row['End Datetime'], START+timedelta(minutes=90))
+        self.assertEqual(row['Duration (hrs)'], 1)
+        widget.timeline.resize_interval(index, 'move', -7200)
+        row = widget.draft()['sequence'][0]
+        self.assertEqual(row['Start Datetime'], START)
+        self.assertEqual(row['Duration (hrs)'], 1)
+
     def test_mouse_drag_on_bar_edge_updates_sequence(self):
         from PyQt5.QtCore import QPoint, QEvent
         from PyQt5.QtGui import QMouseEvent
@@ -270,6 +283,27 @@ class MultiManualWidgetTests(unittest.TestCase):
         self.assertGreater(widget.draft()['sequence'][0]['Duration (hrs)'], 0)
         self.assertAlmostEqual(widget.rows.cellWidget(0, 3).value(),
                                widget.draft()['sequence'][0]['Duration (hrs)'], places=6)
+        widget.close()
+
+    def test_mouse_drag_on_bar_body_moves_sequence(self):
+        from PyQt5.QtCore import QPoint, QEvent
+        from PyQt5.QtGui import QMouseEvent
+        from PyQt5.QtTest import QTest
+        from GUI.BlendSequenceTimeline import IntervalItem
+        widget = MultiManualAuthoring(self.host(), sequence=True)
+        widget.resize(1100, 800); widget.refresh(); widget.show(); self.app.processEvents()
+        timeline = widget.timeline
+        bar = next(item for item in timeline.scene.items() if isinstance(item, IntervalItem)
+                   and timeline.intervals[item.index]['tipping_point'] == 'A')
+        pos = timeline.view.mapFromScene(bar.rect().center()); destination = pos+QPoint(40, 0)
+        QTest.mousePress(timeline.view.viewport(), Qt.LeftButton, Qt.NoModifier, pos)
+        self.app.sendEvent(timeline.view.viewport(), QMouseEvent(QEvent.MouseMove, destination,
+            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+        QTest.mouseRelease(timeline.view.viewport(), Qt.LeftButton, Qt.NoModifier, destination)
+        self.app.processEvents()
+        row = widget.draft()['sequence'][0]
+        self.assertGreater(row['Start Datetime'], START)
+        self.assertAlmostEqual(row['Duration (hrs)'], 1)
         widget.close()
 
     def test_table_edit_does_not_resurrect_old_transfer_on_next_save(self):

@@ -65,7 +65,7 @@ class EvidenceModel(QAbstractTableModel):
             key = self.columns[index.column()][0]
             value = self.records[index.row()].get(key)
             if role == Qt.DisplayRole and key in ("wmt", "planned_wmt") and isinstance(value, (int, float)):
-                return f"{value:,.1f}"
+                return f"{value:,.0f}"
             return ", ".join(map(str, value)) if isinstance(value, list) else "—" if value is None else str(value)
         return None
 

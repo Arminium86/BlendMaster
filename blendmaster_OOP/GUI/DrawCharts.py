@@ -1937,8 +1937,8 @@ class DrawGanttChart:
                 "#A8D5BA", "#F6C28B", "#F7E7A3", "#D9C28F", "#A7C7E7", "#BFD8D2"
             ])
             chart_data['Blend'] = 'Blend ' + chart_data['blend_ID'].astype(str)
-            blend_color_map = {label: stockpile_palette[index % len(stockpile_palette)]
-                for index, label in enumerate(chart_data['Blend'].unique())}
+            from GUI.BlendDisplay import blend_color
+            blend_color_map = {'Blend '+str(value): blend_color(value).name() for value in chart_data['blend_ID'].unique()}
 
             num_lanes = max(chart_data['lane'].nunique(), 1)
             chart_height = min(max(280, 190 + (num_lanes * 55)), 720)

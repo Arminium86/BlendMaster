@@ -217,7 +217,7 @@ class ManualSteadyStateDialog(QDialog):
                     source if candidate else "No eligible direct tip",
                     self._format(
                         candidate["available_tonnes"] if candidate else 0,
-                        2,
+                        0,
                     ),
                 ]
                 for column, value in enumerate(values):
@@ -326,13 +326,13 @@ class ManualSteadyStateDialog(QDialog):
                 summary = summaries[state_key]
                 output_values = [
                     self._format(
-                        summary["stockpile_feed_tonnes"], 2
+                        summary["stockpile_feed_tonnes"], 0
                     ),
                     self._format(
                         summary["direct_tip_ratio"] * 100, 1
                     ),
                     self._format(
-                        summary["feed_capacity_tonnes"], 2
+                        summary["feed_capacity_tonnes"], 0
                     ),
                 ] + [
                     self._format(summary[f"output_grade_{grade}"])

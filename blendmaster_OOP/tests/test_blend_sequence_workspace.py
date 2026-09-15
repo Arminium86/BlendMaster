@@ -140,7 +140,10 @@ class BlendSequenceWorkspaceTests(unittest.TestCase):
             host.run_background_task=lambda title,work,done,*args,**kwargs:done(work())
             view=MultiManualWorkspace(host); view.refresh()
             self.assertEqual(view.kind,'manual'); self.assertEqual(len(view.report),3)
-            self.assertEqual(view.points.count(),2); self.assertTrue(view.update_button.isEnabled())
+            self.assertEqual(view.authoring.points.count(),2)
+            self.assertEqual(view.workspace_tabs.count(), 1)
+            self.assertEqual(view.workspace_tabs.tabText(0), 'Blend Configuration')
+            self.assertFalse(hasattr(view, 'update_button'))
             self.assertNotIn('Run',view.status.text())
             host.deleteLater()
 
