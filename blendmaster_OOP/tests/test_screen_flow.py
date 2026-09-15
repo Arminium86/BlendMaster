@@ -238,7 +238,7 @@ class ScreenFlowStateTests(unittest.TestCase):
             set_database_path(previous_database)
             os.remove(database_path)
 
-    def test_amt_tolerance_reuses_only_timestamp_change_in_now_mode(self):
+    def test_legacy_amt_tolerance_cannot_skip_verifying_new_snapshot(self):
         cached = json.dumps({
             "cache_version": 1,
             "hub": "CH",
@@ -271,8 +271,8 @@ class ScreenFlowStateTests(unittest.TestCase):
             window, cached, requested
         )
 
-        self.assertTrue(reusable)
-        self.assertIn("fresh", reason)
+        self.assertFalse(reusable)
+        self.assertEqual("", reason)
 
     def test_amt_cache_reuses_reduced_selection_at_fixed_timestamp(self):
         cached = json.dumps({

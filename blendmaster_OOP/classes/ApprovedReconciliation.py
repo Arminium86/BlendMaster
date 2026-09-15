@@ -1,4 +1,4 @@
-"""User-approved source factors, independent of refresh time and source tonnes."""
+"""User-approved factors tied to physical sources and historical evidence."""
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -23,9 +23,9 @@ def fingerprint(value):
 
 
 def policy_signature(settings, revision=None):
-    # History arriving, time advancing, and mass/lineage updates do not revoke
-    # the user's approval. An explicit policy/override edit does.
-    return fingerprint([1, normalise_reconciliation_settings(settings), revision])
+    policy = normalise_reconciliation_settings(settings)
+    policy.pop('lookback_refresh_tolerance_minutes', None)
+    return fingerprint([1, policy, revision])
 
 
 def source_identity(mine, opf, kind, name, build='', hex_id=None):
@@ -109,7 +109,7 @@ def missing_sources(state, *, planning=False):
     records = registry.get('sources') or {}
     policy = policy_signature(state.get('reconciliation_settings'), state.get('grade_reconciliation_policy_revision'))
     brands = configured_brands(state.get('product_brand_labels_choice'))
-    missing = []
+    missing, evidence_cache = [], {}
     for opf in opfs(state):
         excluded = continuous_members(state, opf)
         for name, kind, row, hex_id, build in selected_sources(state, planning=planning):
@@ -124,7 +124,11 @@ def missing_sources(state, *, planning=False):
             if kind == 'amt_chunk' and continuous_chunk(state, opf, row):
                 continue
             identity = source_identity(state.get('mine_input_choice'), opf, kind, name, build, hex_id)
-            absent = [brand for brand in brands if (records.get(source_key(identity, brand)) or {}).get('policy') != policy]
+            from classes.SourceSnapshots import source_dependencies, approval_valid
+            content, evidence = source_dependencies(state, opf, kind, row, evidence_cache=evidence_cache)
+            tolerance = normalise_reconciliation_settings(state.get('reconciliation_settings'))['lookback_refresh_tolerance_minutes']
+            absent = [brand for brand in brands if not approval_valid(records.get(source_key(identity, brand)),
+                policy, content, evidence, state.get('start_time_choice'), tolerance)]
             if absent:
                 missing.append(dict(opf=opf, source=name, kind=kind, build=build, hex_id=hex_id, brands=absent))
     return missing
@@ -184,7 +188,7 @@ def migrate_saved_approvals(state):
         for audit in profile.get('reconciliation_audits') or []:
             collect(audit)
     policy = policy_signature(state.get('reconciliation_settings'), state.get('grade_reconciliation_policy_revision'))
-    records = {}
+    records, evidence_cache = {}, {}
     for opf in opfs(state):
         for name, kind, row, hex_id, build in selected_sources(state):
             if row.get('reconciliation_opf') and normalise_opf(row['reconciliation_opf']) != normalise_opf(opf):
@@ -197,7 +201,10 @@ def migrate_saved_approvals(state):
                 detail = deepcopy(detail)
                 detail.update(approval_policy=policy, source_identity=identity,
                               evidence_as_of=str(state.get('start_time_choice') or ''))
-                records[source_key(identity, brand)] = dict(policy=policy, detail=detail)
+                from classes.SourceSnapshots import source_dependencies
+                content, evidence = source_dependencies(state, opf, kind, row, evidence_cache=evidence_cache)
+                records[source_key(identity, brand)] = dict(policy=policy, detail=detail, source_content=content,
+                    historical_evidence=evidence, lookback_anchor=str(state.get('start_time_choice')))
     return dict(sources=records)
 
 

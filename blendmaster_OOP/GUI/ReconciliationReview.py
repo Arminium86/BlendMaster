@@ -84,6 +84,12 @@ class ReconciliationReview(QWidget):
         defaults.addWidget(self.minimum, 2, 1)
         defaults.addWidget(QLabel("Maximum lookback (calendar days)"), 2, 2)
         defaults.addWidget(self.maximum, 2, 3)
+        self.refresh_tolerance = self.spin(60)
+        self.refresh_tolerance.setMinimum(0)
+        self.refresh_tolerance.setSuffix(' min')
+        self.refresh_tolerance.setToolTip('Maximum model-start shift from the last reconciliation refresh. Source or historical evidence changes always require an update. 0 allows no time shift.')
+        defaults.addWidget(QLabel('Lookback refresh tolerance'), 3, 0)
+        defaults.addWidget(self.refresh_tolerance, 3, 1)
         defaults.setColumnStretch(1, 1)
         layout.addLayout(defaults)
         self.help = QLabel()
@@ -115,7 +121,7 @@ class ReconciliationReview(QWidget):
         self.build_local_tab()
         self.method.currentIndexChanged.connect(self.defaults_changed)
         self.window.currentIndexChanged.connect(self.defaults_changed)
-        for widget in (self.days, self.minimum, self.maximum):
+        for widget in (self.days, self.minimum, self.maximum, self.refresh_tolerance):
             widget.valueChanged.connect(self.defaults_changed)
         self.set_context({}, "", [])
 
@@ -257,7 +263,7 @@ class ReconciliationReview(QWidget):
         self.method.setCurrentIndex(self.method.findData(self._settings["method"]))
         self.window.setCurrentIndex(self.window.findData(self._settings["window_mode"]))
         for widget, name in ((self.days, "lookback_days"), (self.minimum, "min_production_days"),
-                              (self.maximum, "max_lookback_days")):
+                              (self.maximum, "max_lookback_days"), (self.refresh_tolerance, "lookback_refresh_tolerance_minutes")):
             widget.setMaximum(max(36500, self._settings[name]))
             widget.setValue(self._settings[name])
         current_brand = self.brand.currentText()
@@ -281,7 +287,8 @@ class ReconciliationReview(QWidget):
             return
         self._settings.update(method=self.method.currentData(), window_mode=self.window.currentData(),
                               lookback_days=self.days.value(), min_production_days=self.minimum.value(),
-                              max_lookback_days=self.maximum.value())
+                              max_lookback_days=self.maximum.value(),
+                              lookback_refresh_tolerance_minutes=self.refresh_tolerance.value())
         self.update_mode()
         self.populate_matrix()
         self.mark_stale()

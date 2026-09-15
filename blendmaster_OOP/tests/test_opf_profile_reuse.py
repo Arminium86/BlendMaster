@@ -28,7 +28,7 @@ class ProfileReuseTests(unittest.TestCase):
     def test_all_chemistry_dependencies_invalidate_but_live_offsets_do_not(self):
         state = self.state()
         state['_combined_opf_profile_cache'] = (profile_signature(state, OPFS), {'prepared': True})
-        for key, value in [('start_time_choice', '2026-09-02'), ('field_mappings', []),
+        for key, value in [('field_mappings', []),
                            ('reconciliation_settings', {'method': 'auto_max_confidence'}),
                            ('hex_sequence_table', [{'hex': 'new'}]), ('opf_reconciliation_inputs', {})]:
             changed = {**state, key: value}

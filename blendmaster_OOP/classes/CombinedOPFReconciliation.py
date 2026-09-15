@@ -25,8 +25,8 @@ SOURCE_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data
 
 def profile_signature(state, opfs):
     from classes.AcceptedEvidence import fingerprint_fields
-    return fingerprint_fields({'version': 4, 'opfs': opfs,
-        **{key: state.get(key) for key in SOURCE_FIELDS}}, state,
+    return fingerprint_fields({'version': 5, 'opfs': opfs,
+        **{key: state.get(key) for key in SOURCE_FIELDS if key != 'start_time_choice'}}, state,
         accepted=('grade_reconciliation_registry',))
 
 
@@ -40,7 +40,9 @@ def reusable_cache(state, opfs=None):
     cached = state.get('_combined_opf_profile_cache')
     if (opfs and isinstance(cached, (tuple, list)) and len(cached) == 2
             and isinstance(cached[1], dict) and cached[0] == profile_signature(state, opfs)):
-        return cached
+        from classes.ApprovedReconciliation import missing_sources
+        if not missing_sources(state, planning=True):
+            return cached
     return None
 
 

@@ -58,6 +58,11 @@ def ensure(host, on_complete, *, on_error=None, _previous_profiles=None):
             for _, failure in waiters:
                 (failure or host.show_error_popup)(error)
         if result[0] != profile_signature(vars(host), opfs):
+            from classes.ApprovedReconciliation import required_message
+            pending = missing_sources(vars(host), planning=True)
+            if pending:
+                fail_all(required_message(pending))
+                return
             # AMT map delivery may complete while the controls are locked.
             # Rebuild from that newer snapshot instead of publishing stale grades.
             if not ensure(host, complete_all, on_error=fail_all, _previous_profiles=result):

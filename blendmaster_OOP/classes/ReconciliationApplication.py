@@ -14,6 +14,8 @@ from classes.ApprovedReconciliation import (
     ReconciliationRequired, policy_signature, source_identity, source_key,
 )
 
+from classes.SourceSnapshots import digest, evidence_signature, approval_valid
+
 from classes.GradeStreams import (
     ANALYTES, configured_brands, internal_product_slot, is_dry_plant,
     normalise_grade_streams, normalise_opf,
@@ -64,7 +66,7 @@ class ReconciliationApplication:
     """One immutable-in-use OPF/configuration context shared by many sources."""
 
     def __init__(self, *, samples, standard_factors, opf, brands, scenario_start, settings=None,
-                 allow_search=False, registry=None, mine=None, policy_revision=None):
+                 allow_search=False, registry=None, mine=None, policy_revision=None, accepted_movement=False):
         self.settings = normalise_reconciliation_settings(settings)
         self.opf = normalise_opf(opf)
         self.brands = configured_brands(brands)
@@ -73,7 +75,9 @@ class ReconciliationApplication:
         self._retained_sources = {}
         self.allow_search, self.registry, self.mine = allow_search, registry, mine
         self.policy = policy_signature(self.settings, policy_revision)
+        self.accepted_movement = accepted_movement
         self.scenario_start = scenario_start
+        self.evidence = evidence_signature(samples, standard_factors)
         # Factor selection depends on evidence and physical lineage, not on
         # grade mappings, adjusted baselines, or subsequent chunk membership.
         self.factor_context_signature = reconciliation_fingerprint(dict(
@@ -84,7 +88,7 @@ class ReconciliationApplication:
             for brand in self.brands:
                 self.resolvers[brand] = ReconciliationFactorResolver(
                     samples, opf=self.opf, brand=brand, scenario_start=scenario_start,
-                    standard_factors=(standard_factors or {}).get(brand), **self.settings,
+                    standard_factors=(standard_factors or {}).get(brand), **{k: v for k, v in self.settings.items() if k != 'lookback_refresh_tolerance_minutes'},
                 )
 
     def retain_audits(self, audits):
@@ -112,14 +116,17 @@ class ReconciliationApplication:
             collect(audit)
         self._retained_sources = retained
 
-    def resolved_source(self, brand, source_id, source_kind, blocks, total, hex_id, prior=None, source_instance=None):
+    def resolved_source(self, brand, source_id, source_kind, blocks, total, hex_id, prior=None, source_instance=None, source_content=None):
         # One application owns one immutable history/settings context. Reuse
         # the review's factor search only for exactly the same physical source.
         identity = source_identity(self.mine, self.opf, source_kind, source_id, source_instance, hex_id)
         approved_key = source_key(identity, brand)
+        content = source_content or digest([blocks, total])
         if self.registry is not None:
             approved = (self.registry.get('sources') or {}).get(approved_key) or {}
-            if approved.get('policy') == self.policy:
+            if ((self.accepted_movement and approved.get('policy') == self.policy) or
+                    approval_valid(approved, self.policy, content, self.evidence, self.scenario_start,
+                                   self.settings['lookback_refresh_tolerance_minutes'])):
                 result = deepcopy(approved['detail'])
                 result['source_wmt'] = total
                 return result
@@ -142,7 +149,8 @@ class ReconciliationApplication:
         if self.registry is not None and total > 0:
             result.update(approval_policy=self.policy, source_identity=identity,
                           calculated_at=datetime.now().isoformat(), evidence_as_of=str(self.scenario_start))
-            self.registry.setdefault('sources', {})[approved_key] = dict(policy=self.policy, detail=deepcopy(result))
+            self.registry.setdefault('sources', {})[approved_key] = dict(policy=self.policy, detail=deepcopy(result),
+                source_content=content, historical_evidence=self.evidence, lookback_anchor=str(self.scenario_start))
         if self.registry is None:
             self._resolved_sources[key] = deepcopy(result)
             if len(self._resolved_sources) > 4096:
@@ -150,7 +158,7 @@ class ReconciliationApplication:
         return result
 
     def apply(self, streams, *, source_id, source_kind, source_wmt, contributing_blocks,
-              hex_id=None, warnings=(), grade_coverage=None, prior_audit=None, source_instance=None):
+              hex_id=None, warnings=(), grade_coverage=None, prior_audit=None, source_instance=None, source_content=None):
         if source_kind not in {"inventory", "amt", "amt_chunk"}:
             raise ValueError("Advanced reconciliation applies only to inventory stockpiles and AMT hexes.")
         if self.settings["method"] == "standard" and self.registry is None:
@@ -158,6 +166,7 @@ class ReconciliationApplication:
         total = finite_number(source_wmt)
         if total is None or total < 0:
             raise ValueError("Advanced reconciliation requires non-negative physical source WMT.")
+        source_content = source_content or digest([streams, contributing_blocks, total])
         result = normalise_grade_streams(streams)
         audit = {"schema_version": APPLICATION_VERSION, "method": self.settings["method"],
                  "opf": self.opf, "source_id": clean_text(source_id), "source_kind": source_kind,
@@ -166,12 +175,12 @@ class ReconciliationApplication:
         for brand in self.brands:
             try:
                 prior = (prior_audit.get('by_brand') or {}).get(brand) if isinstance(prior_audit, dict) else None
-                resolved = self.resolved_source(brand, source_id, source_kind, contributing_blocks, total, hex_id, prior, source_instance)
+                resolved = self.resolved_source(brand, source_id, source_kind, contributing_blocks, total, hex_id, prior, source_instance, source_content)
             except (ValueError, TypeError, AttributeError) as exc:
                 # Malformed source lineage is unavailable evidence, never a reason
                 # to discard source mass or invent factors. Configuration/history
                 # validation happens in the constructor and is not caught here.
-                resolved = self.resolved_source(brand, source_id, source_kind, [], total, hex_id, source_instance=source_instance)
+                resolved = self.resolved_source(brand, source_id, source_kind, [], total, hex_id, source_instance=source_instance, source_content=source_content)
                 audit["warnings"].append(f"Invalid source lineage; using global factors. {exc}")
             records = resolved["records"]
             applied = {kind: {a: math.fsum(r["lineage_fraction"] * r[f"{kind}_factors"][a]

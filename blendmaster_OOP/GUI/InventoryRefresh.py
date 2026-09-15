@@ -20,7 +20,7 @@ from classes.AcceptedEvidence import copy_preparation_state
 
 
 TABLES = ('opening_stockpile_inventories', 'opening_AMT_stockpile_inventories')
-EXTRA_FIELDS = ('AMT_last_refresh_datetime', 'AMT_refresh_tolerance_minutes', 'time_mode_choice',
+EXTRA_FIELDS = ('AMT_last_refresh_datetime', 'inventory_source_cache', 'time_mode_choice',
                 'AMT_chunk_settings', 'hex_sequence_table', 'hex_sequence_table_argument',
                 '_combined_opf_profile_cache', *SOURCE_FIELDS)
 RESULT_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'stockpile_data_use_column',
@@ -28,7 +28,7 @@ RESULT_FIELDS = ('stockpile_data', 'updated_stockpile_data', 'stockpile_data_use
     'AMT_chunk_settings', 'hex_sequence_table', 'hex_sequence_table_argument',
     'AMT_data_request_signature', 'AMT_enrichment_signature', 'AMT_chunk_reconciliation_signature',
     'AMT_last_refresh_datetime', 'historical_recon_warnings', '_combined_opf_profile_cache',
-    'opening_inputs_revision')
+    'opening_inputs_revision', 'inventory_source_cache')
 
 
 def database_version(database):
@@ -47,7 +47,7 @@ def reuse_signature(values, selection, cache):
     """Check actual dependencies; mutable inputs are never cached by identity."""
     from classes.AcceptedEvidence import fingerprint_fields
     from classes.GuidanceImport import file_revision
-    fields = {key: value for key, value in values.items() if key != '_combined_opf_profile_cache'}
+    fields = {key: value for key, value in values.items() if key not in ('_combined_opf_profile_cache', 'inventory_source_cache')}
     fields['calendar_inputs'] = {key: value for key, value in (values.get('calendar_inputs') or {}).items()
                                  if key != 'site_context'}
     fields['selection'] = {
@@ -133,6 +133,9 @@ class Prepared:
     values: dict
     totals: dict
     message: str
+    changed: dict = None
+    active: dict = None
+    unchanged: bool = False
 
     @property
     def database(self):
@@ -151,6 +154,12 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
     """No Qt access or active-database writes are allowed inside this worker."""
     stage = Prepared(tempfile.TemporaryDirectory(prefix='blendmaster-opening-'), {}, {}, '')
     try:
+        published = {}
+        with closing(sqlite3.connect(get_database_path())) as connection:
+            for table, key in zip(TABLES, ('name', 'footprint')):
+                columns = {row[1].lower() for row in connection.execute(f'PRAGMA table_info("{table}")')}
+                published[table] = ({row[0] for row in connection.execute(f'SELECT DISTINCT "{key}" FROM "{table}"')}
+                                    if key in columns else set())
         context = InventoryContext(implementation, copy_preparation_state({**values, **selection}))
         context.opening_stockpile_inventories = service
         footprints = {name for name, row in context.updated_stockpile_data.items() if row.get('amt')}
@@ -163,7 +172,12 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
             subset = {name: row}
             reusable, _ = context.AMT_cached_snapshot_is_reusable(
                 cached_signature, context.AMT_opening_request_signature(subset))
-            if not force and reusable and not context.AMT_data_compatibility_issue(subset):
+            from classes.InventorySourceCache import inputs as source_inputs
+            entry = ((vars(context).get('inventory_source_cache') or {}).get('sources') or {}).get(name)
+            current = source_inputs(vars(context), name)
+            inventory_changed = bool(entry and any(value not in (raw, prepared) for value, raw, prepared in
+                zip(current[:2], entry['raw'][:2], entry['prepared'][:2])))
+            if not force and reusable and not inventory_changed and not context.AMT_data_compatibility_issue(subset):
                 retained[name] = context.AMT_stockpile_data[name]
             else:
                 needed[name] = row
@@ -188,13 +202,39 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
             if missing:
                 raise ValueError('AMT opening data is missing for: ' + ', '.join(missing))
             context.AMT_data_request_signature = signature if source else ''
-            context.apply_canonical_field_mappings()
-            context.apply_grade_streams_to_inventory(allow_pending=True)
-            context.refresh_AMT_enrichment_if_needed(source, persist=False, refresh_map=False, allow_pending=True)
+            from classes.InventorySourceCache import partition, capture
+            dirty, reused, identities = partition(vars(context))
+            complete = {field: vars(context).get(field) or {} for field in
+                        ('stockpile_data', 'updated_stockpile_data', 'AMT_stockpile_data')}
+            if dirty:
+                for field, rows in complete.items():
+                    setattr(context, field, {name: row for name, row in rows.items() if name in dirty})
+                context.apply_canonical_field_mappings()
+                context.apply_grade_streams_to_inventory(allow_pending=True)
+                context.refresh_AMT_enrichment_if_needed({name: row for name, row in source.items() if name in dirty},
+                    force=True, persist=False, refresh_map=False, allow_pending=True)
+                for field, rows in complete.items():
+                    rows.update(vars(context).get(field) or {})
+                    setattr(context, field, rows)
+            context.AMT_enrichment_signature = context.AMT_enrichment_request_signature() if source else ''
             context.prune_zeroed_amt_chunks()
+            context.inventory_source_cache = capture(vars(context), dirty, identities)
+            stage.changed = {TABLES[0]: sorted(dirty), TABLES[1]: sorted(dirty)}
+            stage.active = {TABLES[0]: sorted(context.included_AMT_snapshot(context.stockpile_data)),
+                            TABLES[1]: sorted(context.AMT_stockpile_data)}
+            stage.message = f'Opening inputs: {len(dirty)} sources processed, {len(reused)} unchanged sources reused.'
+            stage.changed = {table: sorted(set(stage.changed[table]) | (set(stage.active[table]) - published[table])) for table in TABLES}
+            if not dirty and all(set(stage.active[table]) == published[table] for table in TABLES):
+                stage.unchanged = True
+                stage.values = {name: vars(context).get(name) for name in RESULT_FIELDS}
+                stage.values['_inventory_sources_unchanged'] = True
+                check_cancel(cancel)
+                return stage
             stage.totals = {name: (*context.AMT_footprint_totals(name, row), context.AMT_raw_signed_footprint_total(name))
                             for name, row in context.updated_stockpile_data.items() if row.get('amt')}
             for name in source:
+                if name in reused and name in context.AMT_chunk_settings:
+                    continue
                 setting = context.get_AMT_chunk_setting(name)
                 total, inventory, raw = stage.totals[name]
                 plan = context.calculate_AMT_chunk_plan(total, setting['average_reclaim_rate'], setting['chunk_reclaim_hours'])
@@ -205,14 +245,16 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
             # AMT/Calendar submission after the user has approved new sources.
             context._combined_opf_profile_cache = reusable_cache(vars(context))
             check_cancel(cancel)
-            service.save_to_database(context.included_AMT_snapshot(context.stockpile_data))
-            service.save_AMT_to_database(context.AMT_stockpile_data)
+            service.save_to_database({name: row for name, row in context.included_AMT_snapshot(context.stockpile_data).items() if name in stage.changed[TABLES[0]]})
+            service.save_AMT_to_database({name: rows for name, rows in context.AMT_stockpile_data.items() if name in stage.changed[TABLES[1]]})
             stage.values = {name: vars(context).get(name) for name in RESULT_FIELDS}
             with closing(sqlite3.connect(stage.database)) as connection:
                 if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ValueError('Prepared opening data failed its database validation.')
-            with open(stage.database, 'rb') as snapshot:
-                stage.values['opening_inputs_revision'] = hashlib.file_digest(snapshot, 'sha256').hexdigest()
+            from classes.SourceSnapshots import digest
+            stage.values['opening_inputs_revision'] = digest([
+                {name: entry['prepared'] for name, entry in context.inventory_source_cache['sources'].items()
+                 if name in context.stockpile_data}, stage.active])
             check_cancel(cancel)
         return stage
     except BaseException:
@@ -221,9 +263,11 @@ def prepare(implementation, values, selection, service, cancel, *, force=False):
 
 
 def publish(stage, database, cancel):
-    """One transaction replaces only the opening tables; saved plans stay intact."""
+    """Atomically publish changed sources; retain unchanged rows and saved plans."""
     try:
         check_cancel(cancel)
+        if stage.unchanged:
+            return stage.values, stage.totals, stage.message
         with closing(sqlite3.connect(database, timeout=30)) as connection:
             # Saved-result readers can continue using their committed snapshot
             # while a large AMT table is copied into the new input version.
@@ -237,9 +281,28 @@ def publish(stage, database, cancel):
             connection.execute('BEGIN IMMEDIATE')
             try:
                 for table in TABLES:
-                    connection.execute(f'DROP TABLE IF EXISTS main."{table}"')
-                    connection.execute(schemas[table][0])
-                    connection.execute(f'INSERT INTO main."{table}" SELECT * FROM prepared."{table}"')
+                    exists = connection.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                    if stage.changed is None:
+                        connection.execute(f'DROP TABLE IF EXISTS main."{table}"')
+                        connection.execute(schemas[table][0])
+                        connection.execute(f'INSERT INTO main."{table}" SELECT * FROM prepared."{table}"')
+                    else:
+                        if not exists:
+                            connection.execute(schemas[table][0])
+                        columns = connection.execute(f'PRAGMA prepared.table_info("{table}")').fetchall()
+                        existing = {r[1].lower() for r in connection.execute(f'PRAGMA main.table_info("{table}")')}
+                        def quoted(value):
+                            return '"' + value.replace('"', '""') + '"'
+                        for column in columns:
+                            if column[1].lower() not in existing:
+                                connection.execute(f'ALTER TABLE main."{table}" ADD COLUMN {quoted(column[1])} {column[2]}')
+                        key = 'name' if table == TABLES[0] else 'footprint'
+                        active = set(stage.active[table])
+                        removed = {row[0] for row in connection.execute(f'SELECT DISTINCT "{key}" FROM main."{table}"')} - active
+                        connection.executemany(f'DELETE FROM main."{table}" WHERE "{key}"=?',
+                                               [(name,) for name in set(stage.changed[table]) | removed])
+                        names = ','.join(quoted(column[1]) for column in columns)
+                        connection.execute(f'INSERT INTO main."{table}" ({names}) SELECT {names} FROM prepared."{table}"')
                     check_cancel(cancel)
                 connection.commit()
             except BaseException:
@@ -392,8 +455,16 @@ class InventoryRefresh:
                                   completed, failed, show_progress=False)
         def completed(result):
             values, totals, message = result
+            unchanged = values.pop('_inventory_sources_unchanged', False)
             for name, value in values.items(): setattr(h, name, value)
             h.updated_stockpile_data_keys = h.updated_stockpile_data.keys()
+            if unchanged:
+                self.status(message, 'ready')
+                self.unlock()
+                h.advance_workspace('stockpile_inventories')
+                self.remember_pending = True
+                self.remember()
+                return
             h.database_view_rows = []; h.database_view_snapshot_signature = None; h.database_view_refresh_pending = True
             h.total_AMT_stockpile_balances = {}
             self.status(message + ' Saved results remain available; prepare/review reconciliation before recalculating.', 'ready')

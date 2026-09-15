@@ -11,7 +11,7 @@ from copy import deepcopy
 def copy_active_state(host, value):
     shared = [vars(host).get(name) for name in ('AMT_stockpile_data', 'aps_destination_guidance',
         'destination_haul_routes', 'destination_progress_snapshot',
-        'grade_reconciliation_registry', 'data_stream_input_cache_result')]
+        'grade_reconciliation_registry', 'data_stream_input_cache_result', 'inventory_source_cache')]
     context = (vars(host).get('calendar_inputs') or {}).get('site_context') or {}
     # The derived context is rebuilt as a whole when Calendar is captured.
     shared.append(context)

@@ -56,7 +56,7 @@ def saved_review(state):
     records = (state.get('grade_reconciliation_registry') or {}).get('sources') or {}
     policy = policy_signature(state.get('reconciliation_settings'), state.get('grade_reconciliation_policy_revision'))
     brands = configured_brands(state.get('product_brand_labels_choice'))
-    audits, overall = [], {}
+    audits, overall, evidence_cache = [], {}, {}
     routing = source_routing(state)
     for opf in opfs(state):
         members, local = {}, []
@@ -79,7 +79,11 @@ def saved_review(state):
                 for brand in brands:
                     approved = records.get(source_key(identity, brand)) or {}
                     detail = dict(approved.get('detail') or {})
-                    stale |= approved.get('policy') != policy
+                    from classes.SourceSnapshots import source_dependencies, approval_valid
+                    from classes.ReconciliationControls import normalise_reconciliation_settings
+                    content, evidence = source_dependencies(state, opf, kind, row, evidence_cache=evidence_cache)
+                    stale |= not approval_valid(approved, policy, content, evidence, state.get('start_time_choice'),
+                        normalise_reconciliation_settings(state.get('reconciliation_settings'))['lookback_refresh_tolerance_minutes'])
                     detail.setdefault('source_identity', identity)
                     detail.setdefault('confidence_percent', None)
                     detail.setdefault('lineage_coverage', 0)

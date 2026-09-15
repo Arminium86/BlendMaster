@@ -59,11 +59,64 @@ manual-load retries and detached checkpoint compaction.
 Desktop timing evidence and saved-report checks are recorded in the accompanying
 15 September 2026 performance report in the Playground artifact directory.
 
+## Content-based opening source reuse (15 September 2026)
+
+`inventory_source_cache` is persisted with each scenario. Each source has raw
+and prepared content fingerprints, preparation dependencies and a detached
+prepared snapshot. `InventoryRefresh` compares sources separately, maps and
+enriches only changed sources, and publishes changed/new rows in one SQLite
+transaction. Unchanged rows and report tables remain intact. A submission with
+no source/dependency changes skips publication and view rebuilding entirely.
+A new column is added to the opening table without replacing existing rows.
+
+Snapshot observation times (`transaction_datetime`, AMT inventory snapshot
+transaction times, `last_update`, `hex_updated`, snapshot/as-of/fetch metadata)
+are excluded from physical content. Raw tonnes, grades, build, geometry,
+lineage and other source attributes remain significant. Generated fields are
+tracked separately so mapping/enrichment cannot invalidate its own input.
+AMT flattened modelled aliases and compact modelled JSON have the same meaning.
+Sample dates and dates *inside* physical lineage are retained.
+
+An AMT request for a different model time must still read the warehouse to
+verify content unless the request itself is already cached. This read is not
+an import or reconciliation: an identical result reuses the prepared source.
+Refresh from Snowflake forces this verification, then uses the same content
+comparison. The AMT Refresh Tolerance UI and age-based bypass are removed;
+legacy saved values have no effect.
+
+Reconciliation approvals now require matching source content, policy and
+historical evidence. Changing a source invalidates only its approvals;
+changing an OPF's historical evidence invalidates approvals depending on it.
+Missing/changed sources remain pending until the user explicitly updates
+Grade Reconciliation. Background profile delivery cannot continue a calculation
+when a source changed during preparation and now requires approval.
+
+The Grade Reconciliation **Lookback refresh tolerance** is configurable,
+defaults to **60 minutes**, and accepts 0 for no time-shift tolerance. The model
+start is compared with the last actual reconciliation's lookback anchor.
+The boundary is inclusive; 60 minutes reuses, 61 minutes requires an update.
+Reuse does not advance the anchor. Prepared OPF source grades also survive
+model-start shifts within this window. Source or history changes invalidate
+immediately, even inside the tolerance. Already accepted physical movements
+and continuous-assay priors retain their separate lifecycle.
+
+Auditable legacy snapshots can migrate with their verified source evidence.
+Older identity-only approvals cannot prove unchanged tonnes/grades/history
+and require one manual reconciliation update to establish these fingerprints.
+The per-source cache is immutable in use and replaced on publication, like
+accepted reconciliation registries. Hashing shared history is scoped to a
+single comparison pass, rather than repeated for every hex.
+
+Validation includes `tests/test_source_snapshots.py`: ordinary and AMT
+observation-only refreshes, source append with a SQLite trigger preventing any
+rewrite of an existing source, preserved reports, saved cache round trips,
+forced warehouse verification, per-source reconciliation, evidence changes,
+anchored tolerance boundaries and UI/default validation. Existing cancellation,
+atomic publication, multi-OPF, approval and workflow tests also apply.
+
 ## Remaining work
 
 Cold project hydration still copies restored site models and computes complete
-shared-input baselines. Changed inventory submissions still perform canonical
-mapping, publication and AMT map decoding. These remain opportunities for further
-improvement; the unchanged-input fast path does not remove necessary changed-input
-work. A fully approved production-scale new solve needs a separate validation
-case; the retained diagnostic project has missing approvals.
+shared-input baselines. Changed sources still need publication and AMT map
+decoding. A fully approved production-scale new solve needs a separate
+validation case; the retained diagnostic project has missing approvals.

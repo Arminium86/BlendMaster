@@ -77,7 +77,7 @@ class ManualGradeReconciliationTests(unittest.TestCase):
             manual(values)
             self.assertEqual(calls, [('CC_OPF01', 'SP', 'c'), ('CC_OPF02', 'SP', 'c')])
 
-    def test_date_history_tonnes_and_lineage_do_not_revoke_inactive_approval(self):
+    def test_date_history_tonnes_and_lineage_invalidate_inactive_approval(self):
         values = state()
         manual(values)
         approved = deepcopy(values['grade_reconciliation_registry'])
@@ -85,12 +85,13 @@ class ManualGradeReconciliationTests(unittest.TestCase):
         values['reconciliation_inputs']['samples'] = []
         values['AMT_stockpile_data']['SP'][0].update(FINAL_WMT=20, balance=20,
             GRADE_BLOCK_LINEAGE_JSON=[dict(grade_block_name=REMOTE, remaining_wmt=20)])
-        with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('repeat')):
-            self.assertFalse(missing_sources(values))
-            profiles = build_profiles(values, OPFS, UserInputs)
-            manual(values)
+        with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('automatic search')):
+            self.assertTrue(missing_sources(values))
+            with self.assertRaises(ReconciliationRequired):
+                require_approved(values)
         self.assertEqual(values['grade_reconciliation_registry'], approved)
-        self.assertAlmostEqual(profiles[OPFS[0]]['inventory']['INV']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
+        manual(values)
+        self.assertFalse(missing_sources(values))
 
     def test_policy_or_build_change_blocks_planning_without_automatic_search(self):
         values = state()
@@ -148,7 +149,7 @@ class ManualGradeReconciliationTests(unittest.TestCase):
             self.assertFalse(missing_sources(migrated))
             self.assertTrue(all(not r['detail'].get('calculated_at') for r in migrated['grade_reconciliation_registry']['sources'].values()))
             migrated['start_time_choice'] += timedelta(days=30)
-            self.assertFalse(missing_sources(migrate_project_state(migrated)))
+            self.assertTrue(missing_sources(migrate_project_state(migrated)))
             values['reconciliation_settings']['min_production_days'] = 3
             self.assertTrue(missing_sources(migrate_project_state(values)))
 

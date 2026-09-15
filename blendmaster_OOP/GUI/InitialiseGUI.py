@@ -790,7 +790,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.AMT_chunk_settings = {}
         self.AMT_footprint_exclusions = {}
         self.AMT_chunk_reconciliation_signature = ""
-        self.AMT_refresh_tolerance_minutes = 30
+        self.inventory_source_cache = {}
         self.AMT_last_refresh_datetime = None
         self.submit_calendar_first_call = True
         self.is_project_loaded = False
@@ -1478,7 +1478,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             "opening_inputs_revision",
             "AMT_data_request_signature", "AMT_enrichment_signature",
             "AMT_chunk_reconciliation_signature",
-            "AMT_refresh_tolerance_minutes", "AMT_last_refresh_datetime",
+            "inventory_source_cache", "AMT_last_refresh_datetime",
             "data_stream_input_cache_signature", "data_stream_input_cache_result",
             "AMT_chunk_settings", "AMT_footprint_exclusions",
             "hex_sequence_table", "hex_sequence_table_argument",
@@ -1903,16 +1903,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.AMT_chunk_reconciliation_signature = str(
                 state.get("AMT_chunk_reconciliation_signature") or ""
             )
-            self.AMT_refresh_tolerance_minutes = max(0, int(
-                state.get("AMT_refresh_tolerance_minutes", 30) or 0
-            ))
+            self.inventory_source_cache = state.get("inventory_source_cache") or {}
             self.AMT_last_refresh_datetime = state.get(
                 "AMT_last_refresh_datetime"
             )
-            if hasattr(self, "AMT_refresh_tolerance_input"):
-                self.AMT_refresh_tolerance_input.setValue(
-                    self.AMT_refresh_tolerance_minutes
-                )
             self.data_stream_input_cache_signature = str(
                 state.get("data_stream_input_cache_signature") or ""
             )
@@ -8767,6 +8761,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         definitions = normalize_field_definitions(self.field_definitions)
         for source in (self.included_AMT_snapshot(self.stockpile_data), self.included_stockpile_data()):
             for record in source.values():
+                original_keys = {str(k).lower() for k in record}
                 explicit = mapping_lookup(
                     self.field_mappings, "inventory"
                 )
@@ -8789,8 +8784,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 }
                 record["source_properties"] = properties
                 record.update({key: value for key, value in canonical.items() if value is not None})
+                record['_source_derived_fields'] = sorted(set(record.get('_source_derived_fields') or []) | ({str(k).lower() for k in record} - original_keys))
         for rows in self.included_AMT_snapshot(self.AMT_stockpile_data).values():
             for record in rows or []:
+                original_keys = {str(k).lower() for k in record}
                 explicit = mapping_lookup(self.field_mappings, "amt")
                 for definition in definitions:
                     name = definition["name"]
@@ -8808,6 +8805,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 }
                 record["source_properties"] = properties
                 record.update({key: value for key, value in canonical.items() if value is not None})
+                record['_source_derived_fields'] = sorted(set(record.get('_source_derived_fields') or []) | ({str(k).lower() for k in record} - original_keys))
 
         grades, properties = legacy_aps_mappings(
             definitions,
@@ -8830,6 +8828,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
     def sync_canonical_grade_fields(self, record, streams):
         """Project calculated streams onto the canonical audit/property keys."""
         record = record if isinstance(record, dict) else {}
+        original_keys = {str(k).lower() for k in record}
         normalized = normalise_grade_streams(streams)
         preferred = configured_brands(
             vars(self).get("product_brand_labels_choice", "")
@@ -8861,6 +8860,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                         properties.pop(key, None)
         record["defined_fields"] = defined
         record["source_properties"] = properties
+
+        record['_source_derived_fields'] = sorted(set(record.get('_source_derived_fields') or []) | ({str(k).lower() for k in record} - original_keys))
 
     def handle_map_fields_submit(self):
         self.capture_map_fields_table()
@@ -10134,11 +10135,13 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         from classes.ApprovedReconciliation import ReconciliationRequired, source_build
         inventory = (vars(self).get('updated_stockpile_data') or {}).get(source_id) or {}
         from classes.AMTReconciliation import chunk_build
+        from classes.SourceSnapshots import source_dependencies
+        content, _ = source_dependencies(vars(self), application.opf, source_kind, row, include_evidence=False)
         try:
             streams, audit = application.apply(
                 streams, source_id=source_id, source_kind=source_kind,
                 source_wmt=max(total or 0.0, 0.0), contributing_blocks=blocks, hex_id=hex_id,
-                warnings=warnings, grade_coverage=grade_coverage,
+                warnings=warnings, grade_coverage=grade_coverage, source_content=content,
                 prior_audit=row.get("reconciliation"), source_instance=(chunk_build(vars(self), row) if source_kind == 'amt_chunk' else source_build(row, inventory)),
             )
         except ReconciliationRequired as exc:
@@ -10978,9 +10981,11 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         def enrich_row(name, row, apply_calculated_split=False):
             """Build streams while validating CB split only for run sources."""
+            original_keys = {str(k).lower() for k in row}
             row.update(inventory_product_property_aliases(
                 row, self.opf_input_choice
             ))
+            row['_source_derived_fields'] = sorted(set(row.get('_source_derived_fields') or []) | ({str(k).lower() for k in row} - original_keys))
             streams = inventory_grade_streams(
                 row,
                 self.product_brand_labels_choice,
@@ -11004,6 +11009,8 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             row["grade_stream_warnings"] = warnings
             if warnings and str(name).strip().upper() in selected_keys:
                 self.data_stream_source_warnings[name] = warnings
+
+            row['_source_derived_fields'] = sorted(set(row.get('_source_derived_fields') or []) | ({str(k).lower() for k in row} - original_keys))
 
         # The fetched inventory contains every stockpile at the site. Keep its
         # audit streams current, but never let an unselected row block a run.
@@ -13737,6 +13744,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.AMT_stockpile_data = {}
         self.inventory_data_request_signature = ""
         self.opening_inputs_revision = None
+        self.inventory_source_cache = {}
         self._inventory_refresh_request = {}
         self.AMT_footprint_exclusions = {}
         self.AMT_data_request_signature = ""
@@ -13911,8 +13919,14 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         persistent_fields = ('product_targets', 'saved_blends_for_schedule',
             'stored_blend_sequence_table_for_gantt', 'stored_blend_sequence_table_for_gantt_default',
             'manual_plan_states', 'manual_direct_tip_allocations', 'AMT_chunk_settings',
-            'stockpile_data_use_column', 'stockpile_data_AMT_column')
-        preserved_model_inputs = {key: copy.deepcopy(getattr(self, key, None)) for key in persistent_fields} if same_site_context else {}
+            'stockpile_data_use_column', 'stockpile_data_AMT_column', 'inventory_source_cache',
+            'AMT_stockpile_data', 'AMT_data_request_signature', 'AMT_enrichment_signature',
+            'AMT_chunk_reconciliation_signature', 'AMT_last_refresh_datetime', 'hex_sequence_table',
+            'hex_sequence_table_argument', 'opening_inputs_revision', 'historical_recon_factors',
+            'historical_recon_warnings', 'reconciliation_inputs', 'opf_reconciliation_inputs',
+            'data_stream_input_cache_signature', 'data_stream_input_cache_result', '_combined_opf_profile_cache')
+        from GUI.WorkflowSnapshot import copy_active_state
+        preserved_model_inputs = copy_active_state(self, {key: vars(self).get(key) for key in persistent_fields}) if same_site_context else {}
         if fresh_site_configuration:
             build_targets = stockpile_data.get("build_targets") or {}
             target_errors = stockpile_data.get("target_errors") or {}
@@ -13967,7 +13981,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.manual_plan_states = {}
             self.populate_product_build_table()
             workflow = vars(self).get('site_workflow_controller')
-            if not (workflow and workflow.active):
+            if not same_site_context and not (workflow and workflow.active):
                 DatabaseManager.clear_all_tables(get_database_path())
                 self.opening_stockpile_inventories.save_to_database(self.stockpile_data)
         for key, value in preserved_model_inputs.items():
@@ -18738,17 +18752,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
             self.refresh_AMT_data_from_snowflake
         )
 
-        self.AMT_refresh_tolerance_input = QSpinBox()
-        self.AMT_refresh_tolerance_input.setRange(0, 1440)
-        self.AMT_refresh_tolerance_input.setSuffix(" min")
-        self.AMT_refresh_tolerance_input.setValue(max(0, int(getattr(
-            self, "AMT_refresh_tolerance_minutes", 30
-        ) or 0)))
-        self.AMT_refresh_tolerance_input.setToolTip(
-            "In Now mode, reuse an otherwise identical AMT snapshot while it "
-            "is this fresh. Set to 0 to refetch whenever the Now timestamp changes."
-        )
-
         self.submit_AMT_button = QPushButton("Submit")
         self.submit_AMT_button.setObjectName("submitAMTChunksButton")
         self.submit_AMT_button.setMinimumWidth(110)
@@ -18758,8 +18761,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.addWidget(QLabel("AMT Refresh Tolerance:"))
-        button_layout.addWidget(self.AMT_refresh_tolerance_input)
         button_layout.addWidget(self.refresh_AMT_data_button)
         button_layout.addWidget(self.submit_AMT_button)
         button_layout.addStretch()
@@ -18934,42 +18935,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
 
         if cached == requested and selection_subset:
             return True, "selection subset"
-        if int(getattr(self, "time_mode_choice", 1) or 1) != 1:
-            return False, ""
-        tolerance = max(0, int(getattr(
-            self, "AMT_refresh_tolerance_minutes", 30
-        ) or 0))
-        if tolerance <= 0:
-            return False, ""
-        refreshed_at = getattr(self, "AMT_last_refresh_datetime", None)
-        try:
-            refreshed_at = pd.Timestamp(refreshed_at).to_pydatetime()
-        except (TypeError, ValueError):
-            return False, ""
-        if refreshed_at.tzinfo is not None:
-            refreshed_at = refreshed_at.replace(tzinfo=None)
-        age_minutes = max(
-            0.0, (datetime.now() - refreshed_at).total_seconds() / 60.0
-        )
-        if age_minutes > tolerance:
-            return False, ""
-        cached.pop("start_time", None)
-        requested.pop("start_time", None)
-        if cached != requested or not selection_subset:
-            return False, ""
-        try:
-            scenario_shift_minutes = abs(
-                (pd.Timestamp(requested_time) - pd.Timestamp(cached_time))
-                .total_seconds()
-            ) / 60.0
-        except (TypeError, ValueError):
-            return False, ""
-        if scenario_shift_minutes > tolerance:
-            return False, ""
-        subset_label = (
-            " selection subset" if requested_selections != cached_selections else ""
-        )
-        return True, f"fresh{subset_label} ({age_minutes:.1f} min old)"
+        return False, ""
 
     @staticmethod
     def AMT_snapshot_for_selected_footprints(snapshot, data_source):
@@ -19122,10 +19088,6 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         # rows.  Build the host panel before either that restore or an async
         # Snowflake fetch so an interrupted load cannot leave the tab blank.
         self.ensure_AMT_map_panel(connect_table=False)
-        if hasattr(self, "AMT_refresh_tolerance_input"):
-            self.AMT_refresh_tolerance_minutes = int(
-                self.AMT_refresh_tolerance_input.value()
-            )
 
         headers = self.amt_stockpile_headers()
         self.AMT_stockpile_table.setColumnCount(len(headers))
@@ -19222,8 +19184,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     )
                 else:
                     cache_message = (
-                        "Reused the cached AMT opening snapshot within the "
-                        f"configured refresh tolerance ({reuse_reason})."
+                        f"Reused compatible cached AMT opening data ({reuse_reason})."
                     )
                 self.set_AMT_cache_status(cache_message)
                 self.finish_AMT_stockpile_table(
@@ -19704,6 +19665,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                 row = row or {}
                 if (str(footprint).upper(), str(row.get('HEX', row.get('hex')))) in managed_members:
                     continue
+                original_keys = {str(k).lower() for k in row}
                 raw_amt_fields = flatten_available_source_fields(row)
                 canonical = apply_field_mappings(
                     row,
@@ -19745,6 +19707,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     self.opf_input_choice,
                     strict_mappings=strict_mappings,
                 )
+                row['_source_derived_fields'] = sorted(set(row.get('_source_derived_fields') or []) | ({str(k).lower() for k in row} - original_keys))
                 if vars(self).get('_apply_amt_component_factors'):
                     streams = self.apply_source_reconciliation(application, row, streams, footprint, "amt")
                 else:
@@ -19829,6 +19792,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
                     self.historical_recon_warnings.append(
                         f"{footprint}/{row.get('HEX', '')}: {warning}"
                     )
+                row['_source_derived_fields'] = sorted(set(row.get('_source_derived_fields') or []) | ({str(k).lower() for k in row} - original_keys))
         self.historical_recon_warnings = list(dict.fromkeys(self.historical_recon_warnings))
         return compact_amt_stockpile_data(enriched)
 
@@ -27168,16 +27132,10 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.AMT_chunk_reconciliation_signature = str(
             loaded_state.get("AMT_chunk_reconciliation_signature") or ""
         )
-        self.AMT_refresh_tolerance_minutes = max(0, int(
-            loaded_state.get("AMT_refresh_tolerance_minutes", 30) or 0
-        ))
+        self.inventory_source_cache = loaded_state.get("inventory_source_cache") or {}
         self.AMT_last_refresh_datetime = loaded_state.get(
             "AMT_last_refresh_datetime"
         )
-        if hasattr(self, "AMT_refresh_tolerance_input"):
-            self.AMT_refresh_tolerance_input.setValue(
-                self.AMT_refresh_tolerance_minutes
-            )
         self.data_stream_input_cache_signature = str(loaded_state.get("data_stream_input_cache_signature") or "")
         self.data_stream_input_cache_result = loaded_state.get("data_stream_input_cache_result") or {}
         self.data_stream_input_request_inflight = ""
@@ -27522,7 +27480,7 @@ class UserInputs(WorkflowNavigation, QMainWindow):
         self.AMT_data_request_signature = ""
         self.AMT_enrichment_signature = ""
         self.AMT_chunk_reconciliation_signature = ""
-        self.AMT_refresh_tolerance_minutes = 30
+        self.inventory_source_cache = {}
         self.AMT_last_refresh_datetime = None
         self._available_mapping_fields_cache = {}
         self.AMT_chunk_settings = {}

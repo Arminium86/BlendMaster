@@ -44,7 +44,7 @@ class OPFProfileLoadingTests(unittest.TestCase):
         self.assertEqual(host._combined_opf_profile_cache[0], profile_signature(vars(host), OPFS))
         host.deleteLater()
 
-    def test_source_replacement_discards_old_profile_before_continuing(self):
+    def test_source_replacement_requires_approval_before_continuing(self):
         host, delivered, snapshots = self.host(), [], []
 
         previous = []
@@ -59,10 +59,10 @@ class OPFProfileLoadingTests(unittest.TestCase):
             replacement['SP']['balance'] = 200
             host.updated_stockpile_data = replacement
             self.drain(host)
-        self.assertEqual(snapshots, [100, 200])
+        self.assertEqual(snapshots, [100])
         self.assertIsNone(previous[0])
-        self.assertEqual(previous[1][1], {'balance': 100})
-        self.assertEqual(delivered, [{'balance': 200}])
+        self.assertEqual(delivered, [])
+        self.assertNotIn('_combined_opf_profile_cache', vars(host))
         host.deleteLater()
 
     def test_stale_saved_profile_is_passed_to_worker_for_individual_source_reuse(self):
@@ -120,6 +120,10 @@ class OPFProfileLoadingTests(unittest.TestCase):
             self.assertFalse(ensure(restored, lambda: None))
             self.assertEqual(build.call_count, 1)
             restored.updated_stockpile_data['SP']['FE_ROM'] = 49
+            self.assertFalse(ensure(restored, lambda: None))
+            updated = {key: vars(restored).get(key) for key in SOURCE_FIELDS}
+            approve_sources(updated)
+            restored.grade_reconciliation_registry = updated['grade_reconciliation_registry']
             self.assertTrue(ensure(restored, lambda: None))
             self.drain(restored)
             self.assertEqual(build.call_count, 2)

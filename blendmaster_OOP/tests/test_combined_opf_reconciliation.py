@@ -41,7 +41,9 @@ def source_state():
 def approve_sources(state, selected_opfs=OPFS):
     """Explicit manual preparation for profile/field-mapping fixtures."""
     from classes.CombinedOPFReconciliation import SourceContext
-    registry = state.setdefault('grade_reconciliation_registry', {})
+    from classes.AcceptedEvidence import fork_registry
+    registry = fork_registry(state.get('grade_reconciliation_registry'))
+    state['grade_reconciliation_registry'] = registry
     for opf in selected_opfs:
         view = SourceContext(**deepcopy(state), _ui_class=UserInputs, _manual_grade_reconciliation=True)
         view._apply_amt_component_factors = True
@@ -75,7 +77,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
             for identity, wmt in [('a', 40), ('b', 60)]]}
         return state
 
-    def test_chunking_and_baseline_changes_reuse_per_opf_hex_and_inventory_searches(self):
+    def test_baseline_change_requires_only_changed_hex_to_be_reapproved(self):
         state = self.auto_amt_state()
         original = ReconciliationFactorResolver.resolve_source
         calls = []
@@ -90,6 +92,9 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
             state['hex_sequence_table'] = [dict(hex='chunk', footprint='SP', sequence=1,
                 balance=100, member_hexes=['a', 'b'])]
             state['AMT_stockpile_data']['SP'][0]['FE_ROM'] = 40
+            calls.clear()
+            approve_sources(state)
+            self.assertEqual(calls, [('CC_OPF01', 'amt', 'a'), ('CC_OPF02', 'amt', 'a')])
             calls.clear()
             reused = build_profiles(state, OPFS, UserInputs)
             self.assertEqual(calls, [])
@@ -116,7 +121,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
         self.assertEqual(searched, [])
         self.assertEqual(profiles[OPFS[1]]['inventory']['SP']['reconciliation']['status'], 'pending')
 
-    def test_changed_hex_lineage_retains_manually_approved_factors(self):
+    def test_changed_hex_lineage_becomes_pending_without_automatic_search(self):
         from tests.test_reconciliation_factor_resolver import REMOTE
         state = self.auto_amt_state()
         approve_sources(state)
@@ -208,7 +213,7 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
         self.assertEqual(profile_signature(state, OPFS), before)
         self.assertAlmostEqual(profiles[OPFS[1]]['chunks']['SP_CHUNK_001']['grade_streams']['adjusted_rom']['FB']['fe'], 55)
 
-    def test_changed_scenario_start_reuses_approved_source_factors(self):
+    def test_scenario_start_within_tolerance_reuses_approved_source_factors(self):
         from classes.CombinedOPFReconciliation import SourceContext
         from datetime import timedelta
         state = source_state()
@@ -219,12 +224,12 @@ class CombinedOPFReconciliationTests(unittest.TestCase):
         context.current_multi_feed_configuration = lambda: dict(mode='combined_opf', tipping_points=[{'opf': opf} for opf in OPFS])
         context._combined_opf_profile_cache = (profile_signature(vars(context), OPFS), build_profiles(vars(context), OPFS, UserInputs))
         self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
-        context.start_time_choice += timedelta(days=1)
+        context.start_time_choice += timedelta(minutes=30)
         with patch.object(ReconciliationFactorResolver, 'resolve_source', side_effect=AssertionError('automatic search')):
             with patch('GUI.OPFProfileLoading.ensure', side_effect=AssertionError('view started preparation')):
+                self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
+                context.start_time_choice += timedelta(minutes=31)
                 self.assertEqual(context.current_opf_profiles(), {})
-            context._combined_opf_profile_cache = (profile_signature(vars(context), OPFS), build_profiles(vars(context), OPFS, UserInputs))
-            self.assertEqual(set(context.current_opf_profiles()), set(OPFS))
 
     def test_amt_chunks_reuse_membership_and_physical_mass_with_opf_product_slots(self):
         state = source_state()

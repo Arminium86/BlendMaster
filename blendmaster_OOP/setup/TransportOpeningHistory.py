@@ -252,7 +252,8 @@ def opening_history_events(bundle, context, config):
                 if opf not in applications:
                     applications[opf] = ReconciliationApplication(samples=[], standard_factors=factors, opf=opf, brands=brands,
                         scenario_start=bundle['request']['end'], settings=context.get('reconciliation_settings'),
-                        registry=registry, mine=identity[0], policy_revision=context.get('grade_reconciliation_policy_revision'))
+                        registry=registry, mine=identity[0], policy_revision=context.get('grade_reconciliation_policy_revision'),
+                        accepted_movement=True)  # Physical movements retain their already accepted source factors.
                 streams, audit = applications[opf].apply(streams, source_id=identity[3], source_instance=identity[4],
                     source_kind='inventory', source_wmt=row['wmt'], contributing_blocks=[])
         # Direct-tip grade blocks already use the configured APS/global stream;

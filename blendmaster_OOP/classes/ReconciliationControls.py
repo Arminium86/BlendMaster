@@ -71,6 +71,10 @@ def normalise_reconciliation_settings(settings=None):
     result = {"method": settings.get("method", "standard"), **normalise_window(settings)}
     if result["method"] not in FACTOR_METHODS:
         raise ValueError("Unsupported reconciliation method.")
+    tolerance = finite_number(settings.get('lookback_refresh_tolerance_minutes', 60))
+    if isinstance(settings.get('lookback_refresh_tolerance_minutes'), bool) or tolerance is None or tolerance < 0 or not tolerance.is_integer():
+        raise ValueError('Lookback refresh tolerance must be a non-negative whole number of minutes.')
+    result['lookback_refresh_tolerance_minutes'] = int(tolerance)
     cells, seen = [], set()
     for raw in settings.get("cells", []) or []:
         opf, brand = normalise_opf(raw.get("opf")), clean_text(raw.get("brand")).upper()

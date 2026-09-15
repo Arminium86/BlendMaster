@@ -12,7 +12,7 @@ from copy import deepcopy
 
 def copy_preparation_state(values):
     """Detach editable sources while retaining read-only accepted evidence."""
-    shared = [values.get(key) for key in ('grade_reconciliation_registry', '_combined_opf_profile_cache')]
+    shared = [values.get(key) for key in ('grade_reconciliation_registry', '_combined_opf_profile_cache', 'inventory_source_cache')]
     return deepcopy(values, {id(value): value for value in shared if isinstance(value, (dict, list, tuple))})
 
 
