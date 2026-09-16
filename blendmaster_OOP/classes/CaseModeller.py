@@ -112,7 +112,7 @@ class CaseModeller:
         "optimization_diagnostics", "previous_selected_stockpile_source_ids",
         "previous_selected_grade_block_pairs", "grade_block_pair_locks",
         "selected_blend_signatures", "contingency_reuse_fallbacks",
-        "previous_chemical_blend_signature",
+        "previous_chemical_blend_signature", "point_chemical_blend_state",
         "transport", "transport_candidates", "product_arrival_results", "transport_selected_arrivals",
     )
 
@@ -271,6 +271,7 @@ class CaseModeller:
         # solver steady state.  It changes only when the selected material
         # composition changes.
         self.previous_chemical_blend_signature = None
+        self.point_chemical_blend_state = {}
         from classes.MultiFeedSettings import scoped_builds
         self.product_build_settings = self.normalized_product_build_settings(scoped_builds(product_build_settings, self.multi_feed_configuration))
         if self.byproducts_enabled and self.product_build_settings:
@@ -1510,7 +1511,7 @@ class CaseModeller:
                 filtered_decision_point_results_to_user_choice.copy()
             )
             filtered_decision_point_results_to_user_choice["blend_ID"] = (
-                self.assign_selected_chemical_blend_id(
+                self.assign_selected_point_blend_ids(
                     filtered_decision_point_results_to_user_choice
                 )
             )
@@ -1705,6 +1706,44 @@ class CaseModeller:
             for (source_type, source_id), tonnes in contributions.items()
         ))
 
+    @staticmethod
+    def chemical_blend_signatures_match(previous, current):
+        """Ignore solver noise, without merging different parent-source sets.
+
+        A fraction tolerance of 1e-6 is 0.0001 percentage points. Compare
+        against the retained blend signature so small changes cannot drift
+        indefinitely without eventually receiving a new ID.
+        """
+        if previous is None:
+            return False
+        old = {row[:2]: row[2] for row in previous}
+        new = {row[:2]: row[2] for row in current}
+        return old.keys() == new.keys() and all(
+            abs(old[key] - new[key]) <= 1e-6 for key in old)
+
+    def assign_selected_point_blend_ids(self, selected_rows):
+        """Track each physical point's mix independently of simultaneous feeds."""
+        if getattr(self, "multi_feed_configuration", {}).get("mode", "single") == "single":
+            return self.assign_selected_chemical_blend_id(selected_rows)
+        if not hasattr(self, "point_chemical_blend_state"):
+            self.point_chemical_blend_state = {}
+        result = pd.Series(index=selected_rows.index, dtype="int64")
+        keys = [key for key in ("opf", "tipping_point") if key in selected_rows]
+        if not keys:
+            return self.assign_selected_chemical_blend_id(selected_rows)
+        for identity, rows in selected_rows.groupby(keys, sort=False, dropna=False):
+            identity = tuple("" if pd.isna(value) else str(value) for value in
+                             (identity if isinstance(identity, tuple) else (identity,)))
+            previous, blend_id = self.point_chemical_blend_state.get(identity, (None, 1))
+            signature = self.chemical_blend_signature_from_dataframe(rows)
+            if signature:
+                if previous is None or not self.chemical_blend_signatures_match(previous, signature):
+                    if previous is not None:
+                        blend_id += 1
+                    self.point_chemical_blend_state[identity] = (signature, blend_id)
+            result.loc[rows.index] = blend_id
+        return result.astype("int64")
+
     def assign_selected_chemical_blend_id(self, selected_rows):
         """Assign the persistent Blend ID for the selected steady state."""
         signature = self.chemical_blend_signature_from_dataframe(selected_rows)
@@ -1712,10 +1751,11 @@ class CaseModeller:
             return self.blend_ID
         if (
             self.previous_chemical_blend_signature is not None
-            and signature != self.previous_chemical_blend_signature
+            and not self.chemical_blend_signatures_match(self.previous_chemical_blend_signature, signature)
         ):
             self.blend_ID += 1
-        self.previous_chemical_blend_signature = signature
+        if not self.chemical_blend_signatures_match(self.previous_chemical_blend_signature, signature):
+            self.previous_chemical_blend_signature = signature
         return self.blend_ID
 
     def select_automatic_blend_option(self):
